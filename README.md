@@ -6,7 +6,7 @@
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
 [![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
-[![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases=true&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
+[![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **A local-first coding workspace with approvals, diffs, quotas, and optional model delegation.**
