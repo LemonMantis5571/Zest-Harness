@@ -158,6 +158,10 @@ async fn fetch_provider_quota(
             "Anthropic exposes rate limits after a request, not a plan balance here.",
         ),
         ProviderConfig::ClaudeCode { .. } => fetch_claude_desktop_quota(provider_id).await,
+        ProviderConfig::CodexCli { .. } => unavailable_view(
+            provider_id,
+            "Codex account usage is owned by the native CLI.",
+        ),
         ProviderConfig::Gateway { .. } => unavailable_view(
             provider_id,
             "This gateway must expose its own account quota.",
