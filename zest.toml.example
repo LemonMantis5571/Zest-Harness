@@ -1,0 +1,86 @@
+# Zest starter configuration.
+#
+# Copy this file to `zest.toml` only when you intentionally want project-local
+# provider settings. Otherwise Zest creates and manages `~/.zest/zest.toml`
+# for the machine. Credentials never belong in this file.
+
+[providers.codex]
+kind = "codex_cli"
+command = "codex"
+model = "gpt-5.6-sol"
+allow_mcp = false
+timeout_secs = 900
+
+[default]
+provider = "codex"
+model = "gpt-5.6-sol"
+
+[tools.bash]
+# Read-only commands can run without an extra approval; other commands ask.
+enabled = true
+
+# CLIProxyAPI gateway providers remain an explicit compatibility path. Existing
+# `kind = "gateway"` installations are never rewritten automatically.
+#
+# [providers.codex_gateway]
+# kind = "gateway"
+# base_url = "http://127.0.0.1:8317"
+# api_key_env = "ZEST_GATEWAY_KEY"
+# model = "gpt-5.6-terra"
+#
+# OpenAI-compatible providers are configured explicitly when needed. Their
+# API keys are stored in the OS credential manager, not here.
+# The native Anthropic API can be added from the launch picker as well; its key
+# uses the same credential manager and does not become part of this file.
+#
+# [providers.anthropic]
+# kind = "anthropic"
+# model = "claude-opus-5"
+# credential = "anthropic"
+#
+# Claude Code can also be the parent provider for the whole Zest session. Run
+# `claude login`, then uncomment this block and set `default.provider = "claude"`.
+# It uses the Claude Code subscription and does not delegate through `[agents]`.
+# [providers.claude]
+# kind = "claude_code"
+# command = "claude"
+# model = "sonnet"
+# models = ["sonnet", "opus", "haiku"]
+# allow_mcp = false
+# permission_mode = "accept_edits"
+# timeout_secs = 900
+#
+# [providers.deepseek]
+# kind = "openai_compatible"
+# base_url = "https://api.deepseek.com"
+# model = "deepseek-v4-flash"
+# models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# credential = "deepseek"
+#
+# [providers.openai]
+# kind = "openai_compatible"
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-5"
+# credential = "openai"
+
+# External workers are optional. Authenticate their CLIs separately, then
+# enable a worker here or from Settings > CLI delegation. The optional model
+# is owned by the worker CLI and is independent from the Zest chat model.
+#
+# [agents.claude]
+# mode = "headless"
+# command = "claude"
+# args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "--model", "{model}", "{prompt}"]
+# model = "sonnet"
+# allow_mcp = false
+# workspace = "isolated"
+# timeout_secs = 900
+#
+# [agents.gemini]
+# mode = "acp"
+# command = "gemini"
+# args = ["--acp", "--model", "{model}"]
+# model = "gemini-2.5-pro"
+# allow_mcp = false
+# workspace = "isolated"
+# timeout_secs = 900

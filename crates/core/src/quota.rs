@@ -158,6 +158,10 @@ async fn fetch_provider_quota(
             "Anthropic exposes rate limits after a request, not a plan balance here.",
         ),
         ProviderConfig::ClaudeCode { .. } => fetch_claude_desktop_quota(provider_id).await,
+        ProviderConfig::CodexCli { .. } => unavailable_view(
+            provider_id,
+            "Codex account usage is owned by the native CLI.",
+        ),
         ProviderConfig::Gateway { .. } => unavailable_view(
             provider_id,
             "This gateway must expose its own account quota.",
@@ -376,14 +380,18 @@ async fn fetch_deepseek_balance(
 /// stored session and performs the authenticated request itself.
 async fn fetch_codex_rate_limits(provider_id: &str) -> ProviderQuotaView {
     let command = std::env::var(CODEX_COMMAND_ENV).unwrap_or_else(|_| "codex".into());
-    let mut child = match Command::new(&command)
+    // Resolve against PATH/PATHEXT and the user's current PATH, the same way
+    // the provider spawn does. Without this the CLI is invisible on Windows,
+    // where npm installs it as a `.cmd` shim.
+    let mut builder = Command::new(crate::tools::external_agent::resolve_program(&command));
+    builder
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    crate::tools::external_agent::prepare_external_command(&mut builder);
+    let mut child = match builder.spawn() {
         Ok(child) => child,
         Err(error) => {
             let detail = if command == "codex" && error.kind() == std::io::ErrorKind::NotFound {
