@@ -626,6 +626,10 @@ export function ChatScreen({
   const [shortcutsRequest, setShortcutsRequest] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
+  const workspaceRefreshRef = useRef<{
+    threadId: string;
+    promise: Promise<WorkspaceChange>;
+  } | null>(null);
   const diffWidthKey = `zest:diff-width:${session.threadId}`;
   const diffOpenKey = `zest:diff-open:${session.threadId}`;
   const dismissedDiffKey = `zest:dismissed-change:${session.threadId}`;
@@ -697,6 +701,24 @@ export function ChatScreen({
     []
   );
 
+  const refreshWorkspaceChanges = useCallback(() => {
+    const existing = workspaceRefreshRef.current;
+    if (existing?.threadId === session.threadId) return existing.promise;
+
+    const promise = onRefreshWorkspaceChanges();
+    const request = { threadId: session.threadId, promise };
+    workspaceRefreshRef.current = request;
+    void promise.then(
+      () => {
+        if (workspaceRefreshRef.current === request) workspaceRefreshRef.current = null;
+      },
+      () => {
+        if (workspaceRefreshRef.current === request) workspaceRefreshRef.current = null;
+      }
+    );
+    return promise;
+  }, [onRefreshWorkspaceChanges, session.threadId]);
+
   useEffect(() => {
     if (
       session.isFreeChat ||
@@ -706,7 +728,7 @@ export function ChatScreen({
       return;
     }
     let cancelled = false;
-    void onRefreshWorkspaceChanges()
+    void refreshWorkspaceChanges()
       .then((change) => {
         if (!cancelled) setDiffTarget(branchTarget(change));
       })
@@ -716,18 +738,18 @@ export function ChatScreen({
     return () => {
       cancelled = true;
     };
-  }, [branchTarget, diffOpenKey, onRefreshWorkspaceChanges, session.isFreeChat]);
+  }, [branchTarget, diffOpenKey, refreshWorkspaceChanges, session.isFreeChat]);
 
   const openBranchChanges = useCallback(async () => {
     if (session.isFreeChat) return;
     try {
-      const change = await onRefreshWorkspaceChanges();
+      const change = await refreshWorkspaceChanges();
       rememberDiffOpen(true);
       setDiffTarget(branchTarget(change));
     } catch {
       // Keep the existing review surface closed when Git cannot be inspected.
     }
-  }, [branchTarget, onRefreshWorkspaceChanges, rememberDiffOpen, session.isFreeChat]);
+  }, [branchTarget, refreshWorkspaceChanges, rememberDiffOpen, session.isFreeChat]);
 
   useEffect(() => {
     if (
@@ -749,7 +771,7 @@ export function ChatScreen({
     let cancelled = false;
     const tick = async () => {
       try {
-        const next = await onRefreshWorkspaceChanges();
+        const next = await refreshWorkspaceChanges();
         if (cancelled) return;
         setDiffTarget((current) =>
           current?.source === "branch" ? branchTarget(next) : current
@@ -763,7 +785,7 @@ export function ChatScreen({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [branchTarget, onRefreshWorkspaceChanges, openBranchChangeId]);
+  }, [branchTarget, refreshWorkspaceChanges, openBranchChangeId]);
 
   const resizeDiff = useCallback(
     (next: number) => {

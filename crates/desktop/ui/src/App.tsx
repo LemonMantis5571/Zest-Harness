@@ -1399,9 +1399,12 @@ export default function App() {
   }
 
   const refreshWorkspaceChanges = useCallback(async () => {
+    const requestedThreadId = threadIdRef.current;
     const next = await backend.workspaceChanges();
-    const threadId = threadIdRef.current;
-    if (threadId) workspaceChangesRef.current.set(threadId, next);
+    if (!requestedThreadId || threadIdRef.current !== requestedThreadId) {
+      throw new Error("workspace changed while reading Git changes");
+    }
+    workspaceChangesRef.current.set(requestedThreadId, next);
     setWorkspaceChange(next);
     return next;
   }, []);
