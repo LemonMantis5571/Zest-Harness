@@ -257,18 +257,13 @@ pub struct ThreadSummary {
 /// The reason a checkpoint exists. The UI uses this to give turn checkpoints
 /// and maintenance checkpoints slightly different affordances without
 /// inspecting labels written by a caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadCheckpointKind {
+    #[default]
     Turn,
     Compaction,
     Manual,
-}
-
-impl Default for ThreadCheckpointKind {
-    fn default() -> Self {
-        Self::Turn
-    }
 }
 
 /// A durable conversation checkpoint. The full snapshot lives beside the
