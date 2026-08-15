@@ -23,6 +23,10 @@ use crate::config::DEFAULT_CODEX_MODEL;
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
 use crate::tools::approval::ToolRisk;
+use crate::tools::external_agent::{
+    prepare_external_command, resolve_program, scrub_secret_environment,
+    scrub_zest_secret_environment,
+};
 
 const APP_SERVER_ARGS: &[&str] = &["app-server", "--listen", "stdio://"];
 const CLIENT_NAME: &str = "zest";
@@ -142,7 +146,25 @@ impl CodexAppServerProvider {
             .iter()
             .map(|arg| (*arg).to_string())
             .collect::<Vec<_>>();
-        JsonlProcess::spawn(&self.command, &args, &self.root).await
+        // Resolve before spawning: on Windows the Codex CLI is an npm `.cmd`
+        // shim with no `.exe`, which a bare program name cannot reach.
+        let mut command = tokio::process::Command::new(resolve_program(&self.command));
+        command.args(&args).current_dir(&self.root);
+        // Resolve the CLI against the user's current PATH, the same way the
+        // Settings availability check does. Without this a desktop process
+        // that predates the Codex install reports the CLI as available and
+        // then fails to launch it.
+        prepare_external_command(&mut command);
+        // Codex authenticates through its own CLI-managed store, so Zest's
+        // provider credentials are always withheld. When Codex is allowed to
+        // run MCP servers those children need the user's own environment, so
+        // only Zest's own keys are removed in that case.
+        if self.allow_mcp {
+            scrub_zest_secret_environment(&mut command, &[]);
+        } else {
+            scrub_secret_environment(&mut command, &[]);
+        }
+        JsonlProcess::spawn_command(command, &self.command).await
     }
 
     async fn run_turn(
@@ -386,6 +408,7 @@ struct StreamState {
     served_model: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rpc_request(
     process: &mut JsonlProcess,
     next_id: &mut u64,
@@ -698,11 +721,67 @@ fn prompt_for_turn(req: &TurnRequest, include_history: bool) -> String {
 fn message_text(content: &[Value]) -> String {
     content
         .iter()
-        .filter_map(|block| {
-            string_field(block, &["text"]).or_else(|| block.as_str().map(str::to_string))
-        })
+        .filter_map(render_message_block)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_message_block(block: &Value) -> Option<String> {
+    if let Some(text) = string_field(block, &["text"]) {
+        return Some(text);
+    }
+    if let Some(text) = block.as_str() {
+        return Some(text.to_string());
+    }
+
+    match block.get("type").and_then(Value::as_str) {
+        Some("tool_use") => {
+            let name = string_field(block, &["name"]).unwrap_or_else(|| "tool".into());
+            let input = block
+                .get("input")
+                .map(compact_json)
+                .unwrap_or_else(|| "{}".into());
+            Some(format!("[Tool call: {name}]\nInput: {input}"))
+        }
+        Some("tool_result") => {
+            let label = if block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                " (error)"
+            } else {
+                ""
+            };
+            let content = block
+                .get("content")
+                .map(render_nested_content)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "[empty]".into());
+            Some(format!("[Tool result{label}]\n{content}"))
+        }
+        Some("thinking") => None,
+        _ => block
+            .get("content")
+            .map(render_nested_content)
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+fn render_nested_content(value: &Value) -> String {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(render_message_block)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::String(text) => text.clone(),
+        _ => compact_json(value),
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "[unserializable]".into())
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
@@ -834,6 +913,42 @@ mod tests {
         let prompt = prompt_for_turn(&request, false);
         assert_eq!(prompt, "New request");
         assert!(!prompt.contains("Earlier answer"));
+    }
+
+    #[test]
+    fn fallback_prompt_preserves_tool_calls_and_results() {
+        let request = TurnRequest {
+            model: "gpt-5.6-sol".into(),
+            system: None,
+            messages: vec![
+                Message::user_text("Inspect the project."),
+                Message::assistant(vec![json!({
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "read_file",
+                    "input": {"path": "src/lib.rs"}
+                })]),
+                Message::user_blocks(vec![json!({
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": [{"type": "text", "text": "pub fn run() {}"}]
+                })]),
+                Message::user_text("Now summarize it."),
+            ],
+            tools: Vec::new(),
+            max_tokens: 100,
+            effort: Some("high".into()),
+            thinking: true,
+            provider_session: None,
+            interaction: None,
+            cancel: None,
+        };
+
+        let prompt = prompt_for_turn(&request, true);
+        assert!(prompt.contains("[Tool call: read_file]"));
+        assert!(prompt.contains("src/lib.rs"));
+        assert!(prompt.contains("[Tool result]"));
+        assert!(prompt.contains("pub fn run() {}"));
     }
 
     #[test]

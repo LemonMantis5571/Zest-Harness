@@ -26,17 +26,6 @@ pub struct JsonlProcess {
 }
 
 impl JsonlProcess {
-    pub async fn spawn(command: &str, args: &[String], cwd: &std::path::Path) -> Result<Self> {
-        if command.trim().is_empty() {
-            return Err(HarnessError::Other(
-                "provider command cannot be empty".into(),
-            ));
-        }
-        let mut process = Command::new(command);
-        process.args(args).current_dir(cwd);
-        Self::spawn_command(process, command).await
-    }
-
     pub async fn spawn_command(mut command: Command, label: &str) -> Result<Self> {
         command
             .stdin(Stdio::piped())

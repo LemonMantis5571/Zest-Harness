@@ -126,8 +126,8 @@ pub use tools::approval::{
 };
 pub use tools::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
 pub use tools::external_agent::{
-    prepare_external_command, run_delegation_reviewer, run_delegation_worker, ExternalAgent,
-    ExternalAgentResult, EXTERNAL_AGENT_TOOL,
+    prepare_external_command, resolve_program, run_delegation_reviewer, run_delegation_worker,
+    ExternalAgent, ExternalAgentResult, EXTERNAL_AGENT_TOOL,
 };
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
