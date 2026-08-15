@@ -573,7 +573,14 @@ export function Composer({
               <span className="truncate">{folderLabel}</span>
             </button>
             {branch ? (
-              <span className="inline-flex items-center gap-1 truncate">
+              <span
+                className="inline-flex items-center gap-1 truncate"
+                title={
+                  gitContext?.branchChanged
+                    ? `${branch} — this chat started on ${gitContext.baseBranch ?? "another branch"}.`
+                    : branch
+                }
+              >
                 <GitBranchIcon className="size-3 shrink-0 opacity-70" />
                 <span className="truncate">{branch}</span>
               </span>
@@ -595,14 +602,6 @@ export function Composer({
                   −{gitContext.deletions}
                 </span>
               </a>
-            ) : gitContext?.branchChanged ? (
-              <span
-                title={`This chat is on ${gitContext.branch ?? branch ?? "another branch"}, based on ${gitContext.baseBranch ?? "the original branch"}.`}
-                className="inline-flex shrink-0 items-center gap-1 text-muted-foreground"
-              >
-                <GitBranchIcon className="size-3 opacity-80" />
-                <span className="hidden sm:inline">branch changed</span>
-              </span>
             ) : null}
             {showModelPicker ? (
               <span className="hidden truncate sm:inline">· {modelLabel(model)}</span>

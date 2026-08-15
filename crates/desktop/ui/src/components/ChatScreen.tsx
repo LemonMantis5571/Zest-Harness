@@ -765,6 +765,11 @@ export function ChatScreen({
     setDiffTarget(branchTarget(workspaceChange));
   }, [branchTarget, diffTarget, dismissedChangeId, rememberDiffOpen, workspaceChange]);
 
+  // The branch button carries counts only once there is something to review,
+  // so a clean tree gets a plain icon button instead of a row of zeroes.
+  const branchChangeCount = workspaceChange?.changedFiles.length ?? 0;
+  const hasBranchChanges = branchChangeCount > 0;
+
   const openBranchChangeId = diffTarget?.source === "branch" ? diffTarget.changeId : null;
   useEffect(() => {
     if (!openBranchChangeId) return;
@@ -1107,19 +1112,28 @@ export function ChatScreen({
             {!session.isFreeChat ? (
               <Button
                 type="button"
-                variant="ghost"
-                size="sm"
-                className="flex shrink-0 gap-1.5 px-2 text-[11px]"
-                title="Open cumulative branch changes"
-                aria-label="Open cumulative branch changes"
+                variant="outline"
+                size={hasBranchChanges ? "sm" : "icon-sm"}
+                className={hasBranchChanges ? "text-[11px] font-normal tabular-nums" : undefined}
+                title="Show branch diff"
+                aria-label={
+                  hasBranchChanges
+                    ? `Show branch diff — ${branchChangeCount} ${
+                        branchChangeCount === 1 ? "file" : "files"
+                      } changed, ${workspaceChange?.additions ?? 0} added, ${
+                        workspaceChange?.deletions ?? 0
+                      } removed`
+                    : "Show branch diff"
+                }
                 onClick={() => void openBranchChanges()}
               >
-                <GitBranchIcon className="size-3.5" aria-hidden="true" />
-                <span>Branch changes</span>
-                {workspaceChange ? (
-                  <span className="text-muted-foreground">
-                    {workspaceChange.changedFiles.length} · +{workspaceChange.additions} −{workspaceChange.deletions}
-                  </span>
+                <GitBranchIcon data-icon="inline-start" aria-hidden="true" />
+                {hasBranchChanges && workspaceChange ? (
+                  <>
+                    <span className="text-muted-foreground">{branchChangeCount}</span>
+                    <span className="text-primary">+{workspaceChange.additions}</span>
+                    <span className="text-destructive">−{workspaceChange.deletions}</span>
+                  </>
                 ) : null}
               </Button>
             ) : null}
