@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { GitForkIcon, RotateCcwIcon, WaypointsIcon } from "lucide-react";
+import { WaypointsIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { resolveCheckpointMarkerPositions } from "@/lib/checkpointPositions";
 import type { ChatMessage, ThreadCheckpoint } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -9,8 +9,6 @@ type Props = {
   checkpoints: ThreadCheckpoint[];
   messages: ChatMessage[];
   onJump: (messageId: string) => void;
-  onFork: (checkpointId: string) => Promise<void>;
-  onRewind: (checkpointId: string) => Promise<void>;
 };
 
 function checkpointMessageId(checkpoint: ThreadCheckpoint, messages: ChatMessage[]) {
@@ -29,7 +27,7 @@ function checkpointAge(createdAt: number): string {
   return `${days}d ago`;
 }
 
-export function CheckpointRail({ checkpoints, messages, onJump, onFork, onRewind }: Props) {
+export function CheckpointRail({ checkpoints, messages, onJump }: Props) {
   const railRef = useRef<HTMLDivElement>(null);
   const markerRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [positions, setPositions] = useState<number[]>([]);
@@ -45,19 +43,18 @@ export function CheckpointRail({ checkpoints, messages, onJump, onFork, onRewind
     if (!rail) return;
     const railRect = rail.getBoundingClientRect();
     const height = rail.clientHeight;
-    setPositions(
-      checkpoints.map((checkpoint, index) => {
-        const anchor = anchors[index];
-        const element = anchor ? document.getElementById(`message-${anchor}`) : null;
-        if (element) {
-          return Math.max(8, Math.min(height - 28, element.getBoundingClientRect().top - railRect.top));
-        }
-        const fallback = messages.length > 1
-          ? (checkpoint.messageCount / Math.max(1, messages.length - 1)) * Math.max(0, height - 28)
-          : 8;
-        return Math.max(8, Math.min(height - 28, fallback));
-      })
-    );
+    const desiredPositions = checkpoints.map((checkpoint, index) => {
+      const anchor = anchors[index];
+      const element = anchor ? document.getElementById(`message-${anchor}`) : null;
+      if (element) {
+        return Math.max(8, Math.min(height - 28, element.getBoundingClientRect().top - railRect.top));
+      }
+      const fallback = messages.length > 1
+        ? (checkpoint.messageCount / Math.max(1, messages.length - 1)) * Math.max(0, height - 28)
+        : 8;
+      return Math.max(8, Math.min(height - 28, fallback));
+    });
+    setPositions(resolveCheckpointMarkerPositions(desiredPositions, height));
   }, [anchors, checkpoints, messages.length]);
 
   useLayoutEffect(() => {
@@ -119,7 +116,7 @@ export function CheckpointRail({ checkpoints, messages, onJump, onFork, onRewind
               }}
               type="button"
               data-checkpoint={checkpoint.id}
-              aria-label={`${checkpoint.label}: ${checkpoint.preview ?? "checkpoint"}`}
+              aria-label={`${checkpoint.label}: ${checkpoint.preview ?? "checkpoint"}${messageId ? ". Click to jump to its message." : ""}`}
               aria-expanded={active}
               className={cn(
                 "flex size-6 items-center justify-center rounded-full border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
@@ -128,11 +125,23 @@ export function CheckpointRail({ checkpoints, messages, onJump, onFork, onRewind
                   : "border-border/80 bg-[var(--chat-canvas)] text-muted-foreground hover:border-primary/60 hover:text-primary"
               )}
               onFocus={() => setActiveId(checkpoint.id)}
-              onClick={() => setActiveId((current) => (current === checkpoint.id ? null : checkpoint.id))}
+              onClick={() => {
+                if (!messageId) {
+                  setActiveId(checkpoint.id);
+                  return;
+                }
+                setActiveId(null);
+                onJump(messageId);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  setActiveId(checkpoint.id);
+                  if (messageId) {
+                    setActiveId(null);
+                    onJump(messageId);
+                  } else {
+                    setActiveId(checkpoint.id);
+                  }
                 } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
                   event.preventDefault();
                   const next = event.key === "ArrowUp" ? index - 1 : index + 1;
@@ -146,42 +155,22 @@ export function CheckpointRail({ checkpoints, messages, onJump, onFork, onRewind
               <WaypointsIcon className="size-3" aria-hidden="true" />
             </button>
             {active ? (
-              <div className="absolute left-7 top-0 z-30 w-64 rounded-lg border border-border/80 bg-popover p-2.5 text-popover-foreground shadow-xl">
-                <div className="flex items-start gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[11px] font-medium">{checkpoint.label}</div>
+              <div className="absolute left-7 top-0 z-30 w-72 max-w-[calc(100vw-3rem)] overflow-hidden rounded-xl border border-border/80 bg-card/95 text-card-foreground shadow-2xl shadow-black/25 backdrop-blur-sm">
+                <div className="flex items-start gap-2.5 border-b border-border/60 px-3 py-2.5">
+                  <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                    <WaypointsIcon className="size-4" aria-hidden="true" />
+                  </div>
+                  <div className="min-w-0 flex-1 pt-px">
+                    <div className="truncate text-xs font-semibold tracking-tight">{checkpoint.label}</div>
                     <div className="mt-0.5 text-[10px] text-muted-foreground">
-                      {checkpointAge(checkpoint.createdAt)} · {checkpoint.kind}
+                      {checkpointAge(checkpoint.createdAt)} <span aria-hidden="true">·</span> {checkpoint.kind}
                     </div>
                   </div>
                 </div>
-                <p className="mt-2 max-h-16 overflow-hidden text-[11px] leading-relaxed text-muted-foreground">
-                  {checkpoint.preview ?? "Conversation checkpoint"}
-                </p>
-                <div className="mt-2 flex items-center gap-1.5">
-                  {messageId ? (
-                    <Button type="button" size="sm" variant="ghost" onClick={() => onJump(messageId)}>
-                      Jump to message
-                    </Button>
-                  ) : null}
-                  <Button type="button" size="sm" onClick={() => void onFork(checkpoint.id)}>
-                    <GitForkIcon className="size-3" aria-hidden="true" />
-                    Fork
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => {
-                      if (window.confirm("Rewind this conversation? Conversation history changes, while workspace files remain untouched.")) {
-                        void onRewind(checkpoint.id);
-                      }
-                    }}
-                  >
-                    <RotateCcwIcon className="size-3" aria-hidden="true" />
-                    Rewind
-                  </Button>
+                <div className="px-3 py-2.5">
+                  <p className="m-0 max-h-16 overflow-hidden border-l-2 border-primary/30 pl-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                    {checkpoint.preview ?? "Conversation checkpoint"}
+                  </p>
                 </div>
               </div>
             ) : null}

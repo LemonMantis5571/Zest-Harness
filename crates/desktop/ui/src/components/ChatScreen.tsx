@@ -120,7 +120,6 @@ type Props = {
   onStop?: () => void;
   onNewChat: () => void;
   onForkThread: () => Promise<void>;
-  onForkFromCheckpoint: (checkpointId: string) => Promise<void>;
   onRewindThread: (checkpointId: string) => Promise<void>;
   workspaceReview: WorkspaceReview | null;
   workspaceChange: WorkspaceChange | null;
@@ -583,7 +582,6 @@ export function ChatScreen({
   onStop,
   onNewChat,
   onForkThread,
-  onForkFromCheckpoint,
   onRewindThread,
   workspaceReview,
   workspaceChange,
@@ -1180,8 +1178,6 @@ export function ChatScreen({
             checkpoints={session.checkpoints}
             messages={messages}
             onJump={jumpToMessage}
-            onFork={onForkFromCheckpoint}
-            onRewind={onRewindThread}
           />
           <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>
             <MessageScroller

@@ -1398,32 +1398,6 @@ export default function App() {
     }
   }
 
-  async function onForkFromCheckpoint(checkpointId: string) {
-    if (sendingRef.current) {
-      toast.add({
-        type: "warning",
-        title: "Finish this turn first",
-        description: "Stop the current turn before forking the conversation.",
-      });
-      return;
-    }
-    try {
-      const info = await backend.forkThreadFromCheckpoint(checkpointId);
-      applySession(info, { clearDraft: true });
-      toast.add({
-        type: "success",
-        title: "Checkpoint fork created",
-        description: "You are now in a new conversation from that checkpoint.",
-      });
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not fork checkpoint",
-        description: formatInvokeError(err),
-      });
-    }
-  }
-
   const refreshWorkspaceChanges = useCallback(async () => {
     const next = await backend.workspaceChanges();
     const threadId = threadIdRef.current;
@@ -2252,7 +2226,6 @@ export default function App() {
             onStop={onStop}
             onNewChat={onNewChat}
             onForkThread={onForkThread}
-            onForkFromCheckpoint={onForkFromCheckpoint}
             onRewindThread={onRewindThread}
             workspaceReview={workspaceReview}
             workspaceChange={workspaceChange}
