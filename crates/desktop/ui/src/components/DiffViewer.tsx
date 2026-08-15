@@ -261,8 +261,8 @@ export function DiffViewer({
             <span className="text-muted-foreground">
               {sections.length} {sections.length === 1 ? "file" : "files"}
             </span>
-            <span className="text-[#3fb950]">+{totalAdded}</span>
-            <span className="text-[#f85149]">−{totalRemoved}</span>
+            <span className="text-primary">+{totalAdded}</span>
+            <span className="text-destructive">−{totalRemoved}</span>
           </div>
           {view === "reading" && reading && (hiddenCount > 0 || foldedCount > 0) ? (
             <div className="border-t border-border/50 px-3 py-1.5 text-[10px] text-muted-foreground/75">
@@ -297,8 +297,8 @@ export function DiffViewer({
                     <span className="min-w-0 flex-1 truncate font-mono text-[11px] font-medium text-foreground/90" title={section.path}>
                       {section.path}
                     </span>
-                    <span className="shrink-0 font-mono text-[10px] text-[#3fb950]">+{section.added}</span>
-                    <span className="shrink-0 font-mono text-[10px] text-[#f85149]">−{section.removed}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-primary">+{section.added}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-destructive">−{section.removed}</span>
                   </button>
                   {!isCollapsed ? (
                     <DiffPreview
