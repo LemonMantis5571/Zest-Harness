@@ -7,9 +7,11 @@
 //! path cases are involved.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::error::{HarnessError, Result};
 use crate::tools::sensitive::is_sensitive_path;
@@ -18,6 +20,15 @@ use crate::tools::sensitive::is_sensitive_path;
 /// Large repositories still expose complete file/count metadata and mark the
 /// visible patch as truncated.
 pub const MAX_DISPLAY_DIFF_BYTES: usize = 2 * 1024 * 1024;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Git revisions are captured from `rev-parse HEAD` and persisted with a
+/// thread. Keep accepting abbreviated hashes for older threads, but never pass
+/// an option-like value into Git's revision parser.
+pub fn is_safe_commit_id(value: &str) -> bool {
+    let value = value.trim();
+    (4..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +102,11 @@ pub async fn inspect(
     base_branch: Option<&str>,
 ) -> Result<WorkspaceChangeSet> {
     let root = root.as_ref().to_path_buf();
+    let base_commit = match base_commit.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if is_safe_commit_id(value) => Some(value),
+        Some(_) => return Ok(WorkspaceChangeSet::unavailable("invalid_base_commit")),
+        None => None,
+    };
     let probe = match run_git(&root, &["rev-parse", "--is-inside-work-tree"]).await {
         Ok(output) => output,
         Err(_) => return Ok(WorkspaceChangeSet::unavailable("git")),
@@ -199,11 +215,11 @@ fn diff_cached_args() -> Vec<&'static str> {
 }
 
 async fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
+    let mut command = Command::new("git");
+    command.args(args).current_dir(root).kill_on_drop(true);
+    timeout(GIT_COMMAND_TIMEOUT, command.output())
         .await
+        .map_err(|_| HarnessError::Other("git command timed out".into()))?
         .map_err(|error| HarnessError::Other(format!("could not run git: {error}")))
 }
 
@@ -236,13 +252,12 @@ fn parse_status(raw: &[u8]) -> Vec<StatusEntry> {
         }
         let text = String::from_utf8_lossy(field);
         let code = &text[..2];
-        let mut path = text[3..].to_string();
-        // Porcelain -z emits the destination path as the following field for
-        // renames/copies. The destination is the path users need to review.
+        let path = text[3..].to_string();
+        // Porcelain -z emits `XY <destination>\0<source>\0` for renames and
+        // copies. The destination is already in this field, so step over the
+        // trailing source rather than reading it as another entry.
         if code.contains('R') || code.contains('C') {
-            if let Some(destination) = fields.next() {
-                path = String::from_utf8_lossy(destination).to_string();
-            }
+            let _ = fields.next();
         }
         let status = if code == "??" {
             "untracked".to_string()
@@ -280,20 +295,19 @@ fn summaries_from_status(entries: &[StatusEntry]) -> Vec<FileChangeSummary> {
 
 fn fill_stats_from_diff(summaries: &mut Vec<FileChangeSummary>, raw: &[u8]) {
     let text = String::from_utf8_lossy(raw);
+    // `git status` already classified everything it could see, including the
+    // untracked/staged distinction the patch headers cannot express. Only
+    // entries discovered from the patch itself need a status derived here.
+    let classified_by_status = summaries.len();
     let mut current: Option<usize> = None;
     for line in text.lines() {
         if let Some(path) = diff_path(line) {
             current = summaries.iter().position(|file| file.path == path);
             if current.is_none() {
-                let status = if line.contains("/dev/null") {
-                    "added"
-                } else {
-                    "modified"
-                };
                 summaries.push(FileChangeSummary {
                     sensitive: is_sensitive_path(&path),
                     path,
-                    status: status.into(),
+                    status: "modified".into(),
                     additions: 0,
                     deletions: 0,
                     binary: false,
@@ -302,6 +316,17 @@ fn fill_stats_from_diff(summaries: &mut Vec<FileChangeSummary>, raw: &[u8]) {
             }
         }
         let Some(index) = current else { continue };
+        if index >= classified_by_status {
+            if line.starts_with("new file mode ") || line.starts_with("--- /dev/null") {
+                summaries[index].status = "added".into();
+            } else if line.starts_with("deleted file mode ") || line.starts_with("+++ /dev/null") {
+                summaries[index].status = "deleted".into();
+            } else if line.starts_with("rename from ") || line.starts_with("rename to ") {
+                summaries[index].status = "renamed".into();
+            } else if line.starts_with("copy from ") || line.starts_with("copy to ") {
+                summaries[index].status = "copied".into();
+            }
+        }
         if line.starts_with("Binary files") || line.starts_with("GIT binary patch") {
             summaries[index].binary = true;
         } else if line.starts_with('+') && !line.starts_with("+++") {
@@ -312,10 +337,95 @@ fn fill_stats_from_diff(summaries: &mut Vec<FileChangeSummary>, raw: &[u8]) {
     }
 }
 
+/// Read the reviewed path out of a `diff --git` header.
+///
+/// Git quotes a side of the header whenever the path holds non-ASCII bytes or
+/// characters that need escaping, and it quotes each side independently. A
+/// parser that only understands the bare form silently fails to recognise
+/// those files, which matters because [`redact_diff`] keys secret suppression
+/// off this function.
 fn diff_path(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("diff --git a/")?;
+    let rest = line.strip_prefix("diff --git ")?;
+    let (left, right) = split_diff_header(rest)?;
+    let left = left.strip_prefix("a/").unwrap_or(&left).to_string();
+    let right = right.strip_prefix("b/").unwrap_or(&right).to_string();
+    Some(if !right.is_empty() { right } else { left })
+}
+
+/// Split the two `a/` and `b/` sides of a header, decoding either side when
+/// Git wrote it as a quoted C string.
+fn split_diff_header(rest: &str) -> Option<(String, String)> {
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let (left, remainder) = unquote_git_path(quoted)?;
+        let remainder = remainder.strip_prefix(' ')?;
+        let right = match remainder.strip_prefix('"') {
+            Some(quoted) => unquote_git_path(quoted)?.0,
+            None => remainder.to_string(),
+        };
+        return Some((left, right));
+    }
+    // An unquoted left side with a quoted right side happens on renames into a
+    // non-ASCII name.
+    if let Some(index) = rest.find(" \"") {
+        let right = unquote_git_path(&rest[index + 2..])?.0;
+        return Some((rest[..index].to_string(), right));
+    }
+    // Both sides bare. A path containing a space stays ambiguous in this form;
+    // Git leaves that ambiguity in the header itself.
     let (left, right) = rest.split_once(" b/")?;
-    Some(if !right.is_empty() { right } else { left }.to_string())
+    Some((left.to_string(), format!("b/{right}")))
+}
+
+/// Decode one Git-quoted path, returning it alongside the rest of the line.
+/// Git writes these as C string literals, escaping each non-ASCII *byte* in
+/// octal, so decode to bytes first and interpret as UTF-8 afterwards.
+fn unquote_git_path(input: &str) -> Option<(String, &str)> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            // Only ever stopping on an ASCII byte keeps this slice on a
+            // character boundary.
+            b'"' => {
+                return Some((
+                    String::from_utf8_lossy(&decoded).into_owned(),
+                    &input[index + 1..],
+                ))
+            }
+            b'\\' => {
+                let escape = *bytes.get(index + 1)?;
+                index += 2;
+                match escape {
+                    b'a' => decoded.push(0x07),
+                    b'b' => decoded.push(0x08),
+                    b'f' => decoded.push(0x0c),
+                    b'n' => decoded.push(b'\n'),
+                    b'r' => decoded.push(b'\r'),
+                    b't' => decoded.push(b'\t'),
+                    b'v' => decoded.push(0x0b),
+                    b'0'..=b'7' => {
+                        let mut value = u32::from(escape - b'0');
+                        for _ in 0..2 {
+                            let digit = bytes
+                                .get(index)
+                                .copied()
+                                .filter(|byte| matches!(byte, b'0'..=b'7'))?;
+                            value = value * 8 + u32::from(digit - b'0');
+                            index += 1;
+                        }
+                        decoded.push(u8::try_from(value).ok()?);
+                    }
+                    other => decoded.push(other),
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    None
 }
 
 fn redact_diff(raw: &[u8]) -> String {
@@ -323,10 +433,13 @@ fn redact_diff(raw: &[u8]) -> String {
     let mut output = String::new();
     let mut omitted_sensitive_body = false;
     for line in text.lines() {
-        if let Some(path) = diff_path(line) {
+        if line.starts_with("diff --git ") {
             output.push_str(line);
             output.push('\n');
-            omitted_sensitive_body = is_sensitive_path(&path);
+            // A header this parser cannot read is treated as sensitive. Losing
+            // a body is recoverable; printing one that was never checked
+            // against the secret list is not.
+            omitted_sensitive_body = diff_path(line).is_none_or(|path| is_sensitive_path(&path));
             if omitted_sensitive_body {
                 output.push_str("@@ sensitive file omitted @@\n");
             }
@@ -372,14 +485,120 @@ async fn change_id(
 mod tests {
     use super::*;
 
+    /// Git emits `XY <destination>\0<source>\0`, destination first. Reading
+    /// the second field instead reports the pre-rename path and then lets the
+    /// patch pass append the real one as a phantom second entry.
     #[test]
     fn status_parser_handles_untracked_and_renamed_entries() {
-        let raw = b"?? new.txt\0R  old.txt\0new-name.txt\0";
+        let raw = b"?? new.txt\0R  new-name.txt\0old.txt\0";
         let entries = parse_status(raw);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].status, "untracked");
         assert_eq!(entries[1].path, "new-name.txt");
         assert_eq!(entries[1].status, "renamed");
+    }
+
+    #[test]
+    fn a_rename_stays_one_entry_after_patch_stats_are_filled() {
+        let mut summaries = summaries_from_status(&parse_status(b"R  new-name.txt\0old.txt\0"));
+        fill_stats_from_diff(
+            &mut summaries,
+            concat!(
+                "diff --git a/old.txt b/new-name.txt\n",
+                "similarity index 90%\n",
+                "rename from old.txt\n",
+                "rename to new-name.txt\n",
+                "@@ -1 +1 @@\n",
+                "-before\n",
+                "+after\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].path, "new-name.txt");
+        assert_eq!(summaries[0].status, "renamed");
+        assert_eq!((summaries[0].additions, summaries[0].deletions), (1, 1));
+    }
+
+    #[test]
+    fn untracked_files_keep_their_status_through_the_patch_pass() {
+        let mut summaries = summaries_from_status(&parse_status(b"?? new.txt\0"));
+        // The untracked body is synthesised with `git diff --no-index`, whose
+        // header claims a new file.
+        fill_stats_from_diff(
+            &mut summaries,
+            concat!(
+                "diff --git a/new.txt b/new.txt\n",
+                "new file mode 100644\n",
+                "--- /dev/null\n",
+                "+++ b/new.txt\n",
+                "+plain\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].status, "untracked");
+        assert_eq!(summaries[0].additions, 1);
+    }
+
+    #[test]
+    fn quoted_headers_resolve_to_the_real_path() {
+        assert_eq!(
+            diff_path("diff --git \"a/config/.env.caf\\303\\251\" \"b/config/.env.caf\\303\\251\"")
+                .as_deref(),
+            Some("config/.env.café")
+        );
+        assert_eq!(
+            diff_path("diff --git a/plain.txt \"b/caf\\303\\251.txt\"").as_deref(),
+            Some("café.txt")
+        );
+        assert_eq!(
+            diff_path("diff --git \"a/tab\\there\" \"b/tab\\there\"").as_deref(),
+            Some("tab\there")
+        );
+        assert_eq!(
+            diff_path("diff --git a/src/lib.rs b/src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+    }
+
+    /// Git quotes any path holding non-ASCII bytes, so a secret file with an
+    /// accented name reaches the redactor in a form the bare parser missed.
+    #[test]
+    fn sensitive_files_with_quoted_paths_are_still_redacted() {
+        let diff = concat!(
+            "diff --git a/src/lib.rs b/src/lib.rs\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "diff --git \"a/config/.env.caf\\303\\251\" \"b/config/.env.caf\\303\\251\"\n",
+            "@@ -1 +1 @@\n",
+            "-API_KEY=supersecret123\n",
+            "+API_KEY=rotated_secret_999\n",
+        );
+        let redacted = redact_diff(diff.as_bytes());
+        assert!(!redacted.contains("supersecret123"));
+        assert!(!redacted.contains("rotated_secret_999"));
+        assert!(redacted.contains("sensitive file omitted"));
+        assert!(redacted.contains("+new"));
+    }
+
+    /// An unreadable header must suppress the body rather than inherit the
+    /// previous section's verdict.
+    #[test]
+    fn unparseable_headers_are_treated_as_sensitive() {
+        let diff = concat!(
+            "diff --git a/src/lib.rs b/src/lib.rs\n",
+            "@@ -1 +1 @@\n",
+            "+safe\n",
+            "diff --git nonsense\n",
+            "+MAYBE_A_SECRET=1\n",
+        );
+        let redacted = redact_diff(diff.as_bytes());
+        assert!(!redacted.contains("MAYBE_A_SECRET"));
+        assert!(redacted.contains("+safe"));
     }
 
     #[test]
@@ -397,5 +616,48 @@ mod tests {
         assert!(truncated);
         assert!(value.starts_with("abc"));
         assert!(value.contains("Diff truncated"));
+    }
+
+    #[test]
+    fn commit_ids_reject_option_like_values_but_keep_abbreviated_hashes() {
+        assert!(is_safe_commit_id("abc123"));
+        assert!(is_safe_commit_id(&"a".repeat(40)));
+        assert!(is_safe_commit_id(&"b".repeat(64)));
+        assert!(!is_safe_commit_id("--output=workspace.patch"));
+        assert!(!is_safe_commit_id("not-a-commit"));
+    }
+
+    #[test]
+    fn patch_stats_classify_file_operations() {
+        let diff = concat!(
+            "diff --git a/added.txt b/added.txt\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/added.txt\n",
+            "+added\n",
+            "diff --git a/deleted.txt b/deleted.txt\n",
+            "deleted file mode 100644\n",
+            "--- a/deleted.txt\n",
+            "+++ /dev/null\n",
+            "-deleted\n",
+            "diff --git a/old.txt b/new.txt\n",
+            "similarity index 100%\n",
+            "rename from old.txt\n",
+            "rename to new.txt\n",
+        );
+        let mut summaries = Vec::new();
+        fill_stats_from_diff(&mut summaries, diff.as_bytes());
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|file| (file.path.as_str(), file.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("added.txt", "added"),
+                ("deleted.txt", "deleted"),
+                ("new.txt", "renamed"),
+            ]
+        );
     }
 }
