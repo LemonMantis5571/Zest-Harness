@@ -1647,7 +1647,7 @@ async fn check_external_agent(
         .get(id.trim())
         .ok_or_else(|| "Enable this worker before checking its CLI.".to_string())?;
     let root = resolve_workspace_root(&state)?;
-    let mut command = Command::new(&agent.command);
+    let mut command = Command::new(zest_core::resolve_program(&agent.command));
     command
         .arg("--version")
         .current_dir(&root)
@@ -1682,7 +1682,7 @@ async fn check_external_agent(
     };
 
     let (authenticated, detail) = if id.trim() == "claude" {
-        let mut auth = Command::new(&agent.command);
+        let mut auth = Command::new(zest_core::resolve_program(&agent.command));
         auth.args(["auth", "status", "--json"])
             .current_dir(root)
             .stdin(Stdio::null())
@@ -3267,7 +3267,7 @@ async fn start_session_inner(
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
     let initial_branch = read_git_branch(&root);
     let mut thread_metadata_changed =
-        thread.ensure_git_context(initial_branch.clone(), read_git_head(&root));
+        thread.ensure_git_context(initial_branch.clone(), read_git_head(&root).await);
     thread_metadata_changed |= thread.record_git_branch(initial_branch);
 
     let approval_hub = Arc::new(ApprovalHub::new());
@@ -4598,7 +4598,7 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
         .sessions
         .with_session_mut(|session| -> Result<SessionInfo, String> {
             let store = open_store(&session.root)?;
-            let restored = store
+            let mut restored = store
                 .rewind_before_user_message(&session.thread, &message_id)
                 .map_err(|e| e.to_string())?;
             restored
@@ -5562,11 +5562,15 @@ fn read_git_branch(root: &Path) -> Option<String> {
     None
 }
 
-fn read_git_head(root: &Path) -> Option<String> {
-    let output = StdCommand::new("git")
+async fn read_git_head(root: &Path) -> Option<String> {
+    let mut command = Command::new("git");
+    command
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(root)
-        .output()
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .ok()?
         .ok()?;
     if !output.status.success() {
         return None;
@@ -5600,18 +5604,22 @@ fn parse_git_numstat(output: &[u8]) -> GitDiffStats {
 }
 
 async fn read_git_diff_stats(root: &Path, start_commit: Option<&str>) -> GitDiffStats {
+    let start_commit = start_commit.map(str::trim);
     let mut command = Command::new("git");
     command.args(["diff", "--numstat"]);
     if let Some(start_commit) = start_commit {
+        if !zest_core::workspace_changes::is_safe_commit_id(start_commit) {
+            return GitDiffStats::default();
+        }
         command.arg(start_commit);
     }
-    let output = match command
+    command.arg("--");
+    command
         .current_dir(root)
         .stderr(Stdio::null())
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => output,
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
+        Ok(Ok(output)) if output.status.success() => output,
         _ => return GitDiffStats::default(),
     };
     parse_git_numstat(&output.stdout)
@@ -5650,6 +5658,7 @@ async fn lookup_pull_request(root: &Path) -> PullRequestLookup {
             .current_dir(root)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -5692,7 +5701,7 @@ async fn inspect_git_context(
         thread_context.base_branch = current_branch.clone();
     }
     if thread_context.start_commit.is_none() {
-        thread_context.start_commit = read_git_head(root);
+        thread_context.start_commit = read_git_head(root).await;
     }
     if current_branch.is_some() {
         thread_context.branch = current_branch.clone();
