@@ -17,6 +17,7 @@ import {
   markApprovalRunning,
   reduceChatEvent,
   restoreApprovalCard,
+  retireApprovalCard,
   type ChatUiState,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
@@ -276,7 +277,24 @@ function formatInvokeError(err: unknown): string {
   if (raw.includes("permission") || raw.includes("access denied")) {
     return "Zest does not have permission to complete that action.";
   }
+  if (isDroppedApprovalError(raw)) {
+    return "That request is no longer waiting — the turn it belonged to has ended.";
+  }
   return "Something went wrong. Try again.";
+}
+
+/**
+ * `ApprovalHub` rejected the resolve because its waiter is gone: the turn ended
+ * (`no active turn for approval`) or the oneshot was already taken or cleared
+ * (`no pending approval with that id`). Neither is retryable, so the card must
+ * be retired rather than restored.
+ */
+function isDroppedApprovalError(raw: string): boolean {
+  return (
+    raw.includes("no pending approval") ||
+    raw.includes("no active turn for approval") ||
+    raw.includes("no turn in progress")
+  );
 }
 
 /**
@@ -1409,6 +1427,7 @@ export default function App() {
     return next;
   }, []);
 
+
   async function onVerifyWorkspace() {
     try {
       const review = await backend.verifyWorkspace();
@@ -1980,7 +1999,15 @@ export default function App() {
         threadIdRef.current ?? undefined
       );
     } catch (err) {
-      if (allow && snapshot) {
+      // A dropped waiter is permanent: putting the card back would leave a
+      // button that can only fail, and because the approval queue is ordered by
+      // transcript position it would keep shadowing the live card behind it.
+      // Retire it instead so the queue advances.
+      if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) {
+        const retired = retireApprovalCard(messagesRef.current, approvalId);
+        messagesRef.current = retired;
+        setMessages(retired);
+      } else if (allow && snapshot) {
         const restored = restoreApprovalCard(messagesRef.current, snapshot);
         messagesRef.current = restored;
         setMessages(restored);

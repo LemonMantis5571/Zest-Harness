@@ -103,6 +103,56 @@ export function isStaleChatEvent(state: ChatUiState, event: ChatEvent): boolean 
   return false;
 }
 
+/**
+ * Close out tool rows that a terminal turn left waiting on a human.
+ *
+ * A turn cannot end with an approval still outstanding — the harness awaits the
+ * decision — so anything still `awaiting_approval` when `done`/`cancelled`/
+ * `error` arrives is a row whose waiter the backend has already dropped.
+ *
+ * Leaving them alone was a deadlock, not cosmetic. `pendingApprovals` in
+ * ChatScreen scans *every* assistant message in the thread and shows
+ * `pendingApprovals[0]`, so one dead row from an earlier turn sat at the head
+ * of the queue and hid the live card behind it ("1 of 2"). Resolving the dead
+ * row sent an id `ApprovalHub` had already dropped, which came back as
+ * "no pending approval with that id" — surfaced as a generic
+ * "Something went wrong" — and since the row never changed status the queue
+ * could never advance. The restore-from-disk path in App.tsx has always done
+ * this; the live path never did.
+ */
+function terminalizeInterruptedTools(tools: ToolPart[]): ToolPart[] {
+  if (
+    !tools.some((t) => t.status === "awaiting_approval" || t.status === "running")
+  ) {
+    return tools;
+  }
+  return tools.map((tool) => {
+    if (tool.status !== "awaiting_approval" && tool.status !== "running") {
+      return tool;
+    }
+    const note =
+      tool.status === "awaiting_approval" ? "approval interrupted" : "interrupted";
+    return {
+      ...tool,
+      status: "error" as const,
+      summary: tool.summary ? `${tool.summary} (${note})` : note,
+    };
+  });
+}
+
+/** Apply {@link terminalizeInterruptedTools} across the whole transcript. */
+function sweepInterruptedTools(state: ChatUiState): ChatUiState {
+  let changed = false;
+  const messages = state.messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    const tools = terminalizeInterruptedTools(message.tools);
+    if (tools === message.tools) return message;
+    changed = true;
+    return { ...message, tools };
+  });
+  return changed ? { ...state, messages } : state;
+}
+
 function ensureAssistant(
   state: ChatUiState,
   messageId: string | undefined,
@@ -424,7 +474,7 @@ export function reduceChatEvent(
       }
       return {
         state: {
-          ...next,
+          ...sweepInterruptedTools(next),
           activeAssistantId: null,
           sending: false,
           currentTurnId: null,
@@ -436,13 +486,15 @@ export function reduceChatEvent(
       const ensured = ensureAssistant(state, event.message_id, newId);
       return {
         state: {
-          ...patchAssistant(ensured.state, ensured.id, (m) => ({
-            ...m,
-            streaming: false,
-            question: undefined,
-            providerActivity: finishProviderActivities(m.providerActivity, "error"),
-            error: m.error ?? "turn cancelled",
-          })),
+          ...sweepInterruptedTools(
+            patchAssistant(ensured.state, ensured.id, (m) => ({
+              ...m,
+              streaming: false,
+              question: undefined,
+              providerActivity: finishProviderActivities(m.providerActivity, "error"),
+              error: m.error ?? "turn cancelled",
+            }))
+          ),
           activeAssistantId: null,
           sending: false,
           currentTurnId: null,
@@ -455,15 +507,17 @@ export function reduceChatEvent(
       effects.errorToast = event.message;
       return {
         state: {
-          ...patchAssistant(ensured.state, ensured.id, (m) => ({
-            ...m,
-            streaming: false,
-            question: undefined,
-            providerActivity: finishProviderActivities(m.providerActivity, "error"),
-            error: event.message,
-            // Only set when signing in again is the actual fix.
-            reconnectProvider: event.reconnect_provider ?? undefined,
-          })),
+          ...sweepInterruptedTools(
+            patchAssistant(ensured.state, ensured.id, (m) => ({
+              ...m,
+              streaming: false,
+              question: undefined,
+              providerActivity: finishProviderActivities(m.providerActivity, "error"),
+              error: event.message,
+              // Only set when signing in again is the actual fix.
+              reconnectProvider: event.reconnect_provider ?? undefined,
+            }))
+          ),
           activeAssistantId: null,
           sending: false,
           currentTurnId: null,
@@ -531,6 +585,39 @@ export function restoreApprovalCard(
       approvalId: snapshot.approvalId,
     };
     return { ...m, tools };
+  });
+}
+
+/**
+ * Retire a card whose waiter the backend no longer has.
+ *
+ * The counterpart to {@link restoreApprovalCard}: restoring is right when the
+ * resolve failed for a transient reason and the user should try again, but a
+ * dropped waiter is permanent. Putting that card back leaves a button that can
+ * only ever fail, sitting ahead of the live approval in the queue.
+ */
+export function retireApprovalCard(
+  messages: ChatMessage[],
+  approvalId: string
+): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.role !== "assistant") return m;
+    if (!m.tools.some((t) => t.approvalId === approvalId)) return m;
+    return {
+      ...m,
+      tools: m.tools.map((t) =>
+        t.approvalId === approvalId
+          ? {
+              ...t,
+              status: "error" as const,
+              approvalId: undefined,
+              summary: t.summary
+                ? `${t.summary} (approval expired)`
+                : "approval expired",
+            }
+          : t
+      ),
+    };
   });
 }
 
