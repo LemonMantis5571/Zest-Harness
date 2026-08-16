@@ -393,6 +393,20 @@ export type RangeTotals = {
   cacheSavingsUsd: number;
   activeDays: number;
   tokensPerActiveDay: number;
+  /**
+   * Where every prompt token went, as three shares adding up to 100%. A hit
+   * rate alone counts cache writes as failures, which makes a session that is
+   * busy filling its cache look like one whose cache never worked.
+   */
+  servedFromCachePercent: number;
+  writtenToCachePercent: number;
+  readFreshPercent: number;
+  /**
+   * Cache reads per cache write — the number the pricing turns on. Absent
+   * rather than zero when nothing was ever written.
+   */
+  cacheReuseRatio?: number | null;
+  /** Same value as `servedFromCachePercent`, kept under its original name. */
   cacheHitPercent: number;
   /** Metered before per-model attribution existed, so unpriceable. */
   unattributedTokens: number;
