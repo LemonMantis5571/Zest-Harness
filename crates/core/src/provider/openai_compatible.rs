@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use super::{
     catalogue_without_efforts, Completion, ModelSpec, Provider, RateLimitSnapshot, StreamEvent,
-    TurnRequest,
+    SystemPrompt, TurnRequest,
 };
 use crate::anthropic::sse::SseParser;
 use crate::anthropic::types::{Message, ToolDef, Usage};
@@ -118,8 +118,18 @@ impl Provider for OpenAiCompatibleProvider {
     ) -> Result<Completion> {
         let wire = Request {
             model: req.model.clone(),
-            messages: convert_messages(req.system.as_deref(), &req.messages),
-            tools: req.tools.iter().map(convert_tool).collect(),
+            messages: convert_messages(
+                req.system.as_ref().map(SystemPrompt::text).as_deref(),
+                &req.messages,
+            ),
+            // This provider has no cached prefix to protect, so a maintenance
+            // turn simply withholds the tools rather than sending them with a
+            // `none` choice these endpoints do not all agree on.
+            tools: if req.allow_tool_use {
+                req.tools.iter().map(convert_tool).collect()
+            } else {
+                Vec::new()
+            },
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -307,14 +317,30 @@ impl OpenAiAccumulator {
         }
         if let Some(usage) = event.get("usage") {
             if !usage.is_null() {
-                self.usage.input_tokens = usage
+                let prompt = usage
                     .get("prompt_tokens")
                     .and_then(Value::as_u64)
-                    .unwrap_or(0) as u32;
-                self.usage.output_tokens = usage
-                    .get("completion_tokens")
+                    .unwrap_or(0);
+                // These endpoints cache the prompt prefix on their own and
+                // report the hit here — but as a *subset* of `prompt_tokens`,
+                // where the ledger (following Anthropic) keeps the two apart.
+                // Left unsplit, every cached token is filed as fresh input and
+                // the measured hit rate for this provider is a flat zero no
+                // matter how well its cache is working.
+                let cached = usage
+                    .get("prompt_tokens_details")
+                    .and_then(|details| details.get("cached_tokens"))
                     .and_then(Value::as_u64)
-                    .unwrap_or(0) as u32;
+                    .unwrap_or(0)
+                    .min(prompt);
+                self.usage.input_tokens = bounded_u32(prompt - cached);
+                self.usage.cache_read_input_tokens = bounded_u32(cached);
+                self.usage.output_tokens = bounded_u32(
+                    usage
+                        .get("completion_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                );
                 self.usage_available = true;
             }
         }
@@ -476,9 +502,59 @@ fn convert_messages(system: Option<&str>, messages: &[Message]) -> Vec<Value> {
     output
 }
 
+/// Saturate rather than wrap. A provider that reports a nonsense token count
+/// should show as an implausibly large one, not as a small one.
+fn bounded_u32(value: u64) -> u32 {
+    value.min(u64::from(u32::MAX)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_of(usage: Value) -> Usage {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        accumulator
+            .push(&json!({ "usage": usage, "choices": [] }), &mut sink)
+            .unwrap();
+        assert!(accumulator.usage_available);
+        accumulator.usage
+    }
+
+    #[test]
+    fn cached_prompt_tokens_are_split_out_of_the_prompt_total() {
+        // `cached_tokens` is a subset of `prompt_tokens` on the wire; counting
+        // it in both columns would double the prompt and report a zero hit
+        // rate on a provider whose cache is working perfectly well.
+        let usage = usage_of(json!({
+            "prompt_tokens": 10_000,
+            "completion_tokens": 250,
+            "prompt_tokens_details": { "cached_tokens": 8_000 },
+        }));
+        assert_eq!(usage.input_tokens, 2_000);
+        assert_eq!(usage.cache_read_input_tokens, 8_000);
+        assert_eq!(usage.output_tokens, 250);
+    }
+
+    #[test]
+    fn an_endpoint_that_reports_no_cache_detail_is_all_fresh_input() {
+        let usage = usage_of(json!({ "prompt_tokens": 900, "completion_tokens": 10 }));
+        assert_eq!(usage.input_tokens, 900);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    /// More cached than prompt is not physical, but it must not underflow into
+    /// four billion fresh input tokens either.
+    #[test]
+    fn an_impossible_cached_figure_is_clamped_to_the_prompt() {
+        let usage = usage_of(json!({
+            "prompt_tokens": 100,
+            "prompt_tokens_details": { "cached_tokens": 900 },
+        }));
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 100);
+    }
 
     #[test]
     fn reads_standard_rate_limit_headers() {

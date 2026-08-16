@@ -15,7 +15,7 @@ use super::session::JsonlProcess;
 use super::{
     catalogue_for_provider, Completion, ModelSpec, Provider, ProviderCommandRequest,
     ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
-    ProviderSessionRef, StreamEvent, TurnRequest,
+    ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
 };
 use crate::anthropic::types::Usage;
 use crate::auth::{detect_codex_cli, AuthStatus};
@@ -200,7 +200,7 @@ impl CodexAppServerProvider {
             "cwd": self.root.to_string_lossy(),
             "sandbox": "workspaceWrite",
             "approvalPolicy": approval_policy,
-            "baseInstructions": req.system,
+            "baseInstructions": req.system.as_ref().map(SystemPrompt::text),
             "config": if self.allow_mcp { json!({}) } else { json!({"mcp_servers": {}}) },
         });
         let mut resumed = false;
@@ -492,8 +492,9 @@ async fn handle_message(
             }
         }
         "thread/tokenUsage/updated" => {
-            if let Some(input) = usage_number(&params, &["inputTokens", "input_tokens"]) {
-                state.usage.input_tokens = bounded_u32(input);
+            if let Some((fresh, cached)) = split_token_usage(&params) {
+                state.usage.input_tokens = fresh;
+                state.usage.cache_read_input_tokens = cached;
                 state.usage_available = true;
             }
             if let Some(output) = usage_number(&params, &["outputTokens", "output_tokens"]) {
@@ -847,6 +848,24 @@ fn bounded_u32(value: u64) -> u32 {
     value.min(u64::from(u32::MAX)) as u32
 }
 
+/// Split a Codex token-usage report into `(fresh input, cache reads)`.
+///
+/// Codex counts its cached prefix *inside* `inputTokens`, while the ledger
+/// keeps cache reads in their own column the way the Messages API does. Without
+/// taking the cached share back out, every Codex turn is filed as a total cache
+/// miss and drags the headline hit rate down with it. `None` when the report
+/// carries no input figure at all, so a silent turn stays silent rather than
+/// being recorded as zero.
+fn split_token_usage(params: &Value) -> Option<(u32, u32)> {
+    let input = usage_number(params, &["inputTokens", "input_tokens"])?;
+    // Clamped: a report claiming more cached than total would otherwise
+    // underflow the subtraction.
+    let cached = usage_number(params, &["cachedInputTokens", "cached_input_tokens"])
+        .unwrap_or(0)
+        .min(input);
+    Some((bounded_u32(input - cached), bounded_u32(cached)))
+}
+
 fn normalize_effort(value: &str) -> String {
     match value {
         "extra" | "extra_high" => "xhigh".into(),
@@ -890,6 +909,37 @@ mod tests {
     }
 
     #[test]
+    fn cached_input_is_taken_back_out_of_the_prompt_total() {
+        // Codex nests the usage under `tokenUsage.last`, and counts the cached
+        // prefix inside `inputTokens` rather than beside it.
+        let params = json!({
+            "tokenUsage": {
+                "last": {
+                    "inputTokens": 10_000,
+                    "cachedInputTokens": 8_000,
+                    "outputTokens": 250,
+                }
+            }
+        });
+        assert_eq!(split_token_usage(&params), Some((2_000, 8_000)));
+    }
+
+    #[test]
+    fn a_report_without_a_cached_figure_is_all_fresh_input() {
+        let params = json!({ "tokenUsage": { "last": { "inputTokens": 500 } } });
+        assert_eq!(split_token_usage(&params), Some((500, 0)));
+        assert_eq!(split_token_usage(&json!({})), None);
+    }
+
+    /// More cached than total is not physical, but it must not underflow into
+    /// four billion fresh input tokens either.
+    #[test]
+    fn an_impossible_cached_figure_is_clamped_to_the_prompt() {
+        let params = json!({ "inputTokens": 100, "cachedInputTokens": 900 });
+        assert_eq!(split_token_usage(&params), Some((0, 100)));
+    }
+
+    #[test]
     fn resumed_turn_prompt_contains_only_the_new_user_input() {
         let request = TurnRequest {
             model: "gpt-5.6-sol".into(),
@@ -900,6 +950,7 @@ mod tests {
                 Message::user_text("New request"),
             ],
             tools: Vec::new(),
+            allow_tool_use: true,
             max_tokens: 100,
             effort: Some("high".into()),
             thinking: true,
@@ -936,6 +987,7 @@ mod tests {
                 Message::user_text("Now summarize it."),
             ],
             tools: Vec::new(),
+            allow_tool_use: true,
             max_tokens: 100,
             effort: Some("high".into()),
             thinking: true,

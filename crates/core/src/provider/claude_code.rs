@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::{catalogue_without_efforts, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
+use super::{
+    catalogue_without_efforts, Completion, ModelSpec, Provider, StreamEvent, SystemPrompt,
+    TurnRequest,
+};
 use crate::anthropic::types::Usage;
 use crate::auth::{detect_claude_code, AuthStatus};
 use crate::config::{
@@ -239,11 +242,12 @@ fn parent_prompt(req: &TurnRequest) -> String {
 
     if let Some(system) = req
         .system
-        .as_deref()
+        .as_ref()
+        .map(SystemPrompt::text)
         .filter(|value| !value.trim().is_empty())
     {
         prompt.push_str("# Zest operating context\n\n");
-        prompt.push_str(system);
+        prompt.push_str(&system);
         prompt.push_str("\n\n");
     }
 
@@ -368,6 +372,7 @@ mod tests {
                 Message::user_text("Now implement the fix."),
             ],
             tools: Vec::new(),
+            allow_tool_use: true,
             max_tokens: 100,
             effort: None,
             thinking: false,

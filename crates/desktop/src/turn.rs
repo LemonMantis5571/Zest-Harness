@@ -214,13 +214,21 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             .ok()
             .flatten();
         if let Some(context) = plugin_context {
+            // Into the volatile half, never the cached one. This is the most
+            // changeable text in the whole prompt — a song title turns over
+            // every few minutes — and appending it to the cached block would
+            // evict the base prompt, project docs, and skills along with it,
+            // every time the track changed.
             let mut system = session
                 .agent
                 .system
                 .clone()
-                .unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
-            system.push_str("\n\n# Enabled local integrations\n\n");
-            system.push_str(&context);
+                .unwrap_or_else(|| SystemPrompt::new(DEFAULT_SYSTEM));
+            if !system.volatile.is_empty() {
+                system.volatile.push_str("\n\n");
+            }
+            system.volatile.push_str("# Enabled local integrations\n\n");
+            system.volatile.push_str(&context);
             session.agent.system = Some(system);
         }
         let assistant_message_id = assistant_message_id.clone();

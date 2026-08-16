@@ -42,7 +42,7 @@ use zest_core::{
     ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
     ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
     PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
-    SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
+    SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread, ThreadCheckpoint,
     ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary,
     ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
     THREAD_FORMAT_VERSION,
@@ -5334,7 +5334,9 @@ fn set_system_prompt(
                     .map_err(|_| "skill registry lock poisoned".to_string())?;
                 let docs = load_project_docs(&session.root);
                 let body = compose_system_with_docs(&session.base_system, &custom, &docs, &guard);
-                format!("{body}\n\n{}", env_context(&session.root))
+                // Same split as RuntimeBuilder::build: environment after the
+                // cache breakpoint, not concatenated into the cached block.
+                SystemPrompt::new(body).with_volatile(env_context(&session.root))
             };
             session.agent.system = Some(composed);
             system_prompt_info(session)
@@ -5380,10 +5382,13 @@ fn list_skills(_state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String>
 
 fn system_prompt_info(session: &Session) -> Result<SystemPromptInfo, String> {
     let custom = load_custom_system(&session.root)?;
+    // The whole prompt as the model reads it — the preview would be lying if
+    // it showed only the half that happens to be cacheable.
     let composed = session
         .agent
         .system
-        .clone()
+        .as_ref()
+        .map(SystemPrompt::text)
         .unwrap_or_else(|| session.base_system.clone());
     let composed_preview = truncate_chars(&composed, COMPOSED_PREVIEW_MAX);
     Ok(SystemPromptInfo {

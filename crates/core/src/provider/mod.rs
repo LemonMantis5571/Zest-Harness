@@ -259,6 +259,79 @@ fn validate_against(
     Ok(())
 }
 
+/// The system prompt, split at the only place a cache breakpoint can sit.
+///
+/// `cacheable` is fixed for the whole session and is the largest stable block
+/// of any request. `volatile` describes the machine the session runs on —
+/// working directory, git branch, top-level tree — which differs between
+/// sessions in the same project. Kept in one string the two are indivisible,
+/// so switching a branch and reopening a thread throws away the entire system
+/// prompt to re-report one line of it.
+///
+/// Splitting them cannot make the volatile half free: it still precedes every
+/// message, so a change there costs the conversation prefix. What it buys is
+/// the part worth protecting — the base prompt, project docs, and skills all
+/// survive, and those dwarf the environment block.
+///
+/// Providers with no notion of a breakpoint render the two in order via
+/// [`Self::text`] and see exactly what they saw before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemPrompt {
+    pub cacheable: String,
+    /// Rendered after `cacheable`, past any breakpoint. Often empty.
+    pub volatile: String,
+}
+
+impl SystemPrompt {
+    /// A prompt that is stable all the way through, which is the common case
+    /// for everything except a project-aware session.
+    pub fn new(cacheable: impl Into<String>) -> Self {
+        Self {
+            cacheable: cacheable.into(),
+            volatile: String::new(),
+        }
+    }
+
+    pub fn with_volatile(mut self, volatile: impl Into<String>) -> Self {
+        self.volatile = volatile.into();
+        self
+    }
+
+    /// Both halves as one string, in the order the model reads them.
+    pub fn text(&self) -> String {
+        if self.volatile.is_empty() {
+            return self.cacheable.clone();
+        }
+        format!("{}\n\n{}", self.cacheable, self.volatile)
+    }
+
+    /// Characters in [`Self::text`], without building it.
+    ///
+    /// The context meter needs the length on every refresh and nothing else;
+    /// rendering tens of kilobytes of prompt to count them and dropping the
+    /// copy a line later is a cost with no reader.
+    pub fn char_len(&self) -> usize {
+        let separator = if self.volatile.is_empty() { 0 } else { 2 };
+        self.cacheable.chars().count() + separator + self.volatile.chars().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cacheable.is_empty() && self.volatile.is_empty()
+    }
+}
+
+impl From<String> for SystemPrompt {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for SystemPrompt {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
 /// One model turn, described without reference to any provider's wire format.
 ///
 /// `effort` and `thinking` are *requests*, not commands. A provider maps them
@@ -266,9 +339,17 @@ fn validate_against(
 /// carries a flag for whether the backend understands Anthropic's extensions.
 pub struct TurnRequest {
     pub model: String,
-    pub system: Option<String>,
+    pub system: Option<SystemPrompt>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
+    /// Whether the model may actually call anything in `tools`.
+    ///
+    /// Maintenance turns — compaction, summarisation — want the tool list on
+    /// the wire so their prompt prefix still matches a normal turn and hits the
+    /// same cache, while never invoking a tool. Sending an empty list instead
+    /// would change the prompt from its first byte and cost a second full-price
+    /// copy of the prefix. Providers that run their own tool loop ignore this.
+    pub allow_tool_use: bool,
     /// Budgets reasoning *and* response text together on providers that think.
     pub max_tokens: u32,
     pub effort: Option<String>,
@@ -559,6 +640,7 @@ pub async fn probe(provider: &dyn Provider, model: &str) -> Result<()> {
         system: None,
         messages: vec![Message::user_text("hi")],
         tools: Vec::new(),
+        allow_tool_use: false,
         max_tokens: 1,
         effort: None,
         // Thinking would ignore max_tokens: 1 and make the cheapest possible

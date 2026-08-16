@@ -65,9 +65,10 @@ pub async fn abridge(
     );
     let request = TurnRequest {
         model: model.to_string(),
-        system: Some(SYSTEM.to_string()),
+        system: Some(SYSTEM.into()),
         messages: vec![Message::user_text(prompt)],
         tools: Vec::new(),
+        allow_tool_use: false,
         max_tokens: 4_000,
         effort: Some(effort.to_string()),
         thinking: false,

@@ -22,7 +22,7 @@ use crate::anthropic::types::{tool_result, tool_uses, Message, Usage};
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
-    Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, TurnRequest,
+    Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
 };
 use crate::thread::new_id;
 use crate::tools::approval::{
@@ -56,7 +56,7 @@ pub struct Agent {
     pub max_tokens: u32,
     /// A request, not a command — providers that have no notion of effort ignore it.
     pub effort: String,
-    pub system: Option<String>,
+    pub system: Option<SystemPrompt>,
     pub messages: Vec<Message>,
     /// Provider-native continuation state. The desktop copies this to the
     /// durable thread only after a successful terminal turn.
@@ -90,9 +90,20 @@ impl Agent {
         }
     }
 
-    pub fn with_system(mut self, system: impl Into<String>) -> Self {
+    /// Accepts a bare string for the common case where the whole prompt is
+    /// stable, or a [`SystemPrompt`] when part of it describes the environment
+    /// and must sit outside the cache breakpoint.
+    pub fn with_system(mut self, system: impl Into<SystemPrompt>) -> Self {
         self.system = Some(system.into());
         self
+    }
+
+    /// The system prompt as the model reads it, both halves in order.
+    pub fn system_text(&self) -> String {
+        self.system
+            .as_ref()
+            .map(SystemPrompt::text)
+            .unwrap_or_default()
     }
 
     pub fn with_ledger(mut self, ledger: Arc<Mutex<Ledger>>) -> Self {
@@ -192,8 +203,10 @@ impl Agent {
     ///
     /// The summarization request receives the persistence-safe history, so a
     /// sensitive tool result cannot be copied into the durable checkpoint. It
-    /// uses no tools and no thinking controls: compaction is maintenance, not a
-    /// second agent turn, and it must remain cheap across providers.
+    /// calls no tools and asks for no thinking: compaction is maintenance, not
+    /// a second agent turn, and it must remain cheap across providers. The tool
+    /// list is still declared where that keeps the cached prefix intact — see
+    /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<String> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
@@ -212,7 +225,14 @@ impl Agent {
             model: self.model.clone(),
             system: self.system.clone(),
             messages,
-            tools: Vec::new(),
+            // The tool list still goes on the wire, and `allow_tool_use` keeps
+            // the model from touching it. Dropping the tools would make this
+            // prompt diverge from a normal turn at byte zero, so compaction
+            // would both miss the session's cached prefix and write a second
+            // full copy of it — twice the price of the thing it exists to
+            // make cheaper.
+            tools: self.tools_for_model(),
+            allow_tool_use: false,
             max_tokens: 4_096,
             effort: None,
             thinking: false,
@@ -340,6 +360,7 @@ impl Agent {
                 // model, and do not send an effort request to a model whose
                 // provider has no wire-level effort control.
                 tools: self.tools_for_model(),
+                allow_tool_use: true,
                 max_tokens: self.max_tokens,
                 effort: self.effort_for_model(),
                 thinking: true,

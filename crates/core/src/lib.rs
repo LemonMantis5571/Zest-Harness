@@ -99,8 +99,8 @@ pub use provider::{
     context_window_for_model, descriptor_for_picker_id, descriptor_from_config, normalize_effort,
     probe, Completion, ModelSpec, Provider, ProviderCommandRequest, ProviderDescriptor,
     ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
-    ProviderSessionRef, RateLimitSnapshot, ResumeHandle, ResumeSupport, StreamEvent, TurnRequest,
-    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    ProviderSessionRef, RateLimitSnapshot, ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt,
+    TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,
