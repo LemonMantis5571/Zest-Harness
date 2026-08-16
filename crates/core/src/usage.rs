@@ -947,13 +947,14 @@ impl Ledger {
         });
 
         let metered = totals.total_tokens();
-        // The full prompt is fresh input + cache reads + cache writes. Cache
-        // writes are not hits, but they are part of the prompt volume against
-        // which the hit rate is measured.
+        // The full prompt is fresh input + cache reads + cache writes, and the
+        // three shares below partition exactly that.
         let observed_prompt = totals
             .input_tokens
             .saturating_add(totals.cache_read_tokens)
             .saturating_add(totals.cache_write_tokens);
+        let served_from_cache_percent =
+            percent_of(totals.cache_read_tokens as f64, observed_prompt as f64);
 
         UsageReport {
             days: days.max(1),
@@ -974,10 +975,15 @@ impl Ledger {
                 } else {
                     metered / u64::from(active_days)
                 },
-                cache_hit_percent: percent_of(
-                    totals.cache_read_tokens as f64,
+                served_from_cache_percent,
+                written_to_cache_percent: percent_of(
+                    totals.cache_write_tokens as f64,
                     observed_prompt as f64,
                 ),
+                read_fresh_percent: percent_of(totals.input_tokens as f64, observed_prompt as f64),
+                cache_reuse_ratio: (totals.cache_write_tokens > 0)
+                    .then(|| totals.cache_read_tokens as f64 / totals.cache_write_tokens as f64),
+                cache_hit_percent: served_from_cache_percent,
                 unattributed_tokens,
             },
             series,
@@ -1138,6 +1144,28 @@ pub struct RangeTotals {
     pub cache_savings_usd: f64,
     pub active_days: u32,
     pub tokens_per_active_day: u64,
+    /// Where every prompt token went, as three shares that add up to 100%.
+    ///
+    /// One number could not answer the question people actually ask. A hit rate
+    /// alone counts cache *writes* as failures, but a write is the price of the
+    /// next read — the first turn of a healthy session is nearly all writes and
+    /// looks identical to a session whose cache never worked at all. Splitting
+    /// the denominator out separates "the cache is not being used" from "the
+    /// cache is being filled".
+    pub served_from_cache_percent: f64,
+    pub written_to_cache_percent: f64,
+    pub read_fresh_percent: f64,
+    /// Cache reads per cache write: how many times the average cached token was
+    /// reused before it expired. This is the number that says whether caching
+    /// paid off, because it is the one the pricing turns on — a write costs
+    /// 1.25x a fresh read (2x at the hour TTL) and a read costs 0.1x, so
+    /// anything above roughly 0.3 is already cheaper than not caching. `None`
+    /// when nothing was ever written, where a ratio would be division by zero
+    /// dressed as a fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_reuse_ratio: Option<f64>,
+    /// Retained under its original name for existing readers; identical to
+    /// [`Self::served_from_cache_percent`].
     pub cache_hit_percent: f64,
     /// Metered before per-model attribution existed, so unpriceable. Real
     /// tokens, and visible as such rather than dropped from the totals.
@@ -1909,6 +1937,88 @@ mod daily_tests {
         assert!((report.totals.cache_hit_percent - expected_hit_rate).abs() < 1e-9);
         // Those reads cost 0.1x input, so they saved 0.9x of 9k at $3/M.
         assert!((report.totals.cache_savings_usd - 0.0243).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_three_prompt_shares_account_for_every_prompt_token() {
+        let mut ledger = Ledger::default();
+        ledger.record(
+            "anthropic",
+            "claude-sonnet-4-6",
+            &Completion {
+                content: vec![],
+                stop_reason: None,
+                usage: crate::anthropic::types::Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 100,
+                    cache_creation_input_tokens: 500,
+                    cache_read_input_tokens: 9_000,
+                },
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            },
+        );
+
+        let totals = ledger.report(7, &priced(), None).totals;
+        let sum = totals.served_from_cache_percent
+            + totals.written_to_cache_percent
+            + totals.read_fresh_percent;
+        assert!(
+            (sum - 100.0).abs() < 1e-9,
+            "the shares must partition the prompt, got {sum}"
+        );
+        assert_eq!(totals.served_from_cache_percent, totals.cache_hit_percent);
+        // 9k read back off 500 written: every cached token paid for itself
+        // eighteen times over.
+        assert_eq!(totals.cache_reuse_ratio, Some(18.0));
+    }
+
+    /// A ratio against nothing is not zero reuse, it is no measurement — and a
+    /// "0.0x" on screen would read as caching having failed.
+    #[test]
+    fn reuse_is_absent_rather_than_zero_when_nothing_was_cached() {
+        let mut ledger = Ledger::default();
+        ledger.record("codex", "gpt-5.6-sol", &completion_with(10, 4));
+        assert_eq!(
+            ledger
+                .report(7, &Prices::default(), None)
+                .totals
+                .cache_reuse_ratio,
+            None
+        );
+    }
+
+    /// Providers whose wire format keeps cached tokens inside the prompt total
+    /// used to land entirely in `input_tokens`, which pinned their measured hit
+    /// rate at zero however well their cache was working.
+    #[test]
+    fn a_provider_reported_cache_hit_is_not_filed_as_fresh_input() {
+        let mut ledger = Ledger::default();
+        ledger.record(
+            "codex",
+            "gpt-5.6-sol",
+            &Completion {
+                content: vec![],
+                stop_reason: None,
+                usage: crate::anthropic::types::Usage {
+                    input_tokens: 2_000,
+                    output_tokens: 50,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 8_000,
+                },
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            },
+        );
+
+        let totals = ledger.report(7, &Prices::default(), None).totals;
+        assert_eq!(totals.uncached_input_tokens, 2_000);
+        assert_eq!(totals.cached_input_tokens, 8_000);
+        assert!((totals.served_from_cache_percent - 80.0).abs() < 1e-9);
     }
 
     #[test]
