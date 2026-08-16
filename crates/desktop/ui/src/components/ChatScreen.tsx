@@ -12,7 +12,6 @@ import {
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
-  GitBranchIcon,
   ImageIcon,
   CommandIcon,
   LoaderCircleIcon,
@@ -33,6 +32,7 @@ import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
+import { BranchChangesBar } from "@/components/BranchChangesBar";
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
@@ -730,7 +730,21 @@ export function ChatScreen({
     let cancelled = false;
     void refreshWorkspaceChanges()
       .then((change) => {
-        if (!cancelled) setDiffTarget(branchTarget(change));
+        if (cancelled) return;
+        // Restoring "this thread had the diff open" is only meaningful while
+        // there is something to review. Without this guard, a tree that went
+        // clean since the panel was last open — committed, stashed, or branch
+        // switched — reopened an empty "+0 −0" panel on every mount, because
+        // the persisted flag outlives the changes it was set for. Drop the flag
+        // so it stops firing until the panel is deliberately opened again.
+        if (
+          change.unavailable ||
+          (!change.changedFiles.length && !change.diff)
+        ) {
+          rememberDiffOpen(false);
+          return;
+        }
+        setDiffTarget(branchTarget(change));
       })
       .catch(() => {
         // A persisted open state is best-effort when the workspace is unavailable.
@@ -738,7 +752,13 @@ export function ChatScreen({
     return () => {
       cancelled = true;
     };
-  }, [branchTarget, diffOpenKey, refreshWorkspaceChanges, session.isFreeChat]);
+  }, [
+    branchTarget,
+    diffOpenKey,
+    refreshWorkspaceChanges,
+    rememberDiffOpen,
+    session.isFreeChat,
+  ]);
 
   const openBranchChanges = useCallback(async () => {
     if (session.isFreeChat) return;
@@ -751,19 +771,10 @@ export function ChatScreen({
     }
   }, [branchTarget, refreshWorkspaceChanges, rememberDiffOpen, session.isFreeChat]);
 
-  useEffect(() => {
-    if (
-      !workspaceChange ||
-      workspaceChange.unavailable ||
-      (!workspaceChange.changedFiles.length && !workspaceChange.diff)
-    ) {
-      return;
-    }
-    if (dismissedChangeId === workspaceChange.changeId) return;
-    if (diffTarget?.source === "branch" && diffTarget.changeId === workspaceChange.changeId) return;
-    rememberDiffOpen(true);
-    setDiffTarget(branchTarget(workspaceChange));
-  }, [branchTarget, diffTarget, dismissedChangeId, rememberDiffOpen, workspaceChange]);
+  // Finding changes no longer throws the diff panel open by itself. That put a
+  // full-height review surface over the transcript uninvited, and the panel is
+  // the wrong size for "something changed" — BranchChangesBar carries that
+  // message in one row and opens the panel when the user actually asks.
 
   // The branch button carries counts only once there is something to review,
   // so a clean tree gets a plain icon button instead of a row of zeroes.
@@ -810,6 +821,22 @@ export function ChatScreen({
     }
     setDiffTarget(null);
   }, [diffTarget, dismissedDiffKey, rememberDiffOpen]);
+  /**
+   * Hide the branch strip for this exact set of changes.
+   *
+   * Keyed on the change id rather than a plain boolean so the strip comes back
+   * by itself the next time the branch moves — dismissing "these 300 lines" is
+   * not a request to stop being told about the next three hundred.
+   */
+  const dismissBranchBar = useCallback(() => {
+    const changeId = workspaceChange?.changeId;
+    if (!changeId) return;
+    setDismissedChangeId(changeId);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(dismissedDiffKey, changeId);
+    }
+  }, [dismissedDiffKey, workspaceChange]);
+
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = session.isFreeChat ? "No workspace" : shortRoot(session.root);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
@@ -1109,34 +1136,9 @@ export function ChatScreen({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            {!session.isFreeChat ? (
-              <Button
-                type="button"
-                variant="outline"
-                size={hasBranchChanges ? "sm" : "icon-sm"}
-                className={hasBranchChanges ? "text-[11px] font-normal tabular-nums" : undefined}
-                title="Show branch diff"
-                aria-label={
-                  hasBranchChanges
-                    ? `Show branch diff — ${branchChangeCount} ${
-                        branchChangeCount === 1 ? "file" : "files"
-                      } changed, ${workspaceChange?.additions ?? 0} added, ${
-                        workspaceChange?.deletions ?? 0
-                      } removed`
-                    : "Show branch diff"
-                }
-                onClick={() => void openBranchChanges()}
-              >
-                <GitBranchIcon data-icon="inline-start" aria-hidden="true" />
-                {hasBranchChanges && workspaceChange ? (
-                  <>
-                    <span className="text-muted-foreground">{branchChangeCount}</span>
-                    <span className="text-primary">+{workspaceChange.additions}</span>
-                    <span className="text-destructive">−{workspaceChange.deletions}</span>
-                  </>
-                ) : null}
-              </Button>
-            ) : null}
+            {/* Branch changes moved out of this row and into BranchChangesBar
+                below the header, where the counts can say which project and
+                branch they belong to. */}
             <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
             <NowPlayingButton />
             <Button
@@ -1207,6 +1209,20 @@ export function ChatScreen({
               <XIcon />
             </Button>
           </div>
+        ) : null}
+
+        {!session.isFreeChat &&
+        hasBranchChanges &&
+        !diffTarget &&
+        dismissedChangeId !== workspaceChange?.changeId ? (
+          <BranchChangesBar
+            projectLabel={folderLabel}
+            branch={gitContext?.branch ?? branch}
+            workspaceChange={workspaceChange}
+            gitContext={gitContext}
+            onOpen={() => void openBranchChanges()}
+            onDismiss={dismissBranchBar}
+          />
         ) : null}
 
         <div className="relative min-h-0 flex-1">

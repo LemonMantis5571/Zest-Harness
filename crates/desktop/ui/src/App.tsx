@@ -1427,6 +1427,22 @@ export default function App() {
     return next;
   }, []);
 
+  const activeIsFreeChat = session?.isFreeChat ?? true;
+  /**
+   * Read the branch's changes when a project chat opens.
+   *
+   * The branch strip is a proactive surface, so it has to know before the user
+   * asks. Nothing else established that: the diff panel only reads Git when it
+   * is opened, and `workspace_changed` only fires when a turn edits something —
+   * so opening a chat on a branch that was already dirty said nothing at all.
+   */
+  useEffect(() => {
+    if (!activeThreadId || activeIsFreeChat) return;
+    void refreshWorkspaceChanges().catch(() => {
+      // Best effort: a workspace Git cannot read simply shows no strip.
+    });
+  }, [activeThreadId, activeIsFreeChat, refreshWorkspaceChanges]);
+
 
   async function onVerifyWorkspace() {
     try {
