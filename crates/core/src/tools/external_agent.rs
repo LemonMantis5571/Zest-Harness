@@ -1379,14 +1379,17 @@ fn resolve_windows_program(program: &str) -> Option<std::ffi::OsString> {
 
     // PATHEXT is ordered by preference, so a real `.exe` wins over a `.cmd`
     // shim for the same name.
-    let extensions =
-        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     let search = effective_search_path()?;
     for dir in std::env::split_paths(&search) {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        for extension in extensions.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+        for extension in extensions
+            .split(';')
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
             let candidate = dir.join(format!("{program}{extension}"));
             if candidate.is_file() {
                 return Some(candidate.into_os_string());
@@ -1404,11 +1407,9 @@ fn effective_search_path() -> Option<std::ffi::OsString> {
     let Some(user_path) = windows_user_path() else {
         return Some(existing);
     };
-    std::env::join_paths(
-        std::env::split_paths(&existing).chain(std::env::split_paths(&user_path)),
-    )
-    .ok()
-    .or(Some(existing))
+    std::env::join_paths(std::env::split_paths(&existing).chain(std::env::split_paths(&user_path)))
+        .ok()
+        .or(Some(existing))
 }
 
 #[cfg(windows)]

@@ -113,8 +113,9 @@ fn store_path() -> Result<std::path::PathBuf, String> {
 fn read_store() -> Result<HashMap<String, String>, String> {
     let path = store_path()?;
     match std::fs::read(&path) {
-        Ok(raw) => serde_json::from_slice(&raw)
-            .map_err(|e| format!("credentials file is corrupt: {e}")),
+        Ok(raw) => {
+            serde_json::from_slice(&raw).map_err(|e| format!("credentials file is corrupt: {e}"))
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(err) => Err(err.to_string()),
     }
