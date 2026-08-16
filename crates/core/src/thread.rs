@@ -882,6 +882,16 @@ impl ThreadStore {
         Ok(self.load_with_recovery(id)?.thread)
     }
 
+    /// Whether this id already has a row on disk.
+    ///
+    /// A different question from `load(..).is_ok()`, and deliberately so: this
+    /// asks whether writing would *update* a chat or *create* one, which is
+    /// what a caller holding a possibly-unsaved draft needs to know. It also
+    /// costs a stat rather than a read-and-parse, so it is safe on a poll.
+    pub fn exists(&self, id: &str) -> bool {
+        ThreadId::parse(id).is_ok_and(|tid| self.path_for(&tid).exists())
+    }
+
     /// Load + migrate + terminalize interrupted in-flight tool/approval cards.
     pub fn load_with_recovery(&self, id: &str) -> Result<ThreadLoad> {
         self.load_typed(id).map_err(Into::into)
@@ -1372,6 +1382,33 @@ mod characterization {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `exists` is the guard that stops a metadata-only write from creating a
+    /// chat. It has to answer for an id that was never saved, and for one whose
+    /// row has been deleted out from under a live session — that second case is
+    /// exactly the draft the desktop holds after deleting the open chat.
+    #[test]
+    fn exists_reports_only_rows_actually_on_disk() {
+        let root = scratch("exists");
+        let store = ThreadStore::open(&root).unwrap();
+
+        let unsaved = Thread::new();
+        assert!(
+            !store.exists(&unsaved.id),
+            "a thread that was never saved has no row"
+        );
+
+        let saved = store.create().unwrap();
+        assert!(store.exists(&saved.id));
+
+        store.delete(&saved.id).unwrap();
+        assert!(
+            !store.exists(&saved.id),
+            "a deleted chat must not look present to a live session still holding it"
+        );
+
+        assert!(!store.exists("not-a-thread-id"));
     }
 
     #[test]

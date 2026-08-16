@@ -2893,6 +2893,13 @@ struct ResolvedThread {
     thread: Thread,
     warning: Option<String>,
     created: bool,
+    /// This thread has no row on disk yet and must not get one here.
+    ///
+    /// Distinct from `!created`: a loaded thread is also "not created", but it
+    /// already exists and may be written to freely. A draft must survive as far
+    /// as the first turn without ever being saved, or it shows up in history as
+    /// a chat the user never started.
+    draft: bool,
 }
 
 fn resolve_thread(
@@ -2918,6 +2925,7 @@ fn resolve_thread(
                     thread,
                     warning: loaded.warning,
                     created: false,
+                    draft: false,
                 });
             }
             Err(ThreadLoadError::Corrupt { .. }) => {
@@ -2931,10 +2939,33 @@ fn resolve_thread(
                             .into(),
                     ),
                     created: true,
+                    draft: false,
+                });
+            }
+            Err(ThreadLoadError::Missing(_)) => {
+                // The pointer names a chat with no row on disk. That is not a
+                // lost chat needing repair — it is the unsaved draft that
+                // `delete_thread` leaves behind, which deliberately has no row
+                // until the user sends something.
+                //
+                // Creating a replacement here is what produced the duplicate:
+                // the draft kept its pointer, so every plain open of the
+                // project (reopening it, switching Space, relaunching) minted
+                // another persisted "Untitled chat" that the user never
+                // started, alongside whichever chat they did start. Hand the
+                // same draft back instead, under the id the pointer already
+                // names, so a later send saves it exactly where the pointer
+                // expects.
+                let mut draft = Thread::new().with_provider(provider_id);
+                draft.id = id.clone();
+                return Ok(ResolvedThread {
+                    thread: draft,
+                    warning: None,
+                    created: false,
+                    draft: true,
                 });
             }
             Err(ThreadLoadError::ProviderMismatch { .. })
-            | Err(ThreadLoadError::Missing(_))
             | Err(ThreadLoadError::UnsupportedVersion { .. }) => {
                 // Fall through to a fresh provider-owned thread.
             }
@@ -2948,7 +2979,27 @@ fn resolve_thread(
         thread,
         warning: None,
         created: true,
+        draft: false,
     })
+}
+
+/// Whether opening a thread should write it back to the store.
+///
+/// Opening stamps the branch and HEAD onto the thread, and for anything already
+/// on disk that is worth saving. An unsaved draft is the exception and vetoes
+/// the write outright: the stamp alone would create the history row the draft
+/// exists to avoid — the phantom "Untitled chat" that appeared beside the chat
+/// the user actually started. Its git context still lives in memory, and the
+/// first turn writes it along with the message.
+///
+/// A function rather than an inline condition so the rule can be tested for
+/// real instead of a test re-implementing it and drifting.
+fn should_persist_on_open(
+    claiming_legacy_thread: bool,
+    metadata_changed: bool,
+    is_unsaved_draft: bool,
+) -> bool {
+    (claiming_legacy_thread || metadata_changed) && !is_unsaved_draft
 }
 
 fn persist_provider_thread(
@@ -3173,7 +3224,11 @@ async fn start_session_inner(
     model: Option<String>,
     effort: Option<String>,
     root_override: Option<PathBuf>,
-    thread_override: Option<(Thread, Option<String>)>,
+    // `thread_override` is `(thread, load warning, is an unsaved draft)`. The
+    // draft flag has to travel with the thread: `open_project_chat` resolves
+    // its own target and hands it over here, so a flag left behind at the
+    // resolve site is a flag this function cannot see.
+    thread_override: Option<(Thread, Option<String>, bool)>,
 ) -> Result<SessionInfo, String> {
     zest_core::load_env();
 
@@ -3231,11 +3286,16 @@ async fn start_session_inner(
         .map(|e| normalize_effort(&e));
 
     let store = open_store(&root)?;
-    let (mut thread, load_warning, thread_created) = match thread_override {
-        Some((thread, warning)) => (thread, warning, false),
+    let (mut thread, load_warning, thread_created, thread_is_draft) = match thread_override {
+        Some((thread, warning, draft)) => (thread, warning, false, draft),
         None => {
             let resolved = resolve_thread(&root, &store, &id, &config, false)?;
-            (resolved.thread, resolved.warning, resolved.created)
+            (
+                resolved.thread,
+                resolved.warning,
+                resolved.created,
+                resolved.draft,
+            )
         }
     };
     // Opening a chat while its existing turn is still live must not run the
@@ -3323,7 +3383,11 @@ async fn start_session_inner(
     // A legacy thread is claimed only after the target provider has built a
     // usable runtime. Git context is persisted at the same point so a failed
     // provider switch cannot leave half-open chat metadata behind.
-    if claiming_legacy_thread || thread_metadata_changed {
+    if should_persist_on_open(
+        claiming_legacy_thread,
+        thread_metadata_changed,
+        thread_is_draft,
+    ) {
         if let Err(error) = store.save(&thread) {
             if thread_created {
                 let _ = store.delete(&thread.id);
@@ -4134,6 +4198,117 @@ mod chat_summary_tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// Deleting the open chat leaves an unsaved draft and points the project at
+    /// it. Reopening the project then has to hand that same draft back — it
+    /// used to mint a persisted replacement, so the sidebar grew an "Untitled
+    /// chat" nobody started next to whichever chat the user did start.
+    #[test]
+    fn reopening_after_deleting_the_open_chat_adds_no_history_row() {
+        let root = std::env::temp_dir().join(format!("zest-delete-reopen-{}", new_id("test")));
+        let store = ThreadStore::open(&root).unwrap();
+        let config = Config::default();
+
+        let mut only = store.create_for_provider("codex").unwrap();
+        only.apply_user("user-1", "hello");
+        store.save(&only).unwrap();
+        persist_provider_thread(&root, "codex", &only.id).unwrap();
+
+        // What `delete_thread` does: drop the row, move the session onto an
+        // unsaved draft, and point the project at that draft.
+        store.delete(&only.id).unwrap();
+        let draft = Thread::new().with_provider("codex");
+        persist_provider_thread(&root, "codex", &draft.id).unwrap();
+        assert_eq!(store.list().unwrap().len(), 0);
+
+        // Any plain reopen of the project — relaunch, Space switch, project
+        // click — lands here.
+        let resolved = resolve_thread(&root, &store, "codex", &config, false).unwrap();
+        assert!(!resolved.created, "reopening must not create a chat");
+        assert_eq!(
+            resolved.thread.id, draft.id,
+            "the draft must keep its id so a later send saves where the pointer points"
+        );
+        assert_eq!(
+            store.list().unwrap().len(),
+            0,
+            "an unsent draft must not appear in history"
+        );
+
+        // Reopening twice more must stay at zero rather than accumulate.
+        let _ = resolve_thread(&root, &store, "codex", &config, false).unwrap();
+        let _ = resolve_thread(&root, &store, "codex", &config, false).unwrap();
+        assert_eq!(store.list().unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Resolving the draft is only half of it. `start_session_inner` stamps the
+    /// branch and head onto whatever thread it opens, and that metadata change
+    /// used to trigger a save — quietly turning the draft into the history row
+    /// it exists to avoid. Guard the flag that vetoes that write.
+    #[test]
+    fn an_unsaved_draft_is_not_written_by_a_metadata_stamp() {
+        let root = std::env::temp_dir().join(format!("zest-draft-stamp-{}", new_id("test")));
+        let store = ThreadStore::open(&root).unwrap();
+
+        let only = store.create_for_provider("codex").unwrap();
+        persist_provider_thread(&root, "codex", &only.id).unwrap();
+        store.delete(&only.id).unwrap();
+        let draft = Thread::new().with_provider("codex");
+        persist_provider_thread(&root, "codex", &draft.id).unwrap();
+
+        let resolved = resolve_thread(&root, &store, "codex", &Config::default(), false).unwrap();
+        assert!(resolved.draft, "a pointer with no row resolves to a draft");
+
+        // The stamp itself must still happen — the session needs the context —
+        // it just must not reach disk.
+        let mut thread = resolved.thread;
+        let changed = thread.ensure_git_context(Some("dev".into()), Some("abc123".into()));
+        assert!(changed, "stamping a fresh draft is a metadata change");
+        assert!(
+            !should_persist_on_open(false, changed, resolved.draft),
+            "a metadata stamp must not persist an unsaved draft"
+        );
+        assert_eq!(
+            store.list().unwrap().len(),
+            0,
+            "the draft must not have been written to history"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The draft flag is only useful if it survives the handoff. It is dropped
+    /// once already: `open_project_chat` resolves its own thread and passes it
+    /// to `start_session_inner` as an override, and when that override could
+    /// not carry the flag the draft was saved anyway — which is why deleting
+    /// the open chat and creating a new one produced two.
+    #[test]
+    fn the_open_decision_covers_every_thread_a_session_can_start_from() {
+        // Loaded from disk, git context moved on: save it.
+        assert!(should_persist_on_open(false, true, false));
+        // Freshly created by `create_for_provider`: the row exists, save it.
+        assert!(should_persist_on_open(false, true, false));
+        // A legacy thread being claimed: save it even without other changes.
+        assert!(should_persist_on_open(true, false, false));
+        // Nothing changed and nothing to claim: no write.
+        assert!(!should_persist_on_open(false, false, false));
+        // An unsaved draft: never, whatever else is true.
+        assert!(!should_persist_on_open(false, true, true));
+        assert!(!should_persist_on_open(true, true, true));
+    }
+
+    /// The other half: a project with no pointer at all still gets a chat.
+    #[test]
+    fn a_project_with_no_pointer_still_resolves_to_a_new_chat() {
+        let root = std::env::temp_dir().join(format!("zest-fresh-project-{}", new_id("test")));
+        let store = ThreadStore::open(&root).unwrap();
+        let resolved = resolve_thread(&root, &store, "codex", &Config::default(), false).unwrap();
+        assert!(resolved.created);
+        assert_eq!(store.list().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]
@@ -4294,7 +4469,7 @@ async fn open_project_chat(
             .create_for_provider(&provider_id)
             .map_err(|e| e.to_string())?;
         created_thread_id = Some(thread.id.clone());
-        Some((thread, None))
+        Some((thread, None, false))
     } else if let Some(loaded) = loaded_target {
         let warning = loaded.warning;
         let source = loaded.thread;
@@ -4308,7 +4483,7 @@ async fn open_project_chat(
         if copying_to_another_provider {
             created_thread_id = Some(thread.id.clone());
         }
-        Some((thread, warning))
+        Some((thread, warning, false))
     } else {
         let resolved = resolve_thread(
             &root,
@@ -4320,7 +4495,7 @@ async fn open_project_chat(
         if resolved.created {
             created_thread_id = Some(resolved.thread.id.clone());
         }
-        Some((resolved.thread, resolved.warning))
+        Some((resolved.thread, resolved.warning, resolved.draft))
     };
 
     let previous_space_state = state
@@ -4758,7 +4933,9 @@ fn delete_thread(
                 session.thread = thread;
                 session.recovery = None;
                 // Keep the active provider pointing at the draft, but do not
-                // create a history row until the user sends a message.
+                // create a history row until the user sends a message. The
+                // pointer is what lets `resolve_thread` hand this same draft
+                // back if the project is reopened before anything is sent.
                 persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             }
             Ok(session_info_from(session, None))
@@ -5771,9 +5948,18 @@ async fn git_context(state: State<'_, AppState>) -> Result<GitContextView, Strin
                 return Ok(());
             }
             if session.thread.record_git_context(next_context) {
-                open_store(&session.root)?
-                    .save(&session.thread)
-                    .map_err(|e| e.to_string())?;
+                let store = open_store(&session.root)?;
+                // Update an existing chat, never create one. After deleting the
+                // open chat the session holds a draft with no row and no git
+                // context, and the front end asks for the context as soon as
+                // the session changes — so this stamp was writing the draft
+                // into history a second after the delete, which is the phantom
+                // "Untitled chat" that appeared next to every chat the user
+                // then created. The context still lands in memory either way,
+                // and the first turn persists it with the message.
+                if store.exists(&session.thread.id) {
+                    store.save(&session.thread).map_err(|e| e.to_string())?;
+                }
             }
             Ok(())
         }) {
