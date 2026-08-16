@@ -511,6 +511,14 @@ struct ThreadCheckpointView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     preview: Option<String>,
+    // Carries a `ThreadCheckpointKind` that has already been serialized, so the
+    // Rust type is a String and ts-rs would widen it to `string`. Name the three
+    // values it can hold instead: the UI switches on them, and `string` lets a
+    // typo through that the union catches.
+    #[cfg_attr(
+        feature = "export-bindings",
+        ts(type = "\"turn\" | \"compaction\" | \"manual\"")
+    )]
     kind: String,
 }
 
@@ -949,7 +957,12 @@ struct ReadingDiffView {
 #[cfg_attr(feature = "export-bindings", derive(TS))]
 #[cfg_attr(
     feature = "export-bindings",
-    ts(export, export_to = "WorkspaceFileChange.ts", rename_all = "camelCase")
+    ts(
+        export,
+        export_to = "WorkspaceFileChange.ts",
+        rename = "WorkspaceFileChange",
+        rename_all = "camelCase"
+    )
 )]
 struct WorkspaceFileChangeView {
     path: String,
@@ -967,7 +980,12 @@ struct WorkspaceFileChangeView {
 #[cfg_attr(feature = "export-bindings", derive(TS))]
 #[cfg_attr(
     feature = "export-bindings",
-    ts(export, export_to = "WorkspaceChange.ts", rename_all = "camelCase")
+    ts(
+        export,
+        export_to = "WorkspaceChange.ts",
+        rename = "WorkspaceChange",
+        rename_all = "camelCase"
+    )
 )]
 struct WorkspaceChangeView {
     change_id: String,
