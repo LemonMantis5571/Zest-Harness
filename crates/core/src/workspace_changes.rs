@@ -454,14 +454,17 @@ fn redact_diff(raw: &[u8]) -> String {
     output
 }
 
+/// Head-only clip whose notice sits *outside* the limit, deliberately.
+///
+/// The flag, not the text, is what this caller acts on, and the notice is a UI
+/// affordance rather than a wire cost — so unlike
+/// [`crate::bounded::ends_within`] the budget bounds the diff and the notice is
+/// added after it. Pinned by `bounded_utf8_marks_truncation`.
 fn bounded_utf8(raw: &str, limit: usize) -> (String, bool) {
     if raw.len() <= limit {
         return (raw.to_string(), false);
     }
-    let mut end = limit;
-    while end > 0 && !raw.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = crate::bounded::floor_boundary(raw, limit);
     let mut value = raw[..end].to_string();
     value.push_str("\n\n[Diff truncated; file and line counts remain complete.]\n");
     (value, true)

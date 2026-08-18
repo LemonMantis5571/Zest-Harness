@@ -802,35 +802,16 @@ fn render_output(command: &str, code: Option<i32>, stdout: &Captured, stderr: &C
 
 /// Keep both ends of long output. A build log's useful parts are the first
 /// error and the final summary; the middle is repetition.
+///
+/// The notice is paid for out of `MAX_OUTPUT_BYTES` rather than added on top, so
+/// the result honors the cap this tool documents. Before that was shared with
+/// [`crate::bounded`] the marker rode outside the budget and the cap overshot by
+/// its length.
 fn clip_middle(text: &str) -> String {
-    if text.len() <= MAX_OUTPUT_BYTES {
-        return text.to_string();
-    }
-    let half = MAX_OUTPUT_BYTES / 2;
-    let head_end = floor_char_boundary(text, half);
-    let tail_start = ceil_char_boundary(text, text.len() - half);
-    let omitted = tail_start - head_end;
-    format!(
-        "{}\n\n[… {omitted} bytes omitted from the middle …]\n\n{}",
-        &text[..head_end],
-        &text[tail_start..]
-    )
-}
-
-fn floor_char_boundary(s: &str, mut index: usize) -> usize {
-    index = index.min(s.len());
-    while index > 0 && !s.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn ceil_char_boundary(s: &str, mut index: usize) -> usize {
-    index = index.min(s.len());
-    while index < s.len() && !s.is_char_boundary(index) {
-        index += 1;
-    }
-    index
+    crate::bounded::ends_within(text, MAX_OUTPUT_BYTES, |omitted| {
+        format!("\n\n[… {omitted} bytes omitted from the middle …]\n\n")
+    })
+    .unwrap_or_else(|| text.to_string())
 }
 
 #[cfg(test)]
@@ -1269,5 +1250,20 @@ mod tests {
         let text = "é".repeat(MAX_OUTPUT_BYTES);
         let clipped = clip_middle(&text);
         assert!(std::str::from_utf8(clipped.as_bytes()).is_ok());
+    }
+
+    /// The cap the tool description promises is the cap the model gets. This
+    /// used to overshoot by the marker's length, because the marker was appended
+    /// to a full budget instead of reserved out of it.
+    #[test]
+    fn clipped_output_honors_the_documented_cap() {
+        for size in [MAX_OUTPUT_BYTES + 1, MAX_OUTPUT_BYTES * 2, MAX_STREAM_BYTES] {
+            let clipped = clip_middle(&"x".repeat(size));
+            assert!(
+                clipped.len() <= MAX_OUTPUT_BYTES,
+                "{size} bytes clipped to {}, over the {MAX_OUTPUT_BYTES} cap",
+                clipped.len()
+            );
+        }
     }
 }

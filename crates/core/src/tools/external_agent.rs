@@ -51,7 +51,6 @@ const MAX_ERROR_CHARS: usize = 2_000;
 /// choose the number.
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_DIFF_BYTES: usize = 512 * 1024;
-const DIFF_CLIP_MARKER_BUDGET: usize = 96;
 const MAX_ACP_FILE_BYTES: usize = 1024 * 1024;
 const MAX_ACP_TERMINAL_OUTPUT_BYTES: usize = 64 * 1024;
 const EXTERNAL_RUN_CANCELLED: &str = "__zest_external_run_cancelled__";
@@ -2946,32 +2945,16 @@ fn null_device() -> &'static Path {
     }
 }
 
+/// Bound a worker's diff to the wire limit, keeping both ends.
+///
+/// The marker's cost is reserved out of the limit by [`crate::bounded`], which
+/// replaces the fixed `DIFF_CLIP_MARKER_BUDGET` guess this used to subtract — the
+/// cap is now exact rather than approximately right.
 fn clip_diff(diff: &str) -> String {
-    if diff.len() <= MAX_EXTERNAL_DIFF_BYTES {
-        return diff.to_string();
-    }
-    let available = MAX_EXTERNAL_DIFF_BYTES.saturating_sub(DIFF_CLIP_MARKER_BUDGET);
-    let head_end = floor_char_boundary(diff, available / 2);
-    let tail_start = ceil_char_boundary(diff, diff.len() - available / 2);
-    let omitted = tail_start.saturating_sub(head_end);
-    let marker = format!("\n\n[... {omitted} bytes omitted from the middle ...]\n\n");
-    format!("{}{}{}", &diff[..head_end], marker, &diff[tail_start..])
-}
-
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    index = index.min(text.len());
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
-    index = index.min(text.len());
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
+    crate::bounded::ends_within(diff, MAX_EXTERNAL_DIFF_BYTES, |omitted| {
+        format!("\n\n[... {omitted} bytes omitted from the middle ...]\n\n")
+    })
+    .unwrap_or_else(|| diff.to_string())
 }
 
 fn clip(value: &str) -> String {
