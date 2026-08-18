@@ -178,8 +178,9 @@ fn build(
                 AnthropicProvider::gateway(id.to_string(), key, base_url, model.clone())
                     .map_err(|e| format!("could not build client: {e}"))?
                     .with_models(catalogue_for_provider(id, model, models, efforts));
-            // CLIProxyAPI maps Anthropic thinking + output_config.effort onto
-            // Codex reasoning — keep them on for the codex gateway path.
+            // Proxies that front Codex map Anthropic thinking +
+            // output_config.effort onto Codex reasoning — keep them on for the
+            // codex gateway path.
             if id == "codex" {
                 provider = provider.with_extensions(true);
             }

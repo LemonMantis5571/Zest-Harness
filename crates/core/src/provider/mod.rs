@@ -91,7 +91,7 @@ pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
     }
 }
 
-/// Efforts every provider understands today (Anthropic + CLIProxyAPI mapping).
+/// Efforts every provider understands today.
 pub const STANDARD_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// One selectable model and the efforts it accepts.

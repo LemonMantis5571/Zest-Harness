@@ -3,9 +3,9 @@
 //! Serves two cases from one implementation:
 //!
 //! - **Native** — Anthropic's API on an Anthropic key.
-//! - **Gateway** — a proxy (CLIProxyAPI, LiteLLM, …) that re-exposes some other
-//!   backend as the Messages API. A Codex or Gemini login reached this way needs
-//!   no second wire protocol in the harness.
+//! - **Gateway** — a user-run proxy (LiteLLM, …) that re-exposes some other
+//!   backend as the Messages API. Zest neither installs nor supervises one; a
+//!   backend reached this way needs no second wire protocol in the harness.
 //!
 //! The only behavioural difference is whether Anthropic-only request fields are
 //! sent. That decision belongs here rather than in the agent loop, which is why

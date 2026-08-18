@@ -19,7 +19,6 @@ pub mod credentials;
 pub mod delegation;
 pub mod error;
 pub mod fsutil;
-pub mod gateway;
 pub mod handoff;
 pub mod persist;
 pub mod prefs;
@@ -46,10 +45,9 @@ pub use anthropic::types::{
     DEFAULT_MODEL,
 };
 pub use auth::{
-    adopt_bundled_gateway, can_start_login, cliproxy_exe, cliproxy_install, detect_all,
-    detect_claude_code, detect_codex_cli, gateway_auth_present, login_command,
-    resolve_claude_code_login, resolve_codex_cli_login, resolve_login, start_claude_code_login,
-    start_codex_cli_login, start_login, AuthStatus, LoginProcess, LoginSpawn, ProviderSlot,
+    can_start_login, detect_all, detect_claude_code, detect_codex_cli, resolve_claude_code_login,
+    resolve_codex_cli_login, resolve_login, start_claude_code_login, start_codex_cli_login,
+    start_login, AuthStatus, LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -75,11 +73,6 @@ pub use delegation::{
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
-pub use gateway::{
-    ensure_running as ensure_gateway_running, gateway_dir, provision as provision_gateway,
-    runtime as gateway_runtime, GatewayLease, GatewayStart, GatewayState, Provisioned,
-    DEFAULT_PORT as GATEWAY_DEFAULT_PORT, GATEWAY_KEY_ENV,
-};
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
 pub use persist::{
     PersistPriority, PersistWorker, Snapshot as PersistSnapshot, DELTA_CHECKPOINT_MS,
