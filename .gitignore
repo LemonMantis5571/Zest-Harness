@@ -31,6 +31,7 @@ crates/desktop/.zest/
 # --- Local tool downloads ---
 /tools/*
 !/tools/.gitkeep
+crates/desktop/binaries/
 
 # --- Node (npm workspaces at repo root) ---
 node_modules/
@@ -57,6 +58,10 @@ Desktop.ini
 .claude/
 .cursor/skills/
 .windsurf/
+
+# --- Private agent context & memory ---
+/context/
+/memory/
 
 # --- Scratch / local experiments ---
 /tmp/
