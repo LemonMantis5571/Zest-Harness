@@ -49,12 +49,7 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
                 models: catalogue_without_efforts(&default_model, models),
             }
         }
-        ProviderConfig::CodexCli { model, models, .. } => ProviderDescriptor {
-            id: provider_id.to_string(),
-            default_model: model.clone(),
-            models: catalogue_for_provider(provider_id, model, models, &[]),
-        },
-        ProviderConfig::Gateway {
+        ProviderConfig::CodexCli {
             model,
             models,
             efforts,

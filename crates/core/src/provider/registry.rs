@@ -13,7 +13,7 @@ use super::anthropic::AnthropicProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::codex_app_server::CodexAppServerProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
-use super::{catalogue_for_provider, catalogue_without_efforts, Provider};
+use super::{catalogue_without_efforts, Provider};
 use crate::config::{Config, ProviderConfig};
 
 /// A provider that could not be built, and why — phrased for a user to act on.
@@ -43,6 +43,15 @@ impl ProviderRegistry {
     pub fn from_config_at(config: &Config, root: &Path) -> (Self, Vec<Skipped>) {
         let mut providers: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
         let mut skipped = Vec::new();
+
+        // A provider a migration had to drop is absent from `providers` entirely,
+        // so without this it would look like it was never configured.
+        for (id, reason) in config.unsupported() {
+            skipped.push(Skipped {
+                id: id.clone(),
+                reason: reason.clone(),
+            });
+        }
 
         for (id, entry) in &config.providers {
             match build(id, entry, root) {
@@ -141,6 +150,7 @@ fn build(
             command,
             model,
             models,
+            efforts,
             allow_mcp,
             timeout_secs,
         } => {
@@ -150,6 +160,7 @@ fn build(
                 command.clone(),
                 model.clone(),
                 models.clone(),
+                efforts.clone(),
                 *allow_mcp,
                 *timeout_secs,
             )
@@ -157,35 +168,6 @@ fn build(
             Ok(Arc::new(provider))
         }
 
-        ProviderConfig::Gateway {
-            base_url,
-            api_key_env,
-            model,
-            models,
-            efforts,
-        } => {
-            // A gateway may legitimately need no key. But if the config *names*
-            // an env var and it is empty, that is a mistake worth surfacing
-            // rather than silently sending an empty credential.
-            let key = match api_key_env {
-                Some(var) => {
-                    read_key(var).ok_or_else(|| format!("{var} is not set in the environment"))?
-                }
-                None => String::new(),
-            };
-
-            let mut provider =
-                AnthropicProvider::gateway(id.to_string(), key, base_url, model.clone())
-                    .map_err(|e| format!("could not build client: {e}"))?
-                    .with_models(catalogue_for_provider(id, model, models, efforts));
-            // Proxies that front Codex map Anthropic thinking +
-            // output_config.effort onto Codex reasoning — keep them on for the
-            // codex gateway path.
-            if id == "codex" {
-                provider = provider.with_extensions(true);
-            }
-            Ok(Arc::new(provider))
-        }
         ProviderConfig::OpenaiCompatible {
             base_url,
             model,
@@ -262,39 +244,38 @@ model = "gpt-5.3-codex"
     }
 
     #[test]
-    fn a_gateway_keeps_the_id_it_was_configured_under() {
+    fn a_provider_keeps_the_id_it_was_configured_under() {
         std::env::set_var("ZEST_TEST_KEY_2", "present");
 
         let config = Config::parse(
             r#"
-[providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+[providers.house]
+kind = "anthropic"
 api_key_env = "ZEST_TEST_KEY_2"
-model = "gpt-5.3-codex"
+model = "claude-haiku-5"
 "#,
         )
         .unwrap();
 
         let (registry, _) = ProviderRegistry::from_config(&config);
-        let provider = registry.get("codex").expect("built");
+        let provider = registry.get("house").expect("built");
 
         // The ledger and configuration key on this, so it must be the config
-        // name — not "gateway", and not the proxy's identity.
-        assert_eq!(provider.id(), "codex");
-        assert_eq!(provider.default_model(), "gpt-5.3-codex");
+        // name rather than the vendor's or the kind's.
+        assert_eq!(provider.id(), "house");
+        assert_eq!(provider.default_model(), "claude-haiku-5");
         assert!(matches!(provider.auth_status(), AuthStatus::Ready { .. }));
 
         std::env::remove_var("ZEST_TEST_KEY_2");
     }
 
     #[test]
-    fn a_gateway_with_no_key_env_is_allowed() {
+    fn an_openai_compatible_provider_with_no_key_env_is_allowed() {
         let config = Config::parse(
             r#"
 [providers.local]
-kind = "gateway"
-base_url = "http://127.0.0.1:11434"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
 model = "llama"
 "#,
         )

@@ -127,7 +127,7 @@ async fn fetch_provider_quota(
         return fetch_codex_rate_limits(provider_id).await;
     }
 
-    if is_claude_subscription_provider(provider_id, provider) {
+    if is_claude_subscription_provider(provider) {
         return fetch_claude_desktop_quota(provider_id).await;
     }
 
@@ -162,20 +162,18 @@ async fn fetch_provider_quota(
             provider_id,
             "Codex account usage is owned by the native CLI.",
         ),
-        ProviderConfig::Gateway { .. } => unavailable_view(
-            provider_id,
-            "This gateway must expose its own account quota.",
-        ),
         ProviderConfig::OpenaiCompatible { .. } => {
             unavailable_view(provider_id, "This API has no standard balance endpoint.")
         }
     }
 }
 
-fn is_claude_subscription_provider(provider_id: &str, provider: &ProviderConfig) -> bool {
+/// Only the Claude Code runtime spends the Claude.ai subscription allowance.
+///
+/// This used to also accept a provider *named* `claude` behind a gateway. It is
+/// a pure kind decision now: the id is a label, not a capability.
+fn is_claude_subscription_provider(provider: &ProviderConfig) -> bool {
     matches!(provider, ProviderConfig::ClaudeCode { .. })
-        || (provider_id.eq_ignore_ascii_case("claude")
-            && matches!(provider, ProviderConfig::Gateway { .. }))
 }
 
 /// Read Claude Desktop's last provider-reported usage sample.
@@ -848,12 +846,13 @@ mod tests {
         let mut config = Config::default();
         config.providers.insert(
             "zeta".into(),
-            ProviderConfig::Gateway {
-                base_url: "http://127.0.0.1:8317".into(),
-                api_key_env: None,
+            ProviderConfig::CodexCli {
+                command: "codex".into(),
                 model: "model".into(),
                 models: Vec::new(),
                 efforts: Vec::new(),
+                allow_mcp: false,
+                timeout_secs: 900,
             },
         );
         config.providers.insert(

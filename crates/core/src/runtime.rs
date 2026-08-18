@@ -593,14 +593,12 @@ mod tests {
 
     #[test]
     fn external_agents_are_explicit_tools_and_follow_the_external_worker_switch() {
-        std::env::set_var("ZEST_EXTERNAL_RUNTIME_KEY", "present");
         let dir = scratch("external-agent");
         let config = Config::parse(
             r#"
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:1"
-api_key_env = "ZEST_EXTERNAL_RUNTIME_KEY"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1/v1"
 model = "gpt-5.6-sol"
 
 [agents.review]
@@ -635,7 +633,6 @@ provider = "codex"
             .build()
             .unwrap();
         assert!(!disabled.agent.tool_names().contains(&"delegate_external"));
-        std::env::remove_var("ZEST_EXTERNAL_RUNTIME_KEY");
     }
 
     #[test]
@@ -723,10 +720,8 @@ provider = "claude"
         let config = Config::parse(
             r#"
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+kind = "anthropic"
 api_key_env = "ZEST_TEST_UNLOADABLE_KEY"
-model = "gpt-5.6-sol"
 "#,
         )
         .unwrap();
@@ -750,8 +745,7 @@ model = "gpt-5.6-sol"
             user_dir.join("zest.toml"),
             r#"
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+kind = "codex_cli"
 model = "gpt-5.6-sol"
 "#,
         )
@@ -776,8 +770,8 @@ model = "gpt-5.6-sol"
             dir.join("zest.toml"),
             r#"
 [providers.local]
-kind = "gateway"
-base_url = "http://127.0.0.1:11434"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
 model = "llama"
 "#,
         )
@@ -789,24 +783,26 @@ model = "llama"
         assert_eq!(config.providers.len(), 1);
     }
 
-    /// Two gateway providers with disjoint model catalogues, both loadable.
+    /// Two providers with disjoint model catalogues, both loadable.
+    ///
+    /// `openai_compatible` on purpose: it is the only remaining kind that loads
+    /// without a key, carries an explicit model allow-list, *and* leaves Zest
+    /// owning the agent loop. The two subscription kinds own their own loop, so a
+    /// fixture built on them would correctly register no tools at all.
     fn two_provider_dir(name: &str) -> PathBuf {
         let dir = scratch(name);
-        std::env::set_var("ZEST_TEST_TWO_KEY", "present");
         let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
         writeln!(
             f,
             r#"
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-api_key_env = "ZEST_TEST_TWO_KEY"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8317/v1"
 model = "gpt-5.6-sol"
 
 [providers.claude]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-api_key_env = "ZEST_TEST_TWO_KEY"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8317/v1"
 model = "claude-opus-5"
 models = ["claude-opus-5", "claude-sonnet-5"]
 
@@ -848,15 +844,12 @@ model = "gpt-5.6-sol"
     #[test]
     fn a_stale_remembered_effort_falls_back_but_an_explicit_one_errors() {
         let dir = scratch("effort-split");
-        std::env::set_var("ZEST_TEST_EFFORT_KEY", "present");
         let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
         writeln!(
             f,
             r#"
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:1"
-api_key_env = "ZEST_TEST_EFFORT_KEY"
+kind = "codex_cli"
 model = "gpt-a"
 efforts = ["low", "high"]
 
@@ -997,21 +990,18 @@ model = "gpt-a"
     }
 
     #[test]
-    fn builds_with_gateway_config_without_key_is_skipped() {
+    fn a_config_whose_only_provider_lacks_its_key_fails_the_build() {
         let dir = scratch("cfg");
         let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
         writeln!(
             f,
             r#"
-[providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+[providers.main]
+kind = "anthropic"
 api_key_env = "ZEST_TEST_RUNTIME_ABSENT_KEY"
-model = "gpt-5.6-sol"
 
 [default]
-provider = "codex"
-model = "gpt-5.6-sol"
+provider = "main"
 "#
         )
         .unwrap();
@@ -1021,7 +1011,7 @@ model = "gpt-5.6-sol"
             .with_config(Config::find(&dir).unwrap())
             .build()
         {
-            Ok(_) => panic!("expected build to fail without gateway key"),
+            Ok(_) => panic!("expected build to fail without a key"),
             Err(e) => e,
         };
         let msg = err.to_string();

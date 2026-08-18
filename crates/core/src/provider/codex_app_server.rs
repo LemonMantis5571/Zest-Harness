@@ -40,6 +40,8 @@ pub struct CodexAppServerProvider {
     default_model: String,
     models: Arc<RwLock<Vec<ModelSpec>>>,
     configured_models: Vec<String>,
+    /// Per-provider effort allow-list. Empty means the standard set.
+    configured_efforts: Vec<String>,
     allow_mcp: bool,
     timeout_secs: u64,
     auth: AuthStatus,
@@ -53,6 +55,7 @@ impl CodexAppServerProvider {
         command: impl Into<String>,
         model: impl Into<String>,
         models: Vec<String>,
+        efforts: Vec<String>,
         allow_mcp: bool,
         timeout_secs: u64,
     ) -> Result<Self> {
@@ -74,7 +77,7 @@ impl CodexAppServerProvider {
         } else {
             default_model
         };
-        let catalogue = catalogue_for_provider(&id, &default_model, &models, &[]);
+        let catalogue = catalogue_for_provider(&id, &default_model, &models, &efforts);
         Ok(Self {
             id,
             root: root.into(),
@@ -82,6 +85,7 @@ impl CodexAppServerProvider {
             default_model,
             models: Arc::new(RwLock::new(catalogue)),
             configured_models: models,
+            configured_efforts: efforts,
             allow_mcp,
             timeout_secs,
             auth: detect_codex_cli(),
@@ -372,7 +376,12 @@ impl Provider for CodexAppServerProvider {
             .read()
             .map(|models| models.clone())
             .unwrap_or_else(|_| {
-                catalogue_for_provider(&self.id, &self.default_model, &self.configured_models, &[])
+                catalogue_for_provider(
+                    &self.id,
+                    &self.default_model,
+                    &self.configured_models,
+                    &self.configured_efforts,
+                )
             })
     }
 

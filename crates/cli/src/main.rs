@@ -1,12 +1,10 @@
-use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use zest_core::{
     detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger, Prices,
-    ProviderConfig, RuntimeBuilder, StreamEvent, Target, Thread, ThreadStore, ToolRisk,
-    DEFAULT_MODEL, DEFAULT_SYSTEM,
+    RuntimeBuilder, StreamEvent, Thread, ThreadStore, ToolRisk, DEFAULT_SYSTEM,
 };
 
 #[tokio::main]
@@ -70,13 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let root = std::env::current_dir()?;
     let effort = std::env::var("ZEST_EFFORT").unwrap_or_else(|_| "high".to_string());
 
-    // ZEST_BASE_URL remains a one-off override for pointing at a gateway without
-    // writing config. It builds the same single-gateway shape zest.toml would, so
-    // there is only ever one code path from here down.
-    let config = match gateway_override() {
-        Some(config) => config,
-        None => Config::find(&root)?,
-    };
+    let config = Config::find(&root)?;
     for issue in config.lint() {
         eprintln!("\x1b[33mwarning:\x1b[0m {issue}");
     }
@@ -249,10 +241,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     }
 
     let root = std::env::current_dir()?;
-    let config = match gateway_override() {
-        Some(config) => config,
-        None => Config::find(&root)?,
-    };
+    let config = Config::find(&root)?;
     for issue in config.lint() {
         eprintln!("warning: {issue}");
     }
@@ -423,7 +412,7 @@ Opt-in live acceptance checks. Spends real quota.
       completion, usage-ledger delta, and thread persistence. Write tools and
       external workers are disabled.
 
-Requires a working provider config (see zest.toml / ZEST_GATEWAY_KEY) and a
+Requires a working provider config (see zest.toml) and a
 README.md in the workspace root.
 
 This is manual on purpose — do not wire it into CI.
@@ -443,10 +432,7 @@ async fn run_doctor_live() -> anyhow::Result<()> {
     println!("workspace: {}", root.display());
     println!("note: spends quota; read-only tools only\n");
 
-    let config = match gateway_override() {
-        Some(config) => config,
-        None => Config::find(&root)?,
-    };
+    let config = Config::find(&root)?;
     for issue in config.lint() {
         eprintln!("\x1b[33mwarning:\x1b[0m {issue}");
     }
@@ -625,50 +611,6 @@ fn print_auth() {
     }
 
     println!("\n\x1b[90m● selectable   ○ unavailable\x1b[0m\n");
-}
-
-/// `ZEST_BASE_URL` as a synthetic single-gateway config.
-///
-/// Pointing it at Anthropic's own host is a no-op — that is just the default
-/// provider, so fall through to the real config instead.
-fn gateway_override() -> Option<Config> {
-    let base = std::env::var("ZEST_BASE_URL").ok()?;
-    let base = base.trim();
-    if base.is_empty() || base.contains("api.anthropic.com") {
-        return None;
-    }
-
-    let model = std::env::var("ZEST_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-    // Prefer the gateway client token; fall back to ANTHROPIC_API_KEY for the
-    // Claude-Code-shaped env that many proxy writeups still document.
-    let api_key_env = if std::env::var("ZEST_GATEWAY_KEY")
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
-    {
-        "ZEST_GATEWAY_KEY"
-    } else {
-        "ANTHROPIC_API_KEY"
-    };
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        "gateway".to_string(),
-        ProviderConfig::Gateway {
-            base_url: base.to_string(),
-            api_key_env: Some(api_key_env.to_string()),
-            model,
-            models: Vec::new(),
-            efforts: Vec::new(),
-        },
-    );
-
-    Some(Config::from_provider_override(
-        providers,
-        Target {
-            provider: "gateway".to_string(),
-            model: None,
-            effort: None,
-        },
-    ))
 }
 
 /// Spend and headroom are printed as separate lines on purpose. They answer

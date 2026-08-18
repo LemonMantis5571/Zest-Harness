@@ -1,15 +1,9 @@
-//! Provider backed by the Messages API.
+//! Provider backed by Anthropic's Messages API on an Anthropic key.
 //!
-//! Serves two cases from one implementation:
-//!
-//! - **Native** — Anthropic's API on an Anthropic key.
-//! - **Gateway** — a user-run proxy (LiteLLM, …) that re-exposes some other
-//!   backend as the Messages API. Zest neither installs nor supervises one; a
-//!   backend reached this way needs no second wire protocol in the harness.
-//!
-//! The only behavioural difference is whether Anthropic-only request fields are
-//! sent. That decision belongs here rather than in the agent loop, which is why
-//! `Agent` no longer carries a flag for it.
+//! This used to serve a second case — a proxy re-exposing some other backend as
+//! the Messages API — behind an `extensions` flag that suppressed the
+//! Anthropic-only request fields. With the `gateway` kind gone there is one
+//! endpoint, so `thinking` and `output_config.effort` are always sent.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -30,10 +24,6 @@ pub struct AnthropicProvider {
     models: Vec<ModelSpec>,
     /// Presence only — the key itself is never inspected or reported.
     has_key: bool,
-    /// Whether the endpoint understands `thinking` and `output_config.effort`.
-    /// False behind a gateway fronting a non-Anthropic model: those fields are
-    /// meaningless there, and are dropped or rejected depending on the proxy.
-    extensions: bool,
 }
 
 impl AnthropicProvider {
@@ -47,30 +37,6 @@ impl AnthropicProvider {
             models: catalogue_from_lists(&default_model, &[], &[]),
             default_model,
             has_key,
-            extensions: true,
-        })
-    }
-
-    /// A Messages-API-speaking gateway in front of some other backend.
-    ///
-    /// `id` is what configuration and the usage ledger key on, so it should name
-    /// the *account* being spent (`"codex"`), not the proxy.
-    pub fn gateway(
-        id: impl Into<String>,
-        api_key: String,
-        base_url: impl Into<String>,
-        default_model: impl Into<String>,
-    ) -> Result<Self> {
-        let has_key = !api_key.trim().is_empty();
-        let default_model = default_model.into();
-        Ok(Self {
-            id: id.into(),
-            client: AnthropicClient::new(api_key)?.with_base_url(base_url),
-            // No optional catalogue → only the configured default is accepted.
-            models: catalogue_from_lists(&default_model, &[], &[]),
-            default_model,
-            has_key,
-            extensions: false,
         })
     }
 
@@ -107,21 +73,6 @@ impl AnthropicProvider {
         }
         self
     }
-
-    /// Replace the model/effort catalogue (from gateway config allow-lists).
-    pub fn with_models(mut self, models: Vec<ModelSpec>) -> Self {
-        self.models = models;
-        self
-    }
-
-    /// Override whether Anthropic extensions are sent.
-    ///
-    /// Only needed for a gateway that genuinely fronts an Anthropic model and can
-    /// pass the fields through — the constructors already pick the right default.
-    pub fn with_extensions(mut self, extensions: bool) -> Self {
-        self.extensions = extensions;
-        self
-    }
 }
 
 #[async_trait]
@@ -149,11 +100,11 @@ impl Provider for AnthropicProvider {
         }
     }
 
-    /// Native Anthropic only. `extensions` already means "this really is the
-    /// Messages API, not a translation layer", which is exactly the condition
-    /// under which `cache_control` means anything.
+    /// Always. This provider only ever talks to Anthropic's own endpoint now, so
+    /// `cache_control` is always honoured rather than dropped by a translation
+    /// layer in between.
     fn supports_prompt_cache(&self) -> bool {
-        self.extensions
+        true
     }
 
     async fn stream_turn(
@@ -189,13 +140,10 @@ impl Provider for AnthropicProvider {
             messages,
             tools,
             tool_choice,
-            thinking: (self.extensions && req.thinking).then(Thinking::default),
-            output_config: match (self.extensions, req.effort.as_ref()) {
-                (true, Some(effort)) => Some(OutputConfig {
-                    effort: effort.clone(),
-                }),
-                _ => None,
-            },
+            thinking: req.thinking.then(Thinking::default),
+            output_config: req.effort.as_ref().map(|effort| OutputConfig {
+                effort: effort.clone(),
+            }),
         };
 
         self.client
@@ -381,13 +329,6 @@ mod tests {
         ];
         mark_conversation_prefix(&mut messages);
         assert_eq!(cached_indices(&messages), vec![0]);
-    }
-
-    #[test]
-    fn gateway_sends_a_plain_string_system_and_no_cache_control() {
-        let provider =
-            AnthropicProvider::gateway("codex", "k".into(), "http://x", "gpt-5.6-sol").unwrap();
-        assert!(!provider.supports_prompt_cache());
     }
 
     #[test]

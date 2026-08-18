@@ -783,7 +783,6 @@ fn provider_method(config: &ProviderConfig) -> &'static str {
         }
         ProviderConfig::ClaudeCode { .. } => "Claude Code subscription",
         ProviderConfig::CodexCli { .. } => "Codex CLI subscription",
-        ProviderConfig::Gateway { .. } => "Gateway",
         ProviderConfig::OpenaiCompatible {
             credential,
             api_key_env,
@@ -1312,18 +1311,16 @@ fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     rows
 }
 
+/// Add a row for every configured provider the picker did not already list.
+///
+/// This used to also filter by kind, because a `gateway` entry was reachable
+/// only through the two picker ids and had no row of its own. Every surviving
+/// kind is selectable directly, so presence in `rows` is the only thing left to
+/// check.
 fn append_configured_direct_provider_views(rows: &mut Vec<ProviderView>, config: &Config) {
     let existing: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-    for (id, entry) in &config.providers {
-        if existing.contains(id)
-            || !matches!(
-                entry,
-                ProviderConfig::Anthropic { .. }
-                    | ProviderConfig::ClaudeCode { .. }
-                    | ProviderConfig::CodexCli { .. }
-                    | ProviderConfig::OpenaiCompatible { .. }
-            )
-        {
+    for id in config.providers.keys() {
+        if existing.contains(id) {
             continue;
         }
         rows.push(configured_provider_view(id, config));
@@ -6741,11 +6738,15 @@ mod characterization {
         }
     }
 
+    /// Providers that are merely *present*, with no kind-specific auth of their
+    /// own. `openai_compatible` is the point: `provider_view_from_slot` re-probes
+    /// the vendor CLI for the two subscription kinds, which would discard the
+    /// synthetic auth status these tests supply.
     fn config_with(ids: &[&str]) -> Config {
         let mut toml = String::new();
         for id in ids {
             toml.push_str(&format!(
-                "[providers.{id}]\nkind = \"gateway\"\nbase_url = \"http://127.0.0.1:8317\"\nmodel = \"m\"\n\n"
+                "[providers.{id}]\nkind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:8317/v1\"\nmodel = \"m\"\n\n"
             ));
         }
         Config::parse(&toml).expect("valid test config")
@@ -6802,8 +6803,10 @@ mod characterization {
         assert!(!desktop_can_start_login("antigravity"));
     }
 
+    /// Every configured provider gets a row, and a picker id the caller already
+    /// listed is never duplicated.
     #[test]
-    fn configured_direct_providers_are_visible_without_a_codex_parent() {
+    fn configured_direct_providers_are_appended_without_duplicating_a_picker_row() {
         let config = Config::parse(
             r#"
 [providers.anthropic]
@@ -6816,20 +6819,19 @@ base_url = "http://localhost:11434/v1"
 model = "llama"
 
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+kind = "codex_cli"
 model = "gpt-5.6-sol"
 "#,
         )
         .expect("valid direct-provider config");
-        let mut rows = Vec::new();
+        // What `list_providers` really passes in: the picker rows, already built.
+        let mut rows = vec![configured_provider_view("codex", &config)];
 
         append_configured_direct_provider_views(&mut rows, &config);
 
         let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
-        assert_eq!(ids, vec!["anthropic", "local"]);
+        assert_eq!(ids, vec!["codex", "anthropic", "local"]);
         assert!(rows.iter().any(|row| row.id == "local" && row.selectable));
-        assert!(rows.iter().any(|row| row.id == "anthropic"));
     }
 
     #[test]
