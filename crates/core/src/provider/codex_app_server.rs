@@ -20,7 +20,7 @@ use super::{
 use crate::anthropic::types::Usage;
 use crate::auth::{detect_codex_cli, AuthStatus};
 use crate::config::DEFAULT_CODEX_MODEL;
-use crate::error::{HarnessError, Result};
+use crate::error::{HarnessError, Result, PROVIDER_MESSAGE_PREFIX};
 use crate::thread::new_id;
 use crate::tools::approval::ToolRisk;
 use crate::tools::external_agent::{
@@ -520,18 +520,24 @@ async fn handle_message(
             if status.as_deref().is_some_and(|status| {
                 matches!(status, "failed" | "error" | "interrupted" | "cancelled")
             }) {
-                return Err(HarnessError::Other(
-                    string_field(&params, &["error", "message"])
-                        .unwrap_or_else(|| "Codex turn failed".into()),
-                ));
+                return Err(codex_failure(&params, "Codex turn failed"));
             }
             return Ok(true);
         }
         "error" => {
-            return Err(HarnessError::Other(
-                string_field(&params, &["message", "error"])
-                    .unwrap_or_else(|| "Codex app-server error".into()),
-            ));
+            // `willRetry` means the app-server is handling it and more events are
+            // coming. Ending the turn here would abort one that recovers.
+            if params.get("willRetry").and_then(Value::as_bool) == Some(true) {
+                let detail = codex_error_message(&params)
+                    .unwrap_or_else(|| "retrying after a provider error".into());
+                on_event(StreamEvent::ProviderActivity {
+                    id: "codex-retry",
+                    title: &detail,
+                    status: "running",
+                });
+                return Ok(false);
+            }
+            return Err(codex_failure(&params, "Codex app-server error"));
         }
         _ => {}
     }
@@ -794,6 +800,59 @@ fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "[unserializable]".into())
 }
 
+/// The failure Codex reported, as an error the front-ends can show verbatim.
+///
+/// Codex writes these for a person: `"You've hit your usage limit ... try again at
+/// <date>"` names the cause *and* the fix. They are tagged
+/// [`PROVIDER_MESSAGE_PREFIX`] so the desktop stops replacing them with a generic
+/// sentence, and `codexErrorInfo` rides along in `kind` for the log.
+fn codex_failure(params: &Value, fallback: &str) -> HarnessError {
+    let message = codex_error_message(params).unwrap_or_else(|| fallback.to_string());
+    let code = codex_error_object(params)
+        .and_then(|error| string_field(error, &["codexErrorInfo", "code"]))
+        .unwrap_or_else(|| "codex".to_string());
+    HarnessError::Stream {
+        kind: format!("{PROVIDER_MESSAGE_PREFIX}{code}"),
+        message,
+    }
+}
+
+/// Codex nests the human-readable reason, and it nests it in two places: an
+/// `error` notification puts it at `params.error.message`, while `turn/completed`
+/// puts it at `params.turn.error.message`.
+///
+/// The bug this fixes: both call sites used [`string_field`], which searches
+/// *sibling keys* rather than a path. Given `error` as an object it found no
+/// string, fell through to the placeholder, and discarded every actionable
+/// message Codex has ever sent.
+fn codex_error_message(params: &Value) -> Option<String> {
+    codex_error_object(params)
+        .and_then(|error| string_field(error, &["message", "detail"]))
+        .or_else(|| {
+            // Older/flatter shapes, still worth accepting.
+            string_field(params, &["message", "error"])
+        })
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+}
+
+fn codex_error_object(params: &Value) -> Option<&Value> {
+    for path in [&["error"][..], &["turn", "error"][..]] {
+        let mut node = params;
+        let found = path.iter().all(|key| match node.get(*key) {
+            Some(next) => {
+                node = next;
+                true
+            }
+            None => false,
+        });
+        if found && node.is_object() {
+            return Some(node);
+        }
+    }
+    None
+}
+
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_string))
@@ -915,6 +974,76 @@ mod tests {
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert!(models.iter().any(|model| model.id == "gpt-5.6-terra"));
         assert_eq!(models[1].context_window, 400_000);
+    }
+
+    /// The reported failure: Codex said "You've hit your usage limit ... try again
+    /// at Aug 19th" and the chat showed "The provider could not complete the
+    /// request. Try again." The reason was nested one level deeper than the
+    /// sibling-key lookup could see, so it was replaced by a placeholder.
+    ///
+    /// Payload copied from a live `codex app-server` session.
+    #[test]
+    fn a_usage_limit_reaches_the_user_in_the_provider_s_own_words() {
+        let params = json!({
+            "error": {
+                "message": "You've hit your usage limit. Upgrade to Pro or try again at Aug 19th, 2026 10:04 PM.",
+                "codexErrorInfo": "usageLimitExceeded",
+                "additionalDetails": null
+            },
+            "willRetry": false,
+            "threadId": "t",
+            "turnId": "u"
+        });
+
+        let err = codex_failure(&params, "Codex app-server error");
+        let shown = err
+            .provider_user_message()
+            .expect("a provider-authored reason must survive to the UI");
+        assert!(shown.contains("usage limit"), "{shown}");
+        assert!(
+            shown.contains("Aug 19th"),
+            "the retry time is the actionable half: {shown}"
+        );
+    }
+
+    /// `turn/completed` nests it one level deeper again, under `turn`.
+    #[test]
+    fn a_failed_turn_reports_the_reason_from_under_the_turn_object() {
+        let params = json!({
+            "threadId": "t",
+            "turn": {
+                "id": "u",
+                "status": "failed",
+                "error": { "message": "model refused", "codexErrorInfo": "refusal" }
+            }
+        });
+
+        assert_eq!(
+            codex_failure(&params, "Codex turn failed").provider_user_message(),
+            Some("model refused")
+        );
+    }
+
+    /// With nothing to quote, the fallback is a placeholder — and it must *not*
+    /// claim to be the provider's own words, or an internal string would be
+    /// rendered as a chat message.
+    #[test]
+    fn an_error_with_no_message_still_fails_without_inventing_one() {
+        let err = codex_failure(&json!({ "willRetry": false }), "Codex app-server error");
+        assert_eq!(
+            err.to_string(),
+            "stream provider:codex: Codex app-server error"
+        );
+    }
+
+    /// A flat `params.message` was the shape this code was written against. It
+    /// still has to work — the nested lookup is an addition, not a replacement.
+    #[test]
+    fn a_flat_message_field_is_still_read() {
+        assert_eq!(
+            codex_error_message(&json!({ "message": "flat reason" })).as_deref(),
+            Some("flat reason")
+        );
     }
 
     #[test]

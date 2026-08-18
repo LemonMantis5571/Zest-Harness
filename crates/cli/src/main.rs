@@ -279,12 +279,19 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     match agent.send(&prompt, &mut on_event).await {
         Ok(()) => emit_json(serde_json::json!({ "kind": "done" })),
         Err(err) => {
-            let message = err.to_string();
+            // The Display form carries an internal tag (`stream provider:<code>:`).
+            // When the provider wrote the reason for a person, quote just that.
+            let message = err
+                .provider_user_message()
+                .map(str::to_string)
+                .unwrap_or_else(|| err.to_string());
             emit_json(serde_json::json!({
                 "kind": "error",
-                "message": message,
+                "message": &message,
             }));
-            return Err(err.into());
+            // Exit with the same words the protocol line carried, so a caller
+            // reading stderr and a caller reading JSONL agree.
+            return Err(anyhow::anyhow!(message));
         }
     }
 

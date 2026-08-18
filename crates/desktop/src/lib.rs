@@ -6172,6 +6172,12 @@ fn normalize_effort(effort: &str) -> String {
 /// User-facing turn errors. An unreachable endpoint is the usual alpha failure
 /// mode and should not look like a missing system prompt.
 fn format_turn_error(err: &HarnessError) -> String {
+    // A provider that wrote its own user-facing reason always knows more than a
+    // classifier here does. Only text explicitly tagged as user-facing qualifies;
+    // see `HarnessError::provider_user_message`.
+    if let Some(message) = err.provider_user_message() {
+        return message.to_string();
+    }
     if err.is_unreachable() {
         return "Zest could not reach the provider. Try reconnecting, then send your message again.".into();
     }
@@ -6279,6 +6285,30 @@ mod tests {
         assert_eq!(
             format_turn_error_for_provider(&failure, "codex"),
             "This provider needs you to sign in again. Reconnect, then send your message again."
+        );
+    }
+
+    /// The reported failure: Codex named the cause and the fix, and the chat
+    /// bubble said "The provider could not complete the request. Try again."
+    #[test]
+    fn a_provider_authored_reason_is_shown_instead_of_the_generic_sentence() {
+        let failure = HarnessError::Stream {
+            kind: "provider:usageLimitExceeded".into(),
+            message: "You've hit your usage limit. Try again at Aug 19th, 2026 10:04 PM.".into(),
+        };
+        assert_eq!(
+            format_turn_error(&failure),
+            "You've hit your usage limit. Try again at Aug 19th, 2026 10:04 PM."
+        );
+
+        // An untagged stream error keeps the generic sentence: its text is ours.
+        let internal = HarnessError::Stream {
+            kind: "codex_protocol".into(),
+            message: "thread/start returned no thread id".into(),
+        };
+        assert_eq!(
+            format_turn_error(&internal),
+            "The provider could not complete the request. Try again."
         );
     }
 
