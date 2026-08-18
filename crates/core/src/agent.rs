@@ -37,6 +37,24 @@ use crate::usage::Ledger;
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
 
+/// What one compaction actually did.
+///
+/// Pruning and summarizing are not two flavours of one result: one keeps the
+/// conversation and shortens it, the other replaces it with a paraphrase. A
+/// caller that cannot tell them apart cannot tell the user the truth about what
+/// happened to their history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionOutcome {
+    /// Over-long tool results were shortened and that was enough. No model call
+    /// was made and the conversation is still the conversation.
+    Pruned {
+        results_pruned: usize,
+        tokens_saved_estimate: u64,
+    },
+    /// The history was replaced by a model-written checkpoint.
+    Summarized { summary: String },
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     tools: ToolRegistry,
@@ -183,6 +201,12 @@ impl Agent {
         self.tools.names()
     }
 
+    /// Project-relative directory holding oversized tool results, when this
+    /// front-end supplied a conversation to keep them under.
+    pub fn spill_dir(&self) -> Option<&str> {
+        self.tools.spill_dir()
+    }
+
     /// Validate a model/effort pair against this agent's provider catalogue.
     pub fn validate_options(&self, model: &str, effort: &str) -> std::result::Result<(), String> {
         self.provider.validate_selection(model, effort)
@@ -191,6 +215,23 @@ impl Agent {
     /// Provider catalogue for pickers.
     pub fn descriptor(&self) -> crate::provider::ProviderDescriptor {
         self.provider.descriptor()
+    }
+
+    /// Context window for the session model.
+    ///
+    /// The provider catalogue is authoritative where it states a capacity; the
+    /// static table only keeps the number honest when nothing was configured. A
+    /// method rather than a front-end helper so the chat chrome and compaction
+    /// resolve the same window — a disagreement here would mean the meter and
+    /// the compaction decision measure against different ceilings.
+    pub fn context_window(&self) -> u64 {
+        self.descriptor()
+            .models
+            .into_iter()
+            .find(|model| model.id == self.model)
+            .map(|model| model.context_window)
+            .filter(|window| *window > 0)
+            .unwrap_or_else(|| crate::provider::context_window_for_model(&self.model))
     }
 
     /// Wire history safe for durable persistence (sensitive tool bodies redacted).
@@ -207,14 +248,39 @@ impl Agent {
     /// a second agent turn, and it must remain cheap across providers. The tool
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
-    pub async fn compact_context(&mut self) -> Result<String> {
+    pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
                 "there is not enough conversation to compact yet".into(),
             ));
         }
 
-        let mut messages = self.messages_for_persist();
+        // Try the free thing first. Pruned against the *live* history, because
+        // that is what will actually be resent if this is enough: measuring off
+        // the redacted copy would credit a saving on bodies already collapsed to
+        // a short constant there, and could skip the summarizer on relief that
+        // does not exist.
+        let mut pruned = self.messages.clone();
+        let report =
+            crate::prune::prune_tool_results(&mut pruned, crate::prune::KEEP_RECENT_MESSAGES);
+        if report.replaced > 0 && self.pruning_relieves_pressure(&report) {
+            self.messages = pruned;
+            // A provider-side thread still mirrors the history that was rewritten.
+            self.provider_session = None;
+            // That measurement described a prompt that no longer exists.
+            self.last_usage = None;
+            // `sensitive_tool_ids` is deliberately *not* cleared: those bodies are
+            // still in live history, still sensitive, and `messages_for_persist`
+            // still finds them by the `tool_use_id` the prune preserved.
+            return Ok(CompactionOutcome::Pruned {
+                results_pruned: report.replaced,
+                tokens_saved_estimate: report.tokens_saved_estimate(),
+            });
+        }
+
+        // Redaction is last before the wire. It is the safety property, so
+        // nothing may run after it that could resurrect a sensitive body.
+        let mut messages = redact_sensitive_staged(pruned, &self.sensitive_tool_ids);
         messages.push(Message::user_text(
             "Create a concise context checkpoint for the next coding turn. ".to_string()
                 + "Preserve the user’s goals, decisions, constraints, files changed, "
@@ -294,7 +360,33 @@ impl Agent {
         // conversation. Do not let that maintenance request masquerade as the
         // next turn's context usage in the footer.
         self.last_usage = None;
-        Ok(summary)
+        Ok(CompactionOutcome::Summarized { summary })
+    }
+
+    /// Would shortening those tool results alone bring the prompt back under the
+    /// auto-compaction threshold?
+    ///
+    /// Anchored on the provider's own count of the last prompt where there is
+    /// one; the estimate supplies only the *delta*. char/4 is far better at "how
+    /// much did this shrink" than at "how big is this", and subtracting an
+    /// absolute saving from a measured total is also what handles the estimator's
+    /// blind spot for tool schemas correctly — scaling by a ratio would credit
+    /// the saving against schema bytes that pruning cannot touch.
+    ///
+    /// The estimate under-counts tokens in code and JSON, so the projection
+    /// over-states what remains and this errs toward still summarizing.
+    fn pruning_relieves_pressure(&self, report: &crate::prune::PruneReport) -> bool {
+        let anchor = self
+            .last_usage
+            .as_ref()
+            .map(Usage::prompt_tokens)
+            .filter(|prompt| *prompt > 0)
+            .unwrap_or_else(|| {
+                crate::context_budget::system_tokens(self.system.as_ref())
+                    + crate::context_budget::conversation_tokens(&self.messages)
+            });
+        anchor.saturating_sub(report.tokens_saved_estimate())
+            < crate::context_budget::auto_compact_threshold(self.context_window())
     }
 
     /// Send one user message and run to completion, executing tools as asked.
@@ -1158,6 +1250,123 @@ mod tests {
         }
     }
 
+    /// Records the messages it was asked to send, then answers.
+    ///
+    /// Declares a small context window so a compaction threshold is easy to
+    /// cross deliberately.
+    struct RecordingProvider {
+        seen: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    #[async_trait]
+    impl Provider for RecordingProvider {
+        fn id(&self) -> &str {
+            "recording"
+        }
+
+        fn default_model(&self) -> &str {
+            "small-window-model"
+        }
+
+        fn models(&self) -> Vec<ModelSpec> {
+            vec![ModelSpec {
+                id: "small-window-model".into(),
+                efforts: Vec::new(),
+                context_window: 16_000,
+                supports_tools: true,
+                supports_vision: false,
+            }]
+        }
+
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+
+        async fn stream_turn(
+            &self,
+            req: &TurnRequest,
+            _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            self.seen.lock().unwrap().push(req.messages.clone());
+            Ok(Completion {
+                content: vec![json!({ "type": "text", "text": "checkpoint" })],
+                stop_reason: Some("end_turn".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            })
+        }
+    }
+
+    /// Fails if it is called at all. The only way to assert that a code path
+    /// spent no model call.
+    struct RefusingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for RefusingProvider {
+        fn id(&self) -> &str {
+            "refusing"
+        }
+
+        fn default_model(&self) -> &str {
+            "small-window-model"
+        }
+
+        fn models(&self) -> Vec<ModelSpec> {
+            vec![ModelSpec {
+                id: "small-window-model".into(),
+                efforts: Vec::new(),
+                context_window: 16_000,
+                supports_tools: true,
+                supports_vision: false,
+            }]
+        }
+
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+
+        async fn stream_turn(
+            &self,
+            _req: &TurnRequest,
+            _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(HarnessError::Other(
+                "the summarizer must not be called".into(),
+            ))
+        }
+    }
+
+    /// The checkpoint text, or `None` when nothing was summarized.
+    ///
+    /// Lives here rather than on `CompactionOutcome` because the desktop matches
+    /// the enum directly and nothing in production wants this shape.
+    fn summary_of(outcome: &CompactionOutcome) -> Option<&str> {
+        match outcome {
+            CompactionOutcome::Summarized { summary } => Some(summary),
+            CompactionOutcome::Pruned { .. } => None,
+        }
+    }
+
+    /// A history whose oldest tool result is far past the prune threshold, plus
+    /// enough recent messages that the pruner's keep-window does not protect it.
+    fn history_with_a_huge_tool_result(id: &str) -> Vec<Message> {
+        let big = "x".repeat(50_000);
+        let mut messages = vec![
+            Message::user_text("do the thing"),
+            Message::user_blocks(vec![tool_result(id, &big, false)]),
+        ];
+        for index in 0..crate::prune::KEEP_RECENT_MESSAGES {
+            messages.push(Message::user_text(format!("later {index}")));
+        }
+        messages
+    }
+
     struct NoopTool;
 
     #[async_trait]
@@ -1229,11 +1438,171 @@ mod tests {
             ..Usage::default()
         });
 
-        let summary = agent.compact_context().await.unwrap();
+        let outcome = agent.compact_context().await.unwrap();
 
-        assert_eq!(summary, "hi");
+        assert_eq!(summary_of(&outcome), Some("hi"));
         assert_eq!(agent.messages.len(), 2);
         assert!(agent.last_usage.is_none());
+    }
+
+    /// The summarizer must never read the untrimmed bodies: whatever survives the
+    /// prune is what it summarizes from, so a checkpoint is written against the
+    /// same text a resumed turn would see.
+    #[tokio::test]
+    async fn an_over_long_tool_result_is_shortened_before_the_summarizer_reads_it() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(RecordingProvider { seen: seen.clone() });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.model = "small-window-model".into();
+        agent.messages = history_with_a_huge_tool_result("call-1");
+        // A measured prompt far past anything pruning could rescue, so the
+        // summarizer runs and we can inspect what it was handed.
+        agent.last_usage = Some(Usage {
+            input_tokens: 200_000,
+            ..Usage::default()
+        });
+
+        let outcome = agent.compact_context().await.unwrap();
+        assert_eq!(summary_of(&outcome), Some("checkpoint"));
+
+        let sent = seen.lock().unwrap();
+        let body = sent[0][1].content[0]["content"].as_str().unwrap();
+        assert!(body.contains(crate::prune::PRUNE_MARKER), "not pruned");
+        assert!(body.chars().count() <= crate::prune::PRUNE_THRESHOLD_CHARS);
+    }
+
+    #[tokio::test]
+    async fn pruning_alone_ends_compaction_without_a_model_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RefusingProvider {
+            calls: calls.clone(),
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.model = "small-window-model".into();
+        agent.messages = history_with_a_huge_tool_result("call-1");
+        // Over the 80% mark of a 16k window, but only just: dropping ~45k
+        // characters of tool output is far more than enough to come back under.
+        agent.last_usage = Some(Usage {
+            input_tokens: 13_000,
+            ..Usage::default()
+        });
+
+        let outcome = agent.compact_context().await.unwrap();
+
+        match outcome {
+            CompactionOutcome::Pruned {
+                results_pruned,
+                tokens_saved_estimate,
+            } => {
+                assert_eq!(results_pruned, 1);
+                assert!(tokens_saved_estimate > 0);
+            }
+            other => panic!("expected a prune, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "the whole point is that no model call was spent"
+        );
+        // The conversation survives, shortened, rather than being replaced.
+        assert_eq!(agent.messages.len(), 6);
+        assert!(agent.last_usage.is_none());
+        assert!(agent.provider_session.is_none());
+    }
+
+    /// Idempotence is what bounds the loop: the second attempt finds nothing to
+    /// prune, so it falls through and spends the model call.
+    #[tokio::test]
+    async fn a_second_compaction_summarizes_because_pruning_is_already_done() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(RecordingProvider { seen: seen.clone() });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.model = "small-window-model".into();
+        agent.messages = history_with_a_huge_tool_result("call-1");
+        agent.last_usage = Some(Usage {
+            input_tokens: 13_000,
+            ..Usage::default()
+        });
+
+        let first = agent.compact_context().await.unwrap();
+        assert!(matches!(first, CompactionOutcome::Pruned { .. }));
+        assert!(seen.lock().unwrap().is_empty());
+
+        agent.last_usage = Some(Usage {
+            input_tokens: 13_000,
+            ..Usage::default()
+        });
+        let second = agent.compact_context().await.unwrap();
+        assert_eq!(summary_of(&second), Some("checkpoint"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_pruned_sensitive_result_still_reaches_the_provider_redacted() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(RecordingProvider { seen: seen.clone() });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.model = "small-window-model".into();
+        agent.messages = history_with_a_huge_tool_result("secret-call");
+        agent.sensitive_tool_ids = vec!["secret-call".to_string()];
+        agent.last_usage = Some(Usage {
+            input_tokens: 200_000,
+            ..Usage::default()
+        });
+
+        agent.compact_context().await.unwrap();
+
+        let sent = seen.lock().unwrap();
+        let body = sent[0][1].content[0]["content"].as_str().unwrap();
+        assert_eq!(
+            body, REDACTED_SENSITIVE_RESULT,
+            "redaction must be the last transformation before the wire"
+        );
+        assert!(!body.contains(crate::prune::PRUNE_MARKER));
+    }
+
+    /// A prune that cannot relieve the pressure must not be mistaken for one that
+    /// did — otherwise the context stays over budget and nothing summarizes it.
+    #[tokio::test]
+    async fn a_prune_that_does_not_relieve_pressure_still_summarizes() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(RecordingProvider { seen: seen.clone() });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.model = "small-window-model".into();
+        agent.messages = history_with_a_huge_tool_result("call-1");
+        agent.last_usage = Some(Usage {
+            input_tokens: 500_000,
+            ..Usage::default()
+        });
+
+        let outcome = agent.compact_context().await.unwrap();
+        assert_eq!(summary_of(&outcome), Some("checkpoint"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// Nothing to prune is the ordinary case, and it must behave exactly as it
+    /// did before the pruner existed.
+    #[tokio::test]
+    async fn a_history_with_no_long_results_summarizes_as_before() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RefusingProvider {
+            calls: calls.clone(),
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.model = "small-window-model".into();
+        agent.messages = (0..6)
+            .map(|index| Message::user_text(format!("short {index}")))
+            .collect();
+        agent.last_usage = Some(Usage {
+            input_tokens: 13_000,
+            ..Usage::default()
+        });
+
+        // Reaches the summarizer, which refuses — proving the prune path was not
+        // taken for a history it could not shrink.
+        assert!(agent.compact_context().await.is_err());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]
