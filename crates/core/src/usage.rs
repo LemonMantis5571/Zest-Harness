@@ -190,6 +190,18 @@ impl TokenCounts {
             .saturating_add(self.cache_read_tokens)
     }
 
+    /// The prompt half of [`Self::total_tokens`]: fresh input plus both cache
+    /// columns.
+    ///
+    /// Same invariant as [`crate::anthropic::types::Usage::prompt_tokens`] —
+    /// one name for one definition, across the two types that carry these
+    /// counters. The three shares in [`RangeTotals`] partition exactly this.
+    pub fn prompt_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+
     fn to_pricing(self) -> pricing::Counts {
         pricing::Counts {
             input_tokens: self.input_tokens,
@@ -949,10 +961,7 @@ impl Ledger {
         let metered = totals.total_tokens();
         // The full prompt is fresh input + cache reads + cache writes, and the
         // three shares below partition exactly that.
-        let observed_prompt = totals
-            .input_tokens
-            .saturating_add(totals.cache_read_tokens)
-            .saturating_add(totals.cache_write_tokens);
+        let observed_prompt = totals.prompt_tokens();
         let served_from_cache_percent =
             percent_of(totals.cache_read_tokens as f64, observed_prompt as f64);
 

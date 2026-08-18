@@ -161,6 +161,25 @@ pub struct Usage {
     pub cache_read_input_tokens: u32,
 }
 
+impl Usage {
+    /// Tokens the prompt actually occupied: fresh input plus both cache columns.
+    ///
+    /// `input_tokens` alone is the *uncached remainder*. On a well-cached turn
+    /// that is a rounding error against the prompt it is a part of, so reading
+    /// it as context occupancy understates the prompt by an order of magnitude.
+    /// Every provider normalizes to this split — the OpenAI-compatible and Codex
+    /// paths subtract their cached share out of the prompt they were handed for
+    /// exactly this reason.
+    ///
+    /// Zero when the provider reported nothing, which is how a caller tells a
+    /// silent endpoint from a measured one.
+    pub fn prompt_tokens(&self) -> u64 {
+        u64::from(self.input_tokens)
+            .saturating_add(u64::from(self.cache_read_input_tokens))
+            .saturating_add(u64::from(self.cache_creation_input_tokens))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolUse {
     pub id: String,
@@ -209,4 +228,37 @@ pub fn tool_result(tool_use_id: &str, content: &str, is_error: bool) -> Value {
         "content": content,
         "is_error": is_error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prompt_total_counts_both_cache_columns() {
+        // A well-cached turn on a 128k window: the prompt is ~100k tokens, but
+        // `input_tokens` on its own reads 1_200. Reading that as occupancy is
+        // what reported a nearly-full window as almost empty.
+        let usage = Usage {
+            input_tokens: 1_200,
+            output_tokens: 800,
+            cache_read_input_tokens: 96_000,
+            cache_creation_input_tokens: 2_800,
+        };
+        assert_eq!(usage.prompt_tokens(), 100_000);
+    }
+
+    #[test]
+    fn a_silent_provider_reports_no_prompt() {
+        assert_eq!(Usage::default().prompt_tokens(), 0);
+    }
+
+    #[test]
+    fn output_tokens_are_not_part_of_the_prompt() {
+        let usage = Usage {
+            output_tokens: 4_096,
+            ..Usage::default()
+        };
+        assert_eq!(usage.prompt_tokens(), 0);
+    }
 }
