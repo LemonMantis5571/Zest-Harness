@@ -18,11 +18,6 @@
 //! is deliberately the opposite of the ACP permission path, which auto-selects
 //! the first allow option when no host is attached.
 
-// Landing in stages: this is the translation layer, exercised end to end by the
-// tests below, and the turn loop that calls it is the next commit. The allow is
-// scoped to this module and comes off when `claude_code` drives it.
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::sync::Arc;
 

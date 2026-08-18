@@ -11,6 +11,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::claude_control::{
+    control_response, decide, render_diff, summarize, surface_for, Surface, ToolPermissionRequest,
+};
 use super::{
     catalogue_without_efforts, Completion, ModelSpec, Provider, StreamEvent, SystemPrompt,
     TurnRequest,
@@ -22,7 +25,12 @@ use crate::config::{
     DEFAULT_CLAUDE_CODE_MODEL,
 };
 use crate::error::{HarnessError, Result};
-use crate::tools::external_agent::{run_headless_command_streaming, ExternalAgentEvent};
+use crate::thread::new_id;
+use crate::tools::approval::ToolRisk;
+use crate::tools::external_agent::{
+    run_headless_command_streaming, ControlResponder, ExternalAgentEvent,
+};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 const BUILTIN_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
 
@@ -87,6 +95,22 @@ impl ClaudeCodeProvider {
         })
     }
 
+    /// The mode the CLI actually runs in.
+    ///
+    /// `AcceptEdits` and `BypassPermissions` auto-approve *before* the callback
+    /// is consulted, so either would silently defeat the approval card. Both
+    /// become `Default` — the mode that actually asks.
+    ///
+    /// This does not depend on whether a front-end is attached. Who gets asked
+    /// is the responder's business: a host renders a card, and no host denies.
+    /// The mode only has to guarantee the CLI asks at all.
+    fn effective_permission_mode(&self) -> ClaudeCodePermissionMode {
+        match self.permission_mode {
+            ClaudeCodePermissionMode::Plan => ClaudeCodePermissionMode::Plan,
+            _ => ClaudeCodePermissionMode::Default,
+        }
+    }
+
     fn config_for(&self, model: &str) -> ExternalAgentConfig {
         ExternalAgentConfig {
             mode: ExternalAgentMode::Headless,
@@ -96,8 +120,16 @@ impl ClaudeCodeProvider {
                 "--output-format".into(),
                 "stream-json".into(),
                 "--include-partial-messages".into(),
+                // Bidirectional stream-json plus `stdio` is what routes the
+                // CLI's permission prompts to us instead of letting it decide
+                // locally. Without the flag it silently denies whatever it
+                // cannot auto-approve.
+                "--input-format".into(),
+                "stream-json".into(),
+                "--permission-prompt-tool".into(),
+                "stdio".into(),
                 "--permission-mode".into(),
-                self.permission_mode.cli_value().into(),
+                self.effective_permission_mode().cli_value().into(),
                 "--model".into(),
                 "{model}".into(),
                 "{prompt}".into(),
@@ -148,32 +180,59 @@ impl Provider for ClaudeCodeProvider {
         let prompt = parent_prompt(req);
         let config = self.config_for(&req.model);
         let mut streamed_text = false;
-        let run = {
-            let mut on_external_event = |event: ExternalAgentEvent| match event {
-                ExternalAgentEvent::TextDelta(text) => {
-                    streamed_text = true;
-                    on_event(StreamEvent::Text(&text));
-                }
-                ExternalAgentEvent::Thinking(text) => {
-                    on_event(StreamEvent::Thinking(&text));
-                }
+
+        // Everything the turn wants to show the user goes through one channel.
+        // The permission responder needs to render an approval card *and* the
+        // stream needs to render text, and both cannot hold `on_event` at once —
+        // so neither does. The loop below is the only thing that touches it.
+        let (tx, mut rx) = unbounded_channel::<TurnEvent>();
+        let mut responder = ClaudePermissions {
+            host: req.interaction.clone(),
+            root: self.root.clone(),
+            cards: tx.clone(),
+        };
+        let stream_tx = tx.clone();
+        let mut on_external_event = move |event: ExternalAgentEvent| {
+            let turn_event = match event {
+                ExternalAgentEvent::TextDelta(text) => Some(TurnEvent::Text(text)),
+                ExternalAgentEvent::Thinking(text) => Some(TurnEvent::Thinking(text)),
                 ExternalAgentEvent::ToolCall { id, title, status } => {
-                    on_event(StreamEvent::ProviderActivity {
-                        id: &id,
-                        title: &title,
-                        status: &status,
-                    });
+                    Some(TurnEvent::Activity { id, title, status })
                 }
-                _ => {}
+                _ => None,
             };
-            run_headless_command_streaming(
+            if let Some(turn_event) = turn_event {
+                let _ = stream_tx.send(turn_event);
+            }
+        };
+        // Dropped so the channel closes when the runner and responder are done.
+        drop(tx);
+
+        let run = {
+            let runner = run_headless_command_streaming(
                 &self.root,
                 &config,
                 &prompt,
                 req.cancel.as_ref(),
                 &mut on_external_event,
-            )
-            .await?
+                Some(&mut responder),
+            );
+            tokio::pin!(runner);
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(turn_event) = rx.recv() => {
+                        emit(turn_event, on_event, &mut streamed_text);
+                    }
+                    result = &mut runner => {
+                        // Drain whatever the final lines queued before settling.
+                        while let Ok(turn_event) = rx.try_recv() {
+                            emit(turn_event, on_event, &mut streamed_text);
+                        }
+                        break result?;
+                    }
+                }
+            }
         };
 
         if req
@@ -229,6 +288,112 @@ impl Provider for ClaudeCodeProvider {
 
 fn bounded_u32(value: Option<u64>) -> u32 {
     value.unwrap_or_default().min(u64::from(u32::MAX)) as u32
+}
+
+/// Anything the turn wants rendered, funnelled through one channel so that
+/// exactly one place borrows the event sink.
+enum TurnEvent {
+    Text(String),
+    Thinking(String),
+    Activity {
+        id: String,
+        title: String,
+        status: String,
+    },
+    Approval {
+        approval_id: String,
+        tool_name: String,
+        risk: ToolRisk,
+        path: String,
+        summary: String,
+        diff: String,
+    },
+}
+
+fn emit(
+    event: TurnEvent,
+    on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    streamed_text: &mut bool,
+) {
+    match event {
+        TurnEvent::Text(text) => {
+            *streamed_text = true;
+            on_event(StreamEvent::Text(&text));
+        }
+        TurnEvent::Thinking(text) => on_event(StreamEvent::Thinking(&text)),
+        TurnEvent::Activity { id, title, status } => on_event(StreamEvent::ProviderActivity {
+            id: &id,
+            title: &title,
+            status: &status,
+        }),
+        TurnEvent::Approval {
+            approval_id,
+            tool_name,
+            risk,
+            path,
+            summary,
+            diff,
+        } => on_event(StreamEvent::ApprovalNeeded {
+            approval_id: approval_id.clone(),
+            tool_name,
+            tool_call_id: approval_id,
+            risk,
+            path,
+            summary,
+            diff,
+        }),
+    }
+}
+
+/// Turns the CLI's permission requests into zest approval cards.
+struct ClaudePermissions {
+    host: Option<std::sync::Arc<dyn super::ProviderInteractionHost>>,
+    root: PathBuf,
+    cards: UnboundedSender<TurnEvent>,
+}
+
+#[async_trait]
+impl ControlResponder for ClaudePermissions {
+    async fn respond(&mut self, message: &Value) -> Option<Value> {
+        let request = ToolPermissionRequest::parse(message)?;
+        let surface = surface_for(&request.tool_name);
+        let approval_id = new_id("claude-approval");
+        let summary = summarize(&request);
+        let (path, diff) = match surface {
+            Surface::FileChange => render_diff(&self.root, &request),
+            Surface::Command(_) => (String::new(), String::new()),
+        };
+        let risk = match surface {
+            Surface::FileChange => ToolRisk::Write,
+            Surface::Command(risk) => risk,
+        };
+
+        // Render the card first, then await the answer. The other order shows
+        // the user a decision that has already been made.
+        let _ = self.cards.send(TurnEvent::Approval {
+            approval_id: approval_id.clone(),
+            tool_name: request.tool_name.clone(),
+            risk,
+            path: path.clone(),
+            summary: summary.clone(),
+            diff: diff.clone(),
+        });
+
+        let allowed = decide(
+            self.host.as_ref(),
+            &approval_id,
+            surface,
+            path,
+            summary,
+            diff,
+        )
+        .await;
+        Some(control_response(
+            &request.request_id,
+            allowed,
+            "the user did not approve this tool call",
+        ))
+    }
 }
 
 fn parent_prompt(req: &TurnRequest) -> String {
@@ -354,11 +519,31 @@ mod tests {
         )
         .unwrap();
 
-        assert!(provider
-            .config_for("sonnet")
-            .args
-            .iter()
-            .any(|arg| arg == "--include-partial-messages"));
+        let interactive = provider.config_for("sonnet").args.join(" ");
+        assert!(interactive.contains("--include-partial-messages"));
+        // The flag that routes permission prompts to us. Without it the CLI
+        // decides locally and denies whatever it cannot auto-approve.
+        assert!(
+            interactive.contains("--permission-prompt-tool stdio"),
+            "{interactive}"
+        );
+        assert!(
+            interactive.contains("--input-format stream-json"),
+            "{interactive}"
+        );
+        // Configured `accept_edits` auto-approves before the callback is
+        // consulted, so an interactive turn must not run in it.
+        assert!(
+            !interactive.contains("acceptEdits"),
+            "accept_edits would silently bypass the approval card: {interactive}"
+        );
+
+        // Plan mode is the one configured value that survives, because it does
+        // not auto-approve.
+        assert_eq!(
+            provider.effective_permission_mode(),
+            ClaudeCodePermissionMode::Default
+        );
     }
 
     #[test]

@@ -1900,7 +1900,11 @@ fn configure_claude_code_provider(
             model,
             models: vec!["sonnet".into(), "opus".into(), "haiku".into()],
             allow_mcp: false,
-            permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+            // Not `accept_edits`: that auto-approves inside the CLI before zest
+            // is consulted, so edits would land with no approval card and no
+            // diff. The provider downgrades it anyway — writing it here would
+            // only mislead someone reading their own zest.toml.
+            permission_mode: zest_core::ClaudeCodePermissionMode::Default,
             timeout_secs: 900,
         },
     )?;

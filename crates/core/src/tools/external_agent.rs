@@ -564,6 +564,7 @@ pub(crate) async fn run_headless_command_streaming(
     prompt: &str,
     cancel: Option<&CancelToken>,
     on_event: &mut ExternalEventSink<'_>,
+    control: Option<&mut dyn ControlResponder>,
 ) -> Result<ExternalAgentRun, crate::error::HarnessError> {
     validate_config(config).map_err(crate::error::HarnessError::Other)?;
     if config.mode != ExternalAgentMode::Headless {
@@ -571,7 +572,7 @@ pub(crate) async fn run_headless_command_streaming(
             "parent CLI provider must use headless mode".into(),
         ));
     }
-    spawn_headless_with_session(cwd, config, prompt, cancel, Some(on_event))
+    spawn_headless_with_session(cwd, config, prompt, cancel, Some(on_event), control)
         .await
         .map_err(|error| {
             if error == EXTERNAL_RUN_CANCELLED {
@@ -588,6 +589,7 @@ async fn spawn_headless_with_session(
     prompt: &str,
     cancel: Option<&CancelToken>,
     on_event: Option<&mut ExternalEventSink<'_>>,
+    control: Option<&mut dyn ControlResponder>,
 ) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(resolve_program(&config.command));
@@ -604,7 +606,7 @@ async fn spawn_headless_with_session(
         .map_err(|error| error.to_string())?;
     let timeout = Duration::from_secs(config.timeout_secs.min(MAX_TIMEOUT_SECS));
     let run_result = tokio::select! {
-        result = read_headless_with_session(&mut process, on_event, timeout) => result,
+        result = read_headless_with_session(&mut process, on_event, control, timeout) => result,
         _ = sleep(timeout) => Err(format!("timed out after {} seconds", timeout.as_secs())),
         _ = wait_cancel(cancel) => Err(EXTERNAL_RUN_CANCELLED.to_string()),
     };
@@ -638,6 +640,7 @@ async fn spawn_headless_with_session(
 async fn read_headless_with_session(
     process: &mut JsonlProcess,
     mut on_event: Option<&mut ExternalEventSink<'_>>,
+    mut control: Option<&mut dyn ControlResponder>,
     timeout: Duration,
 ) -> Result<ExternalAgentRun, String> {
     let started = Instant::now();
@@ -660,6 +663,18 @@ async fn read_headless_with_session(
         }
         match serde_json::from_str::<Value>(line) {
             Ok(value) => {
+                // A control request is a question, not transcript content:
+                // the responder answers it on stdin and the line never
+                // reaches the accumulator.
+                if let Some(responder) = control.as_deref_mut() {
+                    if let Some(reply) = responder.respond(&value).await {
+                        process
+                            .send(&reply)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        continue;
+                    }
+                }
                 let event_start = run.events.len();
                 absorb_headless_value(&value, &mut run);
                 if let Some(on_event) = on_event.as_deref_mut() {
@@ -994,6 +1009,18 @@ async fn spawn_and_run(
 }
 
 pub(crate) type ExternalEventSink<'a> = dyn FnMut(ExternalAgentEvent) + Send + 'a;
+
+/// Answers a provider-specific control request mid-stream.
+///
+/// The headless runner owns framing, accumulation, and timeouts but knows
+/// nothing about what a control request *means*. Claude Code asks permission
+/// this way; a responder returning `Some(reply)` has claimed the line, and the
+/// runner writes that reply back on the stdin the CLI is still waiting on.
+/// Returning `None` leaves the line to ordinary accumulation.
+#[async_trait]
+pub(crate) trait ControlResponder: Send {
+    async fn respond(&mut self, message: &Value) -> Option<Value>;
+}
 
 async fn spawn_and_run_with_cancel(
     cwd: &Path,
@@ -3593,10 +3620,16 @@ mod tests {
         let config = fixture_config("stream", true);
         let mut events = Vec::new();
         let mut sink = |event| events.push(event);
-        let run =
-            run_headless_command_streaming(temp.path(), &config, "stream task", None, &mut sink)
-                .await
-                .unwrap();
+        let run = run_headless_command_streaming(
+            temp.path(),
+            &config,
+            "stream task",
+            None,
+            &mut sink,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(run.text(), "hello");
         assert!(events.iter().any(|event| matches!(
