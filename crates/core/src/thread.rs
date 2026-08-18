@@ -1057,11 +1057,18 @@ impl ThreadStore {
     /// recent ones.
     const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 
-    /// Drop the oldest snapshots until both ceilings are satisfied.
+    /// Drop snapshots until both ceilings are satisfied, automatic ones first.
     ///
     /// Always leaves one behind. A thread with a single enormous checkpoint has
     /// nothing useful to delete — removing it would buy space by making rewind
     /// impossible, which is the one thing checkpoints exist for.
+    ///
+    /// Within that, a `Manual` checkpoint goes last. `Turn` and `Compaction`
+    /// snapshots are bookkeeping the harness writes on its own and will write
+    /// again; a manual one is a restore point somebody deliberately marked, and
+    /// on a long thread the automatic ones would otherwise push it out of the
+    /// window within a day's work. The ceilings still bind — when every
+    /// remaining snapshot is manual, the oldest of those goes.
     fn prune_checkpoints(thread: &mut Thread, dir: &Path) {
         let size_of = |id: &str| -> u64 {
             fs::metadata(dir.join(format!("{id}.json")))
@@ -1079,9 +1086,17 @@ impl ThreadStore {
             && (thread.checkpoints.len() > Self::MAX_CHECKPOINTS
                 || total > Self::MAX_CHECKPOINT_BYTES)
         {
-            let oldest = thread.checkpoints.remove(0);
-            total = total.saturating_sub(size_of(&oldest.id));
-            let _ = fs::remove_file(dir.join(format!("{}.json", oldest.id)));
+            // Checkpoints are ordered oldest-first, so the first non-manual
+            // entry is the oldest automatic one. Falling back to index 0 keeps
+            // the ceilings enforceable on an all-manual thread.
+            let victim = thread
+                .checkpoints
+                .iter()
+                .position(|checkpoint| checkpoint.kind != ThreadCheckpointKind::Manual)
+                .unwrap_or(0);
+            let dropped = thread.checkpoints.remove(victim);
+            total = total.saturating_sub(size_of(&dropped.id));
+            let _ = fs::remove_file(dir.join(format!("{}.json", dropped.id)));
         }
     }
 
@@ -1556,6 +1571,49 @@ mod characterization {
 
         store.create_checkpoint(&mut thread, "only one").unwrap();
         assert_eq!(thread.checkpoints.len(), 1);
+    }
+
+    /// A restore point somebody marked outlives the snapshots the harness takes
+    /// on its own. Turn checkpoints land once per turn and compaction adds more,
+    /// so without a preference a manual one is pushed out of the window inside a
+    /// day's work.
+    #[test]
+    fn automatic_checkpoints_are_evicted_before_a_manual_one() {
+        let root = scratch("checkpoint-manual");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        thread.apply_user("u1", "a question");
+        store.save(&thread).unwrap();
+
+        let marked = store
+            .create_checkpoint_with_metadata(
+                &mut thread,
+                "my restore point",
+                None,
+                None,
+                ThreadCheckpointKind::Manual,
+            )
+            .unwrap();
+
+        // Bury it under more automatic snapshots than the window can hold.
+        for index in 0..ThreadStore::MAX_CHECKPOINTS + 4 {
+            store
+                .create_checkpoint(&mut thread, format!("turn {index}"))
+                .unwrap();
+        }
+
+        assert!(thread.checkpoints.len() <= ThreadStore::MAX_CHECKPOINTS);
+        assert!(
+            thread.checkpoints.iter().any(|c| c.id == marked.id),
+            "the manual checkpoint was evicted by automatic ones"
+        );
+        assert!(
+            root.join(".zest/threads/checkpoints")
+                .join(&thread.id)
+                .join(format!("{}.json", marked.id))
+                .exists(),
+            "its snapshot file was deleted"
+        );
     }
 
     #[test]
