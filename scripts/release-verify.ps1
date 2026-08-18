@@ -8,7 +8,13 @@ Set-Location $Root
 function Step($name, $scriptBlock) {
   Write-Host ""
   Write-Host "==> $name" -ForegroundColor Cyan
-  & $scriptBlock
+  $global:LASTEXITCODE = 0
+  try {
+    & $scriptBlock
+  } catch {
+    Write-Host "==> [ERROR] in step '$name': $_" -ForegroundColor Red
+    throw
+  }
   if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
     throw "Step failed: $name (exit $LASTEXITCODE)"
   }
@@ -49,8 +55,12 @@ Step "npm ci" {
 Step "binding drift (ts-rs)" {
   cargo test -p zest-desktop --features export-bindings --lib export_bindings
   Normalize-BindingWhitespace
-  git diff --exit-code -- $BindingDir
-  if ($LASTEXITCODE -ne 0) { throw "Generated bindings are stale. Commit the regenerated files." }
+  $driftDiff = git diff -- $BindingDir
+  if ($driftDiff) {
+    Write-Host "Binding drift diff detected:" -ForegroundColor Red
+    Write-Host ($driftDiff -join "`n")
+    throw "Generated bindings are stale. Commit the regenerated files."
+  }
 
   $untracked = git ls-files --others --exclude-standard -- $BindingDir
   if ($untracked) {

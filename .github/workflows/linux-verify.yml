@@ -20,7 +20,7 @@ jobs:
             build-essential pkg-config libssl-dev cmake \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
             libdbus-1-dev libxdo-dev \
-            curl wget file tar patchelf
+            curl wget file tar patchelf libfuse2t64
 
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@master
