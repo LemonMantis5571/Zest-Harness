@@ -40,9 +40,51 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # The same gate as Windows CI: the full release PowerShell gate under pwsh.
-      - name: Verify
+      - name: npm ci
+        run: npm ci --no-fund --no-audit
+
+      - name: ts-rs binding drift
         shell: pwsh
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: ./scripts/release-verify.ps1
+        run: |
+          cargo test -p zest-desktop --features export-bindings --lib export_bindings
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          foreach ($file in Get-ChildItem -Path crates/desktop/ui/src/lib/generated -Filter *.ts -File) {
+            $text = [System.IO.File]::ReadAllText($file.FullName)
+            $clean = $text -replace "`r`n", "`n"
+            $clean = [regex]::Replace($clean, '(?m)[ \t]+$', '')
+            if (-not $clean.EndsWith("`n")) { $clean += "`n" }
+            if ($clean -ne $text) {
+              [System.IO.File]::WriteAllText($file.FullName, $clean, $utf8NoBom)
+            }
+          }
+          git diff --exit-code -- crates/desktop/ui/src/lib/generated
+
+      - name: UI tests
+        run: npm run ui:test
+
+      - name: UI lint
+        run: npm run ui:lint
+
+      - name: UI build
+        run: npm run ui:build
+
+      - name: cargo fmt check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+
+      - name: npm audit
+        run: npm audit --omit=dev
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: git diff whitespace check
+        shell: pwsh
+        run: |
+          git diff --check --ignore-space-at-eol
+          git diff --cached --check --ignore-space-at-eol
