@@ -53,6 +53,13 @@ pub struct Config {
     legacy_routing: Option<LegacyRouting>,
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Set by [`Config::parse`] when it had to rewrite a legacy document.
+    /// Never read from or written to TOML — the file on disk is left alone.
+    #[serde(skip)]
+    migrations: Vec<String>,
+    /// Providers a migration could not map onto a surviving kind.
+    #[serde(skip)]
+    unsupported: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -154,9 +161,10 @@ fn default_bash_timeout_ms() -> u64 {
 
 /// How to reach one provider.
 ///
-/// `kind` discriminates: `anthropic` talks to the API directly, `gateway` talks
-/// to anything that re-exposes some other backend as the Messages API. That
-/// distinction lives here and nowhere else — the agent loop cannot tell them apart.
+/// `kind` discriminates, and it is the only thing that does: transport,
+/// credentials, and capabilities are all decided from this variant and never
+/// inferred from a provider id. Two of the four kinds spawn a vendor runtime
+/// that owns its own agent loop; see `Provider::owns_agent_loop`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderConfig {
@@ -209,27 +217,17 @@ pub enum ProviderConfig {
         /// conservative catalogue until a successful `model/list` is cached.
         #[serde(default)]
         models: Vec<String>,
+        /// Optional effort allow-list for every listed model. When empty, the
+        /// standard set (`low`…`max`) is used. Carried over from the migrated
+        /// `gateway` kind, which was the only place this could be expressed.
+        #[serde(default)]
+        efforts: Vec<String>,
         /// MCP is opt-in because the app-server can execute server-owned work
         /// outside Zest's approval boundary.
         #[serde(default)]
         allow_mcp: bool,
         #[serde(default = "default_external_timeout_secs")]
         timeout_secs: u64,
-    },
-    Gateway {
-        /// Origin only — `http://127.0.0.1:8317`, not `.../v1/messages`.
-        base_url: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        /// Required: a gateway has no sensible default model of its own.
-        model: String,
-        /// Optional allow-list. When empty/omitted, only `model` is accepted.
-        #[serde(default)]
-        models: Vec<String>,
-        /// Optional effort allow-list for every listed model. When empty/omitted,
-        /// the standard effort set (`low`…`max`) is used.
-        #[serde(default)]
-        efforts: Vec<String>,
     },
     OpenaiCompatible {
         /// API root, for example `https://api.openai.com/v1` or
@@ -342,7 +340,6 @@ impl ProviderConfig {
         match self {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
             ProviderConfig::ClaudeCode { .. } | ProviderConfig::CodexCli { .. } => None,
-            ProviderConfig::Gateway { api_key_env, .. } => api_key_env.as_deref(),
             ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
         }
     }
@@ -465,22 +462,6 @@ fn ensure_config_file(path: &Path, contents: &str) -> Result<bool> {
 }
 
 impl Config {
-    /// Build the single-provider config used by the `ZEST_BASE_URL` override.
-    /// Keeping construction here preserves the private legacy compatibility
-    /// state without making callers know about it.
-    pub fn from_provider_override(
-        providers: BTreeMap<String, ProviderConfig>,
-        default: Target,
-    ) -> Self {
-        Self {
-            providers,
-            agents: BTreeMap::new(),
-            default: Some(default),
-            legacy_routing: None,
-            tools: ToolsConfig::default(),
-        }
-    }
-
     /// Look for `zest.toml` in `dir`, then `~/.zest/zest.toml`. Absent is not an
     /// error — see module note.
     ///
@@ -522,9 +503,40 @@ impl Config {
         names
     }
 
+    /// Parse `zest.toml`, migrating a legacy `gateway` provider if that is what
+    /// made it unparseable.
+    ///
+    /// Strict first, deliberately. A two-stage parse for everyone would lose
+    /// serde's span information, so an ordinary typo would degrade into a vague
+    /// message for the sake of a legacy path. If the migrated document still
+    /// fails, the *original* error is what the user sees — the rewrite is not a
+    /// suspect worth naming when the real problem is elsewhere.
     pub fn parse(raw: &str) -> Result<Self> {
-        toml::from_str(raw)
-            .map_err(|e| HarnessError::Other(format!("{CONFIG_FILE} is invalid: {e}")))
+        let strict = match toml::from_str::<Self>(raw) {
+            Ok(config) => return Ok(config),
+            Err(strict) => strict,
+        };
+
+        let invalid = || HarnessError::Other(format!("{CONFIG_FILE} is invalid: {strict}"));
+        let Some((migrated, report)) = crate::config_migrate::migrate(raw) else {
+            return Err(invalid());
+        };
+        let mut config: Self = toml::from_str(&migrated).map_err(|_| invalid())?;
+        config.migrations = report.migrations;
+        config.unsupported = report.unsupported;
+        Ok(config)
+    }
+
+    /// Notices for providers this load rewrote in memory. Empty for a config
+    /// that parsed strictly, which is every config Zest writes today.
+    pub fn migrations(&self) -> &[String] {
+        &self.migrations
+    }
+
+    /// Providers dropped by a migration, as `(id, reason)`. The registry turns
+    /// these into `Skipped` entries so the picker can explain the absence.
+    pub fn unsupported(&self) -> &[(String, String)] {
+        &self.unsupported
     }
 
     /// The zero-config shape: one Anthropic provider keyed off the environment.
@@ -548,6 +560,8 @@ impl Config {
             }),
             legacy_routing: None,
             tools: ToolsConfig::default(),
+            migrations: Vec::new(),
+            unsupported: Vec::new(),
         }
     }
 
@@ -580,7 +594,9 @@ impl Config {
     /// Config problems worth showing the user that are not parse errors —
     /// dangling references that would otherwise fail much later, at dispatch.
     pub fn lint(&self) -> Vec<String> {
-        let mut issues = Vec::new();
+        // Migration notices come first: they explain a document the user did not
+        // write, and every other issue below may be a consequence of one.
+        let mut issues = self.migrations.clone();
 
         if let Some(target) = self.default.as_ref().or_else(|| {
             self.legacy_routing
@@ -673,9 +689,7 @@ kind = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-api_key_env = "ZEST_GATEWAY_KEY"
+kind = "codex_cli"
 model = "gpt-5.3-codex"
 
 [default]
@@ -693,19 +707,19 @@ model = "claude-opus-5"
             ProviderConfig::Anthropic { .. }
         ));
         match &config.providers["codex"] {
-            ProviderConfig::Gateway {
-                base_url,
+            ProviderConfig::CodexCli {
+                command,
                 model,
                 models,
                 efforts,
                 ..
             } => {
-                assert_eq!(base_url, "http://127.0.0.1:8317");
+                assert_eq!(command, "codex");
                 assert_eq!(model, "gpt-5.3-codex");
                 assert!(models.is_empty());
                 assert!(efforts.is_empty());
             }
-            other => panic!("expected a gateway, got {other:?}"),
+            other => panic!("expected the Codex CLI, got {other:?}"),
         }
 
         let target = config.default_target().expect("default");
@@ -800,17 +814,18 @@ permission_mode = "accept_edits"
         }
     }
 
+    /// Transport, credentials, and capabilities are decided from `kind` alone.
+    /// A provider id is a label — naming one `codex` must not change how it is
+    /// reached.
     #[test]
-    fn gateway_decision_is_based_only_on_provider_kind() {
+    fn every_kind_parses_to_exactly_its_own_variant() {
         let config = Config::parse(
             r#"
-[providers.gateway]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-model = "gpt-5.6-sol"
-
 [providers.claude]
 kind = "claude_code"
+
+[providers.codex]
+kind = "codex_cli"
 
 [providers.anthropic]
 kind = "anthropic"
@@ -823,13 +838,13 @@ model = "local"
         )
         .expect("valid provider-kind config");
 
-        let ProviderConfig::Gateway { base_url, .. } = &config.providers["gateway"] else {
-            panic!("a gateway kind parses as Gateway");
-        };
-        assert_eq!(base_url, "http://127.0.0.1:8317");
         assert!(matches!(
             config.providers["claude"],
             ProviderConfig::ClaudeCode { .. }
+        ));
+        assert!(matches!(
+            config.providers["codex"],
+            ProviderConfig::CodexCli { .. }
         ));
         assert!(matches!(
             config.providers["anthropic"],
@@ -888,10 +903,10 @@ timeout_secs = 120
 kind = "anthropic"
 api_key_env = "CUSTOM_AUTH"
 
-[providers.gateway]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-api_key_env = "GATEWAY_AUTH"
+[providers.remote]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8317/v1"
+api_key_env = "REMOTE_AUTH"
 model = "model"
 
 [providers.local]
@@ -905,7 +920,7 @@ model = "local"
 
         assert_eq!(
             config.provider_key_env_names(),
-            vec!["CUSTOM_AUTH".to_string(), "GATEWAY_AUTH".to_string()]
+            vec!["CUSTOM_AUTH".to_string(), "REMOTE_AUTH".to_string()]
         );
     }
 
@@ -949,9 +964,7 @@ kind = "anthropic"
 kind = "anthropic"
 
 [providers.b]
-kind = "gateway"
-base_url = "http://localhost:1"
-model = "m"
+kind = "codex_cli"
 "#,
         )
         .expect("valid");
@@ -1013,12 +1026,12 @@ provider = "typo"
     }
 
     #[test]
-    fn a_gateway_without_a_model_is_rejected() {
+    fn an_openai_compatible_provider_without_a_model_is_rejected() {
         let err = Config::parse(
             r#"
-[providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+[providers.remote]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8317/v1"
 "#,
         )
         .unwrap_err();
@@ -1026,12 +1039,11 @@ base_url = "http://127.0.0.1:8317"
     }
 
     #[test]
-    fn gateway_may_list_supported_models_and_efforts() {
+    fn codex_cli_may_list_supported_models_and_efforts() {
         let config = Config::parse(
             r#"
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
+kind = "codex_cli"
 model = "gpt-5.6-sol"
 models = ["gpt-5.6-sol", "gpt-5.6-terra"]
 efforts = ["low", "high", "max"]
@@ -1039,7 +1051,7 @@ efforts = ["low", "high", "max"]
         )
         .expect("valid");
         match &config.providers["codex"] {
-            ProviderConfig::Gateway {
+            ProviderConfig::CodexCli {
                 models, efforts, ..
             } => {
                 assert_eq!(
@@ -1051,12 +1063,12 @@ efforts = ["low", "high", "max"]
                     &["low".to_string(), "high".to_string(), "max".to_string()]
                 );
             }
-            other => panic!("expected gateway, got {other:?}"),
+            other => panic!("expected the Codex CLI, got {other:?}"),
         }
     }
 
     #[test]
-    fn native_codex_defaults_are_explicit_and_gateway_remains_distinct() {
+    fn native_codex_defaults_are_explicit() {
         let config = Config::parse(
             r#"
 [providers.codex]
@@ -1080,20 +1092,124 @@ kind = "codex_cli"
             }
             other => panic!("expected native Codex provider, got {other:?}"),
         }
+    }
 
-        let gateway = Config::parse(
+    /// The whole migration, through the front door.
+    ///
+    /// The strict parse fails on `kind = "gateway"`, the document is rewritten in
+    /// memory, and what comes back is a config the rest of Zest can use — with
+    /// notices explaining a shape the user did not write.
+    #[test]
+    fn a_legacy_gateway_document_loads_through_parse_with_notices() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+api_key_env = "ZEST_GATEWAY_KEY"
+model = "gpt-5.6-sol"
+efforts = ["low", "high"]
+
+[providers.claude]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "claude-opus-5"
+models = ["claude-opus-5"]
+
+[providers.gemini]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gemini-3.1-pro"
+
+[default]
+provider = "claude"
+model = "claude-opus-5"
+"#,
+        )
+        .expect("a legacy gateway document must still load");
+
+        match &config.providers["codex"] {
+            ProviderConfig::CodexCli {
+                command,
+                model,
+                efforts,
+                ..
+            } => {
+                assert_eq!(command, "codex");
+                assert_eq!(model, "gpt-5.6-sol");
+                assert_eq!(efforts, &["low".to_string(), "high".to_string()]);
+            }
+            other => panic!("expected the Codex CLI, got {other:?}"),
+        }
+        match &config.providers["claude"] {
+            ProviderConfig::ClaudeCode {
+                command, models, ..
+            } => {
+                assert_eq!(command, "claude");
+                assert!(models.is_empty(), "API model ids are not CLI aliases");
+            }
+            other => panic!("expected Claude Code, got {other:?}"),
+        }
+        assert!(
+            !config.providers.contains_key("gemini"),
+            "an unmappable entry is dropped rather than guessed at"
+        );
+
+        let target = config.default_target().expect("a default survives");
+        assert_eq!(target.provider, "claude");
+        assert_eq!(
+            target.model, None,
+            "a pin the migrated provider can no longer offer would be a hard \
+             startup error"
+        );
+
+        assert_eq!(config.migrations().len(), 2);
+        assert_eq!(config.unsupported().len(), 1);
+        assert_eq!(config.unsupported()[0].0, "gemini");
+        // Every notice reaches a user: the front-ends already print lint output.
+        let issues = config.lint();
+        assert!(issues.iter().any(|i| i.contains("Codex CLI")), "{issues:?}");
+        assert!(
+            issues.iter().any(|i| i.contains("Claude Code")),
+            "{issues:?}"
+        );
+    }
+
+    /// A migration must not become a suspect for an unrelated mistake. The
+    /// rewrite runs, the result still fails, and the *original* error is what
+    /// the user sees.
+    #[test]
+    fn a_typo_still_reports_the_original_error_after_a_failed_migration() {
+        let err = Config::parse(
             r#"
 [providers.codex]
 kind = "gateway"
 base_url = "http://127.0.0.1:8317"
 model = "gpt-5.6-sol"
+
+[nonsense]
+what = 1
 "#,
         )
-        .expect("valid gateway");
-        assert!(matches!(
-            gateway.providers["codex"],
-            ProviderConfig::Gateway { .. }
-        ));
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("nonsense"),
+            "the surviving problem must be named: {err}"
+        );
+        assert!(
+            !err.contains("migrat"),
+            "the rewrite is not the story here: {err}"
+        );
+    }
+
+    /// A config Zest writes today parses strictly, so it must carry no notices.
+    #[test]
+    fn a_current_document_records_no_migration() {
+        let config = Config::parse(FULL).expect("valid");
+        assert!(config.migrations().is_empty());
+        assert!(config.unsupported().is_empty());
     }
 
     #[test]
@@ -1114,9 +1230,9 @@ kind = "telepathy"
         // to the wrong place with no warning.
         let err = Config::parse(
             r#"
-[providers.codex]
-kind = "gateway"
-base_urls = "http://127.0.0.1:8317"
+[providers.remote]
+kind = "openai_compatible"
+base_urls = "http://127.0.0.1:8317/v1"
 model = "m"
 "#,
         )

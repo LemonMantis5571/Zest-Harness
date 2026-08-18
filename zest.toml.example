@@ -28,14 +28,10 @@ max_result_bytes = 32768
 # Read-only commands can run without an extra approval; other commands ask.
 enabled = true
 
-# CLIProxyAPI gateway providers remain an explicit compatibility path. Existing
-# `kind = "gateway"` installations are never rewritten automatically.
-#
-# [providers.codex_gateway]
-# kind = "gateway"
-# base_url = "http://127.0.0.1:8317"
-# api_key_env = "ZEST_GATEWAY_KEY"
-# model = "gpt-5.6-terra"
+# The `gateway` kind was removed with the bundled CLIProxyAPI sidecar. An
+# existing `kind = "gateway"` entry still loads: `codex` and `claude` are
+# migrated in memory to the CLI kinds below, anything else is skipped with a
+# reason, and this file is never rewritten for you.
 #
 # OpenAI-compatible providers are configured explicitly when needed. Their
 # API keys are stored in the OS credential manager, not here.
@@ -56,7 +52,7 @@ enabled = true
 # model = "sonnet"
 # models = ["sonnet", "opus", "haiku"]
 # allow_mcp = false
-# permission_mode = "accept_edits"
+# permission_mode = "default"
 # timeout_secs = 900
 #
 # [providers.deepseek]

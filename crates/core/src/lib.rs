@@ -14,6 +14,7 @@ pub mod chat_persistence;
 pub mod commands;
 pub mod config;
 pub mod config_edit;
+pub mod config_migrate;
 pub mod context_budget;
 pub mod credentials;
 pub mod delegation;
