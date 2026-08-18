@@ -11,11 +11,20 @@ function Step($name, $scriptBlock) {
   $global:LASTEXITCODE = 0
   try {
     & $scriptBlock
+    if ($env:GITHUB_STEP_SUMMARY) {
+      Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- [x] **$name**: PASSED"
+    }
   } catch {
     Write-Host "==> [ERROR] in step '$name': $_" -ForegroundColor Red
+    if ($env:GITHUB_STEP_SUMMARY) {
+      Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- [ ] **$name**: FAILED`n  - Error: $_"
+    }
     throw
   }
   if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
+    if ($env:GITHUB_STEP_SUMMARY) {
+      Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- [ ] **$name**: FAILED (exit code $LASTEXITCODE)"
+    }
     throw "Step failed: $name (exit $LASTEXITCODE)"
   }
 }
