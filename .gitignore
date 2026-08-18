@@ -1,0 +1,69 @@
+# --- Build artifacts ---
+/target/
+**/*.rs.bk
+*.tsbuildinfo
+
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+# Machine-specific signing overlay (thumbprint is public, but the file names a
+# certificate only this machine has). The .example stays committed.
+crates/desktop/tauri.signing.conf.json
+
+# --- Project-local Zest state (do not commit chat history or personal prompts) ---
+.zest/threads/
+.zest/runs/
+.zest/interrupts/
+.zest/spill/
+.zest/last-thread-id
+.zest/system.md
+.zest/doctor*
+.zest/*.json
+# Skills are personal and installed outside the repository.
+.zest/skills/
+
+# Local/project configuration. Use zest.toml.example for a shareable starter.
+zest.toml
+# Desktop runtime state is machine-local and must never enter the repository.
+crates/desktop/.zest/
+
+# --- Gateway binaries (fetch with scripts/fetch-gateway.ps1; see README) ---
+/tools/*
+!/tools/.gitkeep
+# Bundled sidecars are ~64MB each and are reproducible from a tagged release.
+crates/desktop/binaries/
+# ...but the licence text they ship with is small and must not go missing.
+!crates/desktop/licenses/
+
+# --- Node (npm workspaces at repo root) ---
+node_modules/
+crates/desktop/ui/dist/
+crates/desktop/ui/.vite/
+
+# --- Tauri generated ---
+crates/desktop/gen/
+crates/desktop/src-tauri/target/
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# --- Agent skill installs (optional local copies) ---
+.agents/
+.claude/
+.cursor/skills/
+.windsurf/
+
+# --- Scratch / local experiments ---
+/tmp/
+*.log
+*.tmp
+.cache/

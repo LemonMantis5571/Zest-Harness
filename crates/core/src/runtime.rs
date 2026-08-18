@@ -21,6 +21,7 @@ use crate::skills::SkillSet;
 use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
+use crate::tools::spill::{SpillPolicy, SpillStore};
 use crate::tools::{
     register_browser_tool, register_exec_tools, register_question_tool, register_read_tools,
     register_skill_tools, register_write_tools, BrowserAdapter, FeatureDelegator, ToolRegistry,
@@ -377,6 +378,9 @@ impl RuntimeBuilder {
 
         let registry = Arc::new(registry);
 
+        // Cloned before the delegation block below moves the field.
+        let spill_thread_id = self.parent_thread_id.clone();
+
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::with_parent_secret_envs(
                 &root,
@@ -392,6 +396,22 @@ impl RuntimeBuilder {
         }
         if self.questioner.is_some() && !provider_owns_agent_loop {
             register_question_tool(&mut tools);
+        }
+
+        // Oversized results go to `.zest/spill/<chat-id>/` and the model gets a
+        // locator instead of losing the bytes. A front-end that supplied no
+        // thread gets a synthetic id: the artifacts are then only reachable
+        // within this process, and the store's own sibling sweep collects them
+        // later, since no thread deletion will ever name them.
+        if config.tools.max_result_bytes > 0 {
+            let id = spill_thread_id.unwrap_or_else(|| crate::thread::new_id("session"));
+            match SpillStore::open(&root, &id) {
+                Ok(store) => {
+                    let policy = SpillPolicy::new(store, config.tools.max_result_bytes);
+                    tools = tools.with_spill(Arc::new(policy));
+                }
+                Err(e) => warnings.push(format!("oversized tool results will stay inline: {e}")),
+            }
         }
 
         let approver = self
@@ -881,6 +901,60 @@ model = "gpt-a"
             .build()
             .unwrap();
         assert_eq!(session.model, "claude-sonnet-5");
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
+    }
+
+    #[test]
+    fn a_thread_scoped_spill_directory_reaches_the_agent() {
+        let dir = two_provider_dir("spill-wiring");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("claude")
+            .with_parent_thread_id("t-abc")
+            .enable_external_agents(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert_eq!(session.agent.spill_dir(), Some(".zest/spill/t-abc"));
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
+        // Building a runtime must not litter: the directory appears on the first
+        // result that actually spills, not before.
+        assert!(!dir.join(".zest/spill").exists());
+    }
+
+    #[test]
+    fn a_zero_result_cap_leaves_the_agent_without_a_spill_store() {
+        let dir = two_provider_dir("spill-off");
+        let mut config = Config::find(&dir).unwrap();
+        config.tools.max_result_bytes = 0;
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(config)
+            .with_provider("claude")
+            .with_parent_thread_id("t-abc")
+            .enable_external_agents(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert_eq!(session.agent.spill_dir(), None);
+    }
+
+    /// A front-end with no durable thread still gets bounding; the id is
+    /// synthetic and the artifacts are collected by the store's sibling sweep.
+    #[test]
+    fn a_runtime_without_a_thread_still_bounds_results() {
+        let dir = two_provider_dir("spill-anon");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("claude")
+            .enable_external_agents(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        let spill_dir = session
+            .agent
+            .spill_dir()
+            .expect("a store should be attached");
+        assert!(spill_dir.starts_with(".zest/spill/session-"), "{spill_dir}");
         assert!(session.warnings.is_empty(), "{:?}", session.warnings);
     }
 

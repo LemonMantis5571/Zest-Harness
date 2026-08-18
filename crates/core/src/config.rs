@@ -69,11 +69,38 @@ struct LegacyRouting {
     rules: Vec<toml::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsConfig {
     #[serde(default)]
     pub bash: BashConfig,
+    /// Bytes a tool result may occupy in the model's context before the full text
+    /// is stored under `.zest/spill` and the model gets a bounded preview plus a
+    /// locator it can read or grep.
+    ///
+    /// `0` keeps every result inline however large — the old behavior, where the
+    /// bytes past a tool's own cap were simply gone.
+    #[serde(default = "default_max_result_bytes")]
+    pub max_result_bytes: usize,
+}
+
+/// Hand-written rather than derived: a derived `usize` default is `0`, which this
+/// field reads as "disabled" — the one value that must not be what an absent
+/// `[tools]` section means.
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            bash: BashConfig::default(),
+            max_result_bytes: default_max_result_bytes(),
+        }
+    }
+}
+
+/// 32 KiB — roughly 8k tokens, already a heavy result, and just above `bash`'s
+/// own 30 KiB output cap so the one tool whose truncation markers are pinned by
+/// tests is never also carrying a spill notice.
+fn default_max_result_bytes() -> usize {
+    32 * 1024
 }
 
 /// `[tools.bash]`. Absent means the defaults below, which is a working setup —
@@ -595,6 +622,15 @@ impl Config {
                 );
             }
         }
+        // A cap this small leaves no room for a preview after the locator notice
+        // is paid for, so every oversized result would come back as notice-only —
+        // or stay inline, if even the notice does not fit.
+        if self.tools.max_result_bytes > 0 && self.tools.max_result_bytes < 4_096 {
+            issues.push(format!(
+                "[tools] max_result_bytes = {} is too small to leave room for a preview; use 0 to keep results inline or at least 4096",
+                self.tools.max_result_bytes
+            ));
+        }
         for (id, agent) in &self.agents {
             if agent.command.trim().is_empty() {
                 issues.push(format!("external agent `{id}` has an empty command"));
@@ -953,6 +989,40 @@ provider = "typo"
         let issues = config.lint();
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].contains("typo"));
+    }
+
+    #[test]
+    fn the_result_cap_defaults_without_a_tools_section() {
+        let config =
+            Config::parse("[providers.anthropic]\nkind = \"anthropic\"\n").expect("parses");
+        assert_eq!(config.tools.max_result_bytes, 32 * 1024);
+        // And through the other constructor, which is where a derived `0` default
+        // would have slipped in.
+        assert_eq!(Config::default().tools.max_result_bytes, 32 * 1024);
+        assert!(config.lint().is_empty(), "{:?}", config.lint());
+    }
+
+    #[test]
+    fn the_result_cap_is_configurable_and_zero_is_left_alone() {
+        let config = Config::parse("[tools]\nmax_result_bytes = 0\n").expect("parses");
+        assert_eq!(config.tools.max_result_bytes, 0);
+        assert!(
+            config.lint().is_empty(),
+            "0 is an explicit opt-out, not a mistake: {:?}",
+            config.lint()
+        );
+
+        let config = Config::parse("[tools]\nmax_result_bytes = 65536\n").expect("parses");
+        assert_eq!(config.tools.max_result_bytes, 65_536);
+        assert!(config.lint().is_empty());
+    }
+
+    #[test]
+    fn a_tiny_result_cap_is_linted() {
+        let config = Config::parse("[tools]\nmax_result_bytes = 64\n").expect("parses");
+        let issues = config.lint();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("max_result_bytes"), "{issues:?}");
     }
 
     #[test]

@@ -1299,22 +1299,31 @@ impl ThreadStore {
         Ok(thread.summary())
     }
 
-    /// Permanently remove a thread file. Missing files are success (idempotent).
+    /// Permanently remove a thread file and everything derived from it. Missing
+    /// files are success (idempotent).
+    ///
+    /// Side files are cleaned on the missing arm too, so re-deleting a thread
+    /// whose JSON is already gone still collects its checkpoints and spilled tool
+    /// output. Cleaning only on the removed arm left them behind for good.
     pub fn delete(&self, id: &str) -> Result<()> {
         let tid = ThreadId::parse(id)
             .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
         let path = self.path_for(&tid);
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                let _ = fs::remove_dir_all(self.checkpoints_dir_for(&tid));
-                Ok(())
-            }
+        let result = match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(HarnessError::Other(format!(
                 "delete thread {}: {e}",
                 path.display()
             ))),
+        };
+        if result.is_ok() {
+            let _ = fs::remove_dir_all(self.checkpoints_dir_for(&tid));
+            if let Some(zest_dir) = self.dir.parent() {
+                crate::tools::spill::remove_thread_dir(zest_dir, &tid);
+            }
         }
+        result
     }
 
     pub fn list(&self) -> Result<Vec<ThreadSummary>> {
@@ -1850,6 +1859,45 @@ mod characterization {
         assert!(!path.exists());
         store.delete(&thread.id).unwrap(); // idempotent
         assert!(store.delete("../outside").is_err());
+    }
+
+    #[test]
+    fn deleting_a_thread_removes_its_spilled_tool_output() {
+        let root = scratch("delete-spill");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = store.create_for_provider("codex").unwrap();
+
+        let spill = crate::tools::spill::SpillStore::open(&root, &thread.id).unwrap();
+        let name = spill.next_name("grep");
+        assert!(spill.write(&name, "a large result").is_some());
+        let spill_dir = root.join(".zest/spill").join(&thread.id);
+        assert!(spill_dir.is_dir());
+
+        store.delete(&thread.id).unwrap();
+        assert!(
+            !spill_dir.exists(),
+            "spilled output outlived its conversation"
+        );
+    }
+
+    /// The thread JSON can already be gone — a half-finished delete, or a second
+    /// call — and its side files still have to be collected.
+    #[test]
+    fn deleting_a_missing_thread_still_collects_its_side_files() {
+        let root = scratch("delete-missing");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = store.create_for_provider("codex").unwrap();
+
+        let spill = crate::tools::spill::SpillStore::open(&root, &thread.id).unwrap();
+        assert!(spill.write(&spill.next_name("grep"), "orphan").is_some());
+        let spill_dir = root.join(".zest/spill").join(&thread.id);
+
+        // Remove only the thread row, leaving the derived files behind.
+        fs::remove_file(store.dir().join(format!("{}.json", thread.id))).unwrap();
+        assert!(spill_dir.is_dir());
+
+        store.delete(&thread.id).unwrap();
+        assert!(!spill_dir.exists(), "{}", spill_dir.display());
     }
 
     #[test]

@@ -15,6 +15,15 @@ timeout_secs = 900
 provider = "codex"
 model = "gpt-5.6-sol"
 
+[tools]
+# A tool result larger than this is stored under `.zest/spill/<chat-id>/` and the
+# model gets a bounded preview plus the path, which it can read or grep. Set to 0
+# to keep every result inline however large.
+#
+# Must stay above the `[tools.bash]` header below: TOML would otherwise read a
+# bare key here as part of that table.
+max_result_bytes = 32768
+
 [tools.bash]
 # Read-only commands can run without an extra approval; other commands ask.
 enabled = true
