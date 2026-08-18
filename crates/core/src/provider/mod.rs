@@ -756,7 +756,8 @@ mod tests {
         assert!(cat.iter().all(|model| model.efforts.is_empty()));
     }
 
-    /// The picker and the live provider must agree about what is selectable.
+    /// The picker and the live provider must agree about what is selectable, for
+    /// **every** kind.
     ///
     /// Two independent matches over the same config had drifted:
     /// `descriptor_from_config` built the catalogue from the configured model
@@ -764,33 +765,68 @@ mod tests {
     /// *prepended* it to a catalogue that already held `DEFAULT_MODEL`. A user
     /// with `model = "claude-haiku-5"` saw one model in the picker and could
     /// select two at runtime.
+    ///
+    /// The first version of this test checked `anthropic` only, and a second
+    /// instance of the same bug walked straight through it: `claude_code` kept a
+    /// private `BUILTIN_MODELS` fallback the driver could not see, so an entry
+    /// with no `models` list offered `[sonnet]` and accepted
+    /// `[sonnet, opus, haiku]`. Found by running a real config through both
+    /// paths, not by this test — hence the table.
     #[test]
     fn the_picker_catalogue_matches_the_live_provider_catalogue() {
         std::env::set_var("ZEST_TEST_DRIFT_KEY", "present");
-        let config = crate::config::Config::parse(
-            r#"
-[providers.house]
-kind = "anthropic"
-api_key_env = "ZEST_TEST_DRIFT_KEY"
-model = "claude-haiku-5"
-"#,
-        )
-        .expect("valid");
-        let entry = &config.providers["house"];
+        // One entry per kind, each exercising the *omitted* optional fields,
+        // because that is where a hidden default hides.
+        let cases = [
+            (
+                "house",
+                "[providers.house]\nkind = \"anthropic\"\napi_key_env = \"ZEST_TEST_DRIFT_KEY\"\nmodel = \"claude-haiku-5\"\n",
+            ),
+            ("house", "[providers.house]\nkind = \"claude_code\"\n"),
+            (
+                "house",
+                "[providers.house]\nkind = \"claude_code\"\nmodel = \"opus\"\nmodels = [\"opus\", \"haiku\"]\n",
+            ),
+            ("house", "[providers.house]\nkind = \"codex_cli\"\n"),
+            (
+                "house",
+                "[providers.house]\nkind = \"codex_cli\"\nmodel = \"gpt-5.6-luna\"\nefforts = [\"low\"]\n",
+            ),
+            (
+                "house",
+                "[providers.house]\nkind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:1/v1\"\nmodel = \"local\"\n",
+            ),
+        ];
 
-        let (registry, skipped) = crate::provider::registry::ProviderRegistry::from_config(&config);
-        assert!(skipped.is_empty(), "{skipped:?}");
-        let live = registry.get("house").expect("built").descriptor();
-        let picker = descriptor_from_config("house", entry);
+        for (id, toml) in cases {
+            let config = crate::config::Config::parse(toml).expect("valid");
+            let entry = &config.providers[id];
+            let (registry, skipped) =
+                crate::provider::registry::ProviderRegistry::from_config(&config);
+            assert!(skipped.is_empty(), "{toml}\n{skipped:?}");
+            let live = registry.get(id).expect("built").descriptor();
+            let picker = descriptor_from_config(id, entry);
+
+            assert_eq!(
+                picker.default_model, live.default_model,
+                "default model disagrees for:\n{toml}"
+            );
+            let picker_ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+            let live_ids: Vec<&str> = live.models.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(
+                picker_ids, live_ids,
+                "the picker must offer exactly what the provider accepts:\n{toml}"
+            );
+            let picker_efforts: Vec<&[String]> =
+                picker.models.iter().map(|m| m.efforts.as_slice()).collect();
+            let live_efforts: Vec<&[String]> =
+                live.models.iter().map(|m| m.efforts.as_slice()).collect();
+            assert_eq!(
+                picker_efforts, live_efforts,
+                "effort levels disagree for:\n{toml}"
+            );
+        }
         std::env::remove_var("ZEST_TEST_DRIFT_KEY");
-
-        assert_eq!(picker.default_model, live.default_model);
-        let picker_ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
-        let live_ids: Vec<&str> = live.models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(
-            picker_ids, live_ids,
-            "the picker must offer exactly what the provider accepts"
-        );
     }
 
     #[test]

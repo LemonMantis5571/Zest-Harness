@@ -32,7 +32,13 @@ use crate::tools::external_agent::{
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-const BUILTIN_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
+/// Aliases the Claude Code CLI accepts with no configuration.
+///
+/// `pub(crate)` so the driver builds the picker catalogue from the same list the
+/// provider accepts. It was private, and the driver passed an empty builtin list
+/// instead: an entry with no `models` offered `[sonnet]` in the picker while the
+/// provider accepted `[sonnet, opus, haiku]`.
+pub(crate) const BUILTIN_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
 
 pub struct ClaudeCodeProvider {
     id: String,

@@ -224,8 +224,14 @@ impl ClaudeCodeDriver {
         };
         let default_model = model
             .clone()
+            .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_CODE_MODEL.to_string());
-        let catalogue = catalogue(&default_model, models, &[], EffortPolicy::Unsupported);
+        let catalogue = catalogue(
+            &default_model,
+            models,
+            super::claude_code::BUILTIN_MODELS,
+            EffortPolicy::Unsupported,
+        );
         (default_model, catalogue)
     }
 }
