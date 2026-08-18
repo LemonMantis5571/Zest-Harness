@@ -107,6 +107,17 @@ impl SpillStore {
     /// and a disk sync per tool call would be a new stall in the turn loop paid
     /// for a file this module already documents as disposable.
     pub fn write(&self, name: &str, body: &str) -> Option<()> {
+        // `name` is expected to come from `next_name`, which sanitizes it — but
+        // this is public and takes a bare string, so it checks rather than
+        // trusts. One ordinary path component, nothing else: that rejects `..`,
+        // an absolute path, a drive prefix, and anything with a separator.
+        let mut parts = Path::new(name).components();
+        let single_segment =
+            matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+        if !single_segment {
+            eprintln!("warning: refusing to store tool output under `{name}`");
+            return None;
+        }
         if let Err(error) = fs::create_dir_all(&self.dir) {
             eprintln!("warning: could not create {}: {error}", self.dir.display());
             return None;
@@ -140,9 +151,18 @@ impl SpillStore {
         };
         let now = SystemTime::now();
         let mut files: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+        // The kept file is never a deletion candidate, but it still occupies the
+        // directory — leaving it out of the total would enforce the byte ceiling
+        // against everything *except* the newest artifact, so a single large
+        // spill could sit over budget until some later write happened to count it.
+        let mut kept_bytes = 0u64;
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_file() || entry.file_name() == std::ffi::OsStr::new(keep) {
+            if !meta.is_file() {
+                continue;
+            }
+            if entry.file_name() == std::ffi::OsStr::new(keep) {
+                kept_bytes = meta.len();
                 continue;
             }
             let modified = meta.modified().unwrap_or(now);
@@ -154,7 +174,7 @@ impl SpillStore {
         }
 
         files.sort_by_key(|(modified, _, _)| *modified);
-        let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
+        let mut total: u64 = kept_bytes + files.iter().map(|(_, len, _)| *len).sum::<u64>();
         let mut count = files.len();
         for (_, len, path) in &files {
             if count < MAX_FILES && total <= MAX_DIR_BYTES {
@@ -437,6 +457,42 @@ mod tests {
         assert_eq!(unique.len(), 32, "names collided: {names:?}");
         let on_disk = fs::read_dir(root.join(".zest/spill/t-1")).unwrap().count();
         assert_eq!(on_disk, 32);
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_single_path_segment_is_refused() {
+        let root = scratch("badname");
+        let store = store(&root);
+        for bad in ["../escape.txt", "a/b.txt", "a\\b.txt", "..", "/abs.txt", ""] {
+            assert!(
+                store.write(bad, "body").is_none(),
+                "accepted {bad:?} as a file name"
+            );
+        }
+        assert!(!root.join("escape.txt").exists());
+        assert!(!root.join(".zest/spill/escape.txt").exists());
+    }
+
+    #[test]
+    fn the_byte_ceiling_counts_the_file_just_written() {
+        let root = scratch("keepcounted");
+        let store = store(&root);
+        // One artifact larger than the whole directory budget. It survives its
+        // own sweep, but a later write must see the directory as over budget
+        // rather than measuring everything except the newest file.
+        let huge = "x".repeat((MAX_DIR_BYTES + 1) as usize);
+        let first = store.next_name("bash");
+        assert!(store.write(&first, &huge).is_some());
+
+        let second = store.next_name("bash");
+        assert!(store.write(&second, "small").is_some());
+
+        let dir = root.join(".zest/spill/t-1");
+        assert!(dir.join(&second).exists(), "the newest artifact was swept");
+        assert!(
+            !dir.join(&first).exists(),
+            "the over-budget artifact survived a sweep that could see it"
+        );
     }
 
     #[test]
