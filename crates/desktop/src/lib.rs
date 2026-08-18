@@ -2110,7 +2110,7 @@ fn now_secs() -> u64 {
 ///
 /// A credentials file on disk is not a working session — a provider can hold an
 /// account it has put in cooldown, and that never shows up locally. Called after
-/// a sign-in and from the background check behind an open chat.
+/// an explicit sign-in verification, never while opening a chat.
 #[tauri::command]
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let root = resolve_workspace_root(&state)?;

@@ -41,7 +41,6 @@ import {
   markProviderVerified,
   markProviderVerifyFailed,
   recentVerifyFailed,
-  recentVerifySucceeded,
 } from "@/lib/providerVerify";
 import {
   isProviderReady,
@@ -1071,48 +1070,12 @@ export default function App() {
     scheduleQueuedTurnRef.current(info.threadId, 80);
   }, []);
 
-  /**
-   * Prove the account can serve, without making anyone wait for it.
-   *
-   * `startSession` no longer probes, so this is where a cooled-down session is
-   * discovered. It runs behind an already-usable chat and reports itself in a
-   * banner, because a live turn against the provider is a network round trip and
-   * gating the first paint on one is what made launch feel slow.
-   */
-  const verifyInBackground = useCallback((providerId: string) => {
-    // A recent success is worth trusting; re-learning it costs a real turn.
-    if (recentVerifySucceeded(providerId)) {
-      setSessionWarning(null);
-      return;
-    }
-    void backend
-      .verifyProvider(providerId)
-      .then(() => {
-        markProviderVerified(providerId);
-        setSessionWarning(null);
-      })
-      .catch((err: unknown) => {
-        // Claude Code and Gemini CLI own their sessions. Only providers that
-        // expose a Zest-managed sign-in may offer a desktop reconnect action.
-        const offerReconnect =
-          providerId === "codex" && shouldOfferProviderReconnect(err);
-        if (offerReconnect) markProviderVerifyFailed(providerId);
-        setSessionWarning({
-          providerId,
-          message: formatInvokeError(err),
-          offerReconnect,
-        });
-      });
-  }, []);
-
   const enterChat = useCallback(
     async (providerId: string) => {
       try {
         const info = await backend.startSession(providerId);
         stopPolling();
         applySession(info);
-        // After the chat is on screen, never before it.
-        verifyInBackground(providerId);
         return info;
       } catch (err) {
         // Setup failures (for example, a new folder without a provider config)
@@ -1124,7 +1087,7 @@ export default function App() {
         throw err;
       }
     },
-    [applySession, stopPolling, verifyInBackground]
+    [applySession, stopPolling]
   );
   enterChatRef.current = enterChat;
 
