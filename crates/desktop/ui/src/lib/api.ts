@@ -9,6 +9,7 @@ import type {
   ChatEvent,
   DelegationEvent,
   DelegationJob,
+  CompactionResult,
   ContextUsage,
   GitContext,
   ExternalAgentCheck,
@@ -288,7 +289,7 @@ export function editMessage(messageId: string) {
 }
 
 export function compactContext() {
-  return invoke<ContextUsage>("compact_context");
+  return invoke<CompactionResult>("compact_context");
 }
 
 export function deleteThread(

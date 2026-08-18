@@ -690,7 +690,7 @@ export default function App() {
           setCompacting(true);
           void backend
             .compactContext()
-            .then(async () => {
+            .then(async (result) => {
               try {
                 const info = await backend.sessionInfo();
                 if (info && info.sessionId === sessionIdRef.current) {
@@ -703,11 +703,24 @@ export default function App() {
               } catch {
                 /* checkpoint metadata refresh is best-effort */
               }
-              toast.add({
-                type: "success",
-                title: "Conversation compacted automatically",
-                description: "You can restore the conversation from before compaction.",
-              });
+              // Trimming long tool output and summarizing are different things
+              // to have happened to a conversation, so they get different copy.
+              toast.add(
+                result.prunedOnly
+                  ? {
+                      type: "success",
+                      title: "Trimmed long tool output",
+                      description: `Shortened ${result.resultsPruned} long tool ${
+                        result.resultsPruned === 1 ? "result" : "results"
+                      }. The conversation was kept as it was; the full output is in the restore point.`,
+                    }
+                  : {
+                      type: "success",
+                      title: "Conversation compacted automatically",
+                      description:
+                        "You can restore the conversation from before compaction.",
+                    }
+              );
             })
             .catch((err) => {
               toast.add({

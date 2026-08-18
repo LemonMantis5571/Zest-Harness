@@ -923,7 +923,11 @@ export function createFixtureBackend(): DesktopBackend {
       return { ...session };
     },
     async compactContext() {
-      return this.contextUsage();
+      return {
+        usage: await this.contextUsage(),
+        prunedOnly: false,
+        resultsPruned: 0,
+      };
     },
     async deleteThread(id: string) {
       if (id === session.threadId) {
@@ -1198,9 +1202,15 @@ export function createFixtureBackend(): DesktopBackend {
         windowTokens: 256000,
         remainingTokens: 244000,
         percentFull: 4.7,
-        source: "estimate",
+        source: "last_turn",
         systemTokens: 3200,
         conversationTokens: 8800,
+        // A measured turn, so the three columns sum to usedTokens. Cache-heavy on
+        // purpose: that is what a real session looks like, and it is the shape
+        // that used to read as an almost-empty window.
+        inputTokens: 400,
+        cacheReadTokens: 11200,
+        cacheWriteTokens: 400,
         messageCount: session.messages.length,
         checkpointCount: session.checkpoints.length,
         canCompact: session.messages.length >= 4,

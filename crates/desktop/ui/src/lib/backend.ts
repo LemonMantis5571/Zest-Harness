@@ -11,6 +11,7 @@ import type {
   ChatEvent,
   DelegationEvent,
   DelegationJob,
+  CompactionResult,
   ContextUsage,
   ExternalAgentCheck,
   ExternalAgentRow,
@@ -127,7 +128,7 @@ export type DesktopBackend = {
   forkThreadFromCheckpoint(checkpointId: string): Promise<SessionInfo>;
   rewindThread(checkpointId: string): Promise<SessionInfo>;
   editMessage(messageId: string): Promise<SessionInfo>;
-  compactContext(): Promise<ContextUsage>;
+  compactContext(): Promise<CompactionResult>;
   deleteThread(
     id: string,
     projectPath?: string | null,

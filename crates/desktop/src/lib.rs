@@ -36,9 +36,9 @@ use zest_core::{
     save_custom_system, start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
-    AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace,
-    GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
-    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
+    AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, ExternalAgentMode,
+    ExternalWorkspace, GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess,
+    PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
     ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
     ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
     PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
@@ -53,7 +53,7 @@ use attachments::{
     prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
 };
 use browser::BrowserHost;
-use context_meter::{estimate_context, ContextUsageView};
+use context_meter::{estimate_context, CompactionResultView, ContextUsageView};
 pub(crate) use delegation::{
     get_view as get_delegation_view, list_views as list_delegation_views, DelegationCoordinator,
     DelegationJobView,
@@ -4816,7 +4816,7 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
 /// conversation. The operation occupies the normal turn slot so it cannot race
 /// a send or an approval, but it does not add a visible assistant answer.
 #[tauri::command]
-async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
+async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultView, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
@@ -4844,7 +4844,16 @@ async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView,
 
     let result = session.agent.compact_context().await;
     let output = match result {
-        Ok(_) => {
+        // Both paths rewrote history, so both need the same persistence handling.
+        // The checkpoint written above is kept either way: the UI transcript
+        // stores only a short summary per tool call, so that snapshot's
+        // `agent_messages` is the one durable copy of the full tool bodies a
+        // prune just shortened.
+        Ok(outcome) => {
+            let (pruned_only, results_pruned) = match &outcome {
+                CompactionOutcome::Pruned { results_pruned, .. } => (true, *results_pruned),
+                CompactionOutcome::Summarized { .. } => (false, 0),
+            };
             session.thread.provider_session = None;
             session
                 .thread
@@ -4853,7 +4862,11 @@ async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView,
                 let _ = state.sessions.finish_turn(&turn, session);
                 return Err(error.to_string());
             }
-            estimate_context(&session.agent, session.thread.checkpoints.len())
+            CompactionResultView {
+                usage: estimate_context(&session.agent, session.thread.checkpoints.len()),
+                pruned_only,
+                results_pruned,
+            }
         }
         Err(error) => {
             session.agent.clear_provider_session();
