@@ -75,7 +75,17 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --all-targets -- --nocapture
+        shell: bash
+        run: |
+          cargo test --workspace --all-targets > test_output.log 2>&1 || {
+            status=$?
+            echo "### Cargo Test Failures" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E -C 3 "failures:|FAILED|panicked at|error:" test_output.log | tail -n 100 >> $GITHUB_STEP_SUMMARY || cat test_output.log | tail -n 100 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat test_output.log
+            exit $status
+          }
 
       - name: npm audit
         run: npm audit --omit=dev
