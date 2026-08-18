@@ -12,6 +12,7 @@
 
 pub mod anthropic;
 pub mod claude_code;
+mod claude_control;
 pub mod codex_app_server;
 pub mod openai_compatible;
 pub mod registry;

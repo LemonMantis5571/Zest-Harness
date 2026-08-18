@@ -20,7 +20,13 @@ const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 pub struct JsonlProcess {
     child: Child,
-    stdin: ChildStdin,
+    /// Held open for the life of the turn, then dropped.
+    ///
+    /// An `Option` because closing stdin is a protocol act for some providers,
+    /// not merely cleanup: Claude Code rejects every pending permission request
+    /// the moment its stdin closes, so a driver must hold it open until the
+    /// turn's terminal event and only then let the CLI see EOF and exit.
+    stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     stderr: Option<JoinHandle<Vec<u8>>>,
 }
@@ -58,7 +64,7 @@ impl JsonlProcess {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr: Some(stderr),
         })
@@ -67,14 +73,27 @@ impl JsonlProcess {
     pub async fn send(&mut self, value: &Value) -> Result<()> {
         let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
-        self.stdin
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| HarnessError::Other("provider stdin is already closed".into()))?;
+        stdin
             .write_all(&line)
             .await
             .map_err(|error| HarnessError::Other(format!("provider stdin failed: {error}")))?;
-        self.stdin
+        stdin
             .flush()
             .await
             .map_err(|error| HarnessError::Other(format!("provider stdin flush failed: {error}")))
+    }
+
+    /// Let the child see EOF on stdin. Idempotent.
+    ///
+    /// Call it once the turn has produced its terminal event: a CLI that reads a
+    /// request stream waits for EOF before exiting, so a driver that never
+    /// closes stdin hangs until its idle timeout fires.
+    pub fn close_stdin(&mut self) {
+        self.stdin = None;
     }
 
     pub async fn next(
