@@ -22,7 +22,9 @@ function Normalize-BindingWhitespace {
   $dir = Join-Path $Root $BindingDir
   foreach ($file in Get-ChildItem -Path $dir -Filter *.ts -File) {
     $text = [System.IO.File]::ReadAllText($file.FullName)
-    $clean = [regex]::Replace($text, '(?m)[ \t]+(?=\r?$)', '')
+    $clean = $text -replace "`r`n", "`n"
+    $clean = [regex]::Replace($clean, '(?m)[ \t]+$', '')
+    if (-not $clean.EndsWith("`n")) { $clean += "`n" }
     if ($clean -ne $text) {
       [System.IO.File]::WriteAllText($file.FullName, $clean, $utf8NoBom)
     }
