@@ -75,7 +75,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets -- --nocapture
 
       - name: npm audit
         run: npm audit --omit=dev

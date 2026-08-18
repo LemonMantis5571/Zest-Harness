@@ -699,14 +699,24 @@ mod tests {
         fs::write(&source_path, process_fixture_source())
             .expect("fixture source should be written");
 
-        let status = Command::new("rustc")
+        let rustc = std::env::var_os("RUSTC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("rustc"));
+
+        let output = Command::new(&rustc)
             .arg("--edition=2021")
             .arg(&source_path)
             .arg("-o")
             .arg(&binary_path)
-            .status()
+            .output()
             .expect("rustc should be available for process tests");
-        assert!(status.success(), "fixture compilation failed with {status}");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "fixture compilation failed with {}: {stderr}",
+                output.status
+            );
+        }
         binary_path
     }
 
