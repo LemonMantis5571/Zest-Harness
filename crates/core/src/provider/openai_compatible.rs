@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::{
-    catalogue_without_efforts, Completion, ModelSpec, Provider, RateLimitSnapshot, StreamEvent,
+    catalogue, Completion, EffortPolicy, ModelSpec, Provider, RateLimitSnapshot, StreamEvent,
     SystemPrompt, TurnRequest,
 };
 use crate::anthropic::sse::SseParser;
@@ -97,7 +97,7 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn models(&self) -> Vec<ModelSpec> {
         if self.models.is_empty() {
-            catalogue_without_efforts(&self.default_model, &[])
+            catalogue(&self.default_model, &[], &[], EffortPolicy::Unsupported)
         } else {
             self.models.clone()
         }

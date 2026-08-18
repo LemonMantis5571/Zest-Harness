@@ -18,7 +18,7 @@ use crate::anthropic::types::{Message, Usage};
 use crate::auth::AuthStatus;
 use crate::config::Config;
 use crate::provider::{
-    catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest,
+    catalogue, Completion, EffortPolicy, ModelSpec, Provider, StreamEvent, TurnRequest,
 };
 use crate::runtime::RuntimeBuilder;
 use crate::thread::{Thread, ThreadStore, WIRE_FORMAT_ANTHROPIC_MESSAGES};
@@ -43,7 +43,7 @@ impl ScriptedProvider {
         Self {
             id: id.into(),
             default_model: model.into(),
-            models: catalogue_from_lists(model, &[], &[]),
+            models: catalogue(model, &[], &[], EffortPolicy::Standard(&[])),
             seen_models: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             tool_roundtrip: false,

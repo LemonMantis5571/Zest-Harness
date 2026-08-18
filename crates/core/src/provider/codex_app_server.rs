@@ -13,9 +13,9 @@ use serde_json::{json, Value};
 
 use super::session::JsonlProcess;
 use super::{
-    catalogue_for_provider, Completion, ModelSpec, Provider, ProviderCommandRequest,
+    catalogue, Completion, EffortPolicy, ModelSpec, Provider, ProviderCommandRequest,
     ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
-    ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
+    ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest, CODEX_KNOWN_MODELS,
 };
 use crate::anthropic::types::Usage;
 use crate::auth::{detect_codex_cli, AuthStatus};
@@ -77,7 +77,12 @@ impl CodexAppServerProvider {
         } else {
             default_model
         };
-        let catalogue = catalogue_for_provider(&id, &default_model, &models, &efforts);
+        let catalogue = catalogue(
+            &default_model,
+            &models,
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(&efforts),
+        );
         Ok(Self {
             id,
             root: root.into(),
@@ -376,11 +381,11 @@ impl Provider for CodexAppServerProvider {
             .read()
             .map(|models| models.clone())
             .unwrap_or_else(|_| {
-                catalogue_for_provider(
-                    &self.id,
+                catalogue(
                     &self.default_model,
                     &self.configured_models,
-                    &self.configured_efforts,
+                    CODEX_KNOWN_MODELS,
+                    EffortPolicy::Standard(&self.configured_efforts),
                 )
             })
     }

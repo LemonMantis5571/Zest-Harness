@@ -32,19 +32,20 @@ use ts_rs::TS;
 use zest_core::{
     can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
     descriptor_from_config, detect_all, detect_claude_code, detect_codex_cli, display_path,
-    env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
-    start_claude_code_login as core_start_claude_code_login,
+    driver_for, env_context, load_custom_system, load_project_docs, new_id, probe,
+    save_custom_system, start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
-    AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, ExternalAgentMode,
-    ExternalWorkspace, HarnessError, Ledger, LoginProcess, PersistPriority, PersistSnapshot,
-    PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderCommandRequest,
-    ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
-    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
-    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
-    StreamEvent, SystemPrompt, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadGitContext,
-    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
-    UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, CredentialPolicy,
+    ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginProcess, PersistPriority,
+    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
+    ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
+    ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
+    PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
+    SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread, ThreadCheckpoint,
+    ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary,
+    ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -659,7 +660,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     };
     let method = configured_provider
         .map(provider_method)
-        .unwrap_or(slot.method);
+        .unwrap_or_else(|| slot.method.to_string());
 
     // Being signed in is not the same as being reachable. A vendor CLI can hold
     // a perfectly good session for a provider this project has no entry for,
@@ -712,7 +713,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         .providers
         .get(id)
         .map(provider_method)
-        .unwrap_or("API key");
+        .unwrap_or_else(|| "API key".to_string());
     let descriptor = config
         .providers
         .get(id)
@@ -750,7 +751,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
             })
             .collect::<Vec<_>>()
             .join(" "),
-        method: method.into(),
+        method,
         status_kind: status_kind.into(),
         status_label: status_label.into(),
         detail,
@@ -772,26 +773,19 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
     }
 }
 
-fn provider_method(config: &ProviderConfig) -> &'static str {
-    match config {
-        ProviderConfig::Anthropic { credential, .. } => {
-            if credential.is_some() {
-                "API key"
-            } else {
-                "Environment key"
-            }
-        }
-        ProviderConfig::ClaudeCode { .. } => "Claude Code subscription",
-        ProviderConfig::CodexCli { .. } => "Codex CLI subscription",
-        ProviderConfig::OpenaiCompatible {
-            credential,
-            api_key_env,
-            ..
-        } => match (credential.is_some(), api_key_env.is_some()) {
-            (true, _) => "API key",
-            (false, true) => "Environment key",
-            (false, false) => "No authentication",
-        },
+/// Where this provider's secret comes from, for the picker row.
+///
+/// Derived from the entry's driver rather than matched on variant internals from
+/// another crate: the kind, its display name, and where its key lives are all
+/// the driver's to state, so a new kind cannot arrive here unlabelled.
+fn provider_method(config: &ProviderConfig) -> String {
+    let driver = driver_for(config);
+    let request = driver.credentials(config);
+    match request.policy {
+        CredentialPolicy::VendorOwned => format!("{} subscription", driver.display_name()),
+        _ if request.account.is_some() => "API key".to_string(),
+        _ if request.env.is_some() => "Environment key".to_string(),
+        _ => "No authentication".to_string(),
     }
 }
 

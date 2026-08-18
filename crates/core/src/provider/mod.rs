@@ -14,6 +14,7 @@ pub mod anthropic;
 pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod codex_app_server;
+pub mod driver;
 pub mod openai_compatible;
 pub mod registry;
 pub mod session;
@@ -29,60 +30,31 @@ use crate::config::ProviderConfig;
 use crate::error::Result;
 
 /// Build a picker/validation catalogue from config without loading credentials.
+///
+/// This used to be a second exhaustive match over [`ProviderConfig`], and it had
+/// drifted from the one in `registry::build`. Both now go through the same
+/// driver, so a picker that offers a model the provider rejects is no longer
+/// expressible.
 pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> ProviderDescriptor {
-    match config {
-        ProviderConfig::Anthropic { model, .. } => {
-            let default_model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string());
-            ProviderDescriptor {
-                id: provider_id.to_string(),
-                default_model: default_model.clone(),
-                models: catalogue_for_provider(provider_id, &default_model, &[], &[]),
-            }
-        }
-        ProviderConfig::ClaudeCode { model, models, .. } => {
-            let default_model = model
-                .clone()
-                .unwrap_or_else(|| crate::config::DEFAULT_CLAUDE_CODE_MODEL.to_string());
-            ProviderDescriptor {
-                id: provider_id.to_string(),
-                default_model: default_model.clone(),
-                models: catalogue_without_efforts(&default_model, models),
-            }
-        }
-        ProviderConfig::CodexCli {
-            model,
-            models,
-            efforts,
-            ..
-        } => ProviderDescriptor {
-            id: provider_id.to_string(),
-            default_model: model.clone(),
-            models: catalogue_for_provider(provider_id, model, models, efforts),
-        },
-        ProviderConfig::OpenaiCompatible { model, models, .. } => ProviderDescriptor {
-            id: provider_id.to_string(),
-            default_model: model.clone(),
-            // The OpenAI-compatible adapter deliberately does not send a
-            // vendor-specific reasoning/effort field yet. Do not advertise a
-            // selector that would look authoritative but cannot affect the
-            // request.
-            models: catalogue_without_efforts(model, models),
-        },
-    }
+    driver::driver_for(config).descriptor(provider_id, config)
 }
 
-/// Fallback catalogue when a picker id is not present in `zest.toml`.
+/// Fallback catalogue when a picker id is *not* present in `zest.toml`.
+///
+/// The one place a provider id legitimately decides anything: there is no
+/// config entry, so there is no kind to ask. Everything else goes through
+/// [`driver::driver_for`].
 pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
-    let default_model = match provider_id {
-        "codex" => "gpt-5.6-sol".to_string(),
-        "claude" | "anthropic" => DEFAULT_MODEL.to_string(),
-        "antigravity" => "gemini-3.1-pro-high".to_string(),
-        _ => DEFAULT_MODEL.to_string(),
+    let (default_model, builtin) = match provider_id {
+        "codex" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
+        "claude" | "anthropic" => (DEFAULT_MODEL.to_string(), &[][..]),
+        "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
+        _ => (DEFAULT_MODEL.to_string(), &[][..]),
     };
     ProviderDescriptor {
         id: provider_id.to_string(),
         default_model: default_model.clone(),
-        models: catalogue_for_provider(provider_id, &default_model, &[], &[]),
+        models: catalogue(&default_model, &[], builtin, EffortPolicy::Standard(&[])),
     }
 }
 
@@ -166,71 +138,63 @@ pub const CODEX_KNOWN_MODELS: &[&str] = &[
     "gpt-5.4-mini",
 ];
 
-/// Build a catalogue from an optional allow-list.
+/// Whether a provider exposes a reasoning-effort selector, and which levels.
 ///
-/// When `models` is empty, only `default_model` is accepted (generic gateways).
-/// Prefer [`catalogue_for_provider`] for known provider ids. When `efforts` is
-/// empty, [`STANDARD_EFFORTS`] is used.
-pub fn catalogue_from_lists(
+/// This replaces a pair of near-identical builders whose only difference was
+/// whether they hard-coded an empty effort list. Naming the policy makes the
+/// asymmetry a decision rather than a choice of function.
+#[derive(Debug, Clone, Copy)]
+pub enum EffortPolicy<'a> {
+    /// The wire protocol carries no effort field, so advertising a selector
+    /// would look authoritative while changing nothing.
+    Unsupported,
+    /// [`STANDARD_EFFORTS`], narrowed by a non-empty per-provider allow-list.
+    Standard(&'a [String]),
+}
+
+impl EffortPolicy<'_> {
+    fn levels(self) -> Vec<String> {
+        match self {
+            Self::Unsupported => Vec::new(),
+            Self::Standard([]) => {
+                STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect()
+            }
+            Self::Standard(allowed) => allowed.to_vec(),
+        }
+    }
+}
+
+/// The one catalogue builder.
+///
+/// `models` is the entry's allow-list. When it is empty the provider's own
+/// `builtin` ids are used, and when *that* is empty too, only `default_model` is
+/// accepted. `default_model` is always present and always first, because a
+/// configured default the catalogue rejects is a startup failure.
+///
+/// `builtin` is passed in rather than looked up. It used to be selected by
+/// matching `provider_id == "codex"`, so a `codex_cli` entry under any other
+/// name silently lost its catalogue, and an unrelated provider *named* `codex`
+/// silently gained one. Capability belongs to the kind, not to the id.
+pub fn catalogue(
     default_model: &str,
     models: &[String],
-    efforts: &[String],
+    builtin: &[&str],
+    efforts: EffortPolicy<'_>,
 ) -> Vec<ModelSpec> {
-    let efforts: Vec<String> = if efforts.is_empty() {
-        STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect()
-    } else {
-        efforts.to_vec()
-    };
-    let mut ids: Vec<String> = if models.is_empty() {
-        vec![default_model.to_string()]
-    } else {
+    let levels = efforts.levels();
+    let mut ids: Vec<String> = if !models.is_empty() {
         models.to_vec()
+    } else if !builtin.is_empty() {
+        builtin.iter().map(|id| (*id).to_string()).collect()
+    } else {
+        vec![default_model.to_string()]
     };
-    if !ids.iter().any(|m| m == default_model) {
+    if !ids.iter().any(|id| id == default_model) {
         ids.insert(0, default_model.to_string());
     }
     ids.into_iter()
-        .map(|id| ModelSpec {
-            ..model_spec(id, efforts.clone())
-        })
+        .map(|id| model_spec(id, levels.clone()))
         .collect()
-}
-
-/// Build a model catalogue for a provider whose transport does not expose a
-/// reasoning-effort control. Empty effort lists mean “no effort selector” to
-/// the desktop while model validation still remains authoritative.
-pub fn catalogue_without_efforts(default_model: &str, models: &[String]) -> Vec<ModelSpec> {
-    let mut ids: Vec<String> = if models.is_empty() {
-        vec![default_model.to_string()]
-    } else {
-        models.to_vec()
-    };
-    if !ids.iter().any(|m| m == default_model) {
-        ids.insert(0, default_model.to_string());
-    }
-    ids.into_iter()
-        .map(|id| ModelSpec {
-            ..model_spec(id, Vec::new())
-        })
-        .collect()
-}
-
-/// Like [`catalogue_from_lists`], but provider `codex` gets [`CODEX_KNOWN_MODELS`]
-/// when the config omit `models` — so sticky/UI picks (Sol/Terra/Luna) validate.
-pub fn catalogue_for_provider(
-    provider_id: &str,
-    default_model: &str,
-    models: &[String],
-    efforts: &[String],
-) -> Vec<ModelSpec> {
-    if models.is_empty() && provider_id == "codex" {
-        let builtin: Vec<String> = CODEX_KNOWN_MODELS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        return catalogue_from_lists(default_model, &builtin, efforts);
-    }
-    catalogue_from_lists(default_model, models, efforts)
 }
 
 fn validate_against(
@@ -667,7 +631,7 @@ pub trait Provider: Send + Sync {
     ///
     /// Default: only [`Self::default_model`] with [`STANDARD_EFFORTS`].
     fn models(&self) -> Vec<ModelSpec> {
-        catalogue_from_lists(self.default_model(), &[], &[])
+        catalogue(self.default_model(), &[], &[], EffortPolicy::Standard(&[]))
     }
 
     /// Picker / validation view of this provider.
@@ -742,7 +706,7 @@ mod tests {
 
     #[test]
     fn empty_models_list_accepts_only_default() {
-        let cat = catalogue_from_lists("gpt-5.6-sol", &[], &[]);
+        let cat = catalogue("gpt-5.6-sol", &[], &[], EffortPolicy::Standard(&[]));
         assert_eq!(cat.len(), 1);
         assert_eq!(cat[0].id, "gpt-5.6-sol");
         assert!(cat[0].efforts.contains(&"high".into()));
@@ -751,7 +715,12 @@ mod tests {
     #[test]
     fn models_list_includes_default_if_missing() {
         let models = vec!["gpt-5.4".into()];
-        let cat = catalogue_from_lists("gpt-5.6-sol", &models, &["low".into()]);
+        let cat = catalogue(
+            "gpt-5.6-sol",
+            &models,
+            &[],
+            EffortPolicy::Standard(&["low".to_string()]),
+        );
         assert_eq!(cat[0].id, "gpt-5.6-sol");
         assert_eq!(cat[1].id, "gpt-5.4");
         assert_eq!(cat[0].efforts, vec!["low".to_string()]);
@@ -759,7 +728,12 @@ mod tests {
 
     #[test]
     fn codex_builtin_catalogue_includes_luna() {
-        let cat = catalogue_for_provider("codex", "gpt-5.6-sol", &[], &[]);
+        let cat = catalogue(
+            "gpt-5.6-sol",
+            &[],
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(&[]),
+        );
         assert!(cat.iter().any(|m| m.id == "gpt-5.6-luna"));
         assert!(cat.iter().any(|m| m.id == "gpt-5.6-terra"));
         assert!(cat.iter().any(|m| m.id == "gpt-5.6-sol"));
@@ -767,19 +741,58 @@ mod tests {
 
     #[test]
     fn other_gateway_empty_models_stays_default_only() {
-        let cat = catalogue_for_provider("other", "gpt-5.6-sol", &[], &[]);
+        let cat = catalogue("gpt-5.6-sol", &[], &[], EffortPolicy::Standard(&[]));
         assert_eq!(cat.len(), 1);
         assert_eq!(cat[0].id, "gpt-5.6-sol");
     }
 
     #[test]
     fn openai_compatible_catalogue_does_not_advertise_effort_controls() {
-        let cat = catalogue_without_efforts(
+        let cat = catalogue(
             "deepseek-v4-flash",
             &["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
+            &[],
+            EffortPolicy::Unsupported,
         );
         assert_eq!(cat.len(), 2);
         assert!(cat.iter().all(|model| model.efforts.is_empty()));
+    }
+
+    /// The picker and the live provider must agree about what is selectable.
+    ///
+    /// Two independent matches over the same config had drifted:
+    /// `descriptor_from_config` built the catalogue from the configured model
+    /// alone, while `AnthropicProvider::native(..).with_default_model(..)`
+    /// *prepended* it to a catalogue that already held `DEFAULT_MODEL`. A user
+    /// with `model = "claude-haiku-5"` saw one model in the picker and could
+    /// select two at runtime.
+    #[test]
+    fn the_picker_catalogue_matches_the_live_provider_catalogue() {
+        std::env::set_var("ZEST_TEST_DRIFT_KEY", "present");
+        let config = crate::config::Config::parse(
+            r#"
+[providers.house]
+kind = "anthropic"
+api_key_env = "ZEST_TEST_DRIFT_KEY"
+model = "claude-haiku-5"
+"#,
+        )
+        .expect("valid");
+        let entry = &config.providers["house"];
+
+        let (registry, skipped) = crate::provider::registry::ProviderRegistry::from_config(&config);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let live = registry.get("house").expect("built").descriptor();
+        let picker = descriptor_from_config("house", entry);
+        std::env::remove_var("ZEST_TEST_DRIFT_KEY");
+
+        assert_eq!(picker.default_model, live.default_model);
+        let picker_ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+        let live_ids: Vec<&str> = live.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            picker_ids, live_ids,
+            "the picker must offer exactly what the provider accepts"
+        );
     }
 
     #[test]

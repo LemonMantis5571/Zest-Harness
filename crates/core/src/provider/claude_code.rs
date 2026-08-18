@@ -15,7 +15,7 @@ use super::claude_control::{
     control_response, decide, render_diff, summarize, surface_for, Surface, ToolPermissionRequest,
 };
 use super::{
-    catalogue_without_efforts, Completion, ModelSpec, Provider, StreamEvent, SystemPrompt,
+    catalogue, Completion, EffortPolicy, ModelSpec, Provider, StreamEvent, SystemPrompt,
     TurnRequest,
 };
 use crate::anthropic::types::Usage;
@@ -87,7 +87,7 @@ impl ClaudeCodeProvider {
             root: root.into(),
             command,
             default_model: default_model.clone(),
-            models: catalogue_without_efforts(&default_model, &models),
+            models: catalogue(&default_model, &models, &[], EffortPolicy::Unsupported),
             allow_mcp,
             permission_mode,
             timeout_secs,

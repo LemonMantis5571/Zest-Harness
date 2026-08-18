@@ -8,11 +8,11 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::{catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
+use super::{Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
 use crate::anthropic::client::AnthropicClient;
 use crate::anthropic::types::{
     cached_system_blocks, ephemeral_cache_control, long_cache_control, Message, OutputConfig,
-    Request, Thinking, ToolDef, DEFAULT_MODEL,
+    Request, Thinking, ToolDef,
 };
 use crate::auth::AuthStatus;
 use crate::error::Result;
@@ -27,51 +27,30 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    /// Anthropic's own API.
-    pub fn native(api_key: String) -> Result<Self> {
+    /// Anthropic's own API, with the catalogue its driver already built.
+    ///
+    /// This replaces `native()` plus `with_id()` plus `with_default_model()`,
+    /// which were each used exactly once and did wasted work: `native` built a
+    /// catalogue for `DEFAULT_MODEL`, then `with_default_model` *prepended* the
+    /// configured model to it rather than replacing it — so the live provider
+    /// accepted a model the picker never offered.
+    ///
+    /// `id` names the account being spent, which is what configuration and the
+    /// usage ledger key on — never the kind or the vendor.
+    pub fn new(
+        id: String,
+        api_key: String,
+        default_model: String,
+        models: Vec<ModelSpec>,
+    ) -> Result<Self> {
         let has_key = !api_key.trim().is_empty();
-        let default_model = DEFAULT_MODEL.to_string();
         Ok(Self {
-            id: "anthropic".to_string(),
+            id,
             client: AnthropicClient::new(api_key)?,
-            models: catalogue_from_lists(&default_model, &[], &[]),
+            models,
             default_model,
             has_key,
         })
-    }
-
-    /// Name this provider after the account it spends, not the transport.
-    /// Configuration and the usage ledger key on this.
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
-        self
-    }
-
-    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
-        self.default_model = model.into();
-        if !self.models.iter().any(|m| m.id == self.default_model) {
-            let efforts = self
-                .models
-                .first()
-                .map(|m| m.efforts.clone())
-                .unwrap_or_else(|| {
-                    super::STANDARD_EFFORTS
-                        .iter()
-                        .map(|s| (*s).to_string())
-                        .collect()
-                });
-            self.models.insert(
-                0,
-                ModelSpec {
-                    id: self.default_model.clone(),
-                    efforts,
-                    context_window: super::context_window_for_model(&self.default_model),
-                    supports_tools: true,
-                    supports_vision: false,
-                },
-            );
-        }
-        self
     }
 }
 
@@ -333,7 +312,13 @@ mod tests {
 
     #[test]
     fn native_provider_reports_cache_support() {
-        let provider = AnthropicProvider::native("k".into()).unwrap();
+        let provider = AnthropicProvider::new(
+            "anthropic".into(),
+            "k".into(),
+            crate::anthropic::types::DEFAULT_MODEL.to_string(),
+            Vec::new(),
+        )
+        .unwrap();
         assert!(provider.supports_prompt_cache());
     }
 

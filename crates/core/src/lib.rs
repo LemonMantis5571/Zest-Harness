@@ -90,14 +90,17 @@ pub use prompt::{
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::claude_code::ClaudeCodeProvider;
 pub use provider::codex_app_server::CodexAppServerProvider;
+pub use provider::driver::{
+    driver_for, CredentialPolicy, CredentialRequest, DriverContext, DriverKind, ProviderDriver,
+    BUILT_IN_DRIVERS,
+};
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
-    catalogue_for_provider, catalogue_from_lists, catalogue_without_efforts,
-    context_window_for_model, descriptor_for_picker_id, descriptor_from_config, normalize_effort,
-    probe, Completion, ModelSpec, Provider, ProviderCommandRequest, ProviderDescriptor,
-    ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
-    ProviderSessionRef, RateLimitSnapshot, ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt,
-    TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    catalogue, context_window_for_model, descriptor_for_picker_id, descriptor_from_config,
+    normalize_effort, probe, Completion, EffortPolicy, ModelSpec, Provider, ProviderCommandRequest,
+    ProviderDescriptor, ProviderFileChangeRequest, ProviderInteractionHost,
+    ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot, ResumeHandle, ResumeSupport,
+    StreamEvent, SystemPrompt, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,

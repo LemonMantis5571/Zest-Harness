@@ -9,11 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::anthropic::AnthropicProvider;
-use super::claude_code::ClaudeCodeProvider;
-use super::codex_app_server::CodexAppServerProvider;
-use super::openai_compatible::OpenAiCompatibleProvider;
-use super::{catalogue_without_efforts, Provider};
+use super::{driver, Provider};
 use crate::config::{Config, ProviderConfig};
 
 /// A provider that could not be built, and why — phrased for a user to act on.
@@ -91,115 +87,21 @@ impl ProviderRegistry {
     }
 }
 
+/// Build one provider from its config entry.
+///
+/// Every kind-specific decision — where the key lives, whether it is required,
+/// what catalogue to offer, what to construct — belongs to the entry's driver.
+/// This function's whole job is to resolve the credential the driver asks for
+/// and enforce the policy it declared, so no driver can read a secret itself
+/// and none can forget to check the credential manager before the environment.
 fn build(
     id: &str,
     entry: &ProviderConfig,
     root: &Path,
 ) -> std::result::Result<Arc<dyn Provider>, String> {
-    match entry {
-        ProviderConfig::Anthropic {
-            api_key_env,
-            model,
-            credential,
-        } => {
-            let key = credential
-                .as_deref()
-                .map(crate::credentials::get)
-                .transpose()
-                .map_err(|e| format!("could not read credential: {e}"))?
-                .flatten()
-                .or_else(|| read_key(api_key_env))
-                .ok_or_else(|| {
-                    credential.as_deref().map_or_else(
-                        || format!("{api_key_env} is not set in the environment"),
-                        |account| format!("API key for credential `{account}` is not set"),
-                    )
-                })?;
-
-            let mut provider = AnthropicProvider::native(key)
-                .map_err(|e| format!("could not build client: {e}"))?;
-            if let Some(model) = model {
-                provider = provider.with_default_model(model.clone());
-            }
-            Ok(Arc::new(provider.with_id(id.to_string())))
-        }
-
-        ProviderConfig::ClaudeCode {
-            command,
-            model,
-            models,
-            allow_mcp,
-            permission_mode,
-            timeout_secs,
-        } => {
-            let provider = ClaudeCodeProvider::new(
-                id.to_string(),
-                root,
-                command.clone(),
-                model.clone(),
-                models.clone(),
-                *allow_mcp,
-                *permission_mode,
-                *timeout_secs,
-            )
-            .map_err(|error| format!("could not build Claude Code provider: {error}"))?;
-            Ok(Arc::new(provider))
-        }
-
-        ProviderConfig::CodexCli {
-            command,
-            model,
-            models,
-            efforts,
-            allow_mcp,
-            timeout_secs,
-        } => {
-            let provider = CodexAppServerProvider::new(
-                id.to_string(),
-                root,
-                command.clone(),
-                model.clone(),
-                models.clone(),
-                efforts.clone(),
-                *allow_mcp,
-                *timeout_secs,
-            )
-            .map_err(|error| format!("could not build Codex CLI provider: {error}"))?;
-            Ok(Arc::new(provider))
-        }
-
-        ProviderConfig::OpenaiCompatible {
-            base_url,
-            model,
-            models,
-            credential,
-            api_key_env,
-            ..
-        } => {
-            let key = credential
-                .as_deref()
-                .map(crate::credentials::get)
-                .transpose()
-                .map_err(|e| format!("could not read credential: {e}"))?
-                .flatten()
-                .or_else(|| api_key_env.as_deref().and_then(read_key))
-                .unwrap_or_default();
-            let mut provider =
-                OpenAiCompatibleProvider::new(id.to_string(), key, base_url.clone(), model.clone())
-                    .map_err(|e| format!("could not build client: {e}"))?
-                    .with_models(catalogue_without_efforts(model, models));
-            if credential.is_some() || api_key_env.is_some() {
-                provider = provider.with_key_requirement();
-            } else {
-                provider = provider.without_key_requirement();
-            }
-            Ok(Arc::new(provider))
-        }
-    }
-}
-
-fn read_key(var: &str) -> Option<String> {
-    std::env::var(var).ok().filter(|v| !v.trim().is_empty())
+    let driver = driver::driver_for(entry);
+    let key = driver::resolve_required(driver.credentials(entry))?;
+    driver.create(driver::DriverContext { id, root, key }, entry)
 }
 
 #[cfg(test)]
