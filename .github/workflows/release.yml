@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            os: windows-latest
+          - platform: Linux
+            os: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev cmake \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev libxdo-dev \
+            curl wget file tar patchelf libfuse2t64
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Setup Node 24.16.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Check release version
+        run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Run release verification
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: ./scripts/release-verify.ps1
+
+  package-windows:
+    name: Package Windows installers
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Setup Node 24.16.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check release version
+        run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Build installers
+        run: npm run desktop:build
+
+      - name: Stage installers and checksums
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "release-artifacts"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $files = Get-ChildItem -Path "target/release/bundle" -Recurse -File |
+            Where-Object { $_.Extension.ToLowerInvariant() -in @(".exe", ".msi") }
+          if (-not $files) { throw "No Windows installers were produced." }
+          foreach ($file in $files) { Copy-Item -LiteralPath $file.FullName -Destination $stage }
+          node scripts/release-checksums.mjs --root "target/release/bundle" --out (Join-Path $stage "SHA256SUMS-windows.txt")
+          Copy-Item LICENSE (Join-Path $stage "LICENSE.txt")
+          Copy-Item THIRD_PARTY_NOTICES.md $stage
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package-linux:
+    name: Package Linux installers
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev cmake \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev libxdo-dev \
+            curl wget file tar patchelf libfuse2t64
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Setup Node 24.16.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check release version
+        run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Build installers
+        run: npm run desktop:build
+
+      - name: Stage installers and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$PWD/release-artifacts"
+          mkdir -p "$stage"
+          mapfile -t files < <(find target/release/bundle -type f \( -iname '*.AppImage' -o -iname '*.deb' -o -iname '*.rpm' \))
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Linux installers were produced." >&2
+            exit 1
+          fi
+          cp "${files[@]}" "$stage/"
+          node scripts/release-checksums.mjs --root target/release/bundle --out "$stage/SHA256SUMS-linux.txt"
+
+      - name: Upload Linux assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installers
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: [package-windows, package-linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-installers"
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes="docs/releases/${tag#v}.md"
+          test -f "$notes"
+          mapfile -t assets < <(find release-assets -type f -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No downloaded release assets." >&2
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "Zest $tag" --notes-file "$notes" --prerelease \
+              --verify-tag "${assets[@]}"
+          fi

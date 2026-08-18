@@ -1,0 +1,45 @@
+[package]
+name = "zest-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop front-end for the Zest coding harness."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zest-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "zest_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+zest-core = { path = "../core" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+zest-plugin-api = { path = "../plugin-api" }
+dirs = { workspace = true }
+tokio = { workspace = true }
+ts-rs = { version = "11", default-features = true, optional = true }
+pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "main" }
+rfd = "0.15"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+# Enable with `cargo test -p zest-desktop --features export-bindings` to regenerate TS DTOs.
+export-bindings = ["dep:ts-rs"]

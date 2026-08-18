@@ -1,0 +1,14 @@
+{
+  "name": "zest-desktop",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev --config tauri.dev.conf.json",
+    "dev:official": "tauri dev --config tauri.dev.conf.json",
+    "build": "tauri build",
+    "ui:build": "npm run build -w ui",
+    "ui:dev": "npm run dev -w ui"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0"
+  }
+}

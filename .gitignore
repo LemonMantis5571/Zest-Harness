@@ -28,13 +28,9 @@ zest.toml
 # Desktop runtime state is machine-local and must never enter the repository.
 crates/desktop/.zest/
 
-# --- Gateway binaries (fetch with scripts/fetch-gateway.ps1; see README) ---
+# --- Local tool downloads ---
 /tools/*
 !/tools/.gitkeep
-# Bundled sidecars are ~64MB each and are reproducible from a tagged release.
-crates/desktop/binaries/
-# ...but the licence text they ship with is small and must not go missing.
-!crates/desktop/licenses/
 
 # --- Node (npm workspaces at repo root) ---
 node_modules/
