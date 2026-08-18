@@ -682,6 +682,13 @@ async fn read_headless_with_session(
                         on_event(event);
                     }
                 }
+                // Provider-owned parent streams use stdin as a request stream.
+                // Once the terminal result is consumed, no more requests can
+                // belong to this turn; release stdin so the CLI can observe
+                // EOF and exit. Delegated workers use the non-streaming path.
+                if value.get("type").and_then(Value::as_str) == Some("result") {
+                    process.close_stdin();
+                }
             }
             Err(_) => {
                 run.malformed_lines += 1;
@@ -3649,6 +3656,35 @@ mod tests {
             ExternalAgentEvent::ToolCall { id, status, .. }
                 if id == "tool-1" && status == "completed"
         )));
+    }
+
+    #[tokio::test]
+    async fn closes_stdin_after_a_terminal_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = fixture_config("wait_for_eof", false);
+        config.timeout_secs = 5;
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+
+        let run = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_headless_command_streaming(
+                temp.path(),
+                &config,
+                "terminal task",
+                None,
+                &mut sink,
+                None,
+            ),
+        )
+        .await
+        .expect("terminal result should close the child stdin")
+        .unwrap();
+
+        assert_eq!(run.text(), "finished");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ExternalAgentEvent::Text(text) if text == "finished")));
     }
 
     #[tokio::test]
