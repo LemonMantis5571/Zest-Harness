@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use zest_core::{
-    detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, GatewayLease,
-    GatewayState, Ledger, Prices, ProviderConfig, RuntimeBuilder, StreamEvent, Target, Thread,
-    ThreadStore, ToolRisk, DEFAULT_MODEL, DEFAULT_SYSTEM,
+    detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger, Prices,
+    ProviderConfig, RuntimeBuilder, StreamEvent, Target, Thread, ThreadStore, ToolRisk,
+    DEFAULT_MODEL, DEFAULT_SYSTEM,
 };
 
 #[tokio::main]
@@ -27,9 +27,6 @@ async fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         // Terminal form of the launch picker.
         Some("auth") => {
-            // Auth status may inspect an installed gateway, but printing it
-            // must not provision config or start a process.
-            zest_core::adopt_bundled_gateway();
             print_auth();
             return Ok(());
         }
@@ -80,8 +77,6 @@ async fn main() -> anyhow::Result<()> {
         Some(config) => config,
         None => Config::find(&root)?,
     };
-    let _gateway_lease = prepare_gateway(&config, None).await;
-
     for issue in config.lint() {
         eprintln!("\x1b[33mwarning:\x1b[0m {issue}");
     }
@@ -142,33 +137,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Prepare only the selected gateway-backed provider and retain ownership of a
-/// child Zest starts until the caller's command/turn exits.
-async fn prepare_gateway(config: &Config, explicit_provider: Option<&str>) -> Option<GatewayLease> {
-    let provider_id = explicit_provider
-        .map(str::to_owned)
-        .or_else(|| config.default_target().map(|target| target.provider))?;
-    let base_url = config
-        .providers
-        .get(&provider_id)
-        .and_then(ProviderConfig::gateway_base_url)?
-        .to_string();
-
-    let start = zest_core::ensure_gateway_running(&base_url).await;
-    match start.state {
-        GatewayState::Listening if start.lease.is_owned() => Some(start.lease),
-        GatewayState::Listening | GatewayState::NotLocal => None,
-        GatewayState::NotInstalled => {
-            eprintln!("warning: no local gateway is installed for `{provider_id}`");
-            None
-        }
-        GatewayState::Unavailable(reason) => {
-            eprintln!("warning: could not initialize the local gateway: {reason}");
-            None
-        }
-    }
 }
 
 fn print_help() {
@@ -285,7 +253,6 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
         Some(config) => config,
         None => Config::find(&root)?,
     };
-    let _gateway_lease = prepare_gateway(&config, provider.as_deref()).await;
     for issue in config.lint() {
         eprintln!("warning: {issue}");
     }
@@ -480,7 +447,6 @@ async fn run_doctor_live() -> anyhow::Result<()> {
         Some(config) => config,
         None => Config::find(&root)?,
     };
-    let _gateway_lease = prepare_gateway(&config, None).await;
     for issue in config.lint() {
         eprintln!("\x1b[33mwarning:\x1b[0m {issue}");
     }

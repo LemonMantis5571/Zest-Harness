@@ -32,20 +32,19 @@ use ts_rs::TS;
 use zest_core::{
     can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
     descriptor_from_config, detect_all, detect_claude_code, detect_codex_cli, display_path,
-    ensure_gateway_running, env_context, load_custom_system, load_project_docs, new_id, probe,
-    save_custom_system, start_claude_code_login as core_start_claude_code_login,
+    env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
+    start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
     AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, ExternalAgentMode,
-    ExternalWorkspace, GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess,
-    PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
-    ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
-    ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
-    PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
-    SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread, ThreadCheckpoint,
-    ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary,
-    ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    ExternalWorkspace, HarnessError, Ledger, LoginProcess, PersistPriority, PersistSnapshot,
+    PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderCommandRequest,
+    ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
+    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
+    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
+    StreamEvent, SystemPrompt, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadGitContext,
+    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
+    UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -328,9 +327,6 @@ struct AppState {
     sessions: SessionController,
     browser: Arc<BrowserHost>,
     login: Mutex<Option<LoginProcess>>,
-    /// A gateway child started by this desktop process. An empty lease means
-    /// the selected gateway was already running or was not local.
-    gateway: Mutex<Option<GatewayLease>>,
     /// One coalescing transcript worker per open project. A background turn
     /// must keep its writer after the user navigates to another root.
     persist: Mutex<HashMap<PathBuf, PersistWorker>>,
@@ -360,16 +356,6 @@ struct AppState {
     /// active chat or window changes; this handle only owns live cancellation
     /// and bounded worker lanes.
     delegations: Arc<DelegationCoordinator>,
-}
-
-impl AppState {
-    fn shutdown_gateway(&self) {
-        if let Ok(mut lease) = self.gateway.lock() {
-            if let Some(mut lease) = lease.take() {
-                lease.shutdown();
-            }
-        }
-    }
 }
 
 #[derive(Default)]
@@ -1316,12 +1302,6 @@ fn remember_workspace_config(state: &AppState, config: &Config) {
 #[tauri::command]
 fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     let config = load_workspace_config(&state);
-    // Provider status may inspect the gateway's credential store, but listing
-    // providers must not provision a config or start a process. Adoption only
-    // discovers a bundled sidecar for configured gateway rows.
-    if config.providers.values().any(ProviderConfig::is_gateway) {
-        zest_core::adopt_bundled_gateway();
-    }
     let mut rows: Vec<ProviderView> = detect_all()
         .iter()
         .filter(|s| PICKER_IDS.contains(&s.id))
@@ -2137,9 +2117,9 @@ fn now_secs() -> u64 {
 
 /// Send one minimal turn to prove the provider can actually serve.
 ///
-/// A credentials file on disk is not a working session — the gateway can hold
-/// an account it has put in cooldown, and that never shows up locally. Called
-/// after a sign-in and again before opening a gateway chat.
+/// A credentials file on disk is not a working session — a provider can hold an
+/// account it has put in cooldown, and that never shows up locally. Called after
+/// a sign-in and from the background check behind an open chat.
 #[tauri::command]
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let root = resolve_workspace_root(&state)?;
@@ -2152,17 +2132,15 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
 
     // This is now the only place the "Connect again" wording is produced, because
     // opening a chat no longer probes. It stays tied to `needs_reconnect` so an
-    // unreachable gateway is never reported as a credential problem — telling
-    // someone to re-run OAuth cannot start a process that is not running.
-    prove_provider_serves(&state, &config, &id)
-        .await
-        .map_err(|failure| {
-            if failure.needs_reconnect() && desktop_can_start_login(&id) {
-                format!("{label} needs to be reconnected. Try again.")
-            } else {
-                failure.user_message_for_provider(&id)
-            }
-        })
+    // unreachable endpoint is never reported as a credential problem — telling
+    // someone to re-run OAuth cannot fix a server that is not answering.
+    probe_provider(&config, &id).await.map_err(|failure| {
+        if failure.needs_reconnect() && desktop_can_start_login(&id) {
+            format!("{label} needs to be reconnected. Try again.")
+        } else {
+            failure.user_message_for_provider(&id)
+        }
+    })
 }
 
 /// Why a provider could not be proven able to serve.
@@ -2171,21 +2149,14 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
 /// problem from everything else. Deciding that by matching on a message string
 /// is how "the gateway is not running" came to be reported as a bad session.
 enum ProbeFailure {
-    /// Configuration, workspace, or gateway startup — no turn was attempted, so
-    /// this says nothing about the account.
+    /// Configuration or workspace — no turn was attempted, so this says nothing
+    /// about the account.
     Setup(String),
     /// A real turn was attempted and failed.
     Turn(HarnessError),
 }
 
 impl ProbeFailure {
-    fn user_message(&self) -> String {
-        match self {
-            Self::Setup(message) => message.clone(),
-            Self::Turn(err) => format_turn_error(err),
-        }
-    }
-
     fn user_message_for_provider(&self, provider_id: &str) -> String {
         match self {
             Self::Setup(message) => message.clone(),
@@ -2199,58 +2170,9 @@ impl ProbeFailure {
     }
 }
 
-/// Prove the provider can actually serve: gateway up **and** account working.
-///
-/// Both halves, for an explicit Connect or verify. Opening a chat deliberately
-/// runs only the first half — see [`ensure_gateway_ready`].
-async fn prove_provider_serves(
-    state: &AppState,
-    config: &Config,
-    id: &str,
-) -> Result<(), ProbeFailure> {
-    ensure_gateway_ready(&state.gateway, config, id).await?;
-    probe_provider(config, id).await
-}
-
-/// Make the local gateway available, without spending a turn to find out whether
-/// the account behind it works.
-///
-/// Cheap and local — a TCP check, and a process spawn when nothing answers. This
-/// is the half that has to happen before a chat opens, because every turn needs
-/// the port open; proving the *account* is a network round trip that costs tokens
-/// and belongs behind the UI rather than in front of it.
-async fn ensure_gateway_ready(
-    gateway: &Mutex<Option<GatewayLease>>,
-    config: &Config,
-    id: &str,
-) -> Result<(), ProbeFailure> {
-    // Start the local gateway rather than probing a port nothing is listening on.
-    // Its being down is the ordinary state after a reboot, not a user error, and
-    // Zest launches this same binary to sign in — so it can launch it to serve.
-    if let Some(base_url) = local_gateway_url(config, id) {
-        let start = ensure_gateway_running(&base_url).await;
-        if matches!(start.state, GatewayState::Unavailable(_)) {
-            return Err(ProbeFailure::Setup(
-                "Zest could not start this provider. Try again.".into(),
-            ));
-        }
-        if start.state == GatewayState::Listening && start.lease.is_owned() {
-            let mut owned = gateway
-                .lock()
-                .map_err(|_| ProbeFailure::Setup("Gateway state is unavailable.".into()))?;
-            // A lease may remain after its child exits unexpectedly. Replace
-            // it with the freshly verified child; dropping the old lease only
-            // targets the old retained handle.
-            let old = owned.replace(start.lease);
-            drop(old);
-        }
-    }
-    Ok(())
-}
-
 /// Send one minimal turn to find out whether the account can serve.
 ///
-/// A credentials file on disk is not a working session: a gateway can hold an
+/// A credentials file on disk is not a working session: a provider can hold an
 /// account it has put in cooldown, and that never shows up locally.
 async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
     zest_core::load_env();
@@ -2274,20 +2196,6 @@ async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
     probe(provider.as_ref(), &model)
         .await
         .map_err(ProbeFailure::Turn)
-}
-
-/// The `base_url` of a gateway-kind provider, for gateway supervision.
-///
-/// `None` for a native provider: it has no local process behind it, so there is
-/// nothing to start and nothing to blame for being down.
-fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
-    match config.providers.get(id)? {
-        ProviderConfig::Gateway { base_url, .. } => Some(base_url.clone()),
-        ProviderConfig::Anthropic { .. }
-        | ProviderConfig::ClaudeCode { .. }
-        | ProviderConfig::CodexCli { .. }
-        | ProviderConfig::OpenaiCompatible { .. } => None,
-    }
 }
 
 #[tauri::command]
@@ -3282,18 +3190,6 @@ async fn start_session_inner(
         return Err(format!(
             "{provider_label} is not ready — configure it first"
         ));
-    }
-
-    // Only the local half. Opening a chat waits for the gateway's port, which is
-    // cheap, and *not* for a live turn against the account, which is a network
-    // round trip that costs tokens — that used to make every launch sit on
-    // "Opening your session…" until the model answered. The caller verifies the
-    // account in the background and surfaces a banner if it turns out to be
-    // unusable, so a cooled-down session is reported rather than waited for.
-    if local_gateway_url(&config, &id).is_some() {
-        ensure_gateway_ready(&state.gateway, &config, &id)
-            .await
-            .map_err(|failure| failure.user_message())?;
     }
 
     let prefs = ProjectSessionState::load(&root, &id).get(&id);
@@ -6276,8 +6172,8 @@ fn normalize_effort(effort: &str) -> String {
     zest_core::normalize_effort(effort)
 }
 
-/// User-facing turn errors. Connection refused to the local gateway is the
-/// usual alpha failure mode and should not look like a missing system prompt.
+/// User-facing turn errors. An unreachable endpoint is the usual alpha failure
+/// mode and should not look like a missing system prompt.
 fn format_turn_error(err: &HarnessError) -> String {
     if err.is_unreachable() {
         return "Zest could not reach the provider. Try reconnecting, then send your message again.".into();
@@ -6337,15 +6233,15 @@ mod tests {
         }
     }
 
-    /// The bug this guards: a gateway that was not running produced a Setup
+    /// The bug this guards: a provider that could not be loaded produced a Setup
     /// failure, and the picker told the user to Connect again — an OAuth flow
-    /// that cannot start a process.
+    /// that cannot fix a configuration mistake.
     #[test]
     fn a_setup_failure_never_asks_for_a_new_sign_in() {
         let failure = ProbeFailure::Setup("Zest could not start this provider. Try again.".into());
         assert!(!failure.needs_reconnect());
         assert_eq!(
-            failure.user_message(),
+            failure.user_message_for_provider("codex"),
             "Zest could not start this provider. Try again.",
             "a setup message is shown as written"
         );
@@ -6361,7 +6257,7 @@ mod tests {
                     .into(),
         }));
         assert!(failure.needs_reconnect());
-        let message = failure.user_message();
+        let message = failure.user_message_for_provider("codex");
         assert_eq!(
             message,
             "This provider needs you to sign in again. Reconnect, then send your message again."
@@ -6389,27 +6285,6 @@ mod tests {
         );
     }
 
-    /// Opening a chat must not be gated on a credential check.
-    ///
-    /// `ensure_gateway_ready` can only ever fail with `Setup` — it does not build
-    /// a registry or send a turn — so a cooled-down account cannot keep the chat
-    /// from rendering. That is what moves the network round trip off the launch
-    /// path; verification runs behind the UI and reports itself in a banner.
-    #[test]
-    fn opening_a_chat_cannot_fail_for_a_credential_reason() {
-        // The only failure `ensure_gateway_ready` constructs.
-        let blocked = ProbeFailure::Setup("Zest could not start this provider. Try again.".into());
-        assert!(!blocked.needs_reconnect());
-
-        // A native provider has no local gateway, so there is nothing to wait for
-        // at all — the readiness half is a no-op and start is pure setup.
-        let config = Config::parse(
-            "[providers.anthropic]\nkind = \"anthropic\"\napi_key_env = \"ANTHROPIC_API_KEY\"\n",
-        )
-        .unwrap();
-        assert_eq!(local_gateway_url(&config, "anthropic"), None);
-    }
-
     #[test]
     fn an_overloaded_gateway_is_not_a_sign_in_problem() {
         let failure = ProbeFailure::Turn(exhausted(HarnessError::Api {
@@ -6417,32 +6292,6 @@ mod tests {
             body: r#"{"error":{"message":"overloaded_error"}}"#.into(),
         }));
         assert!(!failure.needs_reconnect());
-    }
-
-    /// A native provider has no local process behind it, so there is nothing to
-    /// start and nothing to blame for being down.
-    #[test]
-    fn only_gateway_providers_are_supervised() {
-        let config = Config::parse(
-            r#"
-[providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-model = "gpt-5.6-sol"
-
-[providers.anthropic]
-kind = "anthropic"
-api_key_env = "ANTHROPIC_API_KEY"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            local_gateway_url(&config, "codex").as_deref(),
-            Some("http://127.0.0.1:8317")
-        );
-        assert_eq!(local_gateway_url(&config, "anthropic"), None);
-        assert_eq!(local_gateway_url(&config, "missing"), None);
     }
 
     #[test]
@@ -6514,7 +6363,6 @@ pub fn run() {
             sessions: SessionController::new(),
             browser: Arc::new(BrowserHost::new()),
             login: Mutex::new(None),
-            gateway: Mutex::new(None),
             persist: Mutex::new(HashMap::new()),
             // Validate the launch directory first so a project opened from a
             // terminal cannot be silently replaced by a stale remembered
@@ -6623,11 +6471,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Zest desktop")
-        .run(|app_handle, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                app_handle.state::<AppState>().shutdown_gateway();
-            }
-        });
+        .run(|_app_handle, _event| {});
 }
 
 /// The bug these guard: a packaged install starts with its own program folder
