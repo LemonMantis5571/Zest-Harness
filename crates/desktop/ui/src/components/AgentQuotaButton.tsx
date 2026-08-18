@@ -3,6 +3,7 @@ import { GaugeIcon, RefreshCwIcon } from "lucide-react";
 
 import { TopbarPanel } from "@/components/TopbarPanel";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { getBackend } from "@/lib/backend";
 import { createProviderQuotaLoader } from "@/lib/quotaCache";
 import { gaugeTone, quotaGauges, type QuotaGauge } from "@/lib/quotaGauges";
@@ -78,6 +79,7 @@ export function AgentQuotaButton({ providers, refreshKey }: Props) {
       quota: liveQuota?.providers.find((provider) => provider.providerId === id),
     }));
   }, [liveQuota, providers, snapshot]);
+  const waitingForQuota = quotaLoading && !liveQuota;
 
   return (
     <TopbarPanel
@@ -122,7 +124,9 @@ export function AgentQuotaButton({ providers, refreshKey }: Props) {
           </p>
         ) : null}
 
-        {rows.length ? (
+        {waitingForQuota ? (
+          <QuotaSkeleton count={rows.length} />
+        ) : rows.length ? (
           <div className="flex flex-col gap-1.5">
             {rows.map((row) => (
               <QuotaRow
@@ -145,6 +149,34 @@ export function AgentQuotaButton({ providers, refreshKey }: Props) {
         </p>
       </div>
     </TopbarPanel>
+  );
+}
+
+function QuotaSkeleton({ count }: { count: number }) {
+  const visibleRows = Math.max(1, Math.min(count, 3));
+
+  return (
+    <div
+      className="flex flex-col gap-1.5"
+      role="status"
+      aria-label="Checking provider limits"
+      aria-busy="true"
+    >
+      {Array.from({ length: visibleRows }, (_, index) => (
+        <div
+          key={index}
+          className="rounded-md border border-border/70 bg-secondary/30 px-2.5 py-2"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="h-2.5 w-10" />
+          </div>
+          <Skeleton className="mt-1.5 h-1.5 w-full rounded-full" />
+          <Skeleton className="mt-1.5 h-2.5 w-3/5" />
+          <Skeleton className="mt-1 h-2.5 w-2/5" />
+        </div>
+      ))}
+    </div>
   );
 }
 
