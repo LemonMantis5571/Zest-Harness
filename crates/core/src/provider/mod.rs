@@ -156,9 +156,7 @@ impl EffortPolicy<'_> {
     fn levels(self) -> Vec<String> {
         match self {
             Self::Unsupported => Vec::new(),
-            Self::Standard([]) => {
-                STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect()
-            }
+            Self::Standard([]) => STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect(),
             Self::Standard(allowed) => allowed.to_vec(),
         }
     }

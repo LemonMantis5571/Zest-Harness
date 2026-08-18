@@ -1,14 +1,18 @@
 //! One driver per provider kind, and one place that maps a kind to its driver.
 //!
-//! The goal is **exactly one exhaustive match over [`ProviderConfig`]** in the
-//! whole crate: [`driver_for`]. Before this, construction lived in
-//! `registry::build` and the picker catalogue lived in
-//! `provider::descriptor_from_config`, and the two had already drifted — an
+//! Construction and capability dispatch through **one** match, [`driver_for`].
+//! Before this, construction lived in `registry::build` and the picker catalogue
+//! lived in `provider::descriptor_from_config`, and the two had already drifted — an
 //! `anthropic` entry with `model = "claude-haiku-5"` offered one model in the
 //! picker and accepted two at runtime, because the live path *prepended* the
 //! configured model to a catalogue that already held `DEFAULT_MODEL`. Two
 //! independent matches over the same variants disagreeing is the argument for
 //! this module; each driver now answers both questions from one helper.
+//!
+//! `quota.rs` still matches on [`ProviderConfig`] and that is deliberate. It
+//! produces a value nothing else has to agree with, and being exhaustive it
+//! already fails to compile when a kind is added — so it carries none of the
+//! drift risk that a *pair* of matches does.
 //!
 //! Deliberately **not** here: a `DriverCapabilities` struct. `owns_agent_loop`,
 //! `supports_prompt_cache`, and `resume_support` are already on [`Provider`], and

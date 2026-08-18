@@ -14,8 +14,21 @@ a replacement for the commit history.
 - The `kind = "gateway"` provider entry, and the `ZEST_BASE_URL` /
   `ZEST_GATEWAY_KEY` environment override that built one.
 
+### Fixed
+
+- The model picker could offer a different set of models than the provider
+  actually accepted. An `anthropic` entry with `model = "claude-haiku-5"` showed
+  one model in the picker and accepted two at runtime.
+- A Codex turn that failed now reports why. "You've hit your usage limit… try
+  again at <date>" used to be replaced by "The provider could not complete the
+  request. Try again."
+
 ### Changed
 
+- Provider construction moved behind a driver per `kind`
+  ([ADR 0005](docs/adr/0005-provider-driver-spi.md)). One visible effect: a
+  `codex_cli` provider under any id now gets the built-in Codex model list,
+  where previously only an entry literally named `codex` did.
 - An existing `kind = "gateway"` config still starts. On load, `codex` becomes
   `codex_cli` (keeping its model and effort lists) and `claude` becomes
   `claude_code` (its model list is dropped, because gateway model ids are not
