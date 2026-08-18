@@ -3,8 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use zest_core::{
-    detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger, Prices,
-    RuntimeBuilder, StreamEvent, Thread, ThreadStore, ToolRisk, DEFAULT_SYSTEM,
+    detect_all, ApprovalDecision, ApprovalPreview, ApprovalRequest, Approver, AuthStatus, Config,
+    Ledger, Prices, ProviderCommandRequest, ProviderFileChangeRequest, ProviderInteractionHost,
+    ProviderQuestionRequest, RuntimeBuilder, StreamEvent, Thread, ThreadStore, ToolRisk,
+    DEFAULT_SYSTEM,
 };
 
 #[tokio::main]
@@ -84,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let mut agent = runtime.agent;
+    agent.provider_interaction = Some(Arc::new(PromptApprover));
 
     println!(
         "zest — {} · {} · root {}",
@@ -810,7 +813,7 @@ fn compact(n: u64) -> String {
     }
 }
 
-/// Terminal approval gate: print what is about to happen and read y/n.
+/// Terminal approval gate shared by Zest-owned tools and provider-owned tools.
 ///
 /// Anything that is not an explicit yes is a no, including EOF — a piped or
 /// detached stdin must not be able to approve a write or a shell command by
@@ -820,36 +823,143 @@ struct PromptApprover;
 #[async_trait::async_trait]
 impl Approver for PromptApprover {
     async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
-        let ApprovalRequest {
-            tool_name,
-            risk,
-            preview,
-            ..
-        } = request;
-
-        println!("\n\x1b[33m? {tool_name}\x1b[0m {}", preview.summary);
-        if !preview.diff.trim().is_empty() {
-            // Diffs can be long; the preview is already bounded by the tool.
-            println!("\x1b[90m{}\x1b[0m", preview.diff.trim_end());
-        }
-        print!("  allow this {}? [y/N] ", risk_word(*risk));
-        let _ = std::io::stdout().flush();
-
-        let mut line = String::new();
-        let read = tokio::task::spawn_blocking(move || {
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf).map(|_| buf)
-        })
-        .await;
-        if let Ok(Ok(buf)) = read {
-            line = buf;
-        }
-
-        match line.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => ApprovalDecision::AllowOnce,
-            _ => ApprovalDecision::Deny,
-        }
+        prompt_approval(request).await
     }
+}
+
+#[async_trait::async_trait]
+impl ProviderInteractionHost for PromptApprover {
+    async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
+        let approval = ApprovalRequest {
+            approval_id: request.approval_id.clone(),
+            tool_name: "provider_command".into(),
+            tool_call_id: request.approval_id,
+            risk: ToolRisk::Exec,
+            preview: ApprovalPreview {
+                path: request.cwd.unwrap_or_default(),
+                summary: request.command,
+                diff: request
+                    .reason
+                    .map(|reason| format!("Reason: {reason}"))
+                    .unwrap_or_default(),
+            },
+        };
+        matches!(
+            prompt_approval(&approval).await,
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+        )
+    }
+
+    async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
+        let approval = ApprovalRequest {
+            approval_id: request.approval_id.clone(),
+            tool_name: "provider_file_change".into(),
+            tool_call_id: request.approval_id,
+            risk: ToolRisk::Write,
+            preview: ApprovalPreview {
+                path: request.path.unwrap_or_default(),
+                summary: request
+                    .reason
+                    .unwrap_or_else(|| "Provider requested a file change".into()),
+                diff: request.diff.unwrap_or_default(),
+            },
+        };
+        matches!(
+            prompt_approval(&approval).await,
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+        )
+    }
+
+    async fn answer_question(&self, request: ProviderQuestionRequest) -> Option<Vec<String>> {
+        if !request.choices.is_empty() {
+            println!("  choices:");
+            for (index, choice) in request.choices.iter().enumerate() {
+                println!("    {}. {choice}", index + 1);
+            }
+        }
+        print!("  answer{}: ", if request.multiple { "s" } else { "" });
+        let _ = std::io::stdout().flush();
+        let line = read_prompt_line().await;
+        parse_question_answers(&line, &request)
+    }
+}
+
+async fn prompt_approval(request: &ApprovalRequest) -> ApprovalDecision {
+    let ApprovalRequest {
+        tool_name,
+        risk,
+        preview,
+        ..
+    } = request;
+
+    println!("\n\x1b[33m? {tool_name}\x1b[0m {}", preview.summary);
+    if !preview.path.trim().is_empty() {
+        println!("\x1b[90m{}\x1b[0m", preview.path);
+    }
+    if !preview.diff.trim().is_empty() {
+        // Diffs can be long; the preview is already bounded by the tool.
+        println!("\x1b[90m{}\x1b[0m", preview.diff.trim_end());
+    }
+    print!("  allow this {}? [y/N] ", risk_word(*risk));
+    let _ = std::io::stdout().flush();
+
+    match read_prompt_line()
+        .await
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "y" | "yes" => ApprovalDecision::AllowOnce,
+        _ => ApprovalDecision::Deny,
+    }
+}
+
+async fn read_prompt_line() -> String {
+    tokio::task::spawn_blocking(|| {
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf).map(|_| buf)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default()
+}
+
+fn parse_question_answers(input: &str, request: &ProviderQuestionRequest) -> Option<Vec<String>> {
+    let raw_answers: Vec<_> = if request.multiple {
+        input
+            .split(',')
+            .map(str::trim)
+            .filter(|answer| !answer.is_empty())
+            .collect()
+    } else {
+        let answer = input.trim();
+        if answer.is_empty() {
+            Vec::new()
+        } else {
+            vec![answer]
+        }
+    };
+    if raw_answers.is_empty() || (!request.multiple && raw_answers.len() != 1) {
+        return None;
+    }
+
+    raw_answers
+        .into_iter()
+        .map(|answer| {
+            if request.choices.is_empty() {
+                return Some(answer.to_string());
+            }
+            if let Ok(number) = answer.parse::<usize>() {
+                return request.choices.get(number.checked_sub(1)?).cloned();
+            }
+            request
+                .choices
+                .iter()
+                .find(|choice| choice.eq_ignore_ascii_case(answer))
+                .cloned()
+        })
+        .collect()
 }
 
 fn risk_word(risk: ToolRisk) -> &'static str {
@@ -858,6 +968,44 @@ fn risk_word(risk: ToolRisk) -> &'static str {
         ToolRisk::Write => "write",
         ToolRisk::Sensitive => "sensitive read",
         ToolRisk::Read => "call",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn question(choices: Vec<&str>, multiple: bool) -> ProviderQuestionRequest {
+        ProviderQuestionRequest {
+            id: "q1".into(),
+            prompt: "Pick one".into(),
+            choices: choices.into_iter().map(str::to_string).collect(),
+            multiple,
+        }
+    }
+
+    #[test]
+    fn provider_question_accepts_a_numbered_choice() {
+        let request = question(vec!["Rust", "Go"], false);
+        assert_eq!(
+            parse_question_answers("2", &request),
+            Some(vec!["Go".to_string()])
+        );
+    }
+
+    #[test]
+    fn provider_question_accepts_multiple_named_choices() {
+        let request = question(vec!["Rust", "Go", "Python"], true);
+        assert_eq!(
+            parse_question_answers("rust, 3", &request),
+            Some(vec!["Rust".to_string(), "Python".to_string()])
+        );
+    }
+
+    #[test]
+    fn provider_question_rejects_an_unknown_choice() {
+        let request = question(vec!["Rust", "Go"], false);
+        assert_eq!(parse_question_answers("Ruby", &request), None);
     }
 }
 
