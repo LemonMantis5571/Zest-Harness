@@ -73,7 +73,6 @@ Linux or macOS). Linux also needs the desktop libraries listed in
 
 ```powershell
 npm ci
-.\scripts\fetch-gateway.ps1
 npm run dev
 ```
 
@@ -81,7 +80,6 @@ npm run dev
 
 ```bash
 npm ci
-pwsh ./scripts/fetch-gateway.ps1
 npm run dev
 ```
 
