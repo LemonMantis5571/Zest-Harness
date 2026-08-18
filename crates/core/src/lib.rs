@@ -8,11 +8,13 @@ pub mod agent;
 mod alpha_prove;
 pub mod anthropic;
 pub mod auth;
+pub mod bounded;
 pub mod cancel;
 pub mod chat_persistence;
 pub mod commands;
 pub mod config;
 pub mod config_edit;
+pub mod context_budget;
 pub mod credentials;
 pub mod delegation;
 pub mod error;
@@ -25,6 +27,7 @@ pub mod pricing;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
+pub mod prune;
 pub mod quota;
 pub mod rates;
 pub mod reading_diff;
@@ -36,7 +39,7 @@ pub mod transcripts;
 pub mod usage;
 pub mod workspace_changes;
 
-pub use agent::Agent;
+pub use agent::{Agent, CompactionOutcome};
 pub use anthropic::client::AnthropicClient;
 pub use anthropic::types::{
     tool_result, tool_uses, Message, OutputConfig, Request, Thinking, ToolDef, ToolUse, Usage,
