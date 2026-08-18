@@ -376,7 +376,7 @@ pub struct Target {
 
 /// Load `.env` from the project (searching upward), then `~/.zest/.env`.
 ///
-/// The second one is the point: a key like `ZEST_GATEWAY_KEY` belongs to the
+/// The second one is the point: a key like `ANTHROPIC_API_KEY` belongs to the
 /// machine for the same reason the provider list does. With only the upward
 /// search, opening a folder outside the Zest checkout finds no `.env` at all
 /// and a correctly-configured provider fails for want of a credential.

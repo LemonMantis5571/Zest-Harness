@@ -1320,6 +1320,9 @@ pub(crate) fn scrub_secret_environment(command: &mut Command, parent_secret_envs
 /// the worker process.
 pub(crate) fn scrub_zest_secret_environment(command: &mut Command, parent_secret_envs: &[String]) {
     const PARENT_SECRET_ENV: &[&str] = &[
+        // Zest no longer reads this one, but a `.env` written for the removed
+        // gateway may still hold a live token. Scrubbing a name that means
+        // nothing here costs nothing; leaking a stale secret does not.
         "ZEST_GATEWAY_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
