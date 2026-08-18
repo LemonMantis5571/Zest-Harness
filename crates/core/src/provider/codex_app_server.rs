@@ -29,6 +29,8 @@ use crate::tools::external_agent::{
 };
 
 const APP_SERVER_ARGS: &[&str] = &["app-server", "--listen", "stdio://"];
+const THREAD_SANDBOX_MODE: &str = "workspace-write";
+const TURN_SANDBOX_POLICY_TYPE: &str = "workspaceWrite";
 const CLIENT_NAME: &str = "zest";
 const CLIENT_TITLE: &str = "Zest";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -204,14 +206,13 @@ impl CodexAppServerProvider {
         } else {
             "never"
         };
-        let thread_params = json!({
-            "model": &req.model,
-            "cwd": self.root.to_string_lossy(),
-            "sandbox": "workspaceWrite",
-            "approvalPolicy": approval_policy,
-            "baseInstructions": req.system.as_ref().map(SystemPrompt::text),
-            "config": if self.allow_mcp { json!({}) } else { json!({"mcp_servers": {}}) },
-        });
+        let thread_params = thread_start_params(
+            &self.root,
+            &req.model,
+            approval_policy,
+            req.system.as_ref(),
+            self.allow_mcp,
+        );
         let mut resumed = false;
         let mut resume_failed = false;
         let requested_thread = match req.provider_session.as_ref() {
@@ -289,7 +290,7 @@ impl CodexAppServerProvider {
                 "approvalPolicy": approval_policy,
                 "cwd": self.root.to_string_lossy(),
                 "sandboxPolicy": {
-                    "type": "workspaceWrite",
+                    "type": TURN_SANDBOX_POLICY_TYPE,
                     "writableRoots": [self.root.to_string_lossy()],
                     "networkAccess": false,
                 },
@@ -649,6 +650,26 @@ fn add_thread_id(mut params: Value, thread_id: &str) -> Value {
         object.insert("threadId".into(), Value::String(thread_id.to_string()));
     }
     params
+}
+
+fn thread_start_params(
+    root: &std::path::Path,
+    model: &str,
+    approval_policy: &str,
+    system: Option<&SystemPrompt>,
+    allow_mcp: bool,
+) -> Value {
+    json!({
+        "model": model,
+        "cwd": root.to_string_lossy(),
+        // `thread/start` uses the CLI-facing sandbox enum. The nested
+        // `turn/start.sandboxPolicy.type` uses the app-server enum
+        // (`workspaceWrite`) and is intentionally different.
+        "sandbox": THREAD_SANDBOX_MODE,
+        "approvalPolicy": approval_policy,
+        "baseInstructions": system.map(SystemPrompt::text),
+        "config": if allow_mcp { json!({}) } else { json!({"mcp_servers": {}}) },
+    })
 }
 
 fn parse_thread_id(value: &Value) -> Option<String> {
@@ -1049,6 +1070,23 @@ mod tests {
             codex_error_message(&json!({ "message": "flat reason" })).as_deref(),
             Some("flat reason")
         );
+    }
+
+    #[test]
+    fn thread_start_uses_the_cli_sandbox_enum() {
+        // `thread/start.sandbox` is not the same enum as
+        // `turn/start.sandboxPolicy.type`. The former uses kebab-case; sending
+        // the latter here makes Codex reject every first turn before it can
+        // reach the model.
+        let params = thread_start_params(
+            std::path::Path::new("C:/workspace"),
+            "gpt-5.6-terra",
+            "on-request",
+            None,
+            false,
+        );
+        assert_eq!(params["sandbox"], "workspace-write");
+        assert_ne!(params["sandbox"], TURN_SANDBOX_POLICY_TYPE);
     }
 
     #[test]
