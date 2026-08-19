@@ -1211,20 +1211,6 @@ export function ChatScreen({
           </div>
         ) : null}
 
-        {!session.isFreeChat &&
-        hasBranchChanges &&
-        !diffTarget &&
-        dismissedChangeId !== workspaceChange?.changeId ? (
-          <BranchChangesBar
-            projectLabel={folderLabel}
-            branch={gitContext?.branch ?? branch}
-            workspaceChange={workspaceChange}
-            gitContext={gitContext}
-            onOpen={() => void openBranchChanges()}
-            onDismiss={dismissBranchBar}
-          />
-        ) : null}
-
         <div className="relative min-h-0 flex-1">
           <CheckpointRail
             checkpoints={session.checkpoints}
@@ -1396,7 +1382,40 @@ export function ChatScreen({
             onRemoveAttachment={onRemoveAttachment}
             onPasteImages={onPasteImages}
             compacting={compacting}
-            aboveComposer={null}
+            aboveComposer={
+              /*
+               * The branch strip rides above the composer rather than under the
+               * top bar.
+               *
+               * Under the top bar it was a full-width row wedged between the
+               * header and the transcript, so it pushed the conversation down
+               * every time it appeared and sat nowhere near anything the user
+               * was doing. Above the composer it is attached to the thing being
+               * acted on, and it overlays rather than reflows.
+               *
+               * `!sending` is the other half of the fix. The change id moves on
+               * every write, so a strip dismissed mid-turn came straight back
+               * — several times per turn while an agent edited files. Holding
+               * it until the turn settles means it can reappear at most once
+               * per turn, and it reappears against a diff that has stopped
+               * moving, which is the only point at which reviewing it is
+               * worthwhile.
+               */
+              !session.isFreeChat &&
+              hasBranchChanges &&
+              !diffTarget &&
+              !sending &&
+              dismissedChangeId !== workspaceChange?.changeId ? (
+                <BranchChangesBar
+                  projectLabel={folderLabel}
+                  branch={gitContext?.branch ?? branch}
+                  workspaceChange={workspaceChange}
+                  gitContext={gitContext}
+                  onOpen={() => void openBranchChanges()}
+                  onDismiss={dismissBranchBar}
+                />
+              ) : null
+            }
           />
         </div>
       </div>
@@ -1463,7 +1482,6 @@ export function ChatScreen({
         compacting={compacting}
         review={workspaceReview}
         onClose={closeWorkbench}
-        onFork={onForkThread}
         onVerify={onVerifyWorkspace}
         onRewind={onRewindThread}
         onJump={jumpToMessage}

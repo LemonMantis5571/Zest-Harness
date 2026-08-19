@@ -16,13 +16,19 @@ type Props = {
 };
 
 /**
- * A strip announcing what the branch has accumulated, sitting under the top bar.
+ * A strip announcing what the branch has accumulated, riding above the composer.
  *
  * It replaces the icon button that used to live in the top bar: an icon with a
  * bare count said "something changed" but not what, and it competed for space
  * with the quota, palette, workbench and settings controls. Given a row of its
  * own it can name the project and branch the counts belong to and still leave
  * the top bar for controls.
+ *
+ * That row started under the top bar, which made it a full-width band that
+ * pushed the transcript down whenever the branch moved. Sitting in the
+ * composer's overlay instead, it shares the composer's width and floats over
+ * the conversation, so appearing costs no layout — and it is next to where the
+ * user is already looking rather than at the far end of the window.
  *
  * Rendered only when the branch actually has changes, so a clean tree costs
  * nothing — there is no zero state to look at.
@@ -42,11 +48,14 @@ export function BranchChangesBar({
   const pullRequest = gitContext?.pullRequest;
 
   return (
-    <div className="px-4 pt-2.5">
+    <div className="mb-2">
       <div
         className={cn(
-          "group/branchbar flex items-center gap-2 rounded-lg border border-border/70 bg-card/80 py-1.5 pl-2.5 pr-1.5",
-          "animate-in fade-in slide-in-from-top-1 duration-200"
+          "group/branchbar flex items-center gap-2 rounded-xl border border-border/80 py-1.5 pl-2.5 pr-1.5",
+          // Matches the queued-messages block directly below it: both float in
+          // the composer's overlay, so both need the same translucent card.
+          "bg-[color-mix(in_srgb,var(--card)_92%,transparent)] shadow-lg backdrop-blur-xl",
+          "animate-in fade-in slide-in-from-bottom-1 duration-200"
         )}
       >
         <button
