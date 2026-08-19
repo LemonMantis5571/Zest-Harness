@@ -111,9 +111,17 @@ impl SpillStore {
         // this is public and takes a bare string, so it checks rather than
         // trusts. One ordinary path component, nothing else: that rejects `..`,
         // an absolute path, a drive prefix, and anything with a separator.
+        //
+        // Both separators are spelled out because `Path::components` only splits
+        // on the ones the *host* recognises. On Unix a backslash is an ordinary
+        // filename byte, so `a\b.txt` arrives as a single Normal component and
+        // would be accepted there while being refused on Windows. The guard is
+        // about what the name means as a path rather than what this build's
+        // separator happens to be, so it has to be the same rule on both.
         let mut parts = Path::new(name).components();
-        let single_segment =
-            matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+        let single_segment = !name.contains(['/', '\\'])
+            && matches!(parts.next(), Some(std::path::Component::Normal(_)))
+            && parts.next().is_none();
         if !single_segment {
             eprintln!("warning: refusing to store tool output under `{name}`");
             return None;

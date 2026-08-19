@@ -48,7 +48,7 @@ CLIs remain responsible for their own sessions.
 
 ### Download the beta
 
-Open the [Zest v0.1.0 beta release](https://github.com/LemonMantis5571/Zest/releases/tag/v0.1.0).
+Open the [latest Zest beta release](https://github.com/LemonMantis5571/Zest/releases/latest).
 
 - **Windows x64** — install the `.msi` or `.exe` package.
 - **Linux x64** — install the `.deb` or `.rpm` package, or run the AppImage.
