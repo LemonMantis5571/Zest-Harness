@@ -83,6 +83,7 @@ import type {
   WorkspaceChange,
   WorkspaceReview,
 } from "@/lib/types";
+import { applyFont, getSavedFontId } from "@/lib/fonts";
 import { cn } from "@/lib/utils";
 
 type Screen =
@@ -381,6 +382,10 @@ export default function App() {
   const [approvalModeState, setApprovalModeState] =
     useState<ApprovalMode>("auto");
   const [optionsUpdating, setOptionsUpdating] = useState(false);
+
+  useEffect(() => {
+    applyFont(getSavedFontId());
+  }, []);
   /**
    * The mode Plan mode interrupted, restored by Build.
    *

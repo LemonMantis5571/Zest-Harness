@@ -1,0 +1,24 @@
+/* ABC Arizona Variable / Webfont Fallback Definitions */
+@font-face {
+  font-family: "ABC Arizona";
+  src:
+    local("ABC Arizona Variable"),
+    local("ABC Arizona"),
+    local("ABC Arizona Sans"),
+    local("Arizona Sans"),
+    local("Arizona");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "ABC Arizona Serif";
+  src:
+    local("ABC Arizona Serif Variable"),
+    local("ABC Arizona Serif"),
+    local("Arizona Serif");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}

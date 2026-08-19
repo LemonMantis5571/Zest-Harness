@@ -1,0 +1,218 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./shadcn-tailwind.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/plus-jakarta-sans";
+@import "@fontsource-variable/jetbrains-mono";
+@import "@fontsource-variable/fira-code";
+@import "./fonts/arizona.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  --font-sans: var(--app-font-family, "Geist Variable", "Inter", "SF Pro Text", "Segoe UI", system-ui, sans-serif);
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "SF Mono", ui-monospace, Consolas, monospace;
+  --font-heading: var(--font-sans);
+}
+
+/* Linear DESIGN.md — always-dark Zest canvas (not pure black) */
+:root {
+  --radius: 0.5rem;
+  --background: #0c0c0e;
+  --foreground: #f7f8f8;
+  --card: #141516;
+  --card-foreground: #f7f8f8;
+  --popover: #16171a;
+  --popover-foreground: #f7f8f8;
+  --primary: #5e6ad2;
+  --primary-foreground: #ffffff;
+  --secondary: #1a1b1d;
+  --secondary-foreground: #d0d6e0;
+  --muted: #1a1b1d;
+  --muted-foreground: #8a8f98;
+  --accent: #1c1d20;
+  --accent-foreground: #f7f8f8;
+  --destructive: #e5484d;
+  --border: #2a2c31;
+  --input: #2a2c31;
+  --ring: #5e6ad2;
+  --chart-1: #5e6ad2;
+  --chart-2: #828fff;
+  --chart-3: #8a8f98;
+  --chart-4: #34343a;
+  --chart-5: #18191a;
+  --sidebar: #121314;
+  --sidebar-foreground: #f7f8f8;
+  --sidebar-primary: #5e6ad2;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1a1b1d;
+  --sidebar-accent-foreground: #f7f8f8;
+  --sidebar-border: #2a2c31;
+  --sidebar-ring: #5e6ad2;
+  --primary-hover: #828fff;
+  --chat-max: 45rem;
+  --chat-canvas: #0f1012;
+  --chat-header: color-mix(in srgb, #121314 92%, transparent);
+  --user-bubble: #1c1e24;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full overflow-hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased font-sans;
+    font-size: 14px;
+    line-height: 1.5;
+    letter-spacing: -0.05px;
+    margin: 0;
+    /* WebView was inheriting the indigo accent as a thick blue caret. */
+    caret-color: var(--foreground);
+  }
+
+  input,
+  textarea,
+  [contenteditable="true"] {
+    caret-color: var(--foreground);
+  }
+
+  /* Clickable controls should look clickable (WebView defaults are inconsistent). */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]),
+  [role="option"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="switch"]:not([aria-disabled="true"]),
+  [role="checkbox"]:not([aria-disabled="true"]),
+  summary,
+  a[href],
+  label[for],
+  select:not(:disabled),
+  input[type="button"]:not(:disabled),
+  input[type="submit"]:not(:disabled),
+  input[type="reset"]:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  input[type="file"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled,
+  input:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+}
+
+@keyframes zest-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+/*
+ * Placeholder block for loading layouts.
+ *
+ * Separate from `.shimmer-text`, which clips its gradient to glyphs and so
+ * cannot stand in for a block. Deliberately low contrast: a placeholder that
+ * draws the eye competes with the content about to replace it.
+ */
+@keyframes zest-skeleton {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.zest-skeleton {
+  background: color-mix(in srgb, var(--foreground) 7%, transparent);
+  animation: zest-skeleton 1.6s ease-in-out infinite;
+}
+
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--foreground) 40%,
+    var(--muted-foreground) 80%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: zest-shimmer 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * Everything, not a hand-maintained list. The previous block named only the
+   * two pulse classes, which left `.shimmer-text`, `.zest-skeleton`, and every
+   * Tailwind `animate-in` / `slide-in-from-*` utility still moving — and those
+   * are most of the motion in the app.
+   *
+   * Near-zero rather than `none` so animations still fire their `end` events;
+   * code that waits for one would otherwise hang.
+   */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+}
