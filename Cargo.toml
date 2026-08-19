@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/cli",
+    "crates/desktop",
+    "crates/plugin-api",
+    "crates/plugins/now-playing",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "A local-first coding workspace with approvals, diffs, and optional model delegation."
+
+[workspace.lints.rust]
+linker_messages = "allow"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+blake3 = "1"
+dirs = "6"
+futures-util = "0.3"
+globset = "0.4"
+ignore = "0.4"
+keyring = "3"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "webpki-roots", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util", "sync", "time", "process"] }
+toml = "1"
