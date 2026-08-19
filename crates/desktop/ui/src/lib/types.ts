@@ -192,22 +192,7 @@ export type ProjectChats = {
   /** `null` marks the user-local free-chat bucket shown under RECENT. */
   path: string | null;
   active: boolean;
-  spaceId: string;
   threads: ThreadSummary[];
-};
-
-export type SpaceView = {
-  id: string;
-  name: string;
-  emoji?: string | null;
-  isDefault: boolean;
-  projectCount: number;
-};
-
-export type SpacesSnapshot = {
-  activeSpaceId: string;
-  spaces: SpaceView[];
-  lastWorkspacePath?: string | null;
 };
 
 export type PreparedAttachment = {

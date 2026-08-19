@@ -23,7 +23,6 @@ import type {
   DelegationJob,
   GitContext,
   SessionInfo,
-  SpacesSnapshot,
   ThreadSummary,
   WorkspaceChange,
 } from "./types";
@@ -56,39 +55,7 @@ function notAvailable(op: string): never {
   throw new Error(`fixture backend: ${op} is not available`);
 }
 
-const DEFAULT_FIXTURE_SPACE_ID = "space:default";
-const MAX_FIXTURE_SPACE_NAME_CHARS = 60;
-const MAX_FIXTURE_EMOJI_CHARS = 16;
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
-
-function takeFixtureChars(value: string, max: number) {
-  return [...value].slice(0, max).join("");
-}
-
-function normalizeFixtureSpaceName(value: string) {
-  const name = takeFixtureChars(value.trim(), MAX_FIXTURE_SPACE_NAME_CHARS);
-  if (!name) throw new Error("Space name cannot be empty.");
-  return name;
-}
-
-function normalizeFixtureEmoji(value?: string | null) {
-  const emoji = takeFixtureChars(value?.trim() || "", MAX_FIXTURE_EMOJI_CHARS);
-  return emoji || null;
-}
-
-function ensureFixtureUniqueSpaceName(
-  spaces: SpacesSnapshot["spaces"],
-  name: string,
-  spaceId?: string
-) {
-  if (
-    spaces.some(
-      (space) => space.id !== spaceId && space.name.toLowerCase() === name.toLowerCase()
-    )
-  ) {
-    throw new Error(`A Space named "${name}" already exists.`);
-  }
-}
 
 export function createFixtureBackend(): DesktopBackend {
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
@@ -101,30 +68,6 @@ export function createFixtureBackend(): DesktopBackend {
     ["fixture-local", "Local model chat"],
     ["fixture-free", "Free chat"],
   ]);
-  const fixtureSpaces: SpacesSnapshot = {
-    activeSpaceId: "space:default",
-    spaces: [
-      {
-        id: "space:default",
-        name: "Default",
-        emoji: null,
-        isDefault: true,
-        projectCount: 1,
-      },
-    ],
-    lastWorkspacePath: workspace,
-  };
-  let fixtureProjectSpaceId = DEFAULT_FIXTURE_SPACE_ID;
-  const fixtureLastWorkspaceBySpaceId: Record<string, string> = {
-    [DEFAULT_FIXTURE_SPACE_ID]: workspace,
-  };
-  function syncFixtureSpaceMetadata() {
-    for (const space of fixtureSpaces.spaces) {
-      space.projectCount = space.id === fixtureProjectSpaceId ? 1 : 0;
-    }
-    fixtureSpaces.lastWorkspacePath =
-      fixtureLastWorkspaceBySpaceId[fixtureSpaces.activeSpaceId] || null;
-  }
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
@@ -729,94 +672,23 @@ export function createFixtureBackend(): DesktopBackend {
       ];
       return threads;
     },
-    async listSpaces() {
-      return structuredClone(fixtureSpaces);
-    },
-    async setActiveSpace(spaceId, currentWorkspacePath) {
-      if (!fixtureSpaces.spaces.some((space) => space.id === spaceId)) {
-        throw new Error("fixture: unknown Space");
-      }
-      if (currentWorkspacePath && currentWorkspacePath !== workspace) {
-        throw new Error("fixture: unknown workspace");
-      }
-      const previousSpaceId = fixtureSpaces.activeSpaceId;
-      if (currentWorkspacePath && fixtureProjectSpaceId === previousSpaceId) {
-        fixtureLastWorkspaceBySpaceId[previousSpaceId] = currentWorkspacePath;
-      }
-      fixtureSpaces.activeSpaceId = spaceId;
-      syncFixtureSpaceMetadata();
-      return structuredClone(fixtureSpaces);
-    },
-    async createSpace(name, emoji) {
-      const normalizedName = normalizeFixtureSpaceName(name);
-      ensureFixtureUniqueSpaceName(fixtureSpaces.spaces, normalizedName);
-      fixtureSpaces.spaces.push({
-        id: `space:${crypto.randomUUID()}`,
-        name: normalizedName,
-        emoji: normalizeFixtureEmoji(emoji),
-        isDefault: false,
-        projectCount: 0,
-      });
-      syncFixtureSpaceMetadata();
-      return structuredClone(fixtureSpaces);
-    },
-    async updateSpace(spaceId, name, emoji) {
-      const space = fixtureSpaces.spaces.find((item) => item.id === spaceId);
-      if (!space) throw new Error("fixture: unknown Space");
-      const normalizedName = normalizeFixtureSpaceName(name);
-      ensureFixtureUniqueSpaceName(fixtureSpaces.spaces, normalizedName, spaceId);
-      space.name = normalizedName;
-      space.emoji = normalizeFixtureEmoji(emoji);
-      syncFixtureSpaceMetadata();
-      return structuredClone(fixtureSpaces);
-    },
-    async deleteSpace(spaceId) {
-      const space = fixtureSpaces.spaces.find((item) => item.id === spaceId);
-      if (!space || space.isDefault) throw new Error("fixture: Space cannot be deleted");
-      fixtureSpaces.spaces = fixtureSpaces.spaces.filter((item) => item.id !== spaceId);
-      delete fixtureLastWorkspaceBySpaceId[spaceId];
-      if (fixtureProjectSpaceId === spaceId) fixtureProjectSpaceId = DEFAULT_FIXTURE_SPACE_ID;
-      if (fixtureSpaces.activeSpaceId === spaceId) {
-        fixtureSpaces.activeSpaceId = DEFAULT_FIXTURE_SPACE_ID;
-      }
-      syncFixtureSpaceMetadata();
-      return structuredClone(fixtureSpaces);
-    },
-    async moveProjectToSpace(projectPath, spaceId) {
-      if (!fixtureSpaces.spaces.some((space) => space.id === spaceId)) {
-        throw new Error("fixture: unknown Space");
-      }
-      if (projectPath !== workspace) throw new Error("fixture: unknown workspace");
-      for (const [id, path] of Object.entries(fixtureLastWorkspaceBySpaceId)) {
-        if (path === projectPath) delete fixtureLastWorkspaceBySpaceId[id];
-      }
-      fixtureProjectSpaceId = spaceId;
-      if (fixtureSpaces.activeSpaceId === spaceId) {
-        fixtureLastWorkspaceBySpaceId[spaceId] = projectPath;
-      }
-      syncFixtureSpaceMetadata();
-      return structuredClone(fixtureSpaces);
-    },
     async forgetWorkspace(projectPath) {
       if (projectPath !== workspace) throw new Error("fixture: unknown workspace");
       throw new Error("Switch to another project before removing the active workspace.");
     },
     async listChatProjects() {
       const threads = await this.listThreads();
-      if (fixtureProjectSpaceId !== fixtureSpaces.activeSpaceId) return [];
       return [
         {
           name: workspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
           path: workspace,
           active: !session.isFreeChat,
-          spaceId: fixtureSpaces.activeSpaceId,
           threads: session.isFreeChat ? [] : threads,
         },
         {
           name: "Free chats",
           path: null,
           active: session.isFreeChat,
-          spaceId: fixtureSpaces.activeSpaceId,
           threads: session.isFreeChat
             ? threads
             : [
@@ -839,10 +711,6 @@ export function createFixtureBackend(): DesktopBackend {
       if (targetRoot !== null) {
         workspace = targetRoot;
       }
-      if (!openingFreeChat && fixtureProjectSpaceId === fixtureSpaces.activeSpaceId) {
-        fixtureLastWorkspaceBySpaceId[fixtureSpaces.activeSpaceId] = workspace;
-      }
-      syncFixtureSpaceMetadata();
       if (options.newThread) fixturePinned = false;
       session = {
         ...session,

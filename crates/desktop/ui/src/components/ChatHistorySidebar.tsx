@@ -2,8 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleAlertIcon,
   Clock3Icon,
-  CheckIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   ChevronsLeftIcon,
   ChevronsRightIcon,
@@ -12,10 +10,8 @@ import {
   GitBranchIcon,
   GitForkIcon,
   GitPullRequestIcon,
-  Layers3Icon,
   LoaderCircleIcon,
   MoreHorizontalIcon,
-  PencilIcon,
   PinIcon,
   PlusIcon,
   ShieldAlertIcon,
@@ -29,7 +25,6 @@ import {
 import { BrandMark } from "@/components/BrandMark";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import { SpaceEditorDialog } from "@/components/SpaceEditorDialog";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -45,7 +40,7 @@ import {
   type ThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
-import type { ProjectChats, SpaceView, SpacesSnapshot, ThreadSummary } from "@/lib/types";
+import type { ProjectChats, ThreadSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -288,16 +283,10 @@ export function ChatHistorySidebar({
   const renameSavingRef = useRef(false);
   const renameCancelledRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
-  const [spacesSnapshot, setSpacesSnapshot] = useState<SpacesSnapshot | null>(null);
-  const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
   const [projectMenuPath, setProjectMenuPath] = useState<string | null>(null);
-  const [spaceEditor, setSpaceEditor] = useState<{
-    space: SpaceView | null;
-  } | null>(null);
-  const [spaceToDelete, setSpaceToDelete] = useState<SpaceView | null>(null);
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction | null>(null);
-  const [spaceBusy, setSpaceBusy] = useState(false);
-  const [spaceError, setSpaceError] = useState<string | null>(null);
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [projectError, setProjectError] = useState<string | null>(null);
 
   const hasActiveActivity = Object.values(threadActivity).some(
     (activity) => activity.state !== "idle"
@@ -336,29 +325,6 @@ export function ChatHistorySidebar({
     const interval = window.setInterval(() => setTick((value) => value + 1), GIT_METADATA_POLL_MS);
     return () => window.clearInterval(interval);
   }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    getBackend()
-      .listSpaces()
-      .then((snapshot) => {
-        if (!cancelled) {
-          setSpacesSnapshot(snapshot);
-          setSpaceError(null);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSpacesSnapshot(null);
-          setSpaceMenuOpen(false);
-          setSpaceError("Could not load Spaces. Try again.");
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, tick]);
 
   const wasSending = useRef(false);
   useEffect(() => {
@@ -447,115 +413,21 @@ export function ChatHistorySidebar({
     });
   }
 
-  const activeSpace =
-    spacesSnapshot?.spaces.find((space) => space.id === spacesSnapshot.activeSpaceId) ??
-    null;
-
-  async function selectSpace(space: SpaceView) {
-    if (spaceBusy || !spacesSnapshot || space.id === spacesSnapshot.activeSpaceId) {
-      setSpaceMenuOpen(false);
-      return;
-    }
-    const previousSpaceId = spacesSnapshot.activeSpaceId;
-    let spaceChanged = false;
-    setSpaceBusy(true);
-    setSpaceError(null);
-    try {
-      const snapshot = await getBackend().setActiveSpace(space.id, activeProjectPath);
-      spaceChanged = true;
-      setSpacesSnapshot(snapshot);
-      setSpaceMenuOpen(false);
-      setProjectMenuPath(null);
-      setTick((n) => n + 1);
-      if (snapshot.lastWorkspacePath && snapshot.lastWorkspacePath !== activeProjectPath) {
-        const opened = await onOpenProjectChat({ root: snapshot.lastWorkspacePath });
-        if (!opened) return;
-      }
-    } catch {
-      if (spaceChanged) {
-        try {
-          const rollback = await getBackend().setActiveSpace(previousSpaceId, activeProjectPath);
-          setSpacesSnapshot(rollback);
-          setTick((n) => n + 1);
-        } catch {
-          // Keep the original error visible if recovery of the Space selection
-          // itself is unavailable.
-        }
-      }
-      setSpaceError("Could not switch Space. Try again.");
-    } finally {
-      setSpaceBusy(false);
-    }
-  }
-
-  async function saveSpace(name: string, emoji: string) {
-    if (spaceBusy) return;
-    setSpaceBusy(true);
-    setSpaceError(null);
-    try {
-      const snapshot = spaceEditor?.space
-        ? await getBackend().updateSpace(spaceEditor.space.id, name, emoji)
-        : await getBackend().createSpace(name, emoji);
-      setSpacesSnapshot(snapshot);
-      setSpaceEditor(null);
-      setSpaceMenuOpen(false);
-      setTick((n) => n + 1);
-    } catch {
-      setSpaceError("Could not save Space. Choose a different name and try again.");
-    } finally {
-      setSpaceBusy(false);
-    }
-  }
-
-  async function confirmDeleteSpace() {
-    if (!spaceToDelete || spaceBusy) return;
-    setSpaceBusy(true);
-    setSpaceError(null);
-    try {
-      const snapshot = await getBackend().deleteSpace(spaceToDelete.id);
-      setSpacesSnapshot(snapshot);
-      setSpaceToDelete(null);
-      setSpaceMenuOpen(false);
-      setTick((n) => n + 1);
-    } catch {
-      setSpaceError("Could not delete Space. Try again.");
-    } finally {
-      setSpaceBusy(false);
-    }
-  }
-
-  async function moveProject(project: ProjectChats, space: SpaceView) {
-    if (spaceBusy || project.path === null) return;
-    setSpaceBusy(true);
-    setSpaceError(null);
-    try {
-      const snapshot = await getBackend().moveProjectToSpace(project.path, space.id);
-      setSpacesSnapshot(snapshot);
-      setProjectMenuPath(null);
-      setTick((n) => n + 1);
-    } catch {
-      setSpaceError("Could not move project. Try again.");
-    } finally {
-      setSpaceBusy(false);
-    }
-  }
-
   async function confirmWorkspaceAction() {
-    if (!workspaceAction || spaceBusy) return;
+    if (!workspaceAction || projectBusy) return;
     const action = workspaceAction;
     if (action.project.path === null) return;
-    setSpaceBusy(true);
-    setSpaceError(null);
+    setProjectBusy(true);
+    setProjectError(null);
     try {
-      const snapshot = await getBackend().forgetWorkspace(action.project.path);
-      setSpacesSnapshot(snapshot);
+      await getBackend().forgetWorkspace(action.project.path);
       setWorkspaceAction(null);
       setProjectMenuPath(null);
       setTick((n) => n + 1);
     } catch {
-      setSpaceError("Could not remove the project from Zest. Switch projects and try again.");
+      setProjectError("Could not remove the project from Zest. Switch projects and try again.");
     } finally {
-      setSpaceBusy(false);
+      setProjectBusy(false);
     }
   }
 
@@ -1047,127 +919,6 @@ export function ChatHistorySidebar({
           ) : (
             <>
               <section aria-labelledby="projects-heading" className="flex flex-col gap-3">
-                <div className="relative">
-                  <button
-                    type="button"
-                    aria-expanded={spaceMenuOpen}
-                    aria-label="Choose Space"
-                    disabled={!spacesSnapshot || spaceBusy}
-                    onClick={() => {
-                      setSpaceError(null);
-                      setSpaceMenuOpen((value) => !value);
-                    }}
-                    className={cn(
-                      "flex h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-background/35 px-2.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60",
-                      spaceMenuOpen
-                        ? "border-primary/40 bg-secondary/70 text-foreground"
-                        : "hover:border-border hover:bg-secondary/50"
-                    )}
-                  >
-                    <span className="grid size-6 shrink-0 place-items-center rounded-md bg-secondary text-sm">
-                      {activeSpace?.emoji || <Layers3Icon className="size-3.5 text-muted-foreground" />}
-                    </span>
-                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
-                        Space
-                      </span>
-                      <span className="truncate text-xs font-medium text-foreground">
-                        {activeSpace?.name ?? "Spaces"}
-                      </span>
-                    </span>
-                    <ChevronDownIcon
-                      className={cn(
-                        "size-3.5 shrink-0 text-muted-foreground transition-transform",
-                        spaceMenuOpen && "rotate-180 text-foreground"
-                      )}
-                    />
-                  </button>
-                  {spaceMenuOpen && spacesSnapshot ? (
-                    <div className="absolute left-0 top-[calc(100%+6px)] z-40 w-full min-w-[240px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl">
-                      <div className="flex items-center justify-between px-2 pb-1.5">
-                        <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-                          Spaces
-                        </span>
-                        <span className="text-[10px] tabular-nums text-muted-foreground/70">
-                          {spacesSnapshot.spaces.length}
-                        </span>
-                      </div>
-                      <div className="flex max-h-44 flex-col gap-0.5 overflow-y-auto">
-                        {spacesSnapshot.spaces.map((space) => (
-                          <button
-                            key={space.id}
-                            type="button"
-                            disabled={spaceBusy}
-                            aria-current={
-                              space.id === spacesSnapshot.activeSpaceId ? "true" : undefined
-                            }
-                            className={cn(
-                              "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:opacity-60",
-                              space.id === spacesSnapshot.activeSpaceId &&
-                                "bg-secondary text-foreground"
-                            )}
-                            onClick={() => void selectSpace(space)}
-                          >
-                            <span className="grid size-5 shrink-0 place-items-center text-sm">
-                              {space.emoji || <Layers3Icon className="size-3.5" />}
-                            </span>
-                            <span className="min-w-0 flex-1 truncate">{space.name}</span>
-                            <span className="text-[10px] text-muted-foreground">
-                              {space.projectCount}
-                            </span>
-                            {space.id === spacesSnapshot.activeSpaceId ? (
-                              <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                            ) : null}
-                          </button>
-                        ))}
-                      </div>
-                      <div className="my-1.5 border-t border-border/60" />
-                      <button
-                        type="button"
-                        className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary"
-                        onClick={() => {
-                          setSpaceEditor({ space: null });
-                          setSpaceMenuOpen(false);
-                          setSpaceError(null);
-                        }}
-                      >
-                        <PlusIcon className="size-3.5" />
-                        Create Space
-                      </button>
-                      {activeSpace ? (
-                        <>
-                          <button
-                            type="button"
-                            className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary"
-                            onClick={() => {
-                              setSpaceEditor({ space: activeSpace });
-                              setSpaceMenuOpen(false);
-                              setSpaceError(null);
-                            }}
-                          >
-                            <PencilIcon className="size-3.5" />
-                            Rename Space
-                          </button>
-                          {!activeSpace.isDefault ? (
-                            <button
-                              type="button"
-                              className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-destructive transition-colors hover:bg-destructive/10"
-                              onClick={() => {
-                                setSpaceToDelete(activeSpace);
-                                setSpaceMenuOpen(false);
-                                setSpaceError(null);
-                              }}
-                            >
-                              <Trash2Icon className="size-3.5" />
-                              Delete Space
-                            </button>
-                          ) : null}
-                        </>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-
                 <div className="flex items-center justify-between px-1">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <FolderIcon className="size-3.5 text-muted-foreground" />
@@ -1192,15 +943,15 @@ export function ChatHistorySidebar({
                     <PlusIcon aria-hidden="true" />
                   </Button>
                 </div>
-                {spaceError ? (
-                  <p className="px-2 pb-1 text-[11px] text-destructive">{spaceError}</p>
+                {projectError ? (
+                  <p className="px-2 pb-1 text-[11px] text-destructive">{projectError}</p>
                 ) : null}
                 {renameError ? (
                   <p className="px-2 pb-1 text-[11px] text-destructive">{renameError}</p>
                 ) : null}
                 {!query && visibleProjects.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">
-                    Open a project folder to add it to this Space.
+                    Open a project folder to get started.
                   </p>
                 ) : null}
                 {searchEmpty ? (
@@ -1254,8 +1005,7 @@ export function ChatHistorySidebar({
                             aria-label={`Project options for ${project.name}`}
                             className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
                             onClick={() => {
-                              setSpaceError(null);
-                              setSpaceMenuOpen(false);
+                              setProjectError(null);
                               setProjectMenuPath((path) =>
                                 path === project.path ? null : project.path
                               );
@@ -1280,7 +1030,7 @@ export function ChatHistorySidebar({
                           </Button>
                         </div>
 
-                        {projectMenuPath === project.path && spacesSnapshot ? (
+                        {projectMenuPath === project.path ? (
                           <div className="absolute right-0 top-9 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl">
                             <div className="flex items-center gap-2 px-2 pb-1.5">
                               <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -1293,35 +1043,10 @@ export function ChatHistorySidebar({
                                 </div>
                               </div>
                             </div>
-                            <div className="border-t border-border/60 pt-1">
-                              <div className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-                                Move project to
-                              </div>
-                              <div className="flex flex-col gap-0.5">
-                                {spacesSnapshot.spaces.map((space) => (
-                                  <button
-                                    key={space.id}
-                                    type="button"
-                                    disabled={spaceBusy || project.spaceId === space.id}
-                                    className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:opacity-50"
-                                    onClick={() => void moveProject(project, space)}
-                                  >
-                                    <span className="grid size-5 shrink-0 place-items-center text-sm">
-                                      {space.emoji || <Layers3Icon className="size-3.5" />}
-                                    </span>
-                                    <span className="min-w-0 flex-1 truncate">{space.name}</span>
-                                    {project.spaceId === space.id ? (
-                                      <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                                    ) : null}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                            <div className="my-1.5 border-t border-border/60" />
                             <div className="flex flex-col gap-0.5">
                               <button
                                 type="button"
-                                disabled={spaceBusy || project.active}
+                                disabled={projectBusy || project.active}
                                 title={
                                   project.active
                                     ? "Switch projects before removing the active workspace"
@@ -1395,39 +1120,6 @@ export function ChatHistorySidebar({
         </div>
       ) : null}
 
-      <SpaceEditorDialog
-        open={spaceEditor != null}
-        space={spaceEditor?.space ?? null}
-        busy={spaceBusy}
-        error={spaceError}
-        onCancel={() => {
-          if (!spaceBusy) setSpaceEditor(null);
-        }}
-        onSubmit={(name, emoji) => {
-          void saveSpace(name, emoji);
-        }}
-      />
-
-      <ConfirmDialog
-        open={spaceToDelete != null}
-        title="Delete Space?"
-        description={
-          spaceToDelete
-            ? `Projects in ${spaceToDelete.name} will return to Default. Nothing on disk will be removed.`
-            : ""
-        }
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
-        destructive
-        busy={spaceBusy}
-        onCancel={() => {
-          if (!spaceBusy) setSpaceToDelete(null);
-        }}
-        onConfirm={() => {
-          void confirmDeleteSpace();
-        }}
-      />
-
       <ConfirmDialog
         open={workspaceAction != null}
         title="Remove project from Zest?"
@@ -1438,9 +1130,9 @@ export function ChatHistorySidebar({
         }
         confirmLabel="Remove"
         cancelLabel="Cancel"
-        busy={spaceBusy}
+        busy={projectBusy}
         onCancel={() => {
-          if (!spaceBusy) setWorkspaceAction(null);
+          if (!projectBusy) setWorkspaceAction(null);
         }}
         onConfirm={() => {
           void confirmWorkspaceAction();

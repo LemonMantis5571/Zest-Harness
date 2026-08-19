@@ -27,7 +27,6 @@ import type {
   RatesStatus,
   SessionInfo,
   SessionMeta,
-  SpacesSnapshot,
   ThreadSummary,
   UsageReport,
   UsageSnapshot,
@@ -105,13 +104,7 @@ export type DesktopBackend = {
     effort?: string;
   }): Promise<SessionMeta>;
   listThreads(): Promise<ThreadSummary[]>;
-  listSpaces(): Promise<SpacesSnapshot>;
-  setActiveSpace(spaceId: string, currentWorkspacePath?: string | null): Promise<SpacesSnapshot>;
-  createSpace(name: string, emoji?: string | null): Promise<SpacesSnapshot>;
-  updateSpace(spaceId: string, name: string, emoji?: string | null): Promise<SpacesSnapshot>;
-  deleteSpace(spaceId: string): Promise<SpacesSnapshot>;
-  moveProjectToSpace(projectPath: string, spaceId: string): Promise<SpacesSnapshot>;
-  forgetWorkspace(projectPath: string): Promise<SpacesSnapshot>;
+  forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
   openProjectChat(options: {
     /** `null` opens a chat without a workspace. */
@@ -231,14 +224,6 @@ export function createTauriBackend(): DesktopBackend {
     startSession: (id, options) => tauriApi.startSession(id, options),
     updateSessionOptions: (options) => tauriApi.updateSessionOptions(options),
     listThreads: () => tauriApi.listThreads(),
-    listSpaces: () => tauriApi.listSpaces(),
-    setActiveSpace: (spaceId, currentWorkspacePath) =>
-      tauriApi.setActiveSpace(spaceId, currentWorkspacePath),
-    createSpace: (name, emoji) => tauriApi.createSpace(name, emoji),
-    updateSpace: (spaceId, name, emoji) => tauriApi.updateSpace(spaceId, name, emoji),
-    deleteSpace: (spaceId) => tauriApi.deleteSpace(spaceId),
-    moveProjectToSpace: (projectPath, spaceId) =>
-      tauriApi.moveProjectToSpace(projectPath, spaceId),
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
