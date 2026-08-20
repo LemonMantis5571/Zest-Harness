@@ -160,7 +160,9 @@ function ensureAssistant(
 ): { state: ChatUiState; id: string } {
   if (messageId) {
     let messages = state.messages;
-    if (!messages.some((m) => m.id === messageId)) {
+    const last = messages[messages.length - 1];
+    const existsAtTail = last?.id === messageId;
+    if (!existsAtTail && !messages.some((m) => m.id === messageId)) {
       messages = [
         ...messages,
         {
@@ -207,11 +209,29 @@ function patchAssistant(
   id: string,
   patch: (msg: Extract<ChatMessage, { role: "assistant" }>) => ChatMessage
 ): ChatUiState {
+  // Streaming updates overwhelmingly target the last transcript row. Keep
+  // that hot path O(1) for lookup, while retaining the backwards search for
+  // provider events that update an earlier assistant row.
+  let index = state.messages.length - 1;
+  const tail = state.messages[index];
+  if (tail?.id !== id || tail.role !== "assistant") {
+    for (index -= 1; index >= 0; index -= 1) {
+      const candidate = state.messages[index];
+      if (candidate.id === id && candidate.role === "assistant") break;
+    }
+  }
+  if (index < 0) return state;
+
+  const current = state.messages[index];
+  if (current.role !== "assistant") return state;
+  const next = patch(current);
+  if (next === current) return state;
+
+  const messages = state.messages.slice();
+  messages[index] = next;
   return {
     ...state,
-    messages: state.messages.map((m) =>
-      m.id === id && m.role === "assistant" ? patch(m) : m
-    ),
+    messages,
   };
 }
 
@@ -516,6 +536,7 @@ export function reduceChatEvent(
               error: event.message,
               // Only set when signing in again is the actual fix.
               reconnectProvider: event.reconnect_provider ?? undefined,
+              providerSelection: event.provider_selection ?? undefined,
             }))
           ),
           activeAssistantId: null,
@@ -535,6 +556,32 @@ export function reduceChatEvent(
       return { state, effects };
     }
   }
+}
+
+/**
+ * Reduce a coalesced frame of chat events without publishing every
+ * intermediate transcript to React. App uses this for text/thinking deltas;
+ * the single-event reducer remains the source of truth for ordering and stale
+ * event checks.
+ */
+export function reduceChatEvents(
+  state: ChatUiState,
+  events: readonly ChatEvent[],
+  options?: ChatReduceOptions
+): ChatReduceResult {
+  let next = state;
+  const effects: ChatReduceEffects = {};
+  for (const event of events) {
+    const reduced = reduceChatEvent(next, event, options);
+    next = reduced.state;
+    if (reduced.effects.errorToast) {
+      effects.errorToast = reduced.effects.errorToast;
+    }
+    if (reduced.effects.warningToast) {
+      effects.warningToast = reduced.effects.warningToast;
+    }
+  }
+  return { state: next, effects };
 }
 
 export function initialChatUiState(

@@ -583,10 +583,8 @@ pub(crate) async fn run_with_sink<S: EventSink>(
                 message_id: assistant_message_id.clone(),
                 message: format_turn_error_for_provider(e, &session.provider_id),
                 // Only for failures that signing in again actually fixes.
-                reconnect_provider: e
-                    .is_auth_problem()
-                    .then(|| session.provider_id.clone())
-                    .filter(|id| desktop_can_start_login(id)),
+                reconnect_provider: reconnect_provider_for_auth_failure(e, &session.provider_id),
+                provider_selection: provider_selection_for_auth_failure(e, &session.provider_id),
             }
         }
     };

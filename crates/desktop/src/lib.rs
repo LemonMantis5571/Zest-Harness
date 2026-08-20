@@ -329,10 +329,8 @@ struct AppState {
     /// One coalescing transcript worker per open project. A background turn
     /// must keep its writer after the user navigates to another root.
     persist: Mutex<HashMap<PathBuf, PersistWorker>>,
-    /// Preferred project root (explicit launch/folder choice / last-workspace).
-    /// A usable launch directory is the strongest startup context; packaged
-    /// launches normally start in the install directory, which is rejected by
-    /// `usable_workspace` and therefore falls back to the remembered folder.
+    /// Explicitly selected project root. This stays empty until the user opens
+    /// a project; projectless chats use the user-local free-chat store.
     workspace_root: Mutex<Option<PathBuf>>,
     /// The last working provider configuration. Keep its provider entry
     /// available when the destination is an ordinary folder with no zest.toml
@@ -1154,6 +1152,13 @@ enum ChatEvent {
         /// button on a rate limit would send the user through OAuth for nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reconnect_provider: Option<String>,
+        /// Provider whose failed API key or CLI-owned sign-in must be repaired
+        /// manually, or replaced by choosing another provider. This remains
+        /// separate from `reconnect_provider` so the UI never launches a
+        /// managed login flow for credentials Zest does not own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        provider_selection: Option<String>,
     },
     Cancelled {
         session_id: String,
@@ -1203,27 +1208,48 @@ fn map_session_err(e: SessionError) -> String {
 }
 
 fn load_workspace_config(state: &AppState) -> Config {
-    match resolve_workspace_root(state) {
-        Ok(root) => {
-            let mut config = Config::find(&root).unwrap_or_else(|_| Config::env_fallback());
-            if can_inherit_workspace_config(&root) {
-                merge_cached_providers(state, &mut config, None);
-            }
-            config
-        }
-        Err(_) => Config::env_fallback(),
+    let root = resolve_workspace_root(state).ok();
+    let mut config = match root.as_ref() {
+        Some(root) => Config::find(root).unwrap_or_else(|_| Config::env_fallback()),
+        None => zest_core::user_config_path()
+            .filter(|path| path.is_file())
+            .and_then(|path| Config::load_from(path).ok())
+            .unwrap_or_else(Config::env_fallback),
+    };
+    if root.as_ref().is_none()
+        || root
+            .as_ref()
+            .is_some_and(|root| can_inherit_workspace_config(root))
+    {
+        merge_cached_providers(state, &mut config, None);
     }
+    config
 }
 
 fn editable_config_path(state: &AppState) -> Result<PathBuf, String> {
-    let root = resolve_workspace_root(state)?;
-    if root.join(zest_core::config::CONFIG_FILE).is_file() {
-        return Ok(root.join(zest_core::config::CONFIG_FILE));
+    if let Ok(root) = resolve_workspace_root(state) {
+        if root.join(zest_core::config::CONFIG_FILE).is_file() {
+            return Ok(root.join(zest_core::config::CONFIG_FILE));
+        }
     }
     zest_core::ensure_user_config()
         .map_err(|e| e.to_string())?
         .or_else(zest_core::user_config_path)
         .ok_or_else(|| "could not locate the user config directory".to_string())
+}
+
+/// Resolve the current project when one was explicitly selected, otherwise
+/// use the user-local store shared by projectless chats. The latter keeps
+/// provider verification and session startup on the same projectless path.
+fn active_or_free_chat_root(state: &AppState) -> Result<PathBuf, String> {
+    match resolve_workspace_root(state) {
+        Ok(selected) => Ok(selected),
+        Err(_) => Ok(choose_active_or_free_chat_root(None, free_chats_root()?)),
+    }
+}
+
+fn choose_active_or_free_chat_root(selected: Option<PathBuf>, free: PathBuf) -> PathBuf {
+    selected.unwrap_or(free)
 }
 
 fn clear_workspace_config_cache(state: &AppState) {
@@ -1435,7 +1461,7 @@ fn external_agent_scope(state: &AppState) -> String {
                 "User zest.toml".to_string()
             }
         })
-        .unwrap_or_else(|| "Active zest.toml".to_string())
+        .unwrap_or_else(|| "User zest.toml".to_string())
 }
 
 fn external_agent_mode_label(mode: ExternalAgentMode) -> &'static str {
@@ -2110,8 +2136,12 @@ fn now_secs() -> u64 {
 /// an explicit sign-in verification, never while opening a chat.
 #[tauri::command]
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let root = resolve_workspace_root(&state)?;
-    let config = config_for_session(&state, &root)?;
+    let root = active_or_free_chat_root(&state)?;
+    let config = if is_free_chat_root(&root) {
+        config_for_free_chat(&state, &root)?
+    } else {
+        config_for_session(&state, &root)?
+    };
     let label = detect_all()
         .into_iter()
         .find(|s| s.id == id)
@@ -2330,58 +2360,52 @@ fn is_install_dir(path: &Path) -> bool {
     install_dir().is_some_and(|dir| path.starts_with(&dir))
 }
 
-/// A candidate is a workspace only if Zest can keep its state there.
-fn usable_workspace(path: PathBuf) -> Option<PathBuf> {
-    let dir = canonicalize_dir(path).ok()?;
-    if is_install_dir(&dir) || !dir_is_writable(&dir) {
-        return None;
-    }
-    Some(dir)
-}
-
-fn cwd_workspace() -> Option<PathBuf> {
-    usable_workspace(std::env::current_dir().ok()?)
-}
-
-/// Select the initial project without letting a stale remembered workspace
-/// override an explicit directory supplied by the process that launched Zest.
-///
-/// Development launches can carry the launched directory in the process
-/// working directory. Packaged launches are commonly started in Zest's own
-/// install directory; that path is rejected by `usable_workspace`, so normal
-/// last-workspace behavior remains intact there.
-fn choose_initial_workspace(
-    launch: Option<PathBuf>,
-    remembered: Option<PathBuf>,
-    fallback: Option<PathBuf>,
-) -> Option<PathBuf> {
-    launch.or(remembered).or(fallback)
-}
-
-fn initial_workspace_root() -> Option<PathBuf> {
-    choose_initial_workspace(
-        cwd_workspace(),
-        load_persisted_workspace().and_then(usable_workspace),
-        default_workspace(),
+/// The app is commonly built from this checkout, and older builds
+/// recorded that checkout as a project merely because it was the process
+/// current directory. Keep that internal path out of the persisted project
+/// list; an explicit folder selection can still add it for the current run.
+fn source_checkout_root() -> Option<PathBuf> {
+    canonicalize_dir(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".."),
     )
+    .ok()
 }
 
-/// The folder first run falls back to when the working directory is unusable.
-///
-/// Documents is where someone who did not choose a project expects to find
-/// their own files, and a dedicated subfolder keeps `.zest/` out of its top
-/// level. Created on demand so the very first launch has somewhere to land
-/// instead of dead-ending on the picker.
-fn default_workspace() -> Option<PathBuf> {
-    let base = dirs::document_dir().or_else(dirs::home_dir)?;
-    let root = base.join("Zest");
-    if !root.is_dir() {
-        std::fs::create_dir_all(&root).ok()?;
+fn is_internal_zest_workspace(path: &Path) -> bool {
+    is_install_dir(path) || source_checkout_root().is_some_and(|root| root == path)
+}
+
+fn remove_implicit_internal_workspace() {
+    let mut roots = load_known_workspaces();
+    let previous_len = roots.len();
+    roots.retain(|root| !is_internal_zest_workspace(root));
+    if roots.len() != previous_len {
+        let _ = write_known_workspaces(&roots);
     }
-    if !dir_is_writable(&root) {
-        return None;
+
+    let Some(config_dir) = dirs::config_dir() else {
+        return;
+    };
+    let last_workspace = config_dir.join("zest").join("last-workspace");
+    let Ok(raw) = std::fs::read_to_string(&last_workspace) else {
+        return;
+    };
+    if canonicalize_dir(PathBuf::from(raw.trim()))
+        .ok()
+        .is_some_and(|root| is_internal_zest_workspace(&root))
+    {
+        let _ = std::fs::remove_file(last_workspace);
     }
-    canonicalize_dir(root).ok()
+}
+
+/// Projects are opt-in. A fresh launch starts without a workspace so the user
+/// can either explicitly open a project or continue with a projectless chat.
+/// In particular, never turn Zest's own working/install directory into a
+/// project just because it happened to be the process current directory.
+fn initial_workspace_root() -> Option<PathBuf> {
+    None
 }
 
 fn no_writable_workspace_error() -> String {
@@ -2405,17 +2429,6 @@ fn workspace_write_error(root: &Path, error: impl std::fmt::Display) -> String {
         );
     }
     error.to_string()
-}
-
-fn load_persisted_workspace() -> Option<PathBuf> {
-    let path = dirs::config_dir()?.join("zest").join("last-workspace");
-    let value = std::fs::read_to_string(path).ok()?;
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return None;
-    }
-    let candidate = PathBuf::from(value);
-    canonicalize_dir(candidate).ok()
 }
 
 fn persist_workspace(root: &Path) -> Result<(), String> {
@@ -2459,6 +2472,21 @@ fn write_known_workspaces(list: &[PathBuf]) -> Result<(), String> {
     std::fs::write(known_workspaces_path()?, raw).map_err(|error| error.to_string())
 }
 
+/// Add a workspace without treating selection as a recency signal. The
+/// sidebar is a user-maintained project list, so selecting an existing project
+/// must not change its position. New projects are appended and the oldest
+/// entry is evicted only when the cap is reached.
+fn append_known_workspace(list: &mut Vec<PathBuf>, root: PathBuf) {
+    if list.iter().any(|path| path == &root) {
+        return;
+    }
+    list.push(root);
+    if list.len() > MAX_KNOWN_WORKSPACES {
+        let excess = list.len() - MAX_KNOWN_WORKSPACES;
+        list.drain(..excess);
+    }
+}
+
 fn require_known_workspace(path: &Path) -> Result<PathBuf, String> {
     let root = canonicalize_dir(path.to_path_buf())?;
     let root_key = display_path(&root);
@@ -2479,9 +2507,7 @@ fn remember_workspace(root: &Path) {
         return;
     };
     let mut list = load_known_workspaces();
-    list.retain(|p| p != &root);
-    list.insert(0, root);
-    list.truncate(MAX_KNOWN_WORKSPACES);
+    append_known_workspace(&mut list, root);
     let _ = write_known_workspaces(&list);
 }
 
@@ -2570,13 +2596,10 @@ fn workspace_removal_target(
     Ok((root, root_key, known_roots))
 }
 
-/// Pick the project folder, rejecting any candidate Zest cannot write to.
-///
-/// Order matters: an explicit launch directory or folder choice beats a
-/// remembered one, and Documents/Zest catches the case where none of those are
-/// usable. Every step is writability-checked, because a candidate that fails
-/// only surfaces later as a storage error deep inside session startup, far from
-/// the folder that caused it.
+/// Return the explicitly selected project folder, rejecting the absence of a
+/// selection rather than inventing one from the launch directory or a stale
+/// remembered path. Every explicit folder choice is writability-checked before
+/// it reaches session startup.
 fn resolve_workspace_root(state: &AppState) -> Result<PathBuf, String> {
     if let Ok(guard) = state.workspace_root.lock() {
         if let Some(root) = guard.as_ref() {
@@ -3002,8 +3025,9 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::Error {
             message_id,
             message,
+            provider_selection,
             ..
-        } => thread.apply_error(message_id, message),
+        } => thread.apply_error_with_provider(message_id, message, provider_selection.as_deref()),
         ChatEvent::Cancelled { message_id, .. } => {
             thread.apply_error(message_id, "turn cancelled");
         }
@@ -3042,34 +3066,23 @@ async fn start_session_inner(
 ) -> Result<SessionInfo, String> {
     zest_core::load_env();
 
-    let root = root_override.unwrap_or(resolve_workspace_root(&state)?);
+    // No workspace is selected on startup by design. Starting a session from
+    // the provider picker therefore opens the user-local free-chat store;
+    // selecting a project later is still an explicit action.
+    let root = root_override.unwrap_or(active_or_free_chat_root(&state)?);
     let config = if is_free_chat_root(&root) {
         config_for_free_chat(&state, &root)?
     } else {
         config_for_session(&state, &root)?
     };
 
-    let (selectable, provider_label) = if config.providers.contains_key(&id) {
-        let provider = ProviderRegistry::from_config(&config)
-            .0
-            .get(&id)
-            .ok_or_else(|| format!("unknown provider `{id}`"))?;
-        (
-            provider.auth_status().selectable(),
-            configured_provider_view(&id, &config).label,
-        )
-    } else {
-        let slot = detect_all()
-            .into_iter()
-            .find(|s| s.id == id)
-            .ok_or_else(|| format!("unknown provider `{id}`"))?;
-        (slot.status.selectable(), slot.label.to_string())
-    };
+    let (selectable, provider_label) = startup_provider_readiness(&config, &id)?;
 
     if !selectable {
-        return Err(format!(
-            "{provider_label} is not ready — configure it first"
-        ));
+        // A provider can remain selected in project config after its API key is
+        // removed. Keep that selection intact and let the UI offer another
+        // provider or a replacement key instead of falling back silently.
+        return Err(provider_unavailable_error(&config, &id, None));
     }
 
     let prefs = ProjectSessionState::load(&root, &id).get(&id);
@@ -3445,8 +3458,8 @@ fn list_cached_threads(
     out
 }
 
-/// Chats grouped by known project folders (MRU), plus the free-chat bucket for
-/// RECENT, for the sidebar.
+/// Chats grouped by known project folders in their persisted order, plus the
+/// free-chat bucket for RECENT, for the sidebar.
 #[tauri::command]
 fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, String> {
     let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
@@ -3457,15 +3470,13 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             .then(|| resolve_workspace_root(&state).ok())
             .flatten(),
     );
-    if let Some(active_root) = active_root.as_ref() {
-        remember_workspace(active_root);
-    }
-
     let mut roots = load_known_workspaces();
     if let Some(active_root) = active_root.as_ref() {
-        if !roots.iter().any(|p| p == active_root) {
-            roots.insert(0, active_root.clone());
-        }
+        // Keep the listing call read-only for existing projects. A selected
+        // project is normally persisted by `set_workspace_root`; this only
+        // keeps an active legacy/root override visible if its registry write
+        // was unavailable.
+        append_known_workspace(&mut roots, active_root.clone());
     }
 
     let free_root = free_chats_root()?;
@@ -3517,16 +3528,6 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
     }
     cache.projects.retain(|root, _| cache_roots.contains(root));
 
-    // Active project first; then by newest thread activity.
-    out.sort_by(|a, b| match (a.active, b.active) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => {
-            let a_t = a.threads.first().map(|t| t.updated_at).unwrap_or(0);
-            let b_t = b.threads.first().map(|t| t.updated_at).unwrap_or(0);
-            b_t.cmp(&a_t).then_with(|| a.name.cmp(&b.name))
-        }
-    });
     Ok(out)
 }
 
@@ -3595,6 +3596,43 @@ fn provider_unavailable_error(
             "availableProviders": configured_provider_choices(config),
         })),
     )
+}
+
+/// A configured provider can be absent from the live registry after its API
+/// key is removed. That is a recoverable configuration state, not an unknown
+/// provider id; preserve the unknown-id error only for ids absent from config.
+fn missing_startup_provider_error(config: &Config, provider_id: &str) -> String {
+    if config.providers.contains_key(provider_id) {
+        provider_unavailable_error(config, provider_id, None)
+    } else {
+        format!("unknown provider `{provider_id}`")
+    }
+}
+
+/// Validate exactly the provider the caller requested before creating a draft
+/// thread or building a runtime. A skipped configured provider stays selected
+/// and returns structured recovery details; this function never falls back to
+/// another ready provider on the user's behalf.
+fn startup_provider_readiness(
+    config: &Config,
+    provider_id: &str,
+) -> Result<(bool, String), String> {
+    if config.providers.contains_key(provider_id) {
+        let provider = ProviderRegistry::from_config(config)
+            .0
+            .get(provider_id)
+            .ok_or_else(|| missing_startup_provider_error(config, provider_id))?;
+        return Ok((
+            provider.auth_status().selectable(),
+            configured_provider_view(provider_id, config).label,
+        ));
+    }
+
+    let slot = detect_all()
+        .into_iter()
+        .find(|slot| slot.id == provider_id)
+        .ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
+    Ok((slot.status.selectable(), slot.label.to_string()))
 }
 
 fn provider_is_selectable(config: &Config, provider_id: &str) -> bool {
@@ -3686,6 +3724,83 @@ fn select_project_provider(
 #[cfg(test)]
 mod project_provider_tests {
     use super::*;
+
+    #[test]
+    fn configured_provider_skipped_after_key_deletion_is_provider_unavailable() {
+        let env_key = format!(
+            "ZEST_TEST_DELETED_KEY_{}",
+            new_id("credential").replace('-', "_").to_ascii_uppercase()
+        );
+        let config = Config::parse(&format!(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "{env_key}"
+model = "claude-sonnet-4-5"
+"#
+        ))
+        .unwrap();
+        let (registry, skipped) = ProviderRegistry::from_config(&config);
+
+        assert!(registry.get("anthropic").is_none());
+        assert!(skipped.iter().any(|entry| entry.id == "anthropic"));
+
+        let error = startup_provider_readiness(&config, "anthropic")
+            .expect_err("a configured provider with no key is unavailable");
+        let value: serde_json::Value =
+            serde_json::from_str(&error).expect("desktop error is structured JSON");
+        assert_eq!(value["code"], "provider_unavailable");
+        assert_eq!(value["details"]["providerId"], "anthropic");
+        assert_eq!(value["details"]["configured"], true);
+        assert!(!error.contains("unknown provider"));
+    }
+
+    #[test]
+    fn new_thread_and_project_switch_do_not_fallback_from_a_deleted_key() {
+        let env_key = format!(
+            "ZEST_TEST_DELETED_KEY_{}",
+            new_id("credential").replace('-', "_").to_ascii_uppercase()
+        );
+        let config = Config::parse(&format!(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "{env_key}"
+model = "claude-sonnet-4-5"
+
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+model = "llama"
+"#
+        ))
+        .unwrap();
+
+        let new_thread_provider =
+            select_project_provider(&config, "anthropic", None, None, None).unwrap();
+        let switched_provider =
+            select_project_provider(&config, "local", None, Some("anthropic"), None).unwrap();
+        assert_eq!(new_thread_provider, "anthropic");
+        assert_eq!(switched_provider, "anthropic");
+
+        let error = startup_provider_readiness(&config, &switched_provider)
+            .expect_err("startup must prompt instead of silently selecting local");
+        let value: serde_json::Value =
+            serde_json::from_str(&error).expect("desktop error is structured JSON");
+        assert_eq!(value["code"], "provider_unavailable");
+        assert_eq!(value["details"]["providerId"], "anthropic");
+        assert_eq!(value["details"]["availableProviders"][0]["id"], "local");
+    }
+
+    #[test]
+    fn genuinely_unknown_startup_provider_keeps_unknown_provider_error() {
+        let config = Config::parse("").unwrap();
+
+        assert_eq!(
+            missing_startup_provider_error(&config, "missing"),
+            "unknown provider `missing`"
+        );
+    }
 
     #[test]
     fn keeps_requested_provider_when_project_declares_it() {
@@ -5895,18 +6010,27 @@ fn format_turn_error(err: &HarnessError) -> String {
 fn format_turn_error_for_provider(err: &HarnessError, provider_id: &str) -> String {
     if err.is_auth_problem() && !desktop_can_start_login(provider_id) {
         return match provider_id {
-            "claude" => {
-                "Claude Code could not authenticate this request. Sign in with the Claude Code CLI, then try again.".into()
-            }
             "antigravity" => {
-                "Gemini could not authenticate this request. Sign in with the Gemini CLI, then try again.".into()
+                "Gemini could not authenticate this request. Sign in with the Gemini CLI or choose another provider, then try again.".into()
             }
             _ => {
-                "The provider could not authenticate this request. Check its API key or CLI sign-in, then try again.".into()
+                "The provider could not authenticate this request. Add or replace its API key, or choose another provider, then try again.".into()
             }
         };
     }
     format_turn_error(err)
+}
+
+fn reconnect_provider_for_auth_failure(err: &HarnessError, provider_id: &str) -> Option<String> {
+    (err.is_auth_problem() && desktop_can_start_login(provider_id)).then(|| provider_id.to_string())
+}
+
+/// Select-provider recovery is reserved for authentication that Zest cannot
+/// restart itself. Keeping this classification beside the reconnect gate makes
+/// the two wire affordances mutually exclusive for the same failure.
+fn provider_selection_for_auth_failure(err: &HarnessError, provider_id: &str) -> Option<String> {
+    (err.is_auth_problem() && !desktop_can_start_login(provider_id))
+        .then(|| provider_id.to_string())
 }
 
 /// Wire label for approval / chat-event payloads (snake_case string).
@@ -5982,12 +6106,81 @@ mod tests {
         );
         assert_eq!(
             format_turn_error_for_provider(&failure, "antigravity"),
-            "Gemini could not authenticate this request. Sign in with the Gemini CLI, then try again."
+            "Gemini could not authenticate this request. Sign in with the Gemini CLI or choose another provider, then try again."
         );
         assert_eq!(
             format_turn_error_for_provider(&failure, "codex"),
             "This provider needs you to sign in again. Reconnect, then send your message again."
         );
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "anthropic"),
+            "The provider could not authenticate this request. Add or replace its API key, or choose another provider, then try again."
+        );
+    }
+
+    #[test]
+    fn auth_recovery_classification_separates_selection_from_managed_reconnect() {
+        // Retry exhaustion must preserve the underlying auth classification.
+        let auth = exhausted(HarnessError::Api {
+            status: 401,
+            body: r#"{"error":{"message":"invalid_api_key"}}"#.into(),
+        });
+        let ordinary_failure = HarnessError::Api {
+            status: 500,
+            body: r#"{"error":{"message":"internal error"}}"#.into(),
+        };
+
+        assert_eq!(
+            provider_selection_for_auth_failure(&auth, "anthropic"),
+            Some("anthropic".into())
+        );
+        assert_eq!(
+            provider_selection_for_auth_failure(&auth, "antigravity"),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&auth, "anthropic"),
+            None
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&auth, "antigravity"),
+            None
+        );
+        assert_eq!(provider_selection_for_auth_failure(&auth, "codex"), None);
+        assert_eq!(provider_selection_for_auth_failure(&auth, "claude"), None);
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&auth, "codex"),
+            Some("codex".into())
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&auth, "claude"),
+            Some("claude".into())
+        );
+        assert_eq!(
+            provider_selection_for_auth_failure(&ordinary_failure, "anthropic"),
+            None
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&ordinary_failure, "codex"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_selection_uses_the_expected_error_wire_field() {
+        let event = ChatEvent::Error {
+            session_id: "session-1".into(),
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            message_id: "message-1".into(),
+            message: "authentication failed".into(),
+            reconnect_provider: None,
+            provider_selection: Some("anthropic".into()),
+        };
+
+        let value = serde_json::to_value(event).expect("chat event serializes");
+        assert_eq!(value["provider_selection"], "anthropic");
+        assert!(value.get("reconnect_provider").is_none());
     }
 
     /// The reported failure: Codex named the cause and the fix, and the chat
@@ -6085,6 +6278,7 @@ pub fn run() {
         eprintln!("warning: could not create the user config: {err}");
     }
     zest_core::load_env();
+    remove_implicit_internal_workspace();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -6093,10 +6287,9 @@ pub fn run() {
             browser: Arc::new(BrowserHost::new()),
             login: Mutex::new(None),
             persist: Mutex::new(HashMap::new()),
-            // Validate the launch directory first so a project opened from a
-            // terminal cannot be silently replaced by a stale remembered
-            // workspace. Packaged launches fall through from their rejected
-            // install directory to the remembered folder.
+            // Do not infer a project from the process current/install
+            // directory. The user chooses a project explicitly or starts a
+            // projectless chat.
             workspace_root: Mutex::new(initial_workspace_root()),
             workspace_config: Mutex::new(None),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
@@ -6213,16 +6406,15 @@ mod workspace_root_tests {
     }
 
     #[test]
-    fn writable_scratch_dir_is_usable() {
+    fn writable_scratch_dir_can_be_probed() {
         let dir = scratch("writable");
         assert!(dir_is_writable(&dir));
-        assert!(usable_workspace(dir).is_some());
     }
 
     #[test]
-    fn missing_dir_is_not_a_workspace() {
+    fn missing_dir_is_not_writable() {
         let missing = std::env::temp_dir().join(format!("zest-absent-{}", new_id("test")));
-        assert!(usable_workspace(missing).is_none());
+        assert!(!dir_is_writable(&missing));
     }
 
     #[test]
@@ -6241,39 +6433,58 @@ mod workspace_root_tests {
             return;
         };
         assert!(is_install_dir(&dir));
-        assert!(usable_workspace(dir.clone()).is_none());
         // Subdirectories of the install belong to the install too.
         assert!(is_install_dir(&dir.join("resources")));
     }
 
     #[test]
-    fn default_workspace_is_writable_when_available() {
-        let Some(root) = default_workspace() else {
+    fn launch_starts_without_a_default_workspace() {
+        assert_eq!(initial_workspace_root(), None);
+    }
+
+    #[test]
+    fn source_checkout_is_recognized_as_internal() {
+        let Some(root) = source_checkout_root() else {
             return;
         };
-        assert!(root.is_dir());
-        assert!(dir_is_writable(&root));
-        assert!(!is_install_dir(&root));
+
+        assert!(is_internal_zest_workspace(&root));
     }
 
     #[test]
-    fn launch_directory_wins_over_a_stale_remembered_workspace() {
-        let launch = PathBuf::from(r"D:\Code\Test");
-        let remembered = PathBuf::from(r"D:\Code\zest");
+    fn projectless_root_uses_the_free_chat_store() {
+        let free = PathBuf::from(r"C:\Users\brite\.zest\free-chats");
+
+        assert_eq!(choose_active_or_free_chat_root(None, free.clone()), free);
         assert_eq!(
-            choose_initial_workspace(Some(launch.clone()), Some(remembered), None),
-            Some(launch)
+            choose_active_or_free_chat_root(Some(PathBuf::from(r"D:\Code\project")), free),
+            PathBuf::from(r"D:\Code\project")
         );
     }
 
     #[test]
-    fn remembered_workspace_is_used_when_launch_directory_is_unusable() {
-        let remembered = PathBuf::from(r"D:\Code\Test");
-        let fallback = PathBuf::from(r"D:\Users\brite\Documents\Zest");
-        assert_eq!(
-            choose_initial_workspace(None, Some(remembered.clone()), Some(fallback)),
-            Some(remembered)
-        );
+    fn remembering_existing_workspace_keeps_project_order() {
+        let first = PathBuf::from(r"D:\Code\first");
+        let second = PathBuf::from(r"D:\Code\second");
+        let mut roots = vec![first.clone(), second.clone()];
+
+        append_known_workspace(&mut roots, second);
+
+        assert_eq!(roots, vec![first, PathBuf::from(r"D:\Code\second")]);
+    }
+
+    #[test]
+    fn new_workspace_is_appended_and_oldest_is_evicted_at_the_cap() {
+        let mut roots: Vec<PathBuf> = (0..MAX_KNOWN_WORKSPACES)
+            .map(|index| PathBuf::from(format!(r"D:\Code\project-{index}")))
+            .collect();
+        let new_root = PathBuf::from(r"D:\Code\new-project");
+
+        append_known_workspace(&mut roots, new_root.clone());
+
+        assert_eq!(roots.len(), MAX_KNOWN_WORKSPACES);
+        assert!(!roots.contains(&PathBuf::from(r"D:\Code\project-0")));
+        assert_eq!(roots.last(), Some(&new_root));
     }
 
     #[test]

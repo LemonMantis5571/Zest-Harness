@@ -8,6 +8,7 @@ import {
   joinThinkingStream,
   markApprovalRunning,
   reduceChatEvent,
+  reduceChatEvents,
   restoreApprovalCard,
   retireApprovalCard,
   type ChatUiState,
@@ -65,6 +66,79 @@ function assistant(state: ChatUiState, index = 0): Extract<ChatMessage, { role: 
 }
 
 describe("reduceChatEvent characterization", () => {
+  it("reduces a coalesced delta frame in order", () => {
+    const start = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "hello" },
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+    ]);
+    const { state } = reduceChatEvents(start, [
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "Check " },
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "this" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: "Hello" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: " world" },
+    ]);
+
+    assert.equal(assistant(state).thinking, "Check this");
+    assert.equal(assistant(state).text, "Hello world");
+  });
+
+  it("patches the streaming tail while preserving settled row references", () => {
+    const settledUser: ChatMessage = { id: "u1", role: "user", text: "hello" };
+    const settledAssistant: ChatMessage = {
+      id: "a0",
+      role: "assistant",
+      text: "settled",
+      thinking: "",
+      tools: [],
+      streaming: false,
+    };
+    const streamingAssistant: ChatMessage = {
+      id: "a1",
+      role: "assistant",
+      text: "before",
+      thinking: "",
+      tools: [],
+      streaming: true,
+    };
+    const start = {
+      ...initialChatUiState(
+        [settledUser, settledAssistant, streamingAssistant],
+        { sessionId: ID.session_id, threadId: ID.thread_id }
+      ),
+      activeAssistantId: "a1",
+      currentTurnId: ID.turn_id,
+      sending: true,
+    };
+
+    const state = reduceChatEvent(start, {
+      kind: "text_delta",
+      ...ID,
+      message_id: "a1",
+      text: " after",
+    }).state;
+
+    assert.equal(state.messages[0], settledUser);
+    assert.equal(state.messages[1], settledAssistant);
+    assert.notEqual(state.messages[2], streamingAssistant);
+    assert.equal(assistant(state, 1).text, "before after");
+  });
+
+  it("still patches an earlier assistant row by id", () => {
+    const start = reduceAll([
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+      { kind: "assistant_start", ...ID, message_id: "a2" },
+    ]);
+    const state = reduceChatEvent(start, {
+      kind: "text_delta",
+      ...ID,
+      message_id: "a1",
+      text: "late update",
+    }).state;
+
+    assert.equal(assistant(state, 0).text, "late update");
+    assert.equal(assistant(state, 1).text, "");
+  });
+
   it("assistant_start shows empty streaming row before first delta", () => {
     const state = reduceAll([
       { kind: "user", ...ID, message_id: "u1", text: "hello" },
@@ -417,7 +491,13 @@ describe("reduceChatEvent characterization", () => {
         sessionId: ID.session_id,
         threadId: ID.thread_id,
       }),
-      { kind: "error", ...ID, message_id: "a1", message: "boom" },
+      {
+        kind: "error",
+        ...ID,
+        message_id: "a1",
+        message: "boom",
+        provider_selection: "deepseek",
+      },
       { newId: seqId() }
     );
     assert.equal(assistant(state).error, "boom");
@@ -425,6 +505,7 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(state.sending, false);
     assert.equal(state.activeAssistantId, null);
     assert.equal(effects.errorToast, "boom");
+    assert.equal(assistant(state).providerSelection, "deepseek");
   });
 
   it("does not duplicate tool_call_start for the same id", () => {

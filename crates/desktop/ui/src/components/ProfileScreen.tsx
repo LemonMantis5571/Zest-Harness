@@ -247,14 +247,20 @@ function StatStrip({
   return (
     <ul className="m-0 grid list-none grid-cols-2 gap-px overflow-hidden rounded-lg border border-border/70 bg-border/60 p-0 sm:grid-cols-3 lg:grid-cols-6">
       {items.map((item) => (
-        <li key={item.label} className="bg-card/60 px-3 py-3 text-center">
+        <li
+          key={item.label}
+          title={item.hint ?? undefined}
+          tabIndex={item.hint ? 0 : undefined}
+          aria-label={item.hint ? `${item.label}: ${item.value}. ${item.hint}` : undefined}
+          className={cn(
+            "bg-card/60 px-3 py-3 text-center focus-visible:outline-2 focus-visible:outline-primary",
+            item.hint ? "cursor-help" : undefined
+          )}
+        >
           <div className="text-[15px] font-semibold tabular-nums tracking-[-0.2px]">
             {item.value}
           </div>
           <div className="mt-0.5 text-[11px] text-muted-foreground">{item.label}</div>
-          {item.hint ? (
-            <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{item.hint}</div>
-          ) : null}
         </li>
       ))}
     </ul>

@@ -126,8 +126,12 @@ export type ChatMessage =
       thinking: string;
       tools: ToolPart[];
       error?: string;
+      /** Snake-case persisted form from Rust `StoredMessage`. */
+      provider_selection?: string;
       /** Provider to offer a Reconnect for; only set on auth failures. */
       reconnectProvider?: string;
+      /** Provider to configure or replace when managed reconnect is not the fix. */
+      providerSelection?: string;
       /** Slash command that produced this turn, if any — titles the output. */
       command?: string;
       /** Live question requested by the model; not persisted in thread history. */

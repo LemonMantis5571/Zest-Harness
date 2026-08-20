@@ -6,7 +6,9 @@
 //! patch for the desktop. Callers do not need to know which Git commands or
 //! path cases are involved.
 
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,26 @@ use crate::tools::sensitive::is_sensitive_path;
 /// visible patch as truncated.
 pub const MAX_DISPLAY_DIFF_BYTES: usize = 2 * 1024 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const INSPECTION_CACHE_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InspectionCacheKey {
+    root: String,
+    base_commit: Option<String>,
+    base_branch: Option<String>,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedInspection {
+    key: InspectionCacheKey,
+    snapshot: WorkspaceChangeSet,
+}
+
+fn inspection_cache() -> &'static Mutex<VecDeque<CachedInspection>> {
+    static CACHE: OnceLock<Mutex<VecDeque<CachedInspection>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(INSPECTION_CACHE_CAPACITY)))
+}
 
 /// Git revisions are captured from `rev-parse HEAD` and persisted with a
 /// thread. Keep accepting abbreviated hashes for older threads, but never pass
@@ -125,6 +147,17 @@ pub async fn inspect(
         return Ok(WorkspaceChangeSet::unavailable("git"));
     }
     let entries = parse_status(&status.stdout);
+    let head = git_head(&root).await;
+    let fingerprint = workspace_fingerprint(&root, &head, &branch, &status.stdout, &entries).await;
+    let cache_key = InspectionCacheKey {
+        root: root.to_string_lossy().into_owned(),
+        base_commit: base_commit.map(str::to_string),
+        base_branch: base_branch.map(str::to_string),
+        fingerprint,
+    };
+    if let Some(snapshot) = cached_inspection(&cache_key) {
+        return Ok(snapshot);
+    }
 
     let tracked_args = diff_args(base_commit);
     let mut raw_diff = match run_git(&root, &tracked_args).await {
@@ -175,7 +208,7 @@ pub async fn inspect(
     let mut summaries = summaries_from_status(&entries);
     fill_stats_from_diff(&mut summaries, &raw_diff);
 
-    Ok(WorkspaceChangeSet {
+    let snapshot = WorkspaceChangeSet {
         change_id,
         repository: "git".into(),
         base_commit: base_commit.map(str::to_string),
@@ -187,7 +220,148 @@ pub async fn inspect(
         diff,
         truncated,
         unavailable: false,
-    })
+    };
+    cache_inspection(cache_key, snapshot.clone());
+    Ok(snapshot)
+}
+
+fn cached_inspection(key: &InspectionCacheKey) -> Option<WorkspaceChangeSet> {
+    let mut cache = inspection_cache().lock().ok()?;
+    let index = cache.iter().position(|entry| &entry.key == key)?;
+    let entry = cache.remove(index)?;
+    let snapshot = entry.snapshot.clone();
+    cache.push_front(entry);
+    Some(snapshot)
+}
+
+fn cache_inspection(key: InspectionCacheKey, snapshot: WorkspaceChangeSet) {
+    let Ok(mut cache) = inspection_cache().lock() else {
+        return;
+    };
+    cache.retain(|entry| entry.key != key);
+    cache.push_front(CachedInspection { key, snapshot });
+    cache.truncate(INSPECTION_CACHE_CAPACITY);
+}
+
+async fn git_head(root: &Path) -> Option<String> {
+    let output = run_git(root, &["rev-parse", "HEAD"]).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!head.is_empty()).then_some(head)
+}
+
+async fn workspace_fingerprint(
+    root: &Path,
+    head: &Option<String>,
+    branch: &Option<String>,
+    status: &[u8],
+    entries: &[StatusEntry],
+) -> String {
+    let index_fingerprint = git_index_fingerprint(root, entries).await;
+    let root_string = root.to_string_lossy().into_owned();
+    let worktree_root = root.to_path_buf();
+    let paths = entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    let worktree_fingerprint =
+        tokio::task::spawn_blocking(move || worktree_content_fingerprint(&worktree_root, &paths))
+            .await
+            .unwrap_or_else(|_| "worktree-fingerprint-unavailable".to_string());
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(root_string.as_bytes());
+    hasher.update(head.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(branch.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(status);
+    hasher.update(index_fingerprint.as_bytes());
+    hasher.update(worktree_fingerprint.as_bytes());
+
+    hasher.finalize().to_hex().to_string()
+}
+
+async fn git_index_fingerprint(root: &Path, entries: &[StatusEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let mut args = vec!["--literal-pathspecs", "ls-files", "--stage", "-z", "--"];
+    args.extend(entries.iter().map(|entry| entry.path.as_str()));
+    match run_git(root, &args).await {
+        Ok(output) if output.status.success() => blake3::hash(&output.stdout).to_hex().to_string(),
+        Ok(output) => format!("index-command-failed:{}", output.status),
+        Err(_) => "index-command-unavailable".to_string(),
+    }
+}
+
+fn worktree_content_fingerprint(root: &Path, paths: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+
+    // Git status is the cheap primary probe, but metadata alone can remain
+    // unchanged when a file is rewritten with the same size and timestamp.
+    // Hash the current worktree content for every reported path so a cache hit
+    // can never return a stale diff for that class of edit.
+    for path in paths {
+        hasher.update(&(path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        match std::fs::symlink_metadata(root.join(path)) {
+            Ok(metadata) => {
+                hasher.update(b"present");
+                hasher.update(&metadata.len().to_le_bytes());
+                hasher.update(&[metadata.is_file() as u8, metadata.is_dir() as u8]);
+                hasher.update(&[metadata.permissions().readonly() as u8]);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    hasher.update(&metadata.permissions().mode().to_le_bytes());
+                }
+
+                if metadata.file_type().is_symlink() {
+                    match std::fs::read_link(root.join(path)) {
+                        Ok(target) => {
+                            hasher.update(b"symlink-target");
+                            hasher.update(target.to_string_lossy().as_bytes());
+                        }
+                        Err(_) => {
+                            hasher.update(b"symlink-target-unavailable");
+                        }
+                    }
+                } else if metadata.is_file() {
+                    match hash_file(root.join(path)) {
+                        Ok(content_hash) => {
+                            hasher.update(b"content");
+                            hasher.update(content_hash.as_bytes());
+                        }
+                        Err(_) => {
+                            hasher.update(b"content-unavailable");
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                hasher.update(b"missing");
+            }
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn hash_file(path: impl AsRef<Path>) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn diff_args(base_commit: Option<&str>) -> Vec<&str> {
@@ -619,6 +793,62 @@ mod tests {
         assert!(truncated);
         assert!(value.starts_with("abc"));
         assert!(value.contains("Diff truncated"));
+    }
+
+    #[test]
+    fn worktree_fingerprint_changes_when_same_sized_file_content_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("same-size.txt");
+        std::fs::write(&path, b"aaaa").unwrap();
+
+        let first = worktree_content_fingerprint(directory.path(), &["same-size.txt".to_string()]);
+        std::fs::write(&path, b"bbbb").unwrap();
+        let second = worktree_content_fingerprint(directory.path(), &["same-size.txt".to_string()]);
+
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn inspection_cache_invalidates_after_a_worktree_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(root.join("tracked.txt"), b"aaaa\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "--", "tracked.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Zest Test",
+                "-c",
+                "user.email=zest-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+
+        std::fs::write(root.join("tracked.txt"), b"bbbb\n").unwrap();
+        let first = inspect(root, None, None).await.unwrap();
+        std::fs::write(root.join("tracked.txt"), b"cccc\n").unwrap();
+        let second = inspect(root, None, None).await.unwrap();
+
+        assert!(first.diff.contains("+bbbb"));
+        assert!(second.diff.contains("+cccc"));
+        assert_ne!(first.change_id, second.change_id);
     }
 
     #[test]

@@ -22,7 +22,6 @@ import {
   XIcon,
 } from "lucide-react";
 
-import { BrandMark } from "@/components/BrandMark";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { Button } from "@/components/ui/button";
@@ -758,35 +757,27 @@ export function ChatHistorySidebar({
         )}
       >
         {open ? (
-          <>
-            <div className="flex min-w-0 items-center gap-2 px-1.5">
-              <BrandMark size={20} />
-              <span className="truncate text-sm font-semibold tracking-[-0.2px]">
-                Zest
-              </span>
-            </div>
-            <div className="flex items-center gap-0.5">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                title="Open project folder"
-                onClick={onOpenFolder}
-              >
-                <FolderOpenIcon />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                title="Collapse sidebar"
-                aria-expanded={open}
-                onClick={() => onOpenChange(false)}
-              >
-                <ChevronsLeftIcon />
-              </Button>
-            </div>
-          </>
+          <div className="ml-auto flex items-center gap-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Open project folder"
+              onClick={onOpenFolder}
+            >
+              <FolderOpenIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Collapse sidebar"
+              aria-expanded={open}
+              onClick={() => onOpenChange(false)}
+            >
+              <ChevronsLeftIcon />
+            </Button>
+          </div>
         ) : (
           <Button
             type="button"

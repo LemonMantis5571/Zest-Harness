@@ -14,4 +14,11 @@ command?: string | null, } | { "kind": "text_delta", session_id: string, thread_
  * signing in again can fix. `None` for everything else — a Reconnect
  * button on a rate limit would send the user through OAuth for nothing.
  */
-reconnect_provider?: string | null, } | { "kind": "cancelled", session_id: string, thread_id: string, turn_id: string, message_id: string, } | { "kind": "warning", session_id: string, thread_id: string, turn_id?: string, message: string, };
+reconnect_provider?: string | null,
+/**
+ * Provider whose failed API key or CLI-owned sign-in must be repaired
+ * manually, or replaced by choosing another provider. This remains
+ * separate from `reconnect_provider` so the UI never launches a
+ * managed login flow for credentials Zest does not own.
+ */
+provider_selection?: string, } | { "kind": "cancelled", session_id: string, thread_id: string, turn_id: string, message_id: string, } | { "kind": "warning", session_id: string, thread_id: string, turn_id?: string, message: string, };

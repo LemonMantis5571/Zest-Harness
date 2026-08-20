@@ -58,9 +58,10 @@ type Props = {
   focusUser?: boolean;
   onClose: () => void;
   onChangeProvider: () => void;
-  /** Rebuild the session after an external worker is enabled or disabled. */
+  /** Rebuild the session after credentials or an external worker change. */
   onReloadSession?: () => Promise<void>;
   onReconnect: () => void;
+  onProviderKeyRemoved?: (providerId: string) => void;
   onOpenFolder: () => void;
   onProfileChange: (profile: UserProfile) => void;
 };
@@ -170,6 +171,7 @@ export function SettingsPanel({
   onChangeProvider,
   onReloadSession,
   onReconnect,
+  onProviderKeyRemoved,
   onOpenFolder,
   onProfileChange,
 }: Props) {
@@ -416,6 +418,11 @@ export function SettingsPanel({
       setProviderKeyPresent(true);
       const rows = await getBackend().listProviders();
       setProvider(rows.find((row) => row.id === provider.id) ?? provider);
+      // The runtime captures the credential when the session is built. A
+      // saved replacement therefore needs an explicit session rebuild before
+      // the next turn can use it; this is still user-initiated by clicking
+      // Save, never an automatic provider switch.
+      if (onReloadSession) await onReloadSession();
     } catch {
       setError("Could not save the API key. Try again.");
     } finally {
@@ -430,6 +437,7 @@ export function SettingsPanel({
     try {
       await getBackend().deleteProviderKey(provider.id);
       setProviderKeyPresent(false);
+      onProviderKeyRemoved?.(provider.id);
     } catch {
       setError("Could not remove the API key. Try again.");
     } finally {

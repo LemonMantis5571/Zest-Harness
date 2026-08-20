@@ -165,6 +165,10 @@ pub enum StoredMessage {
         tools: Vec<ToolPart>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Provider to repair or replace when the error was an auth failure
+        /// that Zest cannot fix with its own managed login flow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_selection: Option<String>,
         /// Slash command that produced this turn. Persisted so a reopened chat
         /// still frames the answer the way it was framed when written —
         /// otherwise an old plan silently degrades to plain text and looks
@@ -637,6 +641,7 @@ impl Thread {
             thinking: String::new(),
             tools: Vec::new(),
             error: None,
+            provider_selection: None,
             command: None,
             streaming: true,
         });
@@ -795,12 +800,26 @@ impl Thread {
     }
 
     pub fn apply_error(&mut self, message_id: &str, message: &str) {
+        self.apply_error_with_provider(message_id, message, None);
+    }
+
+    pub fn apply_error_with_provider(
+        &mut self,
+        message_id: &str,
+        message: &str,
+        provider_selection: Option<&str>,
+    ) {
         self.ensure_assistant(message_id);
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((_, _, _, error, streaming)) = assistant_fields(msg) {
-                *error = Some(message.to_string());
-                *streaming = false;
-            }
+        if let Some(StoredMessage::Assistant {
+            error,
+            provider_selection: stored_provider_selection,
+            streaming,
+            ..
+        }) = self.find_mut(message_id)
+        {
+            *error = Some(message.to_string());
+            *stored_provider_selection = provider_selection.map(str::to_string);
+            *streaming = false;
         }
         self.touch();
     }
@@ -1833,10 +1852,27 @@ mod characterization {
         thread.apply_error("a1", "upstream failed");
         match &thread.messages[1] {
             StoredMessage::Assistant {
-                error, streaming, ..
+                error,
+                provider_selection,
+                streaming,
+                ..
             } => {
                 assert_eq!(error.as_deref(), Some("upstream failed"));
+                assert!(provider_selection.is_none());
                 assert!(!streaming);
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        thread.apply_error_with_provider("a1", "invalid key", Some("anthropic"));
+        match &thread.messages[1] {
+            StoredMessage::Assistant {
+                error,
+                provider_selection,
+                ..
+            } => {
+                assert_eq!(error.as_deref(), Some("invalid key"));
+                assert_eq!(provider_selection.as_deref(), Some("anthropic"));
             }
             other => panic!("expected assistant, got {other:?}"),
         }

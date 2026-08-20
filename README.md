@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./assets/logo.png" alt="Zest logo" width="256" height="256" />
+<img src="./crates/desktop/ui/src/assets/zest-mark.png" alt="Zest logo" width="256" height="256" />
 
 # Zest
 

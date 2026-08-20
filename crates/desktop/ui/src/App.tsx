@@ -16,6 +16,7 @@ import {
   initialChatUiState,
   markApprovalRunning,
   reduceChatEvent,
+  reduceChatEvents,
   restoreApprovalCard,
   retireApprovalCard,
   type ChatUiState,
@@ -97,10 +98,39 @@ type Screen =
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
+/** A broken desktop command must not leave the launch skeleton on screen forever. */
+const BOOT_TIMEOUT_MS = 15_000;
+/** Consecutive status failures are enough to stop a sign-in that can no longer be observed. */
+const LOGIN_STATUS_FAILURE_LIMIT = 5;
 /** How often to re-read .git/HEAD while a chat is open. */
 const BRANCH_POLL_MS = 2000;
 /** PR metadata is remote-backed and changes much less often than .git/HEAD. */
 const GIT_CONTEXT_POLL_MS = 30_000;
+
+/**
+ * Bound the UI wait even when a Tauri command or an embedded runtime never
+ * resolves. The underlying command cannot be cancelled from the webview, but
+ * callers only act on the bounded promise, so a late result cannot keep the
+ * launch screen stuck.
+ */
+function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error(`zest_boot_timeout: ${label}`)),
+      BOOT_TIMEOUT_MS
+    );
+    Promise.resolve(promise).then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 async function showAttention(
   title: string,
@@ -138,8 +168,13 @@ function normalizedWorkspacePath(value: string) {
 }
 
 /** Collapse adjacent text/thinking deltas for the same message before reduce. */
-function mergeAdjacentDeltas(events: ChatEvent[]): ChatEvent[] {
-  const out: ChatEvent[] = [];
+type ChatDeltaEvent = Extract<
+  ChatEvent,
+  { kind: "text_delta" | "thinking_delta" }
+>;
+
+function mergeAdjacentDeltas(events: ChatDeltaEvent[]): ChatDeltaEvent[] {
+  const out: ChatDeltaEvent[] = [];
   for (const event of events) {
     const last = out[out.length - 1];
     if (
@@ -150,6 +185,8 @@ function mergeAdjacentDeltas(events: ChatEvent[]): ChatEvent[] {
       "message_id" in event &&
       last.message_id === event.message_id &&
       last.turn_id === event.turn_id &&
+      last.thread_id === event.thread_id &&
+      last.session_id === event.session_id &&
       "text" in last &&
       "text" in event
     ) {
@@ -205,6 +242,7 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
         };
       }),
       error: msg.error,
+      providerSelection: msg.providerSelection ?? msg.provider_selection,
       // Persisted, so a reopened plan still renders as a plan.
       command: msg.command,
       streaming: false,
@@ -323,8 +361,38 @@ type PickerError = {
   workspace: boolean;
 };
 
+type EnterChatOptions = {
+  /** Prevent a superseded login callback from applying a late session. */
+  isCurrent?: () => boolean;
+};
+
 function pickerErrorFrom(err: unknown): PickerError {
   return { message: formatInvokeError(err), workspace: isWorkspaceProblem(err) };
+}
+
+function startupPickerErrorFrom(err: unknown): PickerError {
+  const raw = rawInvokeError(err).toLowerCase();
+  if (raw.includes("zest_boot_timeout")) {
+    return {
+      message:
+        "Zest could not finish opening its desktop runtime. Restart Zest, then try again.",
+      workspace: false,
+    };
+  }
+  if (
+    raw.includes("404") ||
+    raw.includes("unknown command") ||
+    raw.includes("command not found") ||
+    raw.includes("failed to fetch") ||
+    raw.includes("ipc")
+  ) {
+    return {
+      message:
+        "Zest could not reach its desktop runtime. Restart Zest, then try again.",
+      workspace: false,
+    };
+  }
+  return pickerErrorFrom(err);
 }
 
 const backend = getBackend();
@@ -333,6 +401,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("boot");
   /** Bumped to ask ChatScreen to open Settings at the User section. */
   const [settingsRequest, setSettingsRequest] = useState(0);
+  const [providerSwitchRequest, setProviderSwitchRequest] = useState(0);
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /**
@@ -345,6 +414,7 @@ export default function App() {
   const [sessionWarning, setSessionWarning] = useState<SessionWarning | null>(null);
   const [pickerError, setPickerError] = useState<PickerError | null>(null);
   const [continuing, setContinuing] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [pendingConversationRecovery, setPendingConversationRecovery] = useState<{
     recovery: ConversationRecovery;
     root: string | null;
@@ -398,6 +468,10 @@ export default function App() {
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const pollRef = useRef<number | null>(null);
+  /** Invalidates callbacks from a canceled or superseded browser login. */
+  const loginAttemptRef = useRef(0);
+  /** Prevent duplicate vendor login processes while the first spawn is pending. */
+  const loginStartingRef = useRef(false);
   const activeAssistantId = useRef<string | null>(null);
   /** Live UI projections for chats that continue while another one is open. */
   const chatStatesRef = useRef(new Map<string, ChatUiState>());
@@ -433,7 +507,9 @@ export default function App() {
   effortRef.current = effort;
   /** Set just before send; applied when the matching user_message event arrives. */
   const pendingUserAttachmentsRef = useRef(new Map<string, UserAttachmentChip[]>());
-  const enterChatRef = useRef<(providerId: string) => Promise<SessionInfo>>(
+  const enterChatRef = useRef<
+    (providerId: string, options?: EnterChatOptions) => Promise<SessionInfo>
+  >(
     async () => {
       throw new Error("session start is not ready yet");
     }
@@ -523,7 +599,7 @@ export default function App() {
   );
 
   const loadProviders = useCallback(async (prefer?: string | null) => {
-    const rows = await backend.listProviders();
+    const rows = await withTimeout(backend.listProviders(), "provider list");
     setProviders(rows);
     setSelectedId((current) => {
       const preferId = prefer ?? current;
@@ -541,62 +617,82 @@ export default function App() {
     }
   }, []);
 
-  const finishVerifiedLogin = useCallback(async (row: ProviderRow) => {
-    // File presence is not a working session — prove it, then open chat
-    // without an extra Continue click.
-    setWaitingHint("Checking the sign-in works…");
-    try {
-      await backend.verifyProvider(row.id);
-    } catch (err) {
-      // A refused *model* is not a refused sign-in. Signing in again cannot
-      // change which models the plan includes, so send them into chat — where
-      // the model picker is — instead of back to a Reconnect button that
-      // cannot help.
-      if (isModelUnsupported(err)) {
-        markProviderVerified(row.id);
-        setSessionWarning({
-          providerId: row.id,
-          message: "You're signed in, but this account cannot use that model. Choose another model below.",
-          offerReconnect: false,
-        });
-        setWaitingHint("Opening chat…");
-        try {
-          await enterChatRef.current(row.id);
-        } catch {
-          setPickerError({
-            message: "Could not open this provider. Try again.",
-            workspace: false,
+  const finishVerifiedLogin = useCallback(
+    async (row: ProviderRow, attempt?: number) => {
+      const isCurrent = () =>
+        attempt == null || attempt === loginAttemptRef.current;
+      if (!isCurrent()) return;
+
+      // File presence is not a working session — prove it, then open chat
+      // without an extra Continue click.
+      setWaitingHint("Checking the sign-in works…");
+      try {
+        await withTimeout(backend.verifyProvider(row.id), "provider check");
+        if (!isCurrent()) return;
+      } catch (err) {
+        if (!isCurrent()) return;
+        // A refused *model* is not a refused sign-in. Signing in again cannot
+        // change which models the plan includes, so send them into chat — where
+        // the model picker is — instead of back to a Reconnect button that
+        // cannot help.
+        if (isModelUnsupported(err)) {
+          markProviderVerified(row.id);
+          setSessionWarning({
+            providerId: row.id,
+            message: "You're signed in, but this account cannot use that model. Choose another model below.",
+            offerReconnect: false,
           });
-          setScreen("picker");
+          setWaitingHint("Opening chat…");
+          try {
+            await enterChatRef.current(row.id, { isCurrent });
+            if (!isCurrent()) return;
+          } catch {
+            if (!isCurrent()) return;
+            setPickerError({
+              message: "Could not open this provider. Try again.",
+              workspace: false,
+            });
+            setScreen("picker");
+          }
+          return;
         }
+        markProviderVerifyFailed(row.id);
+        setWaitingHint("Provider unavailable");
+        setWaitingError(`Could not connect to ${row.label}. Try connecting again.`);
         return;
       }
-      markProviderVerifyFailed(row.id);
-      setWaitingHint("Provider unavailable");
-      setWaitingError(`Could not connect to ${row.label}. Try connecting again.`);
-      return;
-    }
-    markProviderVerified(row.id);
-    setWaitingHint("Opening chat…");
-    try {
-      await enterChatRef.current(row.id);
-    } catch (err) {
-      markProviderVerifyFailed(row.id);
-      setPickerError(pickerErrorFrom(err));
-      setScreen("picker");
-    }
-  }, []);
+      markProviderVerified(row.id);
+      setWaitingHint("Opening chat…");
+      try {
+        await enterChatRef.current(row.id, { isCurrent });
+        if (!isCurrent()) return;
+      } catch (err) {
+        if (!isCurrent()) return;
+        markProviderVerifyFailed(row.id);
+        setPickerError(startupPickerErrorFrom(err));
+        setScreen("picker");
+      }
+    },
+    []
+  );
 
   const startWaitingPoll = useCallback(() => {
     stopPolling();
+    const attempt = ++loginAttemptRef.current;
     let ticks = 0;
     setWaitingHint("Waiting for browser sign-in…");
     setWaitingError(null);
 
+    let consecutiveFailures = 0;
+    let pollInFlight = false;
     pollRef.current = window.setInterval(async () => {
+      if (pollInFlight || attempt !== loginAttemptRef.current) return;
+      pollInFlight = true;
       ticks += 1;
       try {
         const rows = await loadProviders(selectedIdRef.current);
+        if (attempt !== loginAttemptRef.current) return;
+        consecutiveFailures = 0;
         const row = rows.find((p) => p.id === selectedIdRef.current);
         // Ready, or a session file appeared but looked incomplete — either way
         // prove it with a probe instead of spinning on "Waiting…".
@@ -606,11 +702,12 @@ export default function App() {
             row.detail.toLowerCase().includes("incomplete"));
         if (row && fileAppeared) {
           stopPolling();
-          await finishVerifiedLogin(row);
+          await finishVerifiedLogin(row, attempt);
           return;
         }
 
-        const login = await backend.loginStatus();
+        const login = await withTimeout(backend.loginStatus(), "login status");
+        if (attempt !== loginAttemptRef.current) return;
         if (login.state === "exited") {
           stopPolling();
           setWaitingHint("Sign-in stopped");
@@ -621,9 +718,19 @@ export default function App() {
           return;
         }
       } catch {
-        /* keep waiting */
+        if (attempt !== loginAttemptRef.current) return;
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= LOGIN_STATUS_FAILURE_LIMIT) {
+          stopPolling();
+          setWaitingHint("Could not check sign-in");
+          setWaitingError("Zest could not check the sign-in status. Return to providers and try again.");
+          return;
+        }
+      } finally {
+        pollInFlight = false;
       }
 
+      if (attempt !== loginAttemptRef.current) return;
       if (ticks >= POLL_MAX_TICKS) {
         stopPolling();
         setWaitingHint("Still waiting");
@@ -632,7 +739,7 @@ export default function App() {
     }, POLL_MS);
   }, [finishVerifiedLogin, loadProviders, stopPolling]);
 
-  const deltaQueueRef = useRef<ChatEvent[]>([]);
+  const deltaQueueRef = useRef<ChatDeltaEvent[]>([]);
   const deltaRafRef = useRef<number | null>(null);
 
   const refreshCheckpointMetadata = useCallback(() => {
@@ -874,6 +981,53 @@ export default function App() {
     }
   }, [maybeAutoCompact, refreshCheckpointMetadata]);
 
+  /**
+   * Publish at most one transcript update per thread for a rendered frame.
+   * Delta ordering is preserved within each thread, while background chats
+   * continue to advance in their own projection without rerendering the open
+   * transcript.
+   */
+  const applyChatDeltasNow = useCallback((events: readonly ChatDeltaEvent[]) => {
+    if (events.length === 0) return;
+
+    const byThread = new Map<string, ChatDeltaEvent[]>();
+    for (const event of events) {
+      const threadEvents = byThread.get(event.thread_id);
+      if (threadEvents) threadEvents.push(event);
+      else byThread.set(event.thread_id, [event]);
+    }
+
+    const currentThread = threadIdRef.current;
+    let currentState: ChatUiState | null = null;
+    for (const [threadKey, threadEvents] of byThread) {
+      const previous =
+        chatStatesRef.current.get(threadKey) ??
+        initialChatUiState([], { threadId: threadKey });
+      const { state: reduced } = reduceChatEvents(
+        {
+          ...previous,
+          sessionId: null,
+          threadId: threadKey,
+        },
+        threadEvents,
+        { newId }
+      );
+      const state: ChatUiState = {
+        ...reduced,
+        sessionId: null,
+        threadId: threadKey,
+      };
+      chatStatesRef.current.set(threadKey, state);
+      if (threadKey === currentThread) currentState = state;
+    }
+
+    if (!currentState) return;
+    messagesRef.current = currentState.messages;
+    activeAssistantId.current = currentState.activeAssistantId;
+    currentTurnIdRef.current = currentState.currentTurnId;
+    setMessages(currentState.messages);
+  }, []);
+
   const flushDeltaQueue = useCallback(
     (drainAll = false) => {
       deltaRafRef.current = null;
@@ -881,13 +1035,14 @@ export default function App() {
       deltaQueueRef.current = [];
       // Merge adjacent text/thinking deltas before React reduce to cut renders.
       const merged = mergeAdjacentDeltas(queued);
+      const frameEvents: ChatDeltaEvent[] = [];
 
       for (let i = 0; i < merged.length; i += 1) {
         const event = merged[i];
         if (!drainAll && event.kind === "text_delta") {
           const reveal = revealCount(event.text.length);
           if (reveal < event.text.length) {
-            applyChatEventNow({ ...event, text: event.text.slice(0, reveal) });
+            frameEvents.push({ ...event, text: event.text.slice(0, reveal) });
             // Order matters: the remainder and everything queued behind it
             // wait a frame together, or later text would overtake earlier text.
             deltaQueueRef.current = [
@@ -897,8 +1052,10 @@ export default function App() {
             break;
           }
         }
-        applyChatEventNow(event);
+        frameEvents.push(event);
       }
+
+      applyChatDeltasNow(frameEvents);
 
       if (deltaQueueRef.current.length > 0 && deltaRafRef.current == null) {
         deltaRafRef.current = window.requestAnimationFrame(() =>
@@ -906,7 +1063,7 @@ export default function App() {
         );
       }
     },
-    [applyChatEventNow]
+    [applyChatDeltasNow]
   );
 
   const handleChatEvent = useCallback(
@@ -1076,9 +1233,13 @@ export default function App() {
   }, []);
 
   const enterChat = useCallback(
-    async (providerId: string) => {
+    async (providerId: string, options?: EnterChatOptions) => {
       try {
-        const info = await backend.startSession(providerId);
+        const info = await withTimeout(
+          backend.startSession(providerId),
+          "session start"
+        );
+        if (options?.isCurrent && !options.isCurrent()) return info;
         stopPolling();
         applySession(info);
         return info;
@@ -1109,12 +1270,21 @@ export default function App() {
 
     if (backend.mode === "fixture") {
       void (async () => {
-        const info = await backend.startSession("fixture");
-        applySession(info);
-        setSending(true);
-        sendingRef.current = true;
         try {
-          await backend.boot?.(handleChatEvent);
+          const info = await withTimeout(
+            backend.startSession("fixture"),
+            "fixture session"
+          );
+          applySession(info);
+          setSending(true);
+          sendingRef.current = true;
+          await withTimeout(
+            Promise.resolve(backend.boot?.(handleChatEvent)),
+            "fixture boot"
+          );
+        } catch (err) {
+          setPickerError(startupPickerErrorFrom(err));
+          setScreen("picker");
         } finally {
           setSending(false);
           sendingRef.current = false;
@@ -1126,10 +1296,10 @@ export default function App() {
     (async () => {
       try {
         const [rows, prefer, folder, userProfile] = await Promise.all([
-          backend.listProviders(),
-          backend.lastProvider().catch(() => null),
-          backend.getWorkspaceFolder().catch(() => null),
-          backend.getUserProfile().catch(() => ({
+          withTimeout(backend.listProviders(), "provider list"),
+          withTimeout(backend.lastProvider(), "saved provider").catch(() => null),
+          withTimeout(backend.getWorkspaceFolder(), "workspace folder").catch(() => null),
+          withTimeout(backend.getUserProfile(), "user profile").catch(() => ({
             displayName: "",
             avatarDataUrl: "",
           })),
@@ -1152,7 +1322,7 @@ export default function App() {
             measureStartup("session-ready", "boot-effect");
             return;
           } catch (err) {
-            setPickerError(pickerErrorFrom(err));
+            setPickerError(startupPickerErrorFrom(err));
             setScreen("picker");
             markStartup("picker-error");
             measureStartup("picker-error", "boot-effect");
@@ -1166,7 +1336,7 @@ export default function App() {
         markStartup("picker-ready");
         measureStartup("picker-ready", "boot-effect");
       } catch (err) {
-        setPickerError(pickerErrorFrom(err));
+        setPickerError(startupPickerErrorFrom(err));
         setScreen("picker");
         markStartup("picker-error");
         measureStartup("picker-error", "boot-effect");
@@ -1239,8 +1409,10 @@ export default function App() {
     const onFocus = () => {
       if (screen === "waiting") {
         void (async () => {
+          const attempt = loginAttemptRef.current;
           try {
             const rows = await loadProviders(selectedIdRef.current);
+            if (attempt !== loginAttemptRef.current) return;
             const row = rows.find((p) => p.id === selectedIdRef.current);
             if (!row) return;
             const fileAppeared =
@@ -1249,7 +1421,7 @@ export default function App() {
                 row.detail.toLowerCase().includes("incomplete"));
             if (!fileAppeared) return;
             stopPolling();
-            await finishVerifiedLogin(row);
+            await finishVerifiedLogin(row, attempt);
           } catch {
             /* keep waiting */
           }
@@ -1275,7 +1447,7 @@ export default function App() {
       await enterChat(row.id);
     } catch (err) {
       setScreen("picker");
-      setPickerError(pickerErrorFrom(err));
+      setPickerError(startupPickerErrorFrom(err));
     } finally {
       setContinuing(false);
     }
@@ -1283,33 +1455,44 @@ export default function App() {
 
   async function goConnect() {
     const row = providers.find((p) => p.id === selectedId);
-    if (!row) return;
+    if (!row || loginStartingRef.current) return;
+    loginStartingRef.current = true;
+    setConnecting(true);
     setPickerError(null);
     try {
-      const started = await backend.startLogin(row.id);
+      const started = await withTimeout(
+        backend.startLogin(row.id),
+        "sign-in start"
+      );
       setWaitingTitle(started.browserTitle);
       setWaitingBody(started.browserBody);
       setScreen("waiting");
       startWaitingPoll();
     } catch (err) {
-      setPickerError(pickerErrorFrom(err));
+      setPickerError(startupPickerErrorFrom(err));
+    } finally {
+      loginStartingRef.current = false;
+      setConnecting(false);
     }
   }
 
   async function cancelWait() {
+    loginAttemptRef.current += 1;
     stopPolling();
-    await backend.cancelLogin().catch(() => {});
+    await withTimeout(backend.cancelLogin(), "cancel sign-in").catch(() => {});
     setWaitingError(null);
     if (session) {
       setScreen("chat");
       return;
     }
     setScreen("picker");
-    await loadProviders(selectedId);
+    await loadProviders(selectedId).catch((err) => {
+      setPickerError(startupPickerErrorFrom(err));
+    });
   }
 
   async function switchProvider(providerId: string) {
-    if (!providerId || providerId === session?.provider) return;
+    if (!providerId) return;
     if (session?.threadId) {
       saveDraft(session.threadId, draftRef.current);
     }
@@ -1331,10 +1514,14 @@ export default function App() {
    *  failure, which knows exactly which account the gateway rejected. */
   async function reconnectProvider(only?: string) {
     const providerId = only ?? session?.provider ?? selectedId;
-    if (!providerId || providerId !== "codex" || backend.mode === "fixture") return;
+    if (!providerId || backend.mode === "fixture" || loginStartingRef.current) return;
+    loginStartingRef.current = true;
     setPickerError(null);
     try {
-      const started = await backend.startLogin(providerId);
+      const started = await withTimeout(
+        backend.startLogin(providerId),
+        "sign-in start"
+      );
       setSelectedId(providerId);
       setWaitingTitle(started.browserTitle);
       setWaitingBody(started.browserBody);
@@ -1344,8 +1531,10 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not start sign-in",
-        description: formatInvokeError(err),
+        description: startupPickerErrorFrom(err).message,
       });
+    } finally {
+      loginStartingRef.current = false;
     }
   }
 
@@ -1363,6 +1552,11 @@ export default function App() {
       });
       applySession(info, { clearDraft: true });
     } catch (err) {
+      const recovery = conversationRecovery(err);
+      if (recovery) {
+        setPendingConversationRecovery({ recovery, root: null });
+        return;
+      }
       toast.add({
         type: "error",
         title: "Could not start new chat",
@@ -1564,7 +1758,8 @@ export default function App() {
     try {
       const info = await backend.openProjectChat({
         root: pending.root,
-        threadId: pending.recovery.threadId,
+        threadId: pending.recovery.threadId ?? undefined,
+        newThread: pending.recovery.kind === "new_chat_unavailable",
         providerId,
         copyThread: pending.recovery.kind === "owner_unavailable",
       });
@@ -1576,11 +1771,18 @@ export default function App() {
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       toast.add({
         type: "success",
-        title: pending.recovery.kind === "owner_unavailable" ? "Copy opened" : "Provider saved",
+        title:
+          pending.recovery.kind === "owner_unavailable"
+            ? "Copy opened"
+            : pending.recovery.kind === "new_chat_unavailable"
+              ? "Chat opened"
+              : "Provider saved",
         description:
           pending.recovery.kind === "owner_unavailable"
             ? `Opened a copy with ${provider?.label ?? providerId}. The original chat was kept.`
-            : `This chat now uses ${provider?.label ?? providerId}.`,
+            : pending.recovery.kind === "new_chat_unavailable"
+              ? `Opened a new chat with ${provider?.label ?? providerId}.`
+              : `This chat now uses ${provider?.label ?? providerId}.`,
       });
     } catch (err) {
       const recovery = conversationRecovery(err);
@@ -1602,11 +1804,23 @@ export default function App() {
     const pending = pendingConversationRecovery;
     if (!pending) return;
     if (pending.root === null) {
-      toast.add({
-        type: "warning",
-        title: "Provider unavailable",
-        description: "Choose another provider to open this free chat.",
+      setPendingConversationRecovery(null);
+      setPickerError({
+        message: "Choose a provider or add one with an API key to start this chat.",
+        workspace: false,
       });
+      setScreen("picker");
+      void loadProviders(selectedIdRef.current).catch(() => {});
+      return;
+    }
+
+    if (pending.recovery.kind !== "unknown_owner" && pending.recovery.configured) {
+      // The provider is present in the project but no longer ready, which is
+      // the API-key-deleted case. Open the provider sheet so the user can
+      // replace the key or explicitly choose another provider; project config
+      // is only needed when the provider entry itself is missing.
+      setPendingConversationRecovery(null);
+      setProviderSwitchRequest((request) => request + 1);
       return;
     }
 
@@ -1619,7 +1833,9 @@ export default function App() {
         description:
           pending.recovery.kind === "owner_unavailable"
             ? `Add ${pending.recovery.providerLabel} to this project's zest.toml, then open the chat again.`
-            : "Add a provider to this project's zest.toml, then open the chat again.",
+            : pending.recovery.kind === "new_chat_unavailable"
+              ? `Configure ${pending.recovery.providerLabel} or another provider in this project's zest.toml, then open the chat again.`
+              : "Add a provider to this project's zest.toml, then open the chat again.",
       });
     } catch (err) {
       toast.add({
@@ -2207,8 +2423,16 @@ export default function App() {
             onContinue={goContinue}
             onConnect={goConnect}
             onOpenFolder={onOpenFolder}
-            onRefresh={() => loadProviders(selectedIdRef.current).then(() => undefined)}
+            onRefresh={async () => {
+              try {
+                await loadProviders(selectedIdRef.current);
+                setPickerError(null);
+              } catch (err) {
+                setPickerError(startupPickerErrorFrom(err));
+              }
+            }}
             continuing={continuing}
+            connecting={connecting}
           />
         ) : null}
 
@@ -2284,8 +2508,9 @@ export default function App() {
               void reconnectProvider(providerId);
             }}
             onReloadSession={async () => {
-              // Rebuilds the runtime so an ACP worker change takes effect. The
-              // sticky thread is reloaded, so the open chat survives.
+              // Rebuilds the runtime so a replaced provider key or ACP worker
+              // change takes effect. The sticky thread is reloaded, so the
+              // open chat survives.
               const id = session?.provider ?? selectedIdRef.current;
               if (!id) return;
               try {
@@ -2300,6 +2525,7 @@ export default function App() {
             onBuildPlan={() => void onBuildPlan()}
             onOpenProfile={() => setScreen("profile")}
             onOpenUsage={() => setScreen("usage")}
+            providerSwitchRequest={providerSwitchRequest}
             delegationJobs={delegationJobs}
             onApproveDelegation={onApproveDelegation}
             onCancelDelegation={onCancelDelegation}

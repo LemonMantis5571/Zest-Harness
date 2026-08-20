@@ -324,12 +324,20 @@ impl OpenAiAccumulator {
                 // These endpoints cache the prompt prefix on their own and
                 // report the hit here — but as a *subset* of `prompt_tokens`,
                 // where the ledger (following Anthropic) keeps the two apart.
+                // DeepSeek uses its own top-level `prompt_cache_hit_tokens`
+                // field; the nested OpenAI field remains the fallback for
+                // other compatible endpoints.
+                //
                 // Left unsplit, every cached token is filed as fresh input and
                 // the measured hit rate for this provider is a flat zero no
                 // matter how well its cache is working.
                 let cached = usage
-                    .get("prompt_tokens_details")
-                    .and_then(|details| details.get("cached_tokens"))
+                    .get("prompt_cache_hit_tokens")
+                    .or_else(|| {
+                        usage
+                            .get("prompt_tokens_details")
+                            .and_then(|details| details.get("cached_tokens"))
+                    })
                     .and_then(Value::as_u64)
                     .unwrap_or(0)
                     .min(prompt);
@@ -531,6 +539,21 @@ mod tests {
             "prompt_tokens": 10_000,
             "completion_tokens": 250,
             "prompt_tokens_details": { "cached_tokens": 8_000 },
+        }));
+        assert_eq!(usage.input_tokens, 2_000);
+        assert_eq!(usage.cache_read_input_tokens, 8_000);
+        assert_eq!(usage.output_tokens, 250);
+    }
+
+    #[test]
+    fn deepseek_cache_hit_tokens_are_split_out_of_the_prompt_total() {
+        // DeepSeek reports cache usage as top-level fields rather than the
+        // nested `prompt_tokens_details.cached_tokens` shape used by OpenAI.
+        let usage = usage_of(json!({
+            "prompt_tokens": 10_000,
+            "prompt_cache_hit_tokens": 8_000,
+            "prompt_cache_miss_tokens": 2_000,
+            "completion_tokens": 250,
         }));
         assert_eq!(usage.input_tokens, 2_000);
         assert_eq!(usage.cache_read_input_tokens, 8_000);

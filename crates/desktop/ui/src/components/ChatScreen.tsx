@@ -67,6 +67,8 @@ import {
   MessageScrollerItem,
   MessageScrollerProvider,
   MessageScrollerViewport,
+  useMessageScroller,
+  useMessageScrollerScrollable,
 } from "@/components/ui/message-scroller";
 import { ZestPulse } from "@/components/ZestPulse";
 import { LinkifyText } from "@/lib/linkify";
@@ -74,6 +76,14 @@ import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import type { ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
+import {
+  TRANSCRIPT_REVEAL_STEP,
+  clampTranscriptStart,
+  initialTranscriptStart,
+  revealEarlierTranscriptStart,
+  shouldTrimTranscript,
+  transcriptStartForTarget,
+} from "@/lib/transcriptWindow";
 import { useKeybindings } from "@/lib/useKeybindings";
 import type {
   ApprovalChoice,
@@ -158,6 +168,8 @@ type Props = {
   onOpenProfile?: () => void;
   /** Show the usage screen. */
   onOpenUsage?: () => void;
+  /** Bumped to refresh provider availability and open the provider sheet. */
+  providerSwitchRequest?: number;
   /**
    * Bumped to request the User section of Settings — the profile screen sends
    * edits here rather than duplicating the form.
@@ -204,6 +216,7 @@ type ChatMessageRowProps = {
   ) => Promise<void>;
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
+  onOpenProviderSwitch?: () => void;
   onSend: (text?: string) => void;
   editing: boolean;
   editingText: string;
@@ -332,6 +345,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onResolveApproval,
   onOpenDiff,
   onReconnectProvider,
+  onOpenProviderSwitch,
   onSend,
   editing,
   editingText,
@@ -535,6 +549,18 @@ const ChatMessageRow = memo(function ChatMessageRow({
                     </Button>
                   </div>
                 ) : null}
+                {msg.providerSelection && onOpenProviderSwitch ? (
+                  <div className="mt-2.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={onOpenProviderSwitch}
+                    >
+                      Choose provider or API key
+                    </Button>
+                  </div>
+                ) : null}
               </BubbleContent>
             </Bubble>
           ) : null}
@@ -560,6 +586,55 @@ const ChatMessageRow = memo(function ChatMessageRow({
     </MessageScrollerItem>
   );
 });
+
+type ScrollToTranscriptMessage = ReturnType<
+  typeof useMessageScroller
+>["scrollToMessage"];
+
+function TranscriptScrollerControls({
+  hiddenCount,
+  onRevealEarlier,
+  onAtEndChange,
+  onRegisterScrollToMessage,
+}: {
+  hiddenCount: number;
+  onRevealEarlier: () => void;
+  onAtEndChange: (atEnd: boolean) => void;
+  onRegisterScrollToMessage: (
+    scrollToMessage: ScrollToTranscriptMessage | null
+  ) => void;
+}) {
+  const { scrollToMessage } = useMessageScroller();
+  const scrollable = useMessageScrollerScrollable();
+  const [mounted, setMounted] = useState(false);
+
+  useLayoutEffect(() => {
+    onRegisterScrollToMessage(scrollToMessage);
+    return () => onRegisterScrollToMessage(null);
+  }, [onRegisterScrollToMessage, scrollToMessage]);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    onAtEndChange(!scrollable.end);
+  }, [onAtEndChange, scrollable.end]);
+
+  if (!mounted || hiddenCount === 0 || scrollable.start) return null;
+  const revealCount = Math.min(hiddenCount, TRANSCRIPT_REVEAL_STEP);
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="secondary"
+      className="absolute left-1/2 top-3 z-20 -translate-x-1/2 border border-border/80 bg-background/95 shadow-md backdrop-blur-sm"
+      onClick={onRevealEarlier}
+    >
+      Show {revealCount} earlier message{revealCount === 1 ? "" : "s"}
+    </Button>
+  );
+}
 
 export function ChatScreen({
   session,
@@ -612,6 +687,7 @@ export function ChatScreen({
   onProfileChange,
   onOpenProfile,
   onOpenUsage,
+  providerSwitchRequest = 0,
   settingsRequest = 0,
   optionsDisabled = false,
   delegationJobs,
@@ -651,6 +727,18 @@ export function ChatScreen({
   );
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
+  const refreshAndOpenProviderSwitch = useCallback(() => {
+    void onRefreshProviders()
+      .catch(() => {})
+      .finally(() => setProviderSwitchOpen(true));
+  }, [onRefreshProviders]);
+  const refreshAndOpenProviderSwitchRef = useRef(refreshAndOpenProviderSwitch);
+  refreshAndOpenProviderSwitchRef.current = refreshAndOpenProviderSwitch;
+
+  useEffect(() => {
+    if (providerSwitchRequest <= 0) return;
+    refreshAndOpenProviderSwitchRef.current();
+  }, [providerSwitchRequest]);
   /**
    * The Workbench opens only when asked for.
    *
@@ -665,6 +753,89 @@ export function ChatScreen({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [editingMessageBusy, setEditingMessageBusy] = useState(false);
+  const [transcriptWindow, setTranscriptWindow] = useState(() => ({
+    threadId: session.threadId,
+    start: initialTranscriptStart(messages.length),
+  }));
+  const scrollToTranscriptMessageRef =
+    useRef<ScrollToTranscriptMessage | null>(null);
+  const pendingTranscriptJumpRef = useRef<string | null>(null);
+
+  const transcriptStart =
+    transcriptWindow.threadId === session.threadId
+      ? clampTranscriptStart(messages.length, transcriptWindow.start)
+      : initialTranscriptStart(messages.length);
+  const visibleMessages = useMemo(
+    () => messages.slice(transcriptStart),
+    [messages, transcriptStart]
+  );
+
+  useEffect(() => {
+    setTranscriptWindow((current) => {
+      const start =
+        current.threadId === session.threadId
+          ? clampTranscriptStart(messages.length, current.start)
+          : initialTranscriptStart(messages.length);
+      if (current.threadId === session.threadId && current.start === start) {
+        return current;
+      }
+      return { threadId: session.threadId, start };
+    });
+  }, [messages.length, session.threadId]);
+
+  useEffect(() => {
+    pendingTranscriptJumpRef.current = null;
+  }, [session.threadId]);
+
+  const registerScrollToTranscriptMessage = useCallback(
+    (scrollToMessage: ScrollToTranscriptMessage | null) => {
+      scrollToTranscriptMessageRef.current = scrollToMessage;
+    },
+    []
+  );
+
+  const scrollToTranscriptMessage = useCallback((messageId: string) => {
+    const scrolled = scrollToTranscriptMessageRef.current?.(messageId, {
+      behavior: "smooth",
+      align: "center",
+    });
+    if (scrolled) return;
+    document.getElementById(`message-${messageId}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }, []);
+
+  const revealEarlierMessages = useCallback(() => {
+    setTranscriptWindow({
+      threadId: session.threadId,
+      start: revealEarlierTranscriptStart(transcriptStart),
+    });
+  }, [session.threadId, transcriptStart]);
+
+  const handleTranscriptAtEndChange = useCallback(
+    (atEnd: boolean) => {
+      if (pendingTranscriptJumpRef.current || editingMessageId) return;
+      if (!shouldTrimTranscript(messages.length, transcriptStart, atEnd)) return;
+      setTranscriptWindow({
+        threadId: session.threadId,
+        start: initialTranscriptStart(messages.length),
+      });
+    },
+    [editingMessageId, messages.length, session.threadId, transcriptStart]
+  );
+
+  useLayoutEffect(() => {
+    const messageId = pendingTranscriptJumpRef.current;
+    if (!messageId) return;
+    const targetIndex = messages.findIndex((message) => message.id === messageId);
+    if (targetIndex < transcriptStart) return;
+    const frame = window.requestAnimationFrame(() => {
+      scrollToTranscriptMessage(messageId);
+      pendingTranscriptJumpRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, scrollToTranscriptMessage, transcriptStart]);
   const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
   const toggleWorkbench = useCallback(() => {
     if (session.isFreeChat) return;
@@ -957,12 +1128,22 @@ export function ChatScreen({
     workbenchWasOpen.current = workbenchOpen;
   }, [workbenchOpen]);
 
-  const jumpToMessage = useCallback((messageId: string) => {
-    document.getElementById(`message-${messageId}`)?.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-    });
-  }, []);
+  const jumpToMessage = useCallback(
+    (messageId: string) => {
+      const targetIndex = messages.findIndex((message) => message.id === messageId);
+      if (targetIndex < 0) return;
+      if (targetIndex < transcriptStart) {
+        pendingTranscriptJumpRef.current = messageId;
+        setTranscriptWindow({
+          threadId: session.threadId,
+          start: transcriptStartForTarget(transcriptStart, targetIndex),
+        });
+        return;
+      }
+      scrollToTranscriptMessage(messageId);
+    },
+    [messages, scrollToTranscriptMessage, session.threadId, transcriptStart]
+  );
 
   const paletteActions = useMemo<PaletteAction[]>(
     () => [
@@ -1298,11 +1479,11 @@ export function ChatScreen({
                     </MessageScrollerItem>
                   ) : null}
 
-                  {messages.map((msg, index) => (
+                  {visibleMessages.map((msg, index) => (
                     <ChatMessageRow
                       key={msg.id}
                       message={msg}
-                      isLast={index === messages.length - 1}
+                      isLast={index === visibleMessages.length - 1}
                       sending={sending}
                       approvalMode={approvalMode}
                       planToBuild={planToBuild}
@@ -1310,6 +1491,7 @@ export function ChatScreen({
                       onResolveApproval={onResolveApproval}
                       onOpenDiff={openDiff}
                       onReconnectProvider={onReconnectProvider}
+                      onOpenProviderSwitch={refreshAndOpenProviderSwitch}
                       onSend={onSend}
                       editing={editingMessageId === msg.id}
                       editingText={editingMessageText}
@@ -1327,6 +1509,12 @@ export function ChatScreen({
                   ))}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
+              <TranscriptScrollerControls
+                hiddenCount={transcriptStart}
+                onRevealEarlier={revealEarlierMessages}
+                onAtEndChange={handleTranscriptAtEndChange}
+                onRegisterScrollToMessage={registerScrollToTranscriptMessage}
+              />
               <MessageScrollerButton />
             </MessageScroller>
           </MessageScrollerProvider>
@@ -1438,6 +1626,10 @@ export function ChatScreen({
         onReconnect={() => {
           closeSettings();
           onReconnect();
+        }}
+        onProviderKeyRemoved={() => {
+          closeSettings();
+          refreshAndOpenProviderSwitch();
         }}
         onOpenFolder={() => {
           closeSettings();

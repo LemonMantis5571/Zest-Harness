@@ -6,6 +6,7 @@ import {
   AVAILABLE_FONTS,
   DEFAULT_FONT_ID,
   applyFont,
+  ensureFontLoaded,
   getSavedFontId,
   type AppFont,
   type FontCategory,
@@ -77,6 +78,8 @@ export function FontPicker({ className, onFontSelect }: Props) {
               key={font.id}
               type="button"
               onClick={() => handleSelect(font.id)}
+              onFocus={() => void ensureFontLoaded(font.id)}
+              onPointerEnter={() => void ensureFontLoaded(font.id)}
               className={cn(
                 "group relative flex flex-col justify-between rounded-lg border p-2.5 text-left transition-all outline-none",
                 isSelected

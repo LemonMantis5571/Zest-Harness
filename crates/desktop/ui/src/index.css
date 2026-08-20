@@ -2,11 +2,7 @@
 @import "tw-animate-css";
 @import "./shadcn-tailwind.css";
 @import "@fontsource-variable/geist";
-@import "@fontsource-variable/inter";
-@import "@fontsource-variable/plus-jakarta-sans";
 @import "@fontsource-variable/jetbrains-mono";
-@import "@fontsource-variable/fira-code";
-@import "./fonts/arizona.css";
 
 @custom-variant dark (&:is(.dark *));
 
