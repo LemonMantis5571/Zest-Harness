@@ -6,6 +6,7 @@ import { AuthShell } from "@/components/AuthShell";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
+import { rawInvokeError } from "@/lib/invokeErrors";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,34 @@ type Props = {
   onRefresh: () => Promise<void>;
   continuing: boolean;
   connecting: boolean;
+};
+
+/** Vendor CLIs that own their own auth session and can be added as a
+ *  first-class parent provider with no more input than an id and a model. */
+const PARENT_CLI_DEFAULTS: Record<
+  string,
+  {
+    title: string;
+    body: string;
+    label: string;
+    model: string;
+    configure: (id: string, model: string) => Promise<void>;
+  }
+> = {
+  claude: {
+    title: "Use Claude Code subscription",
+    body: "Zest will use your Claude Code CLI session as the parent agent, with no delegated worker involved.",
+    label: "Enable Claude Code",
+    model: "sonnet",
+    configure: (id, model) => getBackend().configureClaudeCodeProvider({ id, model }),
+  },
+  codex: {
+    title: "Use Codex CLI subscription",
+    body: "Zest will use your Codex CLI session as the parent agent, with no delegated worker involved.",
+    label: "Enable Codex CLI",
+    model: "gpt-5.6-sol",
+    configure: (id, model) => getBackend().configureCodexCliProvider({ id, model }),
+  },
 };
 
 function shortRoot(root: string): string {
@@ -51,8 +80,8 @@ export function ProviderPicker({
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [addingApiProvider, setAddingApiProvider] = useState(false);
-  const [configuringClaudeCode, setConfiguringClaudeCode] = useState(false);
-  const [claudeCodeError, setClaudeCodeError] = useState<string | null>(null);
+  const [configuringParentId, setConfiguringParentId] = useState<string | null>(null);
+  const [configureParentError, setConfigureParentError] = useState<string | null>(null);
   const selected = providers.find((p) => p.id === selectedId) ?? null;
   const selectedNeedsConnect =
     selected != null && recentVerifyFailed(selected.id);
@@ -241,35 +270,40 @@ export function ProviderPicker({
         </div>
       ) : null}
 
-      {selected?.id === "claude" && !selected.configured ? (
+      {selected && !selected.configured && PARENT_CLI_DEFAULTS[selected.id] ? (
         <div className="mt-4 rounded-lg border border-border/70 bg-card/40 p-3">
-          <div className="text-xs font-medium">Use Claude Code subscription</div>
+          <div className="text-xs font-medium">{PARENT_CLI_DEFAULTS[selected.id].title}</div>
           <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-            Zest will use your Claude Code CLI session as the parent agent, with no
-            delegated worker involved.
+            {PARENT_CLI_DEFAULTS[selected.id].body}
           </p>
           <Button
             type="button"
             size="sm"
             className="mt-2.5 w-full"
-            disabled={continuing || connecting || configuringClaudeCode}
+            disabled={continuing || connecting || configuringParentId === selected.id}
             onClick={() => {
-              setConfiguringClaudeCode(true);
-              setClaudeCodeError(null);
-              void getBackend()
-                .configureClaudeCodeProvider({ id: "claude", model: "sonnet" })
+              const id = selected.id;
+              const preset = PARENT_CLI_DEFAULTS[id];
+              setConfiguringParentId(id);
+              setConfigureParentError(null);
+              void preset
+                .configure(id, preset.model)
                 .then(async () => {
                   await onRefresh();
-                  onSelect("claude");
+                  onSelect(id);
                 })
-                .catch(() => setClaudeCodeError("Could not enable Claude Code. Try again."))
-                .finally(() => setConfiguringClaudeCode(false));
+                .catch((error) =>
+                  setConfigureParentError(
+                    rawInvokeError(error) || `Could not enable ${preset.label}. Try again.`
+                  )
+                )
+                .finally(() => setConfiguringParentId(null));
             }}
           >
-            {configuringClaudeCode ? "Enabling…" : "Enable Claude Code"}
+            {configuringParentId === selected.id ? "Enabling…" : PARENT_CLI_DEFAULTS[selected.id].label}
           </Button>
-          {claudeCodeError ? (
-            <p className="mt-2 text-xs text-destructive">{claudeCodeError}</p>
+          {configureParentError ? (
+            <p className="mt-2 text-xs text-destructive">{configureParentError}</p>
           ) : null}
         </div>
       ) : null}

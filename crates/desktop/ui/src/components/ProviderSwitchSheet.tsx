@@ -4,6 +4,7 @@ import { XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { getBackend } from "@/lib/backend";
+import { rawInvokeError } from "@/lib/invokeErrors";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -19,6 +20,24 @@ type Props = {
   onSelect: (providerId: string) => void;
   onConnect: (providerId: string) => void;
   onRefresh: () => Promise<void>;
+};
+
+/** Vendor CLIs that own their own auth session and can be added as a
+ *  first-class parent provider with no more input than an id and a model. */
+const PARENT_CLI_DEFAULTS: Record<
+  string,
+  { label: string; model: string; configure: (id: string, model: string) => Promise<void> }
+> = {
+  claude: {
+    label: "Enable Claude Code",
+    model: "sonnet",
+    configure: (id, model) => getBackend().configureClaudeCodeProvider({ id, model }),
+  },
+  codex: {
+    label: "Enable Codex CLI",
+    model: "gpt-5.6-sol",
+    configure: (id, model) => getBackend().configureCodexCliProvider({ id, model }),
+  },
 };
 
 function statusLabel(row: ProviderRow): string {
@@ -49,6 +68,8 @@ export function ProviderSwitchSheet({
   const [apiKey, setApiKey] = useState("");
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+  const [enablingParentId, setEnablingParentId] = useState<string | null>(null);
+  const [enableParentError, setEnableParentError] = useState<string | null>(null);
   useDialogFocusTrap(open, dialogRef);
   useEffect(() => {
     if (!open) return;
@@ -154,6 +175,32 @@ export function ProviderSwitchSheet({
                     >
                       {current && row.statusKind === "ready" ? "Replace key" : "Set key"}
                     </Button>
+                  ) : PARENT_CLI_DEFAULTS[row.id] ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={busy || enablingParentId === row.id}
+                      onClick={() => {
+                        const preset = PARENT_CLI_DEFAULTS[row.id];
+                        setEnablingParentId(row.id);
+                        setEnableParentError(null);
+                        void preset
+                          .configure(row.id, preset.model)
+                          .then(async () => {
+                            await onRefresh();
+                            onSelect(row.id);
+                          })
+                          .catch((error) =>
+                            setEnableParentError(
+                              rawInvokeError(error) || `Could not enable ${row.label}. Try again.`
+                            )
+                          )
+                          .finally(() => setEnablingParentId(null));
+                      }}
+                    >
+                      {enablingParentId === row.id ? "Enabling…" : PARENT_CLI_DEFAULTS[row.id].label}
+                    </Button>
                   ) : row.canConnect ? (
                     <Button
                       type="button"
@@ -174,6 +221,11 @@ export function ProviderSwitchSheet({
             );
           })}
         </ul>
+        {enableParentError ? (
+          <p className="border-t border-border/60 px-3 py-2 text-[11px] text-destructive">
+            {enableParentError}
+          </p>
+        ) : null}
         {keyProviderId ? (
           <form
             className="border-t border-border/60 p-3"
