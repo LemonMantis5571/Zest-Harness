@@ -1215,6 +1215,20 @@ fn load_workspace_config(state: &AppState) -> Config {
     }
 }
 
+/// Acquire the config-edit serialization lock, tolerating poisoning.
+///
+/// This guards a bare `()`: it orders read-modify-write edits to zest.toml,
+/// not any in-memory invariant a panicking edit could leave inconsistent.
+/// Treating a poisoned lock as unusable (the old `.map_err` behavior) turned
+/// one panicking edit into a permanent "settings are busy" dead end for every
+/// provider/agent config command for the rest of the process's life.
+fn lock_config_edit(state: &AppState) -> std::sync::MutexGuard<'_, ()> {
+    state
+        .config_edit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn editable_config_path(state: &AppState) -> Result<PathBuf, String> {
     let root = resolve_workspace_root(state)?;
     if root.join(zest_core::config::CONFIG_FILE).is_file() {
@@ -1474,10 +1488,7 @@ fn set_external_agent(state: State<'_, AppState>, id: String, enabled: bool) -> 
             "Only the built-in Claude Code and Gemini CLI presets can be changed here.".into(),
         );
     };
-    let _edit_guard = state
-        .config_edit
-        .lock()
-        .map_err(|_| "settings are busy; try again".to_string())?;
+    let _edit_guard = lock_config_edit(&state);
     let current = load_workspace_config(&state);
     if let Some(existing) = current.agents.get(id) {
         if !external_agent_matches_preset(id, existing) {
@@ -1503,10 +1514,7 @@ fn set_external_agent_mcp(
     enabled: bool,
 ) -> Result<(), String> {
     let id = id.trim();
-    let _edit_guard = state
-        .config_edit
-        .lock()
-        .map_err(|_| "settings are busy; try again".to_string())?;
+    let _edit_guard = lock_config_edit(&state);
     let current = load_workspace_config(&state);
     let Some(existing) = current.agents.get(id) else {
         return Err("Enable this worker before allowing its MCP servers.".into());
@@ -1539,10 +1547,7 @@ fn set_external_agent_model(
     model: Option<String>,
 ) -> Result<(), String> {
     let id = id.trim();
-    let _edit_guard = state
-        .config_edit
-        .lock()
-        .map_err(|_| "settings are busy; try again".to_string())?;
+    let _edit_guard = lock_config_edit(&state);
     let current = load_workspace_config(&state);
     let Some(existing) = current.agents.get(id) else {
         return Err("Enable this worker before choosing a model.".into());
@@ -1800,10 +1805,7 @@ fn configure_api_provider(
     if key.trim().is_empty() {
         return Err("API key is required".into());
     }
-    let _edit_guard = state
-        .config_edit
-        .lock()
-        .map_err(|_| "settings are busy; try again".to_string())?;
+    let _edit_guard = lock_config_edit(&state);
     let path = editable_config_path(&state)?;
     zest_core::config_edit::add_openai_provider(
         &path,
@@ -1831,10 +1833,7 @@ fn configure_anthropic_provider(
     if key.trim().is_empty() {
         return Err("API key is required".into());
     }
-    let _edit_guard = state
-        .config_edit
-        .lock()
-        .map_err(|_| "settings are busy; try again".to_string())?;
+    let _edit_guard = lock_config_edit(&state);
     let path = editable_config_path(&state)?;
     zest_core::config_edit::add_anthropic_provider(
         &path,
@@ -1855,10 +1854,7 @@ fn configure_claude_code_provider(
     id: String,
     model: String,
 ) -> Result<(), String> {
-    let _edit_guard = state
-        .config_edit
-        .lock()
-        .map_err(|_| "settings are busy; try again".to_string())?;
+    let _edit_guard = lock_config_edit(&state);
     let path = editable_config_path(&state)?;
     zest_core::config_edit::add_claude_code_provider(
         &path,
@@ -1873,6 +1869,30 @@ fn configure_claude_code_provider(
             // diff. The provider downgrades it anyway — writing it here would
             // only mislead someone reading their own zest.toml.
             permission_mode: zest_core::ClaudeCodePermissionMode::Default,
+            timeout_secs: 900,
+        },
+    )?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn configure_codex_cli_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let _edit_guard = lock_config_edit(&state);
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_codex_cli_provider(
+        &path,
+        &zest_core::config_edit::CodexCliProviderInput {
+            id,
+            command: "codex".into(),
+            model,
+            models: Vec::new(),
+            efforts: Vec::new(),
+            allow_mcp: false,
             timeout_secs: 900,
         },
     )?;
@@ -6123,6 +6143,7 @@ pub fn run() {
             configure_api_provider,
             configure_anthropic_provider,
             configure_claude_code_provider,
+            configure_codex_cli_provider,
             open_project_config,
             usage_snapshot,
             provider_quota,

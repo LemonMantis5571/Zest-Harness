@@ -571,6 +571,9 @@ export function createFixtureBackend(): DesktopBackend {
     async configureClaudeCodeProvider() {
       notAvailable("configureClaudeCodeProvider");
     },
+    async configureCodexCliProvider() {
+      notAvailable("configureCodexCliProvider");
+    },
     async openProjectConfig() {
       notAvailable("openProjectConfig");
     },
