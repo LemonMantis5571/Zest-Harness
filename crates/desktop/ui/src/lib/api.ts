@@ -97,6 +97,10 @@ export function configureClaudeCodeProvider(input: { id: string; model: string }
   return invoke<void>("configure_claude_code_provider", input);
 }
 
+export function configureCodexCliProvider(input: { id: string; model: string }) {
+  return invoke<void>("configure_codex_cli_provider", input);
+}
+
 export function openProjectConfig(root: string) {
   return invoke<void>("open_project_config", { root });
 }
