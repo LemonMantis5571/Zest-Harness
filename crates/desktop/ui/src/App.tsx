@@ -53,6 +53,13 @@ import {
   mergeSessionOptions,
   rollbackSessionOptions,
 } from "@/lib/sessionOptions";
+import {
+  createNavigationHistory,
+  pushNavigation,
+  travelNavigation,
+  type NavigationDestination,
+  type NavigationHistory,
+} from "@/lib/navigationHistory";
 import { markStartup, measureStartup } from "@/lib/startupPerf";
 import {
   reduceThreadActivity,
@@ -402,6 +409,10 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("boot");
   /** Bumped to ask ChatScreen to open Settings at the User section. */
   const [settingsRequest, setSettingsRequest] = useState(0);
+  /** Bumped to open Settings without forcing the User section. */
+  const [settingsOpenRequest, setSettingsOpenRequest] = useState(0);
+  const [navigation, setNavigation] = useState<NavigationHistory>(createNavigationHistory);
+  const navigationRef = useRef<NavigationHistory>(createNavigationHistory());
   const [providerSwitchRequest, setProviderSwitchRequest] = useState(0);
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -453,6 +464,70 @@ export default function App() {
   const [approvalModeState, setApprovalModeState] =
     useState<ApprovalMode>("auto");
   const [optionsUpdating, setOptionsUpdating] = useState(false);
+
+  const commitNavigation = useCallback((next: NavigationHistory) => {
+    navigationRef.current = next;
+    setNavigation(next);
+  }, []);
+
+  const applyNavigationDestination = useCallback(
+    (destination: NavigationDestination) => {
+      switch (destination.kind) {
+        case "chat":
+          setScreen("chat");
+          break;
+        case "profile":
+          setScreen("profile");
+          break;
+        case "usage":
+          setScreen("usage");
+          break;
+        case "settings":
+          setScreen("chat");
+          if (destination.focusUser) {
+            setSettingsRequest((request) => request + 1);
+          } else {
+            setSettingsOpenRequest((request) => request + 1);
+          }
+          break;
+      }
+    },
+    []
+  );
+
+  const navigateTo = useCallback(
+    (destination: NavigationDestination) => {
+      const next = pushNavigation(navigationRef.current, destination);
+      if (next === navigationRef.current) return;
+      commitNavigation(next);
+      applyNavigationDestination(destination);
+    },
+    [applyNavigationDestination, commitNavigation]
+  );
+
+  const navigateHistory = useCallback(
+    (direction: -1 | 1) => {
+      const moved = travelNavigation(navigationRef.current, direction);
+      if (!moved) return;
+      commitNavigation(moved.history);
+      applyNavigationDestination(moved.destination);
+    },
+    [applyNavigationDestination, commitNavigation]
+  );
+
+  const navigateBack = useCallback(() => navigateHistory(-1), [navigateHistory]);
+  const navigateForward = useCallback(() => navigateHistory(1), [navigateHistory]);
+  const closeSettingsFromHistory = useCallback(() => {
+    if (navigationRef.current.current?.kind === "settings") navigateBack();
+  }, [navigateBack]);
+
+  // The first loaded chat establishes the root of the app-view history. Boot,
+  // provider selection, and sign-in progress are lifecycle states, not places
+  // users should be sent back to by these controls.
+  useEffect(() => {
+    if (screen !== "chat" || navigationRef.current.current) return;
+    commitNavigation(pushNavigation(navigationRef.current, { kind: "chat" }));
+  }, [commitNavigation, screen]);
 
   useEffect(() => {
     applyFont(getSavedFontId());
@@ -2560,9 +2635,16 @@ export default function App() {
             approvalMode={approvalModeState}
             onApprovalModeChange={onApprovalModeChange}
             onBuildPlan={() => void onBuildPlan()}
-            onOpenProfile={() => setScreen("profile")}
-            onOpenUsage={() => setScreen("usage")}
+            onOpenProfile={() => navigateTo({ kind: "profile" })}
+            onOpenUsage={() => navigateTo({ kind: "usage" })}
+            onOpenSettings={() => navigateTo({ kind: "settings", focusUser: false })}
+            onCloseSettings={closeSettingsFromHistory}
+            canNavigateBack={navigation.back.length > 0}
+            canNavigateForward={navigation.forward.length > 0}
+            onNavigateBack={navigateBack}
+            onNavigateForward={navigateForward}
             providerSwitchRequest={providerSwitchRequest}
+            settingsOpenRequest={settingsOpenRequest}
             delegationJobs={delegationJobs}
             onCreateDelegation={onCreateDelegation}
             onApproveDelegation={onApproveDelegation}
@@ -2581,18 +2663,17 @@ export default function App() {
             providerLabel={
               providers.find((p) => p.id === session?.provider)?.label ?? session?.provider
             }
-            onBack={() => setScreen("chat")}
+            onBack={navigateBack}
             onEditProfile={() => {
               // Editing name and avatar stays in Settings; the profile screen
               // reports, it does not duplicate the form.
-              setScreen("chat");
-              setSettingsRequest((n) => n + 1);
+              navigateTo({ kind: "settings", focusUser: true });
             }}
-            onOpenUsage={() => setScreen("usage")}
+            onOpenUsage={() => navigateTo({ kind: "usage" })}
           />
         ) : null}
 
-        {screen === "usage" ? <UsageScreen onBack={() => setScreen("chat")} /> : null}
+        {screen === "usage" ? <UsageScreen onBack={navigateBack} /> : null}
       </div>
 
       <ConversationRecoveryDialog

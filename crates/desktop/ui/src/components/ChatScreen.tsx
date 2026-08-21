@@ -169,6 +169,14 @@ type Props = {
   onOpenProfile?: () => void;
   /** Show the usage screen. */
   onOpenUsage?: () => void;
+  /** Record and open the Settings view in the app navigation history. */
+  onOpenSettings?: () => void;
+  /** Remove Settings from the app navigation history when it closes. */
+  onCloseSettings?: () => void;
+  canNavigateBack: boolean;
+  canNavigateForward: boolean;
+  onNavigateBack: () => void;
+  onNavigateForward: () => void;
   /** Bumped to refresh provider availability and open the provider sheet. */
   providerSwitchRequest?: number;
   /**
@@ -176,6 +184,8 @@ type Props = {
    * edits here rather than duplicating the form.
    */
   settingsRequest?: number;
+  /** Bumped to open Settings without forcing the User section. */
+  settingsOpenRequest?: number;
   onResolveApproval: (
     approvalId: string,
     decision: ApprovalChoice
@@ -689,8 +699,15 @@ export function ChatScreen({
   onProfileChange,
   onOpenProfile,
   onOpenUsage,
+  onOpenSettings,
+  onCloseSettings,
+  canNavigateBack,
+  canNavigateForward,
+  onNavigateBack,
+  onNavigateForward,
   providerSwitchRequest = 0,
   settingsRequest = 0,
+  settingsOpenRequest = 0,
   optionsDisabled = false,
   delegationJobs,
   onCreateDelegation,
@@ -1094,6 +1111,15 @@ export function ChatScreen({
     setEditingMessageText("");
   }, [editingMessageBusy]);
 
+  const openSettings = useCallback(
+    (focusUser = false) => {
+      setFocusUser(focusUser);
+      setSettingsOpen(true);
+      onOpenSettings?.();
+    },
+    [onOpenSettings]
+  );
+
   const submitEditingMessage = useCallback(async () => {
     const messageId = editingMessageId;
     const text = editingMessageText.trim();
@@ -1179,13 +1205,10 @@ export function ChatScreen({
         label: "Open settings",
         description: "Configure Zest and keyboard shortcuts",
         shortcut: "Ctrl+,",
-        run: () => {
-          setFocusUser(false);
-          setSettingsOpen(true);
-        },
+        run: openSettings,
       },
     ],
-    [onNewChat, session.isFreeChat, toggleWorkbench, workbenchOpen]
+    [onNewChat, openSettings, session.isFreeChat, toggleWorkbench, workbenchOpen]
   );
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -1196,10 +1219,17 @@ export function ChatScreen({
     setSettingsOpen(true);
   }, [settingsRequest]);
 
-  function closeSettings() {
+  useEffect(() => {
+    if (settingsOpenRequest <= 0) return;
+    setFocusUser(false);
+    setSettingsOpen(true);
+  }, [settingsOpenRequest]);
+
+  const closeSettings = useCallback(() => {
     setSettingsOpen(false);
     setFocusUser(false);
-  }
+    onCloseSettings?.();
+  }, [onCloseSettings]);
 
   function setSidebar(next: boolean) {
     setSidebarOpen(next);
@@ -1243,7 +1273,7 @@ export function ChatScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancelEditingMessage, closeDiff, diffTarget, editingMessageId, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
+  }, [cancelEditingMessage, closeDiff, closeSettings, diffTarget, editingMessageId, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
@@ -1255,13 +1285,12 @@ export function ChatScreen({
     "focus.composer": focusComposer,
     "view.sidebar": () => setSidebar(!sidebarOpen),
     "view.settings": () => {
-      setFocusUser(false);
-      setSettingsOpen(true);
+      openSettings();
     },
     "view.shortcuts": () => {
       setFocusUser(false);
       setShortcutsRequest((n) => n + 1);
-      setSettingsOpen(true);
+      openSettings();
     },
     "view.profile": () => onOpenProfile?.(),
     "view.usage": () => onOpenUsage?.(),
@@ -1284,6 +1313,10 @@ export function ChatScreen({
         onForkThread={onForkThread}
         onDeleteThread={onDeleteThread}
         onOpenFolder={onOpenFolder}
+        canNavigateBack={canNavigateBack}
+        canNavigateForward={canNavigateForward}
+        onNavigateBack={onNavigateBack}
+        onNavigateForward={onNavigateForward}
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1299,8 +1332,7 @@ export function ChatScreen({
                   onOpenProfile();
                   return;
                 }
-                setFocusUser(true);
-                setSettingsOpen(true);
+                openSettings(true);
               }}
             />
             <div className="min-w-0 flex-1 leading-tight">
@@ -1358,10 +1390,7 @@ export function ChatScreen({
               title="Settings (Ctrl+,)"
               aria-label="Open settings"
               aria-expanded={settingsOpen}
-              onClick={() => {
-                setFocusUser(false);
-                setSettingsOpen(true);
-              }}
+              onClick={() => openSettings()}
             >
               <SettingsIcon />
             </Button>

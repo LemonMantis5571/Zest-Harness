@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
   CircleAlertIcon,
   Clock3Icon,
   ChevronRightIcon,
@@ -65,6 +67,10 @@ type Props = {
     freeChat: boolean
   ) => Promise<void>;
   onOpenFolder: () => void;
+  canNavigateBack: boolean;
+  canNavigateForward: boolean;
+  onNavigateBack: () => void;
+  onNavigateForward: () => void;
 };
 
 function threadTitle(thread: ThreadSummary) {
@@ -147,7 +153,7 @@ function matchesQuery(project: ProjectChats, thread: ThreadSummary, query: strin
 
 function navItemClass(active = false) {
   return cn(
-    "flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none transition-colors",
+    "flex h-7 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none transition-colors",
     "hover:bg-[var(--sidebar-accent)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
     active && "bg-[var(--sidebar-accent)] text-foreground"
   );
@@ -260,6 +266,10 @@ export function ChatHistorySidebar({
   onForkThread,
   onDeleteThread,
   onOpenFolder,
+  canNavigateBack,
+  canNavigateForward,
+  onNavigateBack,
+  onNavigateForward,
 }: Props) {
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [loading, setLoading] = useState(false);
@@ -572,7 +582,7 @@ export function ChatHistorySidebar({
           <div
             role="group"
             aria-label={`Renaming ${title}`}
-            className="flex w-full cursor-text items-center gap-2 rounded-md bg-[var(--sidebar-accent)] py-1.5 pr-24 pl-2 text-left outline-none"
+            className="flex w-full cursor-text items-center gap-2 rounded-md bg-[var(--sidebar-accent)] py-1 pr-24 pl-2 text-left outline-none"
           >
             <input
               ref={renameInputRef}
@@ -616,7 +626,7 @@ export function ChatHistorySidebar({
           title={`Double-click to rename “${title}”`}
           aria-label={[title, activityText, gitText].filter(Boolean).join(". ")}
           className={cn(
-            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-24 pl-2 text-left outline-none transition-colors",
+            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1 pr-24 pl-2 text-left outline-none transition-colors",
             "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
             "focus-visible:ring-2 focus-visible:ring-ring/50",
             active
@@ -752,21 +762,36 @@ export function ChatHistorySidebar({
     >
       <div
         className={cn(
-          "flex h-[49px] shrink-0 items-center border-b border-border/60",
-          open ? "justify-between gap-1 px-2" : "justify-center px-1"
+          "flex h-10 shrink-0 items-center border-b border-border/60",
+          open ? "justify-end gap-1 px-2" : "justify-center px-1"
         )}
       >
         {open ? (
-          <div className="ml-auto flex items-center gap-0.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Open project folder"
-              onClick={onOpenFolder}
-            >
-              <FolderOpenIcon />
-            </Button>
+          <div className="flex w-full items-center justify-between gap-1">
+            <div className="flex items-center gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="Back"
+                aria-label="Back"
+                disabled={!canNavigateBack}
+                onClick={onNavigateBack}
+              >
+                <ArrowLeftIcon aria-hidden="true" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="Forward"
+                aria-label="Forward"
+                disabled={!canNavigateForward}
+                onClick={onNavigateForward}
+              >
+                <ArrowRightIcon aria-hidden="true" />
+              </Button>
+            </div>
             <Button
               type="button"
               variant="ghost"
@@ -816,7 +841,7 @@ export function ChatHistorySidebar({
       ) : null}
 
       {open ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
           <nav aria-label="Primary" className="flex flex-col gap-0.5">
             <button
               type="button"
@@ -901,7 +926,7 @@ export function ChatHistorySidebar({
             </div>
           ) : null}
 
-          <div className="my-3 border-t border-border/40" />
+          <div className="my-2 border-t border-border/40" />
 
           {loading && projects.length === 0 ? (
             <p className="px-2 py-1 text-xs text-muted-foreground">Loading…</p>
@@ -909,7 +934,7 @@ export function ChatHistorySidebar({
             <p className="px-2 py-1 text-xs text-destructive">{error}</p>
           ) : (
             <>
-              <section aria-labelledby="projects-heading" className="flex flex-col gap-3">
+              <section aria-labelledby="projects-heading" className="flex flex-col gap-2">
                 <div className="flex items-center justify-between px-1">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <FolderIcon className="size-3.5 text-muted-foreground" />
@@ -969,7 +994,7 @@ export function ChatHistorySidebar({
                             title={project.path}
                             onClick={() => toggleExpanded(project.path)}
                             className={cn(
-                              "flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors",
+                              "flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left outline-none transition-colors",
                               "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50"
                             )}
                           >
@@ -1062,7 +1087,7 @@ export function ChatHistorySidebar({
                         ) : null}
 
                         {expandedHere ? (
-                          <ul className="m-0 mt-0.5 mb-1 flex list-none flex-col gap-0.5 p-0 pl-3">
+                          <ul className="m-0 mt-0.5 mb-0.5 flex list-none flex-col gap-0.5 p-0 pl-3">
                             {project.threads.length === 0 ? (
                               <li className="px-2 py-1 text-[11px] text-muted-foreground/80">
                                 No chats yet
@@ -1086,7 +1111,7 @@ export function ChatHistorySidebar({
               </section>
 
               {recentThreads.length > 0 ? (
-                <section aria-labelledby="recent-chats-heading" className="mt-4">
+                <section aria-labelledby="recent-chats-heading" className="mt-3">
                   <div
                     id="recent-chats-heading"
                     className="flex items-center gap-1.5 px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
