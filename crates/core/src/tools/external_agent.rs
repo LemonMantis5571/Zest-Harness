@@ -36,6 +36,7 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
 use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
+use crate::tools::isolated_workspace;
 use crate::usage::{ExternalCost, ExternalUsageReport};
 
 pub const EXTERNAL_AGENT_TOOL: &str = "delegate_external";
@@ -740,13 +741,13 @@ async fn run_current(
     prompt: &str,
     parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
-    let base = git_output(root, &["rev-parse", "HEAD"])
+    let base = isolated_workspace::git_output(root, &["rev-parse", "HEAD"])
         .await
         .ok()
         .filter(|value| !value.trim().is_empty());
     let mut run = spawn_and_run(root, config, prompt, parent_secret_envs).await?;
     if let Some(base) = base {
-        let diff = collect_git_diff(root, &base).await?;
+        let diff = isolated_workspace::collect_git_diff(root, &base).await?;
         run.diff = clip_diff(&diff);
         if !run.diff.trim().is_empty() {
             run.events.push(ExternalAgentEvent::Diff {
@@ -818,31 +819,12 @@ async fn run_isolated(
     prompt: &str,
     parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
-    let base = git_output(root, &["rev-parse", "HEAD"])
+    let mut workspace = isolated_workspace::prepare(root)
         .await
         .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
-
-    let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
-    let worktree = temp.path().join("workspace");
-    git_output_args(
-        root,
-        &["worktree", "add", "--detach", "--quiet"],
-        Some(&worktree),
-        Some(&base),
-    )
-    .await
-    .map_err(|error| format!("create isolated worktree: {error}"))?;
-
-    let mut worktree_guard = WorktreeGuard::new(root, &worktree);
-    remove_sensitive_tracked_files(&worktree).await?;
-
-    copy_working_snapshot(root, &worktree, &base).await?;
-    let baseline = snapshot_worktree(&worktree).await?;
-
-    let result = spawn_and_run(&worktree, config, prompt, parent_secret_envs).await;
-    let diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
-    let cleanup = worktree_guard.cleanup().await;
-    drop(temp);
+    let result = spawn_and_run(workspace.path(), config, prompt, parent_secret_envs).await;
+    let diff = workspace.collect_diff().await;
+    let cleanup = workspace.cleanup().await;
 
     let mut run = result?;
     let diff = diff?;
@@ -892,35 +874,26 @@ pub async fn run_delegation_reviewer(
         crate::delegation::validate_diff_paths(root, worker_diff)
             .map_err(|error| format!("worker diff is unsafe: {error}"))?;
     }
-    let base = git_output(root, &["rev-parse", "HEAD"])
+    let mut workspace = isolated_workspace::prepare_reviewer(root, worker_diff)
         .await
-        .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
-    let temp = tempfile::tempdir().map_err(|error| format!("create reviewer temp dir: {error}"))?;
-    let worktree = temp.path().join("workspace");
-    git_output_args(
-        root,
-        &["worktree", "add", "--detach", "--quiet"],
-        Some(&worktree),
-        Some(&base),
+        .map_err(|error| {
+            if error.contains("worker diff is unsafe") {
+                error
+            } else {
+                format!("prepare reviewer workspace: {error}")
+            }
+        })?;
+    let result = spawn_and_run_with_cancel(
+        workspace.path(),
+        config,
+        prompt,
+        cancel,
+        None,
+        parent_secret_envs,
     )
-    .await
-    .map_err(|error| format!("create reviewer worktree: {error}"))?;
-    let mut guard = WorktreeGuard::new(root, &worktree);
-    remove_sensitive_tracked_files(&worktree).await?;
-    copy_working_snapshot(root, &worktree, &base).await?;
-    if !worker_diff.trim().is_empty() {
-        apply_diff_to_workspace(&worktree, worker_diff).await?;
-    }
-    // The worker patch is part of the review input, not a reviewer edit. Take
-    // the reviewer baseline only after applying it so a read-only reviewer
-    // does not appear to have rewritten the worker's entire diff.
-    let baseline = snapshot_worktree(&worktree).await?;
-    let result =
-        spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None, parent_secret_envs)
-            .await;
-    let reviewer_diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
-    let cleanup = guard.cleanup().await;
-    drop(temp);
+    .await;
+    let reviewer_diff = workspace.collect_diff().await;
+    let cleanup = workspace.cleanup().await;
     let mut run = result?;
     let reviewer_diff = reviewer_diff?;
     cleanup?;
@@ -940,29 +913,20 @@ async fn run_isolated_with_cancel(
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
 ) -> Result<ExternalAgentResult, String> {
-    let base = git_output(root, &["rev-parse", "HEAD"])
+    let mut workspace = isolated_workspace::prepare(root)
         .await
         .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
-    let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
-    let worktree = temp.path().join("workspace");
-    git_output_args(
-        root,
-        &["worktree", "add", "--detach", "--quiet"],
-        Some(&worktree),
-        Some(&base),
+    let result = spawn_and_run_with_cancel(
+        workspace.path(),
+        config,
+        prompt,
+        cancel,
+        None,
+        parent_secret_envs,
     )
-    .await
-    .map_err(|error| format!("create isolated worktree: {error}"))?;
-    let mut guard = WorktreeGuard::new(root, &worktree);
-    remove_sensitive_tracked_files(&worktree).await?;
-    copy_working_snapshot(root, &worktree, &base).await?;
-    let baseline = snapshot_worktree(&worktree).await?;
-    let result =
-        spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None, parent_secret_envs)
-            .await;
-    let diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
-    let cleanup = guard.cleanup().await;
-    drop(temp);
+    .await;
+    let diff = workspace.collect_diff().await;
+    let cleanup = workspace.cleanup().await;
     let mut run = result?;
     let diff = diff?;
     cleanup?;
@@ -973,37 +937,6 @@ async fn run_isolated_with_cancel(
         });
     }
     Ok(run.into_public())
-}
-
-async fn apply_diff_to_workspace(worktree: &Path, diff: &str) -> Result<(), String> {
-    let mut command = Command::new("git");
-    command
-        .args(["apply", "--binary", "--whitespace=nowarn", "-"])
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("start worker diff apply: {error}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(diff.as_bytes())
-            .await
-            .map_err(|error| format!("write worker diff: {error}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|error| format!("apply worker diff: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "could not apply worker diff: {}",
-            clip(String::from_utf8_lossy(&output.stderr).trim())
-        ))
-    }
 }
 
 async fn spawn_and_run(
@@ -2598,390 +2531,6 @@ async fn respond_acp_permission(value: &Value, stdin: &mut ChildStdin) -> Result
         .map_err(|error| format!("flush ACP permission response: {error}"))
 }
 
-async fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .map_err(|error| format!("could not start git: {error}"))?;
-    if !output.status.success() {
-        return Err(clip(String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn git_output_args(
-    cwd: &Path,
-    args: &[&str],
-    path: Option<&Path>,
-    trailing: Option<&str>,
-) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command.args(args).current_dir(cwd);
-    if let Some(path) = path {
-        command.arg(path);
-    }
-    if let Some(value) = trailing {
-        command.arg(value);
-    }
-    let output = command
-        .output()
-        .await
-        .map_err(|error| format!("could not start git: {error}"))?;
-    if !output.status.success() {
-        return Err(clip(String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .map_err(|error| format!("could not start git: {error}"))?;
-    if !output.status.success() {
-        return Err(clip(String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(output.stdout)
-}
-
-async fn remove_worktree(root: &Path, worktree: &Path) -> Result<(), String> {
-    let output = Command::new("git")
-        .args(["worktree", "remove", "--force"])
-        .arg(worktree)
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|error| format!("could not start git cleanup: {error}"))?;
-    if !output.status.success() {
-        return Err(clip(String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(())
-}
-
-struct WorktreeGuard {
-    root: PathBuf,
-    worktree: PathBuf,
-    active: bool,
-}
-
-impl WorktreeGuard {
-    fn new(root: &Path, worktree: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            worktree: worktree.to_path_buf(),
-            active: true,
-        }
-    }
-
-    async fn cleanup(&mut self) -> Result<(), String> {
-        if !self.active {
-            return Ok(());
-        }
-        remove_worktree(&self.root, &self.worktree).await?;
-        self.active = false;
-        Ok(())
-    }
-}
-
-impl Drop for WorktreeGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        // Agent cancellation drops the async future before it can await Git
-        // cleanup. The synchronous fallback prevents a cancelled worker from
-        // leaving a stale worktree registration behind.
-        let _ = std::process::Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.worktree)
-            .current_dir(&self.root)
-            .output();
-    }
-}
-
-async fn remove_sensitive_tracked_files(root: &Path) -> Result<(), String> {
-    let tracked = git_bytes(root, &["ls-files", "-z"]).await?;
-    for raw in tracked.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let relative = String::from_utf8_lossy(raw).replace('\\', "/");
-        if !is_sensitive_path(&relative) {
-            continue;
-        }
-        let path = root.join(&relative);
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-                std::fs::remove_file(&path)
-                    .map_err(|error| format!("remove sensitive worker file {relative}: {error}"))?;
-            }
-            Ok(metadata) if metadata.is_dir() => {
-                std::fs::remove_dir_all(&path).map_err(|error| {
-                    format!("remove sensitive worker directory {relative}: {error}")
-                })?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-async fn copy_working_snapshot(root: &Path, worktree: &Path, base: &str) -> Result<(), String> {
-    let patch = safe_tracked_diff(root, base).await?;
-    if !patch.is_empty() {
-        let mut command = Command::new("git");
-        command
-            .args(["apply", "--binary", "-"])
-            .current_dir(worktree)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("could not apply current changes: {error}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&patch)
-                .await
-                .map_err(|error| format!("write current changes: {error}"))?;
-        }
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|error| format!("apply current changes: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "could not apply current tracked changes: {}",
-                clip(String::from_utf8_lossy(&output.stderr).trim())
-            ));
-        }
-    }
-
-    let untracked = git_bytes(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
-    for raw in untracked.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let relative = String::from_utf8_lossy(raw).replace('\\', "/");
-        if relative == ".zest"
-            || relative.starts_with(".zest/")
-            || crate::tools::sensitive::is_sensitive_path(&relative)
-        {
-            continue;
-        }
-        let source = root.join(&relative);
-        let metadata = std::fs::symlink_metadata(&source)
-            .map_err(|error| format!("inspect untracked file {relative}: {error}"))?;
-        if !metadata.file_type().is_file() {
-            continue;
-        }
-        let destination = worktree.join(&relative);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("copy untracked directory {relative}: {error}"))?;
-        }
-        std::fs::copy(&source, &destination)
-            .map_err(|error| format!("copy untracked file {relative}: {error}"))?;
-    }
-    Ok(())
-}
-
-async fn snapshot_worktree(root: &Path) -> Result<String, String> {
-    git_output(root, &["add", "-A", "--", "."]).await?;
-    git_output(
-        root,
-        &[
-            "-c",
-            "user.name=Zest",
-            "-c",
-            "user.email=zest@localhost",
-            "-c",
-            "commit.gpgSign=false",
-            "commit",
-            "--allow-empty",
-            "--no-verify",
-            "--quiet",
-            "-m",
-            "Zest external delegation baseline",
-        ],
-    )
-    .await?;
-    git_output(root, &["rev-parse", "HEAD"]).await
-}
-
-async fn collect_git_diff(root: &Path, base: &str) -> Result<String, String> {
-    let output = safe_tracked_diff(root, base).await?;
-    Ok(String::from_utf8_lossy(&output).to_string())
-}
-
-async fn collect_git_diff_with_untracked(
-    root: &Path,
-    source_root: &Path,
-    base: &str,
-) -> Result<String, String> {
-    let mut diff = collect_git_diff(root, base).await?;
-    let current_untracked =
-        git_bytes(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
-    for raw in current_untracked.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let relative = String::from_utf8_lossy(raw).replace('\\', "/");
-        if relative == ".zest"
-            || relative.starts_with(".zest/")
-            || crate::tools::sensitive::is_sensitive_path(&relative)
-        {
-            continue;
-        }
-        let path = root.join(&relative);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => metadata,
-            _ => continue,
-        };
-        if metadata.len() > 2_000_000 {
-            diff.push_str(&format!("\nBinary or large untracked file: {relative}\n"));
-            continue;
-        }
-        let source = source_root.join(&relative);
-        let output = if source.is_file() {
-            git_no_index_diff(root, &source, &path, &relative).await?
-        } else {
-            git_no_index_diff(root, null_device(), &path, &relative).await?
-        };
-        if !output.is_empty() {
-            diff.push_str(&output);
-        }
-    }
-
-    let source_untracked = git_bytes(
-        source_root,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )
-    .await?;
-    for raw in source_untracked.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let relative = String::from_utf8_lossy(raw).replace('\\', "/");
-        if relative == ".zest" || relative.starts_with(".zest/") || is_sensitive_path(&relative) {
-            continue;
-        }
-        let source = source_root.join(&relative);
-        let target = root.join(&relative);
-        if source.is_file() && !target.exists() && !git_path_is_tracked(root, &relative).await? {
-            let output = git_no_index_diff(root, &source, null_device(), &relative).await?;
-            if !output.is_empty() {
-                diff.push_str(&output);
-            }
-        }
-    }
-    Ok(diff)
-}
-
-async fn git_path_is_tracked(root: &Path, relative: &str) -> Result<bool, String> {
-    let output = Command::new("git")
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(relative)
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|error| format!("could not inspect tracked path: {error}"))?;
-    if output.status.success() {
-        return Ok(true);
-    }
-    if output.status.code() == Some(1) {
-        return Ok(false);
-    }
-    Err(clip(String::from_utf8_lossy(&output.stderr).trim()))
-}
-
-async fn safe_tracked_diff(root: &Path, base: &str) -> Result<Vec<u8>, String> {
-    let paths = git_bytes(root, &["diff", "--name-only", "-z", base, "--"]).await?;
-    let mut safe_paths = Vec::new();
-    for raw in paths.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let relative = String::from_utf8_lossy(raw).replace('\\', "/");
-        if !is_sensitive_path(&relative) {
-            safe_paths.push(relative);
-        }
-    }
-    if safe_paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut command = Command::new("git");
-    command
-        .args(["diff", "--binary", "--no-ext-diff", base, "--"])
-        .args(&safe_paths)
-        .current_dir(root);
-    let output = command
-        .output()
-        .await
-        .map_err(|error| format!("could not start git diff: {error}"))?;
-    if !output.status.success() {
-        return Err(clip(String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(output.stdout)
-}
-
-async fn git_no_index_diff(
-    cwd: &Path,
-    left: &Path,
-    right: &Path,
-    relative: &str,
-) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["diff", "--no-index", "--no-ext-diff", "--"])
-        .arg(left)
-        .arg(right)
-        .current_dir(cwd)
-        .output()
-        .await
-        .map_err(|error| format!("diff untracked file: {error}"))?;
-    if output.status.success() || output.status.code() == Some(1) {
-        return Ok(normalize_no_index_diff(
-            &String::from_utf8_lossy(&output.stdout),
-            relative,
-        ));
-    }
-    Err(clip(String::from_utf8_lossy(&output.stderr).trim()))
-}
-
-fn normalize_no_index_diff(raw: &str, relative: &str) -> String {
-    let relative = relative.replace('\\', "/");
-    let mut normalized = String::with_capacity(raw.len());
-    for line in raw.lines() {
-        let replacement = if line.starts_with("diff --git ") {
-            Some(format!("diff --git a/{relative} b/{relative}"))
-        } else if line.starts_with("--- ") && !line.starts_with("--- /dev/null") {
-            Some(format!("--- a/{relative}"))
-        } else if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
-            Some(format!("+++ b/{relative}"))
-        } else {
-            None
-        };
-        normalized.push_str(replacement.as_deref().unwrap_or(line));
-        normalized.push('\n');
-    }
-    if !raw.ends_with('\n') {
-        normalized.pop();
-    }
-    normalized
-}
-
-fn null_device() -> &'static Path {
-    if cfg!(windows) {
-        Path::new("NUL")
-    } else {
-        Path::new("/dev/null")
-    }
-}
-
 /// Bound a worker's diff to the wire limit, keeping both ends.
 ///
 /// The marker's cost is reserved out of the limit by [`crate::bounded`], which
@@ -3417,7 +2966,7 @@ mod tests {
             "@@ -0,0 +1 @@\n",
             "+fixture worker change\n"
         );
-        let normalized = normalize_no_index_diff(raw, "delegated.txt");
+        let normalized = isolated_workspace::normalize_no_index_diff(raw, "delegated.txt");
         assert!(normalized.contains("diff --git a/delegated.txt b/delegated.txt"));
         assert!(normalized.contains("+++ b/delegated.txt"));
         assert!(!normalized.contains("C:\\\\Users"));
@@ -3722,37 +3271,20 @@ mod tests {
         std::fs::write(temp.path().join("tracked.txt"), "user edit\n").unwrap();
         std::fs::write(temp.path().join("untracked.txt"), "preexisting\n").unwrap();
 
-        let worktree = temp.path().join("worker");
-        git_ok(
-            temp.path(),
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                "--quiet",
-                worktree.to_str().unwrap(),
-                "HEAD",
-            ],
-        )
-        .await;
-        copy_working_snapshot(temp.path(), &worktree, "HEAD")
-            .await
-            .unwrap();
-        let baseline = snapshot_worktree(&worktree).await.unwrap();
+        let mut workspace = isolated_workspace::prepare(temp.path()).await.unwrap();
+        let worktree = workspace.path().to_path_buf();
 
         std::fs::write(worktree.join("tracked.txt"), "worker edit\n").unwrap();
         std::fs::write(worktree.join("untracked.txt"), "worker untracked\n").unwrap();
         std::fs::write(worktree.join("new.txt"), "new worker file\n").unwrap();
 
-        let diff = collect_git_diff_with_untracked(&worktree, temp.path(), &baseline)
-            .await
-            .unwrap();
+        let diff = workspace.collect_diff().await.unwrap();
         assert!(diff.contains("-user edit"));
         assert!(!diff.contains("-base"));
         assert!(diff.contains("-preexisting"));
         assert!(diff.contains("new worker file"));
 
-        remove_worktree(temp.path(), &worktree).await.unwrap();
+        workspace.cleanup().await.unwrap();
     }
 
     #[tokio::test]

@@ -89,6 +89,7 @@ import type {
   ApprovalChoice,
   ApprovalMode,
   ChatMessage,
+  DelegationCreateInput,
   DelegationJob,
   GitContext,
   PreparedAttachment,
@@ -187,6 +188,7 @@ type Props = {
   onProfileChange: (profile: UserProfile) => void;
   optionsDisabled?: boolean;
   delegationJobs: DelegationJob[];
+  onCreateDelegation: (request: DelegationCreateInput) => Promise<DelegationJob>;
   onApproveDelegation: (jobId: string) => Promise<void>;
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
@@ -691,6 +693,7 @@ export function ChatScreen({
   settingsRequest = 0,
   optionsDisabled = false,
   delegationJobs,
+  onCreateDelegation,
   onApproveDelegation,
   onCancelDelegation,
   onRetryDelegation,
@@ -1678,10 +1681,12 @@ export function ChatScreen({
         onRewind={onRewindThread}
         onJump={jumpToMessage}
         delegationJobs={delegationJobs}
+        onCreateDelegation={onCreateDelegation}
         onApproveDelegation={onApproveDelegation}
         onCancelDelegation={onCancelDelegation}
         onRetryDelegation={onRetryDelegation}
         onApplyDelegation={onApplyDelegation}
+        onReconnectProvider={onReconnectProvider}
       />
 
       <CommandPalette

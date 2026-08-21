@@ -20,7 +20,10 @@ import type {
   ChatEvent,
   ChatMessage,
   DelegationEvent,
+  DelegationCreateInput,
   DelegationJob,
+  DelegationTargetOptionView,
+  DelegationUpdateInput,
   GitContext,
   SessionInfo,
   ThreadSummary,
@@ -101,6 +104,13 @@ export function createFixtureBackend(): DesktopBackend {
     dependsOn: [],
     agent: "claude",
     reviewerAgent: "claude",
+    workerTarget: { kind: "externalAgent", agentId: "claude" },
+    reviewerTarget: { kind: "sameAsWorker" },
+    resolvedWorkerTarget: null,
+    resolvedReviewerTarget: null,
+    approved: false,
+    origin: { coordinator: "fixture", chatId: null, threadId: session.threadId },
+    attempts: [],
     attempt: 0,
     status: "awaiting_approval",
     changedFiles: [],
@@ -1110,6 +1120,77 @@ export function createFixtureBackend(): DesktopBackend {
     async listDelegationJobs(): Promise<DelegationJob[]> {
       return [delegationSnapshot()];
     },
+    async listDelegationTargets(): Promise<DelegationTargetOptionView[]> {
+      return [
+        {
+          target: { kind: "provider", providerId: "fixture", model: null, effort: null },
+          available: true,
+          label: "Fixture provider",
+          error: null,
+        },
+        {
+          target: { kind: "externalAgent", agentId: "claude" },
+          available: false,
+          label: "Claude Code",
+          error: "Unavailable in the fixture. Reconnect or choose another target.",
+        },
+      ];
+    },
+    async createDelegationJob(request: DelegationCreateInput): Promise<DelegationJob> {
+      fixtureDelegationJob = {
+        ...fixtureDelegationJob,
+        jobId: `fixture-delegation-${Date.now()}`,
+        cardId: `fixture-card-${Date.now()}`,
+        parentThreadId: request.parentThreadId,
+        title: request.title,
+        objective: request.objective,
+        lane: request.lane,
+        scope: request.scope,
+        context: request.context ?? [],
+        dependsOn: request.dependsOn ?? [],
+        workerTarget: request.worker,
+        reviewerTarget: request.reviewer ?? { kind: "sameAsWorker" },
+        agent: request.worker.kind === "provider" ? request.worker.providerId : request.worker.agentId,
+        reviewerAgent: request.worker.kind === "provider" ? request.worker.providerId : request.worker.agentId,
+        approved: false,
+        status: "awaiting_approval",
+        changedFiles: [],
+        changedFileCount: 0,
+        acceptanceChecks: (request.acceptanceChecks ?? []).map((command: string) => ({ command, status: "pending", output: "" })),
+        updatedAt: Date.now(),
+      };
+      return delegationSnapshot();
+    },
+    async updateDelegationJob(request: DelegationUpdateInput): Promise<DelegationJob> {
+      if (request.jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
+      fixtureDelegationJob = {
+        ...fixtureDelegationJob,
+        ...(request.title != null ? { title: request.title } : {}),
+        ...(request.objective != null ? { objective: request.objective } : {}),
+        ...(request.scope ? { scope: request.scope } : {}),
+        ...(request.context ? { context: request.context } : {}),
+        ...(request.acceptanceChecks ? { acceptanceChecks: request.acceptanceChecks.map((command: string) => ({ command, status: "pending", output: "" })) } : {}),
+        ...(request.worker ? { workerTarget: request.worker } : {}),
+        ...(request.reviewer ? { reviewerTarget: request.reviewer } : {}),
+        status: "awaiting_approval",
+        approved: false,
+        updatedAt: fixtureDelegationJob.updatedAt + 1,
+      };
+      return delegationSnapshot();
+    },
+    async approveDelegationJob(jobId: string): Promise<DelegationJob> {
+      return runFixtureDelegation(jobId);
+    },
+    async prepareDelegationHandoff(jobId: string) {
+      if (jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
+      return {
+        jobId,
+        summary: fixtureDelegationJob.workerSummary ?? "No worker summary is available yet.",
+        changedFiles: [...fixtureDelegationJob.changedFiles],
+        artifactNames: ["worker.diff", "worker-result.json", "review-result.json"],
+        status: fixtureDelegationJob.status,
+      };
+    },
     async getDelegationJob(jobId: string): Promise<DelegationJob> {
       if (jobId !== fixtureDelegationJob.jobId) {
         throw new Error(`fixture backend: delegation job ${jobId} was not found`);
@@ -1126,7 +1207,9 @@ export function createFixtureBackend(): DesktopBackend {
       return delegationSnapshot();
     },
     async retryDelegationJob(jobId: string): Promise<DelegationJob> {
-      return runFixtureDelegation(jobId);
+      if (jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
+      updateDelegation("awaiting_approval", "approval_required", { approved: false, error: undefined });
+      return delegationSnapshot();
     },
     async applyDelegationJob(jobId: string): Promise<DelegationJob> {
       if (jobId !== fixtureDelegationJob.jobId) {

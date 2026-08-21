@@ -54,8 +54,9 @@ use attachments::{
 use browser::BrowserHost;
 use context_meter::{estimate_context, CompactionResultView, ContextUsageView};
 pub(crate) use delegation::{
-    get_view as get_delegation_view, list_views as list_delegation_views, DelegationCoordinator,
-    DelegationJobView,
+    get_view as get_delegation_view, list_views as list_delegation_views,
+    CreateDelegationJobRequest, DelegationCoordinator, DelegationHandoff, DelegationJobView,
+    DelegationTargetOption, UpdateDelegationJobRequest,
 };
 use plugins::{NowPlayingView, PluginView};
 use session::{Session, SessionController, SessionError};
@@ -339,6 +340,7 @@ struct AppState {
     /// Mode + session grants. Outlives any one project so switching folders
     /// does not silently reset the user's chosen permission level.
     policy: Arc<Mutex<ApprovalPolicy>>,
+    ledger: Arc<Mutex<Ledger>>,
     /// Serialize comment-preserving config read-modify-write operations made
     /// by Settings so two quick preset changes cannot overwrite each other.
     config_edit: Mutex<()>,
@@ -3178,6 +3180,7 @@ async fn start_session_inner(
         .with_approver(approver)
         .with_questioner(questioner)
         .with_policy(state.policy.clone())
+        .with_ledger(state.ledger.clone())
         .with_browser_adapter(state.browser.adapter())
         .with_parent_thread_id(&thread.id)
         .with_remembered_options(prefs.model, prefs.effort)
@@ -5851,6 +5854,51 @@ fn list_delegation_jobs(
 }
 
 #[tauri::command]
+fn list_delegation_targets(
+    state: State<'_, AppState>,
+) -> Result<Vec<DelegationTargetOption>, String> {
+    let root = resolve_workspace_root(&state)?;
+    DelegationCoordinator::list_targets(&root)
+}
+
+#[tauri::command]
+fn create_delegation_job(
+    state: State<'_, AppState>,
+    request: CreateDelegationJobRequest,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.create_job(&root, request)
+}
+
+#[tauri::command]
+fn update_delegation_job(
+    state: State<'_, AppState>,
+    request: UpdateDelegationJobRequest,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.update_job(&root, request)
+}
+
+#[tauri::command]
+fn approve_delegation_job(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.approve(&app, &root, &job_id)
+}
+
+#[tauri::command]
+fn prepare_delegation_handoff(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationHandoff, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.handoff(&root, &job_id)
+}
+
+#[tauri::command]
 fn get_delegation_job(
     state: State<'_, AppState>,
     job_id: String,
@@ -6302,20 +6350,24 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .manage(AppState {
-            sessions: SessionController::new(),
-            browser: Arc::new(BrowserHost::new()),
-            login: Mutex::new(None),
-            persist: Mutex::new(HashMap::new()),
-            // Do not infer a project from the process current/install
-            // directory. The user chooses a project explicitly or starts a
-            // projectless chat.
-            workspace_root: Mutex::new(initial_workspace_root()),
-            workspace_config: Mutex::new(None),
-            policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
-            config_edit: Mutex::new(()),
-            chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
-            delegations: Arc::new(DelegationCoordinator::new()),
+        .manage({
+            let ledger = Arc::new(Mutex::new(Ledger::load()));
+            AppState {
+                sessions: SessionController::new(),
+                browser: Arc::new(BrowserHost::new()),
+                login: Mutex::new(None),
+                persist: Mutex::new(HashMap::new()),
+                // Do not infer a project from the process current/install
+                // directory. The user chooses a project explicitly or starts a
+                // projectless chat.
+                workspace_root: Mutex::new(initial_workspace_root()),
+                workspace_config: Mutex::new(None),
+                policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
+                ledger: ledger.clone(),
+                config_edit: Mutex::new(()),
+                chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
+                delegations: Arc::new(DelegationCoordinator::with_ledger(ledger)),
+            }
         })
         .setup(|app| {
             app.state::<AppState>().browser.attach(app.handle().clone());
@@ -6401,6 +6453,11 @@ pub fn run() {
             get_user_profile,
             set_user_profile,
             list_delegation_jobs,
+            list_delegation_targets,
+            create_delegation_job,
+            update_delegation_job,
+            approve_delegation_job,
+            prepare_delegation_handoff,
             get_delegation_job,
             cancel_delegation_job,
             retry_delegation_job,
@@ -6560,6 +6617,28 @@ mod export_bindings {
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
         TurnRecoveryView::export_all().expect("export TurnRecovery bindings");
         ToolMetaView::export_all().expect("export ToolMetaView bindings");
+        delegation::DelegationStatus::export_all().expect("export DelegationStatus bindings");
+        delegation::ReviewSeverity::export_all().expect("export ReviewSeverity bindings");
+        delegation::AcceptanceCheckStatus::export_all()
+            .expect("export AcceptanceCheckStatus bindings");
+        delegation::ReviewFinding::export_all().expect("export ReviewFinding bindings");
+        delegation::AcceptanceCheckView::export_all().expect("export AcceptanceCheckView bindings");
+        delegation::DelegationTargetView::export_all().expect("export DelegationTarget bindings");
+        delegation::ReviewerTargetView::export_all().expect("export ReviewerTarget bindings");
+        delegation::AttemptUsageView::export_all().expect("export AttemptUsageView bindings");
+        delegation::DelegationAttemptView::export_all()
+            .expect("export DelegationAttemptView bindings");
+        delegation::DelegationOriginView::export_all()
+            .expect("export DelegationOriginView bindings");
+        delegation::DelegationJobView::export_all().expect("export DelegationJobView bindings");
+        delegation::DelegationEvent::export_all().expect("export DelegationEvent bindings");
+        delegation::CreateDelegationJobRequest::export_all()
+            .expect("export DelegationCreateRequest bindings");
+        delegation::UpdateDelegationJobRequest::export_all()
+            .expect("export DelegationUpdateRequest bindings");
+        delegation::DelegationTargetOption::export_all()
+            .expect("export DelegationTargetOption bindings");
+        delegation::DelegationHandoff::export_all().expect("export DelegationHandoff bindings");
     }
 }
 

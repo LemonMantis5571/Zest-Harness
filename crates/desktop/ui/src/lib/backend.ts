@@ -11,6 +11,10 @@ import type {
   ChatEvent,
   DelegationEvent,
   DelegationJob,
+  DelegationCreateInput,
+  DelegationHandoffView,
+  DelegationTargetOptionView,
+  DelegationUpdateInput,
   CompactionResult,
   ContextUsage,
   ExternalAgentCheck,
@@ -180,6 +184,11 @@ export type DesktopBackend = {
   setUserProfile(profile: UserProfile): Promise<UserProfile>;
   onChatEvent(handler: (event: ChatEvent) => void): Promise<UnlistenFn>;
   listDelegationJobs(): Promise<DelegationJob[]>;
+  listDelegationTargets(): Promise<DelegationTargetOptionView[]>;
+  createDelegationJob(request: DelegationCreateInput): Promise<DelegationJob>;
+  updateDelegationJob(request: DelegationUpdateInput): Promise<DelegationJob>;
+  approveDelegationJob(jobId: string): Promise<DelegationJob>;
+  prepareDelegationHandoff(jobId: string): Promise<DelegationHandoffView>;
   getDelegationJob(jobId: string): Promise<DelegationJob>;
   cancelDelegationJob(jobId: string): Promise<DelegationJob>;
   retryDelegationJob(jobId: string): Promise<DelegationJob>;
@@ -274,6 +283,11 @@ export function createTauriBackend(): DesktopBackend {
     setUserProfile: (profile) => tauriApi.setUserProfile(profile),
     onChatEvent: (handler) => tauriApi.onChatEvent(handler),
     listDelegationJobs: () => tauriApi.listDelegationJobs(),
+    listDelegationTargets: () => tauriApi.listDelegationTargets(),
+    createDelegationJob: (request) => tauriApi.createDelegationJob(request),
+    updateDelegationJob: (request) => tauriApi.updateDelegationJob(request),
+    approveDelegationJob: (jobId) => tauriApi.approveDelegationJob(jobId),
+    prepareDelegationHandoff: (jobId) => tauriApi.prepareDelegationHandoff(jobId),
     getDelegationJob: (jobId) => tauriApi.getDelegationJob(jobId),
     cancelDelegationJob: (jobId) => tauriApi.cancelDelegationJob(jobId),
     retryDelegationJob: (jobId) => tauriApi.retryDelegationJob(jobId),

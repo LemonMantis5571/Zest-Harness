@@ -71,6 +71,7 @@ import type {
   ApprovalMode,
   ChatEvent,
   ChatMessage,
+  DelegationCreateInput,
   DelegationEvent,
   DelegationJob,
   GitContext,
@@ -1377,6 +1378,17 @@ export default function App() {
     };
   }, [handleDelegationEvent]);
 
+  useEffect(() => {
+    const onHandoff = (event: Event) => {
+      const detail = (event as CustomEvent<{ summary?: string }>).detail;
+      const summary = detail?.summary?.trim();
+      if (!summary) return;
+      setDraft(summary);
+    };
+    window.addEventListener("zest:delegation-handoff", onHandoff);
+    return () => window.removeEventListener("zest:delegation-handoff", onHandoff);
+  }, []);
+
   const activeDelegationRoot = session?.root;
   useEffect(() => {
     const activeRoot = activeDelegationRoot;
@@ -2337,12 +2349,27 @@ export default function App() {
 
   async function onApproveDelegation(jobId: string) {
     try {
-      const job = await backend.retryDelegationJob(jobId);
+      const job = await backend.approveDelegationJob(jobId);
       replaceDelegationJob(job);
     } catch (err) {
       toast.add({
         type: "error",
         title: "Could not start feature card",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
+  async function onCreateDelegation(request: DelegationCreateInput) {
+    try {
+      const job = await backend.createDelegationJob(request);
+      replaceDelegationJob(job);
+      return job;
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not create feature card",
         description: formatInvokeError(err),
       });
       throw err;
@@ -2364,7 +2391,17 @@ export default function App() {
   }
 
   async function onRetryDelegation(jobId: string) {
-    await onApproveDelegation(jobId);
+    try {
+      const job = await backend.retryDelegationJob(jobId);
+      replaceDelegationJob(job);
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not retry feature card",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
   }
 
   async function onApplyDelegation(jobId: string) {
@@ -2527,6 +2564,7 @@ export default function App() {
             onOpenUsage={() => setScreen("usage")}
             providerSwitchRequest={providerSwitchRequest}
             delegationJobs={delegationJobs}
+            onCreateDelegation={onCreateDelegation}
             onApproveDelegation={onApproveDelegation}
             onCancelDelegation={onCancelDelegation}
             onRetryDelegation={onRetryDelegation}

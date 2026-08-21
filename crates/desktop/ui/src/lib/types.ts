@@ -15,6 +15,12 @@ import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/Wo
 import type { WorkspaceChange as GeneratedWorkspaceChange } from "./generated/WorkspaceChange.ts";
 import type { DelegationEvent as GeneratedDelegationEvent } from "./generated/DelegationEvent.ts";
 import type { DelegationJobView } from "./generated/DelegationJobView.ts";
+import type { CreateDelegationJobRequest as DelegationCreateRequest } from "./generated/DelegationCreateRequest.ts";
+import type { DelegationHandoff } from "./generated/DelegationHandoff.ts";
+import type { DelegationTargetOption } from "./generated/DelegationTargetOption.ts";
+import type { DelegationTargetView } from "./generated/DelegationTarget.ts";
+import type { UpdateDelegationJobRequest as DelegationUpdateRequest } from "./generated/DelegationUpdateRequest.ts";
+import type { ReviewerTargetView } from "./generated/ReviewerTarget.ts";
 import type { PlanningQuestion } from "./planningQuestion.ts";
 
 export type StatusKind = "ready" | "unknown" | "not_logged_in" | "unconfigured";
@@ -86,6 +92,12 @@ export type WorkspaceReview = GeneratedWorkspaceReview;
 export type WorkspaceChange = GeneratedWorkspaceChange;
 export type DelegationEvent = GeneratedDelegationEvent;
 export type DelegationJob = DelegationJobView;
+export type DelegationTarget = DelegationTargetView;
+export type DelegationTargetOptionView = DelegationTargetOption;
+export type DelegationCreateInput = DelegationCreateRequest;
+export type DelegationUpdateInput = DelegationUpdateRequest;
+export type DelegationHandoffView = DelegationHandoff;
+export type ReviewerTarget = ReviewerTargetView;
 
 export type ToolMetadata = ToolMetaView;
 

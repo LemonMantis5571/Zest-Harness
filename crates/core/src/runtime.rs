@@ -18,7 +18,7 @@ use crate::provider::normalize_effort;
 use crate::provider::registry::{ProviderRegistry, Skipped};
 use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
-use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
+use crate::tools::approval::{AllowApprover, ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
@@ -50,6 +50,23 @@ pub struct RuntimeSession {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeRole {
+    #[default]
+    Parent,
+    DelegationWorker,
+    DelegationReviewer,
+}
+
+/// A configured provider target after credentials and capability validation.
+/// The value deliberately contains no credential material.
+pub struct ResolvedProviderTarget {
+    pub provider_id: String,
+    pub model: String,
+    pub effort: String,
+    pub provider: Arc<dyn crate::provider::Provider>,
+}
+
 /// Assembles config, providers, tools, ledger, and an [`Agent`].
 pub struct RuntimeBuilder {
     root: PathBuf,
@@ -70,6 +87,7 @@ pub struct RuntimeBuilder {
     parent_thread_id: Option<String>,
     register_write: bool,
     register_exec: bool,
+    role: RuntimeRole,
 }
 
 impl RuntimeBuilder {
@@ -91,6 +109,7 @@ impl RuntimeBuilder {
             parent_thread_id: None,
             register_write: true,
             register_exec: true,
+            role: RuntimeRole::Parent,
         }
     }
 
@@ -191,6 +210,11 @@ impl RuntimeBuilder {
         self
     }
 
+    pub fn with_role(mut self, role: RuntimeRole) -> Self {
+        self.role = role;
+        self
+    }
+
     pub fn build(self) -> Result<RuntimeSession> {
         let root = self.root;
         let config = match self.config {
@@ -223,6 +247,17 @@ impl RuntimeBuilder {
                 )))
             }
         };
+
+        if self.role != RuntimeRole::Parent && provider.owns_agent_loop() {
+            let role = match self.role {
+                RuntimeRole::DelegationWorker => "worker",
+                RuntimeRole::DelegationReviewer => "reviewer",
+                RuntimeRole::Parent => "parent",
+            };
+            return Err(HarnessError::Other(format!(
+                "provider `{provider_id}` owns its agent loop and cannot run as a native delegated {role}"
+            )));
+        }
 
         let (remembered_model, remembered_effort) = self.remembered.unwrap_or((None, None));
         let mut warnings: Vec<String> = Vec::new();
@@ -304,8 +339,11 @@ impl RuntimeBuilder {
         // whether the prompt is allowed to talk about it. Computing it in two
         // places would eventually let them disagree, and the failure mode is a
         // prompt describing a tool the model cannot see.
-        let external_delegate_enabled =
-            self.enable_external_agents && !provider_owns_agent_loop && !config.agents.is_empty();
+        let is_parent = self.role == RuntimeRole::Parent;
+        let external_delegate_enabled = is_parent
+            && self.enable_external_agents
+            && !provider_owns_agent_loop
+            && !config.agents.is_empty();
 
         let mut base_system = if provider_owns_agent_loop {
             match self.system {
@@ -326,11 +364,11 @@ impl RuntimeBuilder {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::EXTERNAL_DELEGATION_SYSTEM);
         }
-        if self.questioner.is_some() && !provider_owns_agent_loop {
+        if is_parent && self.questioner.is_some() && !provider_owns_agent_loop {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::INTERACTIVE_QUESTION_SYSTEM);
         }
-        if self.browser.is_some() && !provider_owns_agent_loop {
+        if is_parent && self.browser.is_some() && !provider_owns_agent_loop {
             base_system.push_str("\n\n");
             base_system.push_str(LOCAL_BROWSER_SYSTEM);
         }
@@ -354,7 +392,7 @@ impl RuntimeBuilder {
         if !provider_owns_agent_loop {
             register_read_tools(&mut worker_tools, &root)
                 .map_err(|e| HarnessError::Other(format!("register read tools: {e}")))?;
-            if self.register_write {
+            if self.register_write && self.role != RuntimeRole::DelegationReviewer {
                 register_write_tools(&mut worker_tools, &root)
                     .map_err(|e| HarnessError::Other(format!("register write tools: {e}")))?;
             }
@@ -366,12 +404,13 @@ impl RuntimeBuilder {
         // also run shell commands widens the blast radius for no benefit that
         // the parent conversation cannot already provide.
         let mut tools = worker_tools.clone();
-        if !provider_owns_agent_loop {
+        if !provider_owns_agent_loop && is_parent {
             if let Some(browser) = self.browser {
                 register_browser_tool(&mut tools, browser);
             }
         }
-        if !provider_owns_agent_loop && self.register_exec && config.tools.bash.enabled {
+        if is_parent && !provider_owns_agent_loop && self.register_exec && config.tools.bash.enabled
+        {
             register_exec_tools(&mut tools, &root, config.tools.bash.settings())
                 .map_err(|e| HarnessError::Other(format!("register exec tools: {e}")))?;
         }
@@ -394,7 +433,7 @@ impl RuntimeBuilder {
                     .unwrap_or_else(|| "coordinator".to_string()),
             )));
         }
-        if self.questioner.is_some() && !provider_owns_agent_loop {
+        if is_parent && self.questioner.is_some() && !provider_owns_agent_loop {
             register_question_tool(&mut tools);
         }
 
@@ -414,15 +453,21 @@ impl RuntimeBuilder {
             }
         }
 
-        let approver = self
-            .approver
-            .unwrap_or_else(|| Arc::new(DenyApprover) as Arc<dyn Approver>);
+        let approver = if self.role == RuntimeRole::DelegationWorker {
+            Arc::new(AllowApprover) as Arc<dyn Approver>
+        } else {
+            self.approver
+                .unwrap_or_else(|| Arc::new(DenyApprover) as Arc<dyn Approver>)
+        };
         let questioner = self
             .questioner
             .unwrap_or_else(|| Arc::new(DenyQuestioner) as Arc<dyn Questioner>);
-        let policy = self
-            .policy
-            .unwrap_or_else(|| Arc::new(Mutex::new(ApprovalPolicy::default())));
+        let policy = if self.role == RuntimeRole::DelegationWorker {
+            Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Bypass)))
+        } else {
+            self.policy
+                .unwrap_or_else(|| Arc::new(Mutex::new(ApprovalPolicy::default())))
+        };
 
         let mut agent = Agent::new(provider, tools)
             .with_system(system)
@@ -455,6 +500,53 @@ impl RuntimeSession {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// Resolve a native worker target without fallback to another provider/model.
+pub fn resolve_provider_target(
+    registry: &ProviderRegistry,
+    skipped: &[Skipped],
+    provider_id: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<ResolvedProviderTarget> {
+    let provider = registry.get(provider_id).ok_or_else(|| {
+        if let Some(entry) = skipped.iter().find(|entry| entry.id == provider_id) {
+            HarnessError::Other(format!(
+                "provider `{provider_id}` is unavailable: {}. Connect it or choose another configured provider.",
+                entry.reason
+            ))
+        } else {
+            HarnessError::Other(format!(
+                "provider `{provider_id}` is not configured. Connect it or choose another configured provider."
+            ))
+        }
+    })?;
+    if provider.owns_agent_loop() {
+        return Err(HarnessError::Other(format!(
+            "provider `{provider_id}` owns its agent loop and cannot run as a native delegated worker"
+        )));
+    }
+    let model = model
+        .map(str::to_owned)
+        .unwrap_or_else(|| provider.default_model().to_string());
+    let effort = normalize_effort(effort.unwrap_or("high"));
+    provider
+        .validate_selection(&model, &effort)
+        .map_err(HarnessError::Other)?;
+    if let Some(spec) = provider.models().iter().find(|spec| spec.id == model) {
+        if !spec.supports_tools {
+            return Err(HarnessError::Other(format!(
+                "model `{model}` on provider `{provider_id}` does not support tools and cannot run a delegated worker"
+            )));
+        }
+    }
+    Ok(ResolvedProviderTarget {
+        provider_id: provider_id.to_string(),
+        model,
+        effort,
+        provider,
+    })
 }
 
 /// Explain why a selected provider is not available, and what to do about it.
@@ -1019,5 +1111,65 @@ provider = "main"
             msg.contains("could not be loaded") || msg.contains("unavailable"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn delegated_worker_profile_has_read_write_skills_only() {
+        let dir = two_provider_dir("worker-profile");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("codex")
+            .with_role(RuntimeRole::DelegationWorker)
+            .build()
+            .unwrap();
+        let names = session.agent.tool_names();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"read_skill"));
+        assert!(!names.contains(&"bash"));
+        assert!(!names.contains(&"delegate_external"));
+        assert!(!names.contains(&"ask_user"));
+    }
+
+    #[test]
+    fn delegated_reviewer_profile_is_read_only() {
+        let dir = two_provider_dir("reviewer-profile");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("codex")
+            .with_role(RuntimeRole::DelegationReviewer)
+            .build()
+            .unwrap();
+        let names = session.agent.tool_names();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"read_skill"));
+        assert!(!names.contains(&"write_file"));
+        assert!(!names.contains(&"bash"));
+        assert!(!names.contains(&"delegate_external"));
+    }
+
+    #[test]
+    fn provider_owned_loop_is_rejected_for_native_worker() {
+        let dir = scratch("owned-worker");
+        let config = Config::parse(
+            r#"
+[providers.claude]
+kind = "claude_code"
+
+[default]
+provider = "claude"
+"#,
+        )
+        .unwrap();
+        let result = RuntimeBuilder::new(&dir)
+            .with_config(config)
+            .with_provider("claude")
+            .with_role(RuntimeRole::DelegationWorker)
+            .build();
+        let error = match result {
+            Ok(_) => panic!("provider-owned loop must not be accepted as a native worker"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("owns its agent loop"));
     }
 }

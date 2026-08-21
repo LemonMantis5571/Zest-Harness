@@ -7,6 +7,7 @@ pub mod edit_file;
 pub mod external_agent;
 pub mod glob_files;
 pub mod grep;
+pub(crate) mod isolated_workspace;
 pub mod list_dir;
 pub mod outcome;
 pub mod prepared;

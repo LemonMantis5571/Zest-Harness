@@ -9,6 +9,10 @@ import type {
   ChatEvent,
   DelegationEvent,
   DelegationJob,
+  DelegationCreateInput,
+  DelegationHandoffView,
+  DelegationTargetOptionView,
+  DelegationUpdateInput,
   CompactionResult,
   ContextUsage,
   GitContext,
@@ -442,6 +446,26 @@ export function onChatEvent(handler: (event: ChatEvent) => void): Promise<Unlist
 
 export function listDelegationJobs() {
   return invoke<DelegationJob[]>("list_delegation_jobs");
+}
+
+export function listDelegationTargets() {
+  return invoke<DelegationTargetOptionView[]>("list_delegation_targets");
+}
+
+export function createDelegationJob(request: DelegationCreateInput) {
+  return invoke<DelegationJob>("create_delegation_job", { request });
+}
+
+export function updateDelegationJob(request: DelegationUpdateInput) {
+  return invoke<DelegationJob>("update_delegation_job", { request });
+}
+
+export function approveDelegationJob(jobId: string) {
+  return invoke<DelegationJob>("approve_delegation_job", { jobId });
+}
+
+export function prepareDelegationHandoff(jobId: string) {
+  return invoke<DelegationHandoffView>("prepare_delegation_handoff", { jobId });
 }
 
 export function getDelegationJob(jobId: string) {

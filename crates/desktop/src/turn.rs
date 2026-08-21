@@ -347,7 +347,13 @@ pub(crate) async fn run_with_sink<S: EventSink>(
                     };
                     if let (Some(app), Some(job_id)) = (delegation_app.as_ref(), delegation_job_id)
                     {
-                        delegation_coordinator.enqueue(app.clone(), delegation_root.clone(), job_id);
+                        // `delegate_feature` already passed the model/tool approval gate;
+                        // that approval is the explicit approval for this exact card.
+                        let _ = delegation_coordinator.approve(
+                            app,
+                            &delegation_root,
+                            &job_id,
+                        );
                     }
                     event
                 }

@@ -9,9 +9,11 @@ import {
   GitMergeIcon,
   HistoryIcon,
   ListTreeIcon,
+  PlusIcon,
   PanelRightCloseIcon,
   PlayIcon,
   RefreshCwIcon,
+  SendIcon,
   TriangleAlertIcon,
   WrenchIcon,
   XIcon,
@@ -25,7 +27,10 @@ import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import type {
   ChatMessage,
+  DelegationCreateInput,
   DelegationJob,
+  DelegationTarget,
+  DelegationTargetOptionView,
   SessionInfo,
   WorkspaceFileContent,
   WorkspaceFileView,
@@ -45,10 +50,12 @@ type PanelProps = {
   onRewind: (checkpointId: string) => Promise<void>;
   onJump: (messageId: string) => void;
   delegationJobs: DelegationJob[];
+  onCreateDelegation: (request: DelegationCreateInput) => Promise<DelegationJob>;
   onApproveDelegation: (jobId: string) => Promise<void>;
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
+  onReconnectProvider?: (providerId: string) => void;
 };
 
 type Tab = "activity" | "outline" | "delegation" | "files";
@@ -129,6 +136,55 @@ function messagePreview(message: ChatMessage) {
     return `${message.tools.length} tool ${message.tools.length === 1 ? "call" : "calls"}`;
   }
   return message.role === "user" ? "Attachment" : "Working…";
+}
+
+function targetKey(target: DelegationTarget): string {
+  return target.kind === "provider" ? `provider:${target.providerId}` : `external:${target.agentId}`;
+}
+
+function targetProviderId(target: DelegationTarget | undefined): string | null {
+  return target?.kind === "provider" ? target.providerId : null;
+}
+
+function isTargetAvailabilityError(error: string | undefined): boolean {
+  if (!error) return false;
+  const normalized = error.toLowerCase();
+  return normalized.includes("unavailable")
+    || normalized.includes("not configured")
+    || normalized.includes("credential")
+    || normalized.includes("connect")
+    || normalized.includes("reconnect");
+}
+
+function lines(value: string): string[] {
+  return value.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function compactTokenCount(value: bigint): string {
+  const numeric = Number(value);
+  if (Number.isSafeInteger(numeric)) {
+    return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(numeric);
+  }
+  return `${value} tokens`;
+}
+
+function attemptUsageSummary(job: DelegationJob): string | null {
+  let input = 0n;
+  let output = 0n;
+  let cacheRead = 0n;
+  let cacheWrite = 0n;
+  let measured = false;
+  for (const attempt of job.attempts) {
+    const usage = attempt.usage;
+    if (!usage) continue;
+    measured = true;
+    input += usage.inputTokens ?? 0n;
+    output += usage.outputTokens ?? 0n;
+    cacheRead += usage.cacheReadTokens ?? 0n;
+    cacheWrite += usage.cacheWriteTokens ?? 0n;
+  }
+  if (!measured) return null;
+  return `usage ${compactTokenCount(input)} in · ${compactTokenCount(output)} out · cache ${compactTokenCount(cacheRead)} read / ${compactTokenCount(cacheWrite)} write`;
 }
 
 /**
@@ -337,10 +393,12 @@ function WorkbenchBody({
   onRewind,
   onJump,
   delegationJobs,
+  onCreateDelegation,
   onApproveDelegation,
   onCancelDelegation,
   onRetryDelegation,
   onApplyDelegation,
+  onReconnectProvider,
 }: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -349,9 +407,42 @@ function WorkbenchBody({
     jobId: string;
     section: "worker" | "review";
   } | null>(null);
+  const [delegationFilter, setDelegationFilter] = useState<"project" | "chat">("project");
+  const [targetOptions, setTargetOptions] = useState<DelegationTargetOptionView[]>([]);
+  const [targetError, setTargetError] = useState<string | null>(null);
+  const [creatingJob, setCreatingJob] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [objective, setObjective] = useState("");
+  const [lane, setLane] = useState("product");
+  const [scope, setScope] = useState("");
+  const [context, setContext] = useState("");
+  const [dependsOn, setDependsOn] = useState("");
+  const [acceptanceChecks, setAcceptanceChecks] = useState("");
+  const [workerKey, setWorkerKey] = useState("");
+  const [reviewerKey, setReviewerKey] = useState("same");
+  const [workerModel, setWorkerModel] = useState("");
+  const [workerEffort, setWorkerEffort] = useState("");
   const panelRef = useRef<HTMLElement>(null);
   const titleId = useId();
   const workUnitsId = useId();
+
+  useEffect(() => {
+    if (tab !== "delegation") return;
+    let cancelled = false;
+    void getBackend().listDelegationTargets().then((targets) => {
+      if (cancelled) return;
+      setTargetOptions(targets);
+      setTargetError(null);
+      setWorkerKey((current) => {
+        if (current) return current;
+        const firstAvailable = targets.find((target) => target.available);
+        return firstAvailable ? targetKey(firstAvailable.target) : "";
+      });
+    }).catch((cause) => {
+      if (!cancelled) setTargetError(cause instanceof Error ? cause.message : "Could not load delegation targets.");
+    });
+    return () => { cancelled = true; };
+  }, [tab]);
 
   // Mount is open, because this component only exists while the panel is.
   useEffect(() => {
@@ -462,6 +553,60 @@ function WorkbenchBody({
       .replaceAll("_", " ")
       .replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
+
+  async function createDelegation() {
+    const selected = targetOptions.find((option) => targetKey(option.target) === workerKey);
+    if (!objective.trim() || !selected?.available) return;
+    setCreatingJob(true);
+    try {
+      const worker: DelegationTarget = selected.target.kind === "provider"
+        ? { ...selected.target, model: workerModel.trim() || null, effort: workerEffort || null }
+        : selected.target;
+      const reviewer = reviewerKey === "same"
+        ? { kind: "sameAsWorker" as const }
+        : (() => {
+            const option = targetOptions.find((candidate) => targetKey(candidate.target) === reviewerKey);
+            return option ? { kind: "target" as const, target: option.target } : { kind: "sameAsWorker" as const };
+          })();
+      await onCreateDelegation({
+        parentThreadId: session.threadId,
+        chatId: session.threadId,
+        title: objective.trim().split("\n")[0].slice(0, 120),
+        objective: objective.trim(),
+        lane: lane.trim() || "product",
+        scope: lines(scope),
+        context: lines(context),
+        dependsOn: lines(dependsOn),
+        acceptanceChecks: lines(acceptanceChecks),
+        worker,
+        reviewer,
+      });
+      setObjective("");
+      setScope("");
+      setContext("");
+      setDependsOn("");
+      setAcceptanceChecks("");
+      setCreateOpen(false);
+    } catch (cause) {
+      setTargetError(cause instanceof Error ? cause.message : "Could not create delegation job.");
+    } finally {
+      setCreatingJob(false);
+    }
+  }
+
+  async function sendDelegationToChat(jobId: string) {
+    setBusyAction(`handoff:${jobId}`);
+    try {
+      const handoff = await getBackend().prepareDelegationHandoff(jobId);
+      window.dispatchEvent(new CustomEvent("zest:delegation-handoff", { detail: handoff }));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  const visibleDelegationJobs = delegationJobs.filter((job) =>
+    delegationFilter === "project" || job.parentThreadId === session.threadId
+  );
 
 
   return (
@@ -838,17 +983,53 @@ function WorkbenchBody({
           <FileBrowser />
         ) : (
           <section className="flex flex-col gap-2">
-            <div className="flex items-center justify-between px-1">
-              <h2 className="m-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                Jobs
-              </h2>
-              <span className="text-[10px] text-muted-foreground">{delegationJobs.length}</span>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <div>
+                <h2 className="m-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Agent Board</h2>
+                <p className="m-0 mt-0.5 text-[10px] text-muted-foreground">Project-level work, approval, and review.</p>
+              </div>
+              <Button type="button" size="sm" variant="outline" onClick={() => setCreateOpen((open) => !open)}><PlusIcon data-icon="inline-start" />New job</Button>
             </div>
-            {delegationJobs.length === 0 ? (
+            <div className="flex items-center gap-1 rounded-md border border-border/60 bg-background/40 p-1">
+              {(["project", "chat"] as const).map((filter) => (
+                <button key={filter} type="button" className={cn("flex-1 rounded px-2 py-1 text-[10px]", delegationFilter === filter ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => setDelegationFilter(filter)}>
+                  {filter === "project" ? "All project" : "Current chat"}
+                </button>
+              ))}
+            </div>
+            {createOpen ? (
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-2.5">
+                <div className="mb-2 text-[11px] font-medium">Create a bounded job</div>
+                <div className="flex flex-col gap-2">
+                  <textarea value={objective} onChange={(event) => setObjective(event.target.value)} placeholder="Objective" rows={3} className="resize-y rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" />
+                  <div className="grid grid-cols-2 gap-2"><input value={lane} onChange={(event) => setLane(event.target.value)} placeholder="Lane" className="rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" /><input value={scope} onChange={(event) => setScope(event.target.value)} placeholder="Scope (one path per line)" className="rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" /></div>
+                  <textarea value={context} onChange={(event) => setContext(event.target.value)} placeholder="Context (one item per line)" rows={2} className="resize-y rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" />
+                  <div className="grid grid-cols-2 gap-2"><input value={dependsOn} onChange={(event) => setDependsOn(event.target.value)} placeholder="Dependencies (job IDs)" className="rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" /><input value={acceptanceChecks} onChange={(event) => setAcceptanceChecks(event.target.value)} placeholder="Acceptance checks (commands)" className="rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" /></div>
+                  <label className="text-[10px] text-muted-foreground">Worker target<select value={workerKey} onChange={(event) => setWorkerKey(event.target.value)} className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-[11px] text-foreground"><option value="">Choose an available target</option>{(["provider", "externalAgent"] as const).map((kind) => <optgroup key={kind} label={kind === "provider" ? "Zest providers" : "External CLI agents"}>{targetOptions.filter((option) => option.target.kind === kind).map((option) => { const value = targetKey(option.target); return <option key={value} value={value} disabled={!option.available}>{option.label}{option.available ? "" : " — unavailable"}</option>; })}</optgroup>)}</select></label>
+                  {targetOptions.find((option) => targetKey(option.target) === workerKey && !option.available)?.error ? <p className="m-0 text-[10px] text-amber-300">{targetOptions.find((option) => targetKey(option.target) === workerKey)?.error} Reconnect or choose another target; there is no automatic fallback.</p> : null}
+                  {targetOptions.find((option) => targetKey(option.target) === workerKey)?.target.kind === "provider" ? <div className="grid grid-cols-2 gap-2"><input value={workerModel} onChange={(event) => setWorkerModel(event.target.value)} placeholder="Model (optional)" className="rounded-md border border-border bg-background/70 px-2 py-1.5 text-[11px] outline-none focus:border-primary" /><select value={workerEffort} onChange={(event) => setWorkerEffort(event.target.value)} className="rounded-md border border-border bg-background px-2 py-1.5 text-[11px] text-foreground"><option value="">Default effort</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option></select></div> : null}
+                  <label className="text-[10px] text-muted-foreground">Reviewer target<select value={reviewerKey} onChange={(event) => setReviewerKey(event.target.value)} className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-[11px] text-foreground"><option value="same">Same worker, fresh reviewer runtime</option>{targetOptions.map((option) => <option key={`reviewer:${targetKey(option.target)}`} value={targetKey(option.target)} disabled={!option.available}>{option.label}{option.available ? "" : " — unavailable"}</option>)}</select></label>
+                  {targetError ? <p className="m-0 text-[10px] text-amber-300">{targetError}</p> : null}
+                  {targetOptions.filter((option) => !option.available).map((option) => {
+                    const providerId = option.target.kind === "provider" ? option.target.providerId : null;
+                    return (
+                      <div key={`unavailable:${targetKey(option.target)}`} className="flex items-center justify-between gap-2 rounded-md border border-amber-400/20 bg-amber-400/5 px-2 py-1.5 text-[10px] text-amber-200">
+                        <span className="min-w-0">{option.label}: {option.error ?? "Unavailable"}</span>
+                        {providerId && onReconnectProvider ? (
+                          <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => onReconnectProvider(providerId)}>Reconnect</Button>
+                        ) : <span className="shrink-0 text-[10px] text-muted-foreground">Choose another target</span>}
+                      </div>
+                    );
+                  })}
+                  <div className="flex justify-end gap-1.5"><Button type="button" size="sm" variant="ghost" onClick={() => setCreateOpen(false)}>Cancel</Button><Button type="button" size="sm" disabled={creatingJob || !objective.trim() || !workerKey} onClick={() => void createDelegation()}>{creatingJob ? "Creating…" : "Create awaiting approval"}</Button></div>
+                </div>
+              </div>
+            ) : null}
+            {visibleDelegationJobs.length === 0 ? (
               <div className="px-1 py-1 text-[11px] text-muted-foreground">Nothing yet.</div>
             ) : (
               <div className="flex flex-col gap-2">
-                {delegationJobs.map((job) => {
+                {visibleDelegationJobs.map((job) => {
                   const sourceMessage = jobMessageIds.get(job.jobId);
                   const checksPassed = job.acceptanceChecks.filter(
                     (check) => check.status === "passed"
@@ -856,6 +1037,12 @@ function WorkbenchBody({
                   const blocking = job.reviewerFindings.filter(
                     (finding) => finding.severity === "blocking"
                   );
+                  const usage = attemptUsageSummary(job);
+                  const reviewerTarget = job.reviewerTarget.kind === "target"
+                    ? job.reviewerTarget.target
+                    : undefined;
+                  const reconnectProviderId = targetProviderId(job.workerTarget)
+                    ?? targetProviderId(reviewerTarget);
                   return (
                     <article
                       key={job.jobId}
@@ -863,7 +1050,11 @@ function WorkbenchBody({
                     >
                       <div className="flex items-start gap-2">
                         <span className="mt-0.5 shrink-0" aria-hidden="true">
-                          {job.status === "accepted" || job.status === "ready_to_apply" ? (
+                          {job.status === "awaiting_approval" ? (
+                            <TriangleAlertIcon className="size-4 text-amber-400" />
+                          ) : job.status === "queued" ? (
+                            <Clock3Icon className="size-4 text-muted-foreground" />
+                          ) : job.status === "accepted" || job.status === "ready_to_apply" ? (
                             <CheckCircle2Icon className="size-4 text-primary" />
                           ) : job.status === "failed" || job.status === "blocked" || job.status === "apply_conflict" ? (
                             <TriangleAlertIcon className="size-4 text-amber-400" />
@@ -919,6 +1110,7 @@ function WorkbenchBody({
                           </span>{" "}
                           checks passed
                         </span>
+                        {usage ? <span className="truncate" title={usage}>{usage}</span> : null}
                       </div>
                       {job.changedFiles.length > 0 ? (
                         <div className="mt-2 rounded-md bg-secondary/50 px-2 py-1.5 font-mono text-[10px] text-foreground/80">
@@ -938,7 +1130,14 @@ function WorkbenchBody({
                         </div>
                       ) : null}
                       {job.error ? (
-                        <div className="mt-2 line-clamp-3 text-[10px] text-amber-300">{job.error}</div>
+                        <div className="mt-2 flex items-start justify-between gap-2 rounded-md border border-amber-400/20 bg-amber-400/5 px-2 py-1.5 text-[10px] text-amber-300">
+                          <span className="line-clamp-3 min-w-0">{job.error}</span>
+                          {reconnectProviderId && onReconnectProvider && isTargetAvailabilityError(job.error) ? (
+                            <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => onReconnectProvider(reconnectProviderId)}>
+                              Reconnect
+                            </Button>
+                          ) : null}
+                        </div>
                       ) : null}
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <Button
@@ -996,8 +1195,8 @@ function WorkbenchBody({
                             disabled={busyAction !== null}
                             onClick={() => void runDelegationAction(job.jobId, onRetryDelegation)}
                           >
-                            <PlayIcon data-icon="inline-start" />
-                            Approve fresh attempt
+                            <RefreshCwIcon data-icon="inline-start" />
+                            Retry (await approval)
                           </Button>
                         ) : null}
                         {job.status === "awaiting_approval" ? (
@@ -1009,7 +1208,13 @@ function WorkbenchBody({
                             onClick={() => void runDelegationAction(job.jobId, onApproveDelegation)}
                           >
                             <PlayIcon data-icon="inline-start" />
-                            Approve and start
+                            Approve
+                          </Button>
+                        ) : null}
+                        {job.status !== "awaiting_approval" && job.status !== "planned" ? (
+                          <Button type="button" variant="ghost" size="sm" disabled={busyAction !== null} onClick={() => void sendDelegationToChat(job.jobId)}>
+                            <SendIcon data-icon="inline-start" />
+                            Send to chat
                           </Button>
                         ) : null}
                         {!['accepted', 'cancelled', 'failed'].includes(job.status) ? (

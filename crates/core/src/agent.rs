@@ -55,6 +55,35 @@ pub enum CompactionOutcome {
     Summarized { summary: String },
 }
 
+/// Usage accumulated by every provider round in one user turn. This remains
+/// separate from `last_usage`, which intentionally describes only the final
+/// round for the context meter.
+#[derive(Debug, Clone, Default)]
+pub struct TurnUsageSummary {
+    pub rounds: u32,
+    pub usage: Usage,
+    pub usage_available: bool,
+}
+
+impl TurnUsageSummary {
+    fn record(&mut self, usage: &Usage, available: bool) {
+        self.rounds = self.rounds.saturating_add(1);
+        self.usage_available |= available;
+        if available {
+            self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
+            self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
+            self.usage.cache_creation_input_tokens = self
+                .usage
+                .cache_creation_input_tokens
+                .saturating_add(usage.cache_creation_input_tokens);
+            self.usage.cache_read_input_tokens = self
+                .usage
+                .cache_read_input_tokens
+                .saturating_add(usage.cache_read_input_tokens);
+        }
+    }
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     tools: ToolRegistry,
@@ -82,6 +111,9 @@ pub struct Agent {
     pub provider_interaction: Option<Arc<dyn ProviderInteractionHost>>,
     /// Last completed turn's usage (input fills the context window estimate).
     pub last_usage: Option<Usage>,
+    /// Every provider round completed for the current user turn, retained even
+    /// if cancellation later discards the staged wire history.
+    pub turn_usage: Option<TurnUsageSummary>,
     /// Tool-use ids whose results must be redacted when persisting wire history.
     sensitive_tool_ids: Vec<String>,
 }
@@ -104,6 +136,7 @@ impl Agent {
             provider_session: None,
             provider_interaction: None,
             last_usage: None,
+            turn_usage: None,
             sensitive_tool_ids: Vec::new(),
         }
     }
@@ -194,6 +227,10 @@ impl Agent {
     /// reading-diff generation. These operations never mutate agent history.
     pub fn provider(&self) -> Arc<dyn Provider> {
         self.provider.clone()
+    }
+
+    pub fn turn_usage(&self) -> Option<TurnUsageSummary> {
+        self.turn_usage.clone()
     }
 
     /// Registered tool names (stable order). Used to assert worker-tool wiring.
@@ -432,6 +469,7 @@ impl Agent {
         cancel: Option<&CancelToken>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
+        self.turn_usage = None;
         staged.push(user_message);
         // Track which tool_use ids were sensitive so tool_result redaction can
         // strip them from durable history while live memory keeps the body.
@@ -495,6 +533,9 @@ impl Agent {
                     );
                 }
             }
+            self.turn_usage
+                .get_or_insert_with(TurnUsageSummary::default)
+                .record(&completion.usage, completion.usage_available);
             last_usage = Some(completion.usage.clone());
 
             Self::check_cancel(cancel)?;
@@ -2112,5 +2153,34 @@ mod tests {
         // An endpoint that names no model has not disagreed with anything.
         assert!(models_agree("claude-opus-5", ""));
         assert!(models_agree("", "claude-opus-5"));
+    }
+
+    #[test]
+    fn turn_usage_accumulates_rounds_and_provider_cache_fields() {
+        let mut summary = TurnUsageSummary::default();
+        summary.record(
+            &Usage {
+                input_tokens: 11,
+                output_tokens: 7,
+                cache_creation_input_tokens: 13,
+                cache_read_input_tokens: 17,
+            },
+            true,
+        );
+        summary.record(
+            &Usage {
+                input_tokens: 19,
+                output_tokens: 23,
+                cache_creation_input_tokens: 29,
+                cache_read_input_tokens: 31,
+            },
+            true,
+        );
+        assert_eq!(summary.rounds, 2);
+        assert_eq!(summary.usage.input_tokens, 30);
+        assert_eq!(summary.usage.output_tokens, 30);
+        assert_eq!(summary.usage.cache_creation_input_tokens, 42);
+        assert_eq!(summary.usage.cache_read_input_tokens, 48);
+        assert!(summary.usage_available);
     }
 }

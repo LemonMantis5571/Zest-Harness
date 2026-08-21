@@ -40,8 +40,10 @@ CLIs remain responsible for their own sessions.
 - **Live quota data** — show provider-reported limits when an official,
   supported source is available.
 - **Resumable sessions** — keep project chats and checkpoints across restarts.
-- **Optional delegation** — send bounded work to a configured external coding
-  CLI and review its result before applying it.
+- **Optional delegation** — create a durable, project-local feature card, send
+  it to either a configured native provider worker or an external coding CLI,
+  review the returned diff in a fresh workspace, and apply it only after
+  approval.
 - **Optional plugins** — add local integrations without rebuilding Zest.
 
 ## How do I install Zest?
@@ -152,6 +154,13 @@ permissions; Zest is not an operating-system sandbox.
 
 Plugins run as separate child processes, but the plugin boundary is not a
 sandbox either. Install only plugins whose source and behavior are trusted.
+
+Delegation is explicit and local-first. The selected parent provider remains
+the owner of the parent conversation; delegation does not silently switch the
+parent provider or inject the parent transcript into a worker. External CLIs
+keep their own credentials and sessions. The coordinator owns the project-local
+job boundary, queue and retry rules, reviewer isolation, and usage accounting
+model.
 
 ## Where can I find the docs?
 

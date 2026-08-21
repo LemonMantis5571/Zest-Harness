@@ -17,6 +17,7 @@ pub mod config_edit;
 pub mod config_migrate;
 pub mod context_budget;
 pub mod credentials;
+pub mod delegated_worker;
 pub mod delegation;
 pub mod error;
 pub mod fsutil;
@@ -39,7 +40,7 @@ pub mod transcripts;
 pub mod usage;
 pub mod workspace_changes;
 
-pub use agent::{Agent, CompactionOutcome};
+pub use agent::{Agent, CompactionOutcome, TurnUsageSummary};
 pub use anthropic::client::AnthropicClient;
 pub use anthropic::types::{
     tool_result, tool_uses, Message, OutputConfig, Request, Thinking, ToolDef, ToolUse, Usage,
@@ -65,12 +66,18 @@ pub use config::{
     ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, ProviderConfig, Target,
     DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
+pub use delegated_worker::{
+    run_acceptance_checks, run_provider_reviewer, run_provider_worker, NativeReviewerResult,
+    NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
+};
 pub use delegation::{
     apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
     validate_diff_paths, validate_diff_scope, validate_review_paths, AcceptanceCheckResult,
-    AttemptRole, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
-    DelegationStatus, DelegationStore, FeatureCard, ReviewDecision, ReviewFinding, ReviewReport,
-    ReviewSeverity, WorkerResult, WorkspaceSnapshot, DELEGATION_FORMAT_VERSION,
+    AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
+    DelegationOrigin, DelegationStatus, DelegationStore, DelegationTarget, FeatureCard,
+    ResolvedTargetMetadata, ReviewDecision, ReviewFinding, ReviewReport, ReviewSeverity,
+    ReviewerTarget, TargetFingerprint, WorkerResult, WorkspaceSnapshot, DELEGATION_FORMAT_VERSION,
+    LEGACY_DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -110,7 +117,9 @@ pub use rates::{RateCatalog, DEFAULT_RATES_URL};
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
 };
-pub use runtime::{RuntimeBuilder, RuntimeSession};
+pub use runtime::{
+    resolve_provider_target, ResolvedProviderTarget, RuntimeBuilder, RuntimeRole, RuntimeSession,
+};
 pub use skills::{
     Skill, SkillSet, SkillSummary, INLINE_BUDGET_BYTES, INLINE_MAX_BYTES, MAX_SKILLS,
     MAX_SKILL_BYTES,
