@@ -20,6 +20,8 @@ import type {
   ExternalAgentRow,
   LoginStarted,
   LoginStatus,
+  McpCheck,
+  McpServerRow,
   NowPlayingView,
   PreparedAttachment,
   PluginView,
@@ -63,6 +65,41 @@ export function setExternalAgentModel(id: string, model: string | null) {
 
 export function checkExternalAgent(id: string) {
   return invoke<ExternalAgentCheck>("check_external_agent", { id });
+}
+
+export function listMcpServers() {
+  return invoke<McpServerRow[]>("list_mcp_servers");
+}
+
+/** Writes the whole entry, then refreshes its tool list. Returns every row. */
+export function saveMcpServer(input: {
+  id: string;
+  command: string;
+  args: string[];
+  envVars: string[];
+  enabled: boolean;
+  timeoutSecs?: number | null;
+}) {
+  return invoke<McpServerRow[]>("save_mcp_server", {
+    id: input.id,
+    command: input.command,
+    args: input.args,
+    envVars: input.envVars,
+    enabled: input.enabled,
+    timeoutSecs: input.timeoutSecs ?? null,
+  });
+}
+
+export function setMcpServerEnabled(id: string, enabled: boolean) {
+  return invoke<McpServerRow[]>("set_mcp_server_enabled", { id, enabled });
+}
+
+export function removeMcpServer(id: string) {
+  return invoke<McpServerRow[]>("remove_mcp_server", { id });
+}
+
+export function checkMcpServer(id: string) {
+  return invoke<McpCheck>("check_mcp_server", { id });
 }
 
 export function setProviderKey(id: string, key: string) {
@@ -317,6 +354,10 @@ export function saveMarkdown(suggestedName: string, markdown: string) {
     suggestedName,
     markdown,
   });
+}
+
+export function revealWorkspaceFolder() {
+  return invoke<void>("reveal_workspace_folder");
 }
 
 export function getWorkspaceFolder() {

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
+use crate::mcp::register_mcp_tools;
 use crate::prompt::{
     compose_system_with_docs, env_context, load_custom_system, load_project_docs, DEFAULT_SYSTEM,
     LOCAL_BROWSER_SYSTEM,
@@ -413,6 +414,38 @@ impl RuntimeBuilder {
         {
             register_exec_tools(&mut tools, &root, config.tools.bash.settings())
                 .map_err(|e| HarnessError::Other(format!("register exec tools: {e}")))?;
+        }
+
+        // Zest-owned MCP servers, and only for a provider whose agent loop Zest
+        // owns. A Claude Code or Codex parent already loads MCP servers from
+        // its own configuration, so registering Zest's on top would give that
+        // chat two MCP stacks and one of them outside its permission prompts.
+        // Registration reads the cached catalogue rather than handshaking with
+        // every server, so a configured-but-unreachable server cannot hold up
+        // the first message.
+        if is_parent && !provider_owns_agent_loop && !config.mcp.is_empty() {
+            let uncatalogued = register_mcp_tools(
+                &mut tools,
+                &config.mcp,
+                &crate::mcp::McpCatalog::load(),
+                &root,
+            );
+            if !uncatalogued.is_empty() {
+                // Saying nothing here is the bad outcome: the server is
+                // configured and switched on, so the user has every reason to
+                // expect its tools, and would otherwise only learn they are
+                // missing from the model failing to use them.
+                warnings.push(format!(
+                    "No tools loaded for the MCP server{} {}. Check {} in Customize → MCPs.",
+                    if uncatalogued.len() == 1 { "" } else { "s" },
+                    uncatalogued.join(", "),
+                    if uncatalogued.len() == 1 {
+                        "it"
+                    } else {
+                        "them"
+                    }
+                ));
+            }
         }
 
         let registry = Arc::new(registry);

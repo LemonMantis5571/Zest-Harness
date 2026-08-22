@@ -29,6 +29,7 @@ import {
   writeSidebarOpen,
 } from "@/components/ChatHistorySidebar";
 import { CommandOutputCard } from "@/components/CommandOutputCard";
+import { CustomizePanel } from "@/components/CustomizePanel";
 import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
@@ -43,12 +44,13 @@ import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
 import { Markdown } from "@/components/Markdown";
 import { NowPlayingButton } from "@/components/NowPlayingButton";
+import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { ToolCallRow } from "@/components/ToolCallRow";
+import { UsageScreen } from "@/components/UsageScreen";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
-import { ThinkingTrace } from "@/components/ThinkingTrace";
-import { UserAvatarButton } from "@/components/UserAvatarButton";
+import { ThinkingReasoning } from "@/components/ThinkingReasoning";
 import { WorkbenchPanel } from "@/components/WorkbenchPanel";
 import {
   Attachment,
@@ -71,8 +73,11 @@ import {
   useMessageScrollerScrollable,
 } from "@/components/ui/message-scroller";
 import { ZestPulse } from "@/components/ZestPulse";
+import { toast } from "@/components/ui/toast";
+import { getBackend } from "@/lib/backend";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
+import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import type { ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
@@ -85,6 +90,7 @@ import {
   transcriptStartForTarget,
 } from "@/lib/transcriptWindow";
 import { useKeybindings } from "@/lib/useKeybindings";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -169,6 +175,14 @@ type Props = {
   onOpenProfile?: () => void;
   /** Show the usage screen. */
   onOpenUsage?: () => void;
+  /** Show the Customize panel (MCP servers, skills, project instructions). */
+  onOpenCustomize?: () => void;
+  /** Which panel is showing in the transcript's place, or null for the transcript. */
+  shellPanel?: ShellPanel | null;
+  /** Record a Customize tab change in the app navigation history. */
+  onCustomizeTabChange?: (tab: CustomizeTab) => void;
+  /** Leave the open panel for wherever the user was before it. */
+  onClosePanel?: () => void;
   /** Record and open the Settings view in the app navigation history. */
   onOpenSettings?: () => void;
   /** Remove Settings from the app navigation history when it closes. */
@@ -486,7 +500,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           ) : null}
 
           {msg.thinking ? (
-            <ThinkingTrace thinking={msg.thinking} streaming={msg.streaming} />
+            <ThinkingReasoning thinking={msg.thinking} streaming={msg.streaming} />
           ) : null}
 
           {planningQuestion ? (
@@ -581,7 +595,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           !msg.text &&
           !msg.thinking &&
           msg.tools.length === 0 ? (
-            <ThinkingTrace thinking="" streaming emptyLabel="Thinking..." />
+            <ThinkingReasoning thinking="" streaming emptyLabel="Thinking..." />
           ) : null}
 
           {msg.streaming &&
@@ -591,7 +605,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
             (tool) =>
               tool.status === "running" || tool.status === "awaiting_approval"
           ) ? (
-            <ThinkingTrace thinking="" streaming emptyLabel="Working..." />
+            <ThinkingReasoning thinking="" streaming emptyLabel="Working..." />
           ) : null}
         </MessageContent>
       </Message>
@@ -699,6 +713,10 @@ export function ChatScreen({
   onProfileChange,
   onOpenProfile,
   onOpenUsage,
+  onOpenCustomize,
+  shellPanel = null,
+  onCustomizeTabChange,
+  onClosePanel,
   onOpenSettings,
   onCloseSettings,
   canNavigateBack,
@@ -718,9 +736,16 @@ export function ChatScreen({
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusUser, setFocusUser] = useState(false);
-  /** Bumped to open Settings with the Keyboard shortcuts section expanded. */
-  const [shortcutsRequest, setShortcutsRequest] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
+  /**
+   * Too narrow to hold the sidebar, a checkpoint rail, and a readable
+   * transcript at the same time.
+   *
+   * 768px is where a 260px sidebar stops leaving the conversation enough room:
+   * below it the transcript was down to a ~300px column, inset asymmetrically
+   * by the rail's gutter.
+   */
+  const narrow = useMediaQuery("(max-width: 767px)");
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
   const workspaceRefreshRef = useRef<{
     threadId: string;
@@ -1030,6 +1055,13 @@ export function ChatScreen({
 
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = session.isFreeChat ? "No workspace" : shortRoot(session.root);
+  /**
+   * The provider as a person would name it, falling back to the session's own
+   * label when the picker row is not loaded yet. Shown under the name in the
+   * sidebar's profile row and on the profile page.
+   */
+  const providerLabel =
+    providers.find((row) => row.id === session.provider)?.label ?? session.label;
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
   /**
    * Every tool still waiting on a decision, oldest first.
@@ -1110,6 +1142,19 @@ export function ChatScreen({
     setEditingMessageId(null);
     setEditingMessageText("");
   }, [editingMessageBusy]);
+
+  const revealProjectFolder = useCallback(async () => {
+    try {
+      await getBackend().revealWorkspaceFolder();
+    } catch (err) {
+      toast.add({
+        type: "warning",
+        title: "Could not open the folder",
+        description:
+          err instanceof Error ? err.message : "The file manager did not start.",
+      });
+    }
+  }, []);
 
   const openSettings = useCallback(
     (focusUser = false) => {
@@ -1200,6 +1245,17 @@ export function ChatScreen({
         shortcut: "Ctrl+Shift+M",
         run: () => setProviderSwitchOpen(true),
       },
+      ...(onOpenCustomize
+        ? [
+            {
+              id: "open-customize",
+              label: "Open Customize",
+              description: "MCP servers, skills, and project instructions",
+              shortcut: "Ctrl+Shift+,",
+              run: onOpenCustomize,
+            },
+          ]
+        : []),
       {
         id: "open-settings",
         label: "Open settings",
@@ -1208,7 +1264,14 @@ export function ChatScreen({
         run: openSettings,
       },
     ],
-    [onNewChat, openSettings, session.isFreeChat, toggleWorkbench, workbenchOpen]
+    [
+      onNewChat,
+      onOpenCustomize,
+      openSettings,
+      session.isFreeChat,
+      toggleWorkbench,
+      workbenchOpen,
+    ]
   );
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -1231,10 +1294,18 @@ export function ChatScreen({
     onCloseSettings?.();
   }, [onCloseSettings]);
 
+  /** An explicit toggle, so it is remembered. */
   function setSidebar(next: boolean) {
     setSidebarOpen(next);
     writeSidebarOpen(next);
   }
+
+  // Collapse on the way into a narrow window and restore the remembered choice
+  // on the way out. Deliberately not persisted: resizing a window is not the
+  // user saying they prefer a collapsed sidebar.
+  useEffect(() => {
+    setSidebarOpen(narrow ? false : readSidebarOpen());
+  }, [narrow]);
 
   // Escape stays hand-written and is not rebindable: it means "dismiss what is
   // on top", so it has to read the stack of open surfaces in order.
@@ -1287,13 +1358,10 @@ export function ChatScreen({
     "view.settings": () => {
       openSettings();
     },
-    "view.shortcuts": () => {
-      setFocusUser(false);
-      setShortcutsRequest((n) => n + 1);
-      openSettings();
-    },
+    "view.shortcuts": () => onCustomizeTabChange?.("shortcuts"),
     "view.profile": () => onOpenProfile?.(),
     "view.usage": () => onOpenUsage?.(),
+    "view.customize": () => onOpenCustomize?.(),
     "view.provider": () => setProviderSwitchOpen(true),
     "view.palette": () => setPaletteOpen(true),
   });
@@ -1313,6 +1381,12 @@ export function ChatScreen({
         onForkThread={onForkThread}
         onDeleteThread={onDeleteThread}
         onOpenFolder={onOpenFolder}
+        onOpenCustomize={onOpenCustomize}
+        customizeActive={shellPanel?.kind === "customize"}
+        profileActive={shellPanel?.kind === "profile"}
+        profile={profile}
+        providerLabel={providerLabel}
+        onOpenProfile={onOpenProfile}
         canNavigateBack={canNavigateBack}
         canNavigateForward={canNavigateForward}
         onNavigateBack={onNavigateBack}
@@ -1321,32 +1395,25 @@ export function ChatScreen({
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex min-w-0 shrink-0 items-center gap-2 border-b border-border/60 bg-[var(--chat-header)] px-4 py-2.5">
+          {/*
+           * The header says where you are; who you are moved to the bottom of
+           * the sidebar. So the project leads, with the provider and branch
+           * under it, instead of the display name leading and the project
+           * being crowded onto the second line.
+           */}
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
-            <UserAvatarButton
-              avatarDataUrl={profile.avatarDataUrl}
-              displayName={profile.displayName}
-              title="Your profile"
-              className="shrink-0"
-              onClick={() => {
-                if (onOpenProfile) {
-                  onOpenProfile();
-                  return;
-                }
-                openSettings(true);
-              }}
-            />
             <div className="min-w-0 flex-1 leading-tight">
               <div
                 className="truncate text-sm font-semibold tracking-[-0.2px]"
-                title={profile.displayName.trim() || "Zest"}
+                title={session.isFreeChat ? "No workspace" : session.root}
               >
-                {profile.displayName.trim() || "Zest"}
+                {session.isFreeChat ? "No workspace" : folderLabel}
               </div>
               <div
                 className="min-w-0 max-w-[48ch] truncate text-[11px] text-muted-foreground"
-                title={`${session.isFreeChat ? "No workspace" : session.root}${branch ? ` · ${branch}` : ""}`}
+                title={`${session.label}${branch ? ` · ${branch}` : ""}`}
               >
-                {session.label} · {folderLabel}
+                {session.label}
                 {branch ? ` · ${branch}` : ""}
               </div>
             </div>
@@ -1357,6 +1424,20 @@ export function ChatScreen({
                 branch they belong to. */}
             <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
             <NowPlayingButton />
+            {/* Only with a project: a projectless chat has no folder to show,
+                and the backend refuses to reveal Zest's own free-chat store. */}
+            {!session.isFreeChat ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title={`Show ${folderLabel} in the file manager`}
+                aria-label="Show the project folder in the file manager"
+                onClick={() => void revealProjectFolder()}
+              >
+                <FolderOpenIcon aria-hidden="true" />
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="ghost"
@@ -1424,12 +1505,53 @@ export function ChatScreen({
           </div>
         ) : null}
 
+        {/*
+         * Panels reached from the sidebar take the transcript's place inside
+         * this shell rather than replacing the whole window: the sidebar and
+         * header stay, so the chat is one click away and the nav item can show
+         * as current. The transcript block below is left at its original
+         * indentation so wrapping it stays a two-line diff.
+         */}
+        {shellPanel ? (
+          shellPanel.kind === "customize" ? (
+            <CustomizePanel
+              tab={shellPanel.tab}
+              sending={sending}
+              providerOwnsAgentLoop={session.ownsAgentLoop}
+              providerLabel={providerLabel}
+              onTabChange={(next) => onCustomizeTabChange?.(next)}
+              onBack={() => onClosePanel?.()}
+            />
+          ) : (
+            // Profile and Usage were written as whole pages, so they get the
+            // scroll container the transcript would have had.
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {shellPanel.kind === "profile" ? (
+                <ProfileScreen
+                  profile={profile}
+                  providerLabel={providerLabel}
+                  onBack={() => onClosePanel?.()}
+                  // Editing name and avatar stays in Settings; the profile
+                  // page reports, it does not duplicate the form.
+                  onEditProfile={() => openSettings(true)}
+                  onOpenUsage={() => onOpenUsage?.()}
+                />
+              ) : (
+                <UsageScreen onBack={() => onClosePanel?.()} />
+              )}
+            </div>
+          )
+        ) : (
         <div className="relative min-h-0 flex-1">
-          <CheckpointRail
-            checkpoints={session.checkpoints}
-            messages={messages}
-            onJump={jumpToMessage}
-          />
+          {/* The rail needs a gutter of its own; a narrow window has none to
+              spare, so it steps aside and the transcript takes the width. */}
+          {narrow ? null : (
+            <CheckpointRail
+              checkpoints={session.checkpoints}
+              messages={messages}
+              onJump={jumpToMessage}
+            />
+          )}
           <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>
             <MessageScroller
               className={cn("absolute inset-0", !hasNeedsInput && "pb-40")}
@@ -1441,7 +1563,13 @@ export function ChatScreen({
               }}
             >
               <MessageScrollerViewport className="scroll-fade-b">
-                <MessageScrollerContent className="mx-auto w-full max-w-[var(--chat-max)] gap-6 pl-10 pr-4 py-6">
+                <MessageScrollerContent
+                  className={cn(
+                    "mx-auto w-full max-w-[var(--chat-max)] gap-6 py-6",
+                    // The extra left inset exists only to clear the rail.
+                    narrow ? "px-3" : "pl-10 pr-4"
+                  )}
+                >
                   {messages.length === 0 ? (
                     <MessageScrollerItem messageId="empty">
                       <div className="flex min-h-[42vh] flex-col items-center justify-center gap-4 text-center">
@@ -1638,6 +1766,7 @@ export function ChatScreen({
             }
           />
         </div>
+        )}
       </div>
 
       <SettingsPanel
@@ -1648,7 +1777,6 @@ export function ChatScreen({
         sending={sending}
         profile={profile}
         focusUser={focusUser}
-        focusShortcuts={shortcutsRequest}
         onClose={closeSettings}
         onChangeProvider={() => {
           closeSettings();
@@ -1666,6 +1794,10 @@ export function ChatScreen({
         onOpenFolder={() => {
           closeSettings();
           onOpenFolder();
+        }}
+        onOpenCustomize={() => {
+          closeSettings();
+          onOpenCustomize?.();
         }}
         onProfileChange={onProfileChange}
       />

@@ -22,6 +22,8 @@ import type {
   GitContext,
   LoginStarted,
   LoginStatus,
+  McpCheck,
+  McpServerRow,
   NowPlayingView,
   PreparedAttachment,
   PluginView,
@@ -54,6 +56,19 @@ export type DesktopBackend = {
   setExternalAgentMcp(id: string, enabled: boolean): Promise<void>;
   setExternalAgentModel(id: string, model: string | null): Promise<void>;
   checkExternalAgent(id: string): Promise<ExternalAgentCheck>;
+  listMcpServers(): Promise<McpServerRow[]>;
+  /** Saving also refreshes the server's tool list; every row comes back. */
+  saveMcpServer(input: {
+    id: string;
+    command: string;
+    args: string[];
+    envVars: string[];
+    enabled: boolean;
+    timeoutSecs?: number | null;
+  }): Promise<McpServerRow[]>;
+  setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerRow[]>;
+  removeMcpServer(id: string): Promise<McpServerRow[]>;
+  checkMcpServer(id: string): Promise<McpCheck>;
   setProviderKey(id: string, key: string): Promise<void>;
   deleteProviderKey(id: string): Promise<void>;
   providerKeyPresent(id: string): Promise<boolean>;
@@ -166,6 +181,8 @@ export type DesktopBackend = {
   setSystemPrompt(custom: string): Promise<SystemPromptInfo>;
   listSkills(): Promise<SkillSummary[]>;
   getWorkspaceFolder(): Promise<string>;
+  /** Show the active project in the OS file manager. Rejects a projectless chat. */
+  revealWorkspaceFolder(): Promise<void>;
   listWorkspaceFiles(relativePath?: string | null): Promise<WorkspaceFileView[]>;
   readWorkspaceFile(relativePath: string): Promise<WorkspaceFileContent>;
   pickWorkspaceFolder(): Promise<WorkspacePickResult | null>;
@@ -207,6 +224,11 @@ export function createTauriBackend(): DesktopBackend {
     setExternalAgentMcp: (id, enabled) => tauriApi.setExternalAgentMcp(id, enabled),
     setExternalAgentModel: (id, model) => tauriApi.setExternalAgentModel(id, model),
     checkExternalAgent: (id) => tauriApi.checkExternalAgent(id),
+    listMcpServers: () => tauriApi.listMcpServers(),
+    saveMcpServer: (input) => tauriApi.saveMcpServer(input),
+    setMcpServerEnabled: (id, enabled) => tauriApi.setMcpServerEnabled(id, enabled),
+    removeMcpServer: (id) => tauriApi.removeMcpServer(id),
+    checkMcpServer: (id) => tauriApi.checkMcpServer(id),
     setProviderKey: (id, key) => tauriApi.setProviderKey(id, key),
     deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
     providerKeyPresent: (id) => tauriApi.providerKeyPresent(id),
@@ -269,6 +291,7 @@ export function createTauriBackend(): DesktopBackend {
     setSystemPrompt: (custom) => tauriApi.setSystemPrompt(custom),
     listSkills: () => tauriApi.listSkills(),
     getWorkspaceFolder: () => tauriApi.getWorkspaceFolder(),
+    revealWorkspaceFolder: () => tauriApi.revealWorkspaceFolder(),
     listWorkspaceFiles: (relativePath) => tauriApi.listWorkspaceFiles(relativePath),
     readWorkspaceFile: (relativePath) => tauriApi.readWorkspaceFile(relativePath),
     pickWorkspaceFolder: () => tauriApi.pickWorkspaceFolder(),

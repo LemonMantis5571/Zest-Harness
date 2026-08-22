@@ -4,9 +4,7 @@ import { AuthSuccess } from "@/components/AuthSuccess";
 import { ChatScreen } from "@/components/ChatScreen";
 import { ChatSkeleton } from "@/components/ChatSkeleton";
 import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDialog";
-import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderPicker } from "@/components/ProviderPicker";
-import { UsageScreen } from "@/components/UsageScreen";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
 import { admitAttachments } from "@/lib/attachmentLimits";
@@ -59,6 +57,7 @@ import {
   travelNavigation,
   type NavigationDestination,
   type NavigationHistory,
+  type ShellPanel,
 } from "@/lib/navigationHistory";
 import { markStartup, measureStartup } from "@/lib/startupPerf";
 import {
@@ -100,9 +99,8 @@ type Screen =
   | "picker"
   | "waiting"
   | "auth-success"
-  | "chat"
-  | "profile"
-  | "usage";
+  /** The chat shell. Profile, Usage, and Customize render inside it. */
+  | "chat";
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
@@ -411,6 +409,11 @@ export default function App() {
   const [settingsRequest, setSettingsRequest] = useState(0);
   /** Bumped to open Settings without forcing the User section. */
   const [settingsOpenRequest, setSettingsOpenRequest] = useState(0);
+  /**
+   * Which panel is showing in place of the transcript, or null for the
+   * transcript itself. Each Customize tab is its own history entry.
+   */
+  const [shellPanel, setShellPanel] = useState<ShellPanel | null>(null);
   const [navigation, setNavigation] = useState<NavigationHistory>(createNavigationHistory);
   const navigationRef = useRef<NavigationHistory>(createNavigationHistory());
   const [providerSwitchRequest, setProviderSwitchRequest] = useState(0);
@@ -474,15 +477,20 @@ export default function App() {
     (destination: NavigationDestination) => {
       switch (destination.kind) {
         case "chat":
+          setShellPanel(null);
           setScreen("chat");
           break;
+        // Profile, Usage, and Customize are all reached from the sidebar, so
+        // they render inside the chat shell rather than replacing it.
         case "profile":
-          setScreen("profile");
-          break;
         case "usage":
-          setScreen("usage");
+        case "customize":
+          setShellPanel(destination);
+          setScreen("chat");
           break;
         case "settings":
+          // Settings is an overlay, so whichever panel is open stays behind it
+          // and Back returns there.
           setScreen("chat");
           if (destination.focusUser) {
             setSettingsRequest((request) => request + 1);
@@ -520,6 +528,29 @@ export default function App() {
   const closeSettingsFromHistory = useCallback(() => {
     if (navigationRef.current.current?.kind === "settings") navigateBack();
   }, [navigateBack]);
+  /**
+   * Leaving a panel walks back past the run of Customize tabs it may have
+   * opened.
+   *
+   * A plain Back inside Customize would land on the previous tab, which reads
+   * as a Back button that does nothing — the user asked to leave, not to change
+   * tab. Other panels are a single entry, so one step is enough.
+   */
+  const closeShellPanel = useCallback(() => {
+    if (navigationRef.current.current?.kind !== "customize") {
+      navigateBack();
+      return;
+    }
+    while (navigationRef.current.current?.kind === "customize") {
+      const before = navigationRef.current;
+      navigateBack();
+      if (navigationRef.current === before) {
+        // Nothing behind it in history — Customize was the first view.
+        navigateTo({ kind: "chat" });
+        return;
+      }
+    }
+  }, [navigateBack, navigateTo]);
 
   // The first loaded chat establishes the root of the app-view history. Boot,
   // provider selection, and sign-in progress are lifecycle states, not places
@@ -2507,7 +2538,6 @@ export default function App() {
   }
 
   const authMode = screen !== "chat";
-  const scrollableScreen = screen === "profile" || screen === "usage";
 
   return (
     <Toaster>
@@ -2517,7 +2547,7 @@ export default function App() {
           authMode &&
             cn(
               "relative flex overflow-auto px-6 py-8 before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[radial-gradient(ellipse_at_50%_0%,color-mix(in_srgb,var(--primary)_10%,transparent),transparent_55%)] [&>*]:relative [&>*]:z-10",
-              scrollableScreen ? "items-start justify-center" : "items-center justify-center"
+              "items-center justify-center"
             ),
           !authMode && "flex flex-1 flex-col overflow-hidden"
         )}
@@ -2637,6 +2667,15 @@ export default function App() {
             onBuildPlan={() => void onBuildPlan()}
             onOpenProfile={() => navigateTo({ kind: "profile" })}
             onOpenUsage={() => navigateTo({ kind: "usage" })}
+            onOpenCustomize={() =>
+              navigateTo({
+                kind: "customize",
+                tab: shellPanel?.kind === "customize" ? shellPanel.tab : "mcp",
+              })
+            }
+            shellPanel={shellPanel}
+            onCustomizeTabChange={(tab) => navigateTo({ kind: "customize", tab })}
+            onClosePanel={closeShellPanel}
             onOpenSettings={() => navigateTo({ kind: "settings", focusUser: false })}
             onCloseSettings={closeSettingsFromHistory}
             canNavigateBack={navigation.back.length > 0}
@@ -2657,23 +2696,6 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "profile" ? (
-          <ProfileScreen
-            profile={profile}
-            providerLabel={
-              providers.find((p) => p.id === session?.provider)?.label ?? session?.provider
-            }
-            onBack={navigateBack}
-            onEditProfile={() => {
-              // Editing name and avatar stays in Settings; the profile screen
-              // reports, it does not duplicate the form.
-              navigateTo({ kind: "settings", focusUser: true });
-            }}
-            onOpenUsage={() => navigateTo({ kind: "usage" })}
-          />
-        ) : null}
-
-        {screen === "usage" ? <UsageScreen onBack={navigateBack} /> : null}
       </div>
 
       <ConversationRecoveryDialog

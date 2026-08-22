@@ -491,6 +491,104 @@ pub fn upsert_external_agent(path: &Path, input: &ExternalAgentInput) -> Result<
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// One `[mcp.<id>]` entry as the desktop supplies it.
+#[derive(Debug, Clone)]
+pub struct McpServerInput {
+    pub id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env_vars: Vec<String>,
+    pub enabled: bool,
+    pub timeout_secs: u64,
+}
+
+pub fn upsert_mcp_server(path: &Path, input: &McpServerInput) -> Result<(), String> {
+    let id = input.id.trim();
+    let command = input.command.trim();
+
+    validate_id(id, "MCP server")?;
+    if command.is_empty() {
+        return Err("MCP server command is required".into());
+    }
+    if input.timeout_secs == 0 || input.timeout_secs > 600 {
+        return Err("MCP timeout must be between 1 and 600 seconds".into());
+    }
+    // Values here would be committed secrets. The check is worth its weight:
+    // `env_vars = ["GITHUB_TOKEN=ghp_…"]` is exactly the mistake this shape
+    // invites, and it must fail loudly rather than write the token to disk.
+    if let Some(bad) = input.env_vars.iter().find(|name| name.contains('=')) {
+        return Err(format!(
+            "`{bad}` looks like a value. List environment variable names only — the value stays in your environment."
+        ));
+    }
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("mcp") {
+        doc["mcp"] = Item::Table(Table::new());
+    }
+    let servers = doc["mcp"]
+        .as_table_mut()
+        .ok_or_else(|| "[mcp] is not a table".to_string())?;
+    let entry = servers.entry(id).or_insert(Item::Table(Table::new()));
+    let server = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("MCP server `{id}` is not a table"))?;
+
+    server["command"] = toml_edit::value(command);
+
+    let mut args = Array::new();
+    for arg in &input.args {
+        args.push(Value::from(arg.as_str()));
+    }
+    if args.is_empty() {
+        server.remove("args");
+    } else {
+        server["args"] = toml_edit::value(args);
+    }
+
+    let mut env_vars = Array::new();
+    for name in &input.env_vars {
+        let name = name.trim();
+        if !name.is_empty() {
+            env_vars.push(Value::from(name));
+        }
+    }
+    if env_vars.is_empty() {
+        server.remove("env_vars");
+    } else {
+        server["env_vars"] = toml_edit::value(env_vars);
+    }
+
+    server["enabled"] = toml_edit::value(input.enabled);
+    server["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+pub fn remove_mcp_server(path: &Path, id: &str) -> Result<(), String> {
+    let id = id.trim();
+    validate_id(id, "MCP server")?;
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if let Some(servers) = doc.get_mut("mcp").and_then(Item::as_table_mut) {
+        servers.remove(id);
+    }
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 pub fn remove_external_agent(path: &Path, id: &str) -> Result<(), String> {
     let id = id.trim();
     validate_id(id, "agent")?;
@@ -731,5 +829,100 @@ mod tests {
     fn model_options_are_scoped_to_builtin_workers() {
         assert_eq!(external_agent_model_options("claude"), &["sonnet", "opus"]);
         assert!(external_agent_model_options("custom").is_empty());
+    }
+
+    fn mcp_input(id: &str) -> McpServerInput {
+        McpServerInput {
+            id: id.into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+            env_vars: vec!["GITHUB_TOKEN".into()],
+            enabled: true,
+            timeout_secs: 120,
+        }
+    }
+
+    #[test]
+    fn adds_an_mcp_server_without_discarding_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(
+            &path,
+            "# keep me\n[providers.anthropic]\nkind = \"anthropic\"\napi_key_env = \"KEY\"\n",
+        )
+        .unwrap();
+
+        upsert_mcp_server(&path, &mcp_input("github")).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep me"));
+        let config = Config::parse(&raw).unwrap();
+        let server = &config.mcp["github"];
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.env_vars, vec!["GITHUB_TOKEN".to_string()]);
+        assert!(server.enabled);
+
+        remove_mcp_server(&path, "github").unwrap();
+        let config = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(config.mcp.is_empty());
+    }
+
+    /// Turning a server off must keep the entry: the user configured a command
+    /// and arguments, and an off switch that deletes them is a trap.
+    #[test]
+    fn disabling_an_mcp_server_keeps_how_it_was_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "").unwrap();
+
+        upsert_mcp_server(&path, &mcp_input("github")).unwrap();
+        upsert_mcp_server(
+            &path,
+            &McpServerInput {
+                enabled: false,
+                ..mcp_input("github")
+            },
+        )
+        .unwrap();
+
+        let config = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let server = &config.mcp["github"];
+        assert!(!server.enabled);
+        assert_eq!(server.args.len(), 2);
+    }
+
+    #[test]
+    fn an_env_var_value_is_refused_so_no_secret_reaches_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let error = upsert_mcp_server(
+            &path,
+            &McpServerInput {
+                env_vars: vec!["GITHUB_TOKEN=ghp_secret".into()],
+                ..mcp_input("github")
+            },
+        )
+        .expect_err("a value must not be accepted");
+        assert!(error.contains("names only"), "{error}");
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("ghp_secret"));
+    }
+
+    #[test]
+    fn an_out_of_range_mcp_timeout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "").unwrap();
+        assert!(upsert_mcp_server(
+            &path,
+            &McpServerInput {
+                timeout_secs: 0,
+                ..mcp_input("github")
+            },
+        )
+        .is_err());
     }
 }

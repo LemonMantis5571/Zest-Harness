@@ -1,27 +1,17 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   BotIcon,
-  BookOpenIcon,
   ChartColumnIcon,
   ChevronRightIcon,
-  FolderOpenIcon,
-  KeyboardIcon,
   type LucideIcon,
-  PuzzleIcon,
-  RefreshCwIcon,
-  ScrollTextIcon,
   ServerIcon,
+  SlidersHorizontalIcon,
   TypeIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
 
 import { FontPicker } from "@/components/FontPicker";
-import {
-  KeyboardShortcuts,
-  useScrollIntoViewOnBump,
-} from "@/components/KeyboardShortcuts";
-import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -29,15 +19,13 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { WorkerModelPicker } from "@/components/WorkerModelPicker";
-import { getBackend, type SkillSummary } from "@/lib/backend";
+import { getBackend } from "@/lib/backend";
 import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
 import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 import type {
   ExternalAgentCheck,
   ExternalAgentRow,
-  NowPlayingView,
-  PluginView,
   ProviderRow,
   SessionInfo,
   UsageSnapshot,
@@ -52,8 +40,6 @@ type Props = {
   effort: EffortId;
   sending: boolean;
   profile: UserProfile;
-  /** Bumped to open and scroll to the Keyboard shortcuts section. */
-  focusShortcuts?: number;
   /** Open the User section first (avatar click). */
   focusUser?: boolean;
   onClose: () => void;
@@ -63,10 +49,10 @@ type Props = {
   onReconnect: () => void;
   onProviderKeyRemoved?: (providerId: string) => void;
   onOpenFolder: () => void;
+  /** Leave Settings for the Customize panel (MCPs, skills, extras, rules). */
+  onOpenCustomize: () => void;
   onProfileChange: (profile: UserProfile) => void;
 };
-
-const CUSTOM_SOFT_LIMIT = 8000;
 
 function formatAge(secs: number) {
   if (secs < 60) return `${secs}s`;
@@ -166,18 +152,17 @@ export function SettingsPanel({
   sending,
   profile,
   focusUser = false,
-  focusShortcuts = 0,
   onClose,
   onChangeProvider,
   onReloadSession,
   onReconnect,
   onProviderKeyRemoved,
   onOpenFolder,
+  onOpenCustomize,
   onProfileChange,
 }: Props) {
   const supportsEffort = effortsForModel(session.models, model).length > 0;
   const panelRef = useRef<HTMLDivElement>(null);
-  const shortcutsRef = useScrollIntoViewOnBump(focusShortcuts);
   const titleId = useId();
   useDialogFocusTrap(open, panelRef);
   const [provider, setProvider] = useState<ProviderRow | null>(null);
@@ -191,25 +176,12 @@ export function SettingsPanel({
   const [externalChecks, setExternalChecks] = useState<Record<string, ExternalAgentCheck>>({});
   const [externalBusy, setExternalBusy] = useState<{
     id: string;
-    action: "saving" | "checking" | "mcp" | "model";
+    action: "saving" | "checking" | "model";
   } | null>(null);
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState<string | null>(null);
 
-  const [customPrompt, setCustomPrompt] = useState("");
-  const [savedCustom, setSavedCustom] = useState("");
-  const [basePrompt, setBasePrompt] = useState("");
-  const [promptPath, setPromptPath] = useState(".zest/system.md");
-  const [promptSaving, setPromptSaving] = useState(false);
-  const [promptError, setPromptError] = useState<string | null>(null);
-  const [promptSavedFlash, setPromptSavedFlash] = useState(false);
-
-  const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
-  const [plugins, setPlugins] = useState<PluginView[]>([]);
-  const [nowPlaying, setNowPlaying] = useState<NowPlayingView | null>(null);
-  const [pluginBusy, setPluginBusy] = useState<string | null>(null);
-  const [pluginFolderBusy, setPluginFolderBusy] = useState(false);
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
   const [profileSaving, setProfileSaving] = useState(false);
@@ -228,7 +200,6 @@ export function SettingsPanel({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setPromptError(null);
     setProfileError(null);
     setExternalLoading(true);
     setExternalError(null);
@@ -236,19 +207,13 @@ export function SettingsPanel({
 
     const backend = getBackend();
     // Settled, not all: these are independent sections, and one of them
-    // failing used to blank the other three. The system prompt in particular
-    // needs the live session, which is unavailable while a turn streams —
-    // that must not take Usage and Skills down with it.
+    // failing used to blank the others.
     Promise.allSettled([
       backend.listProviders(),
       backend.listExternalAgents(),
-      backend.getSystemPrompt(),
-      backend.listSkills(),
       backend.usageSnapshot(),
-      backend.listPlugins(),
-      backend.nowPlaying(),
     ])
-      .then(([rowsR, externalR, promptR, skillsR, snapR, pluginsR, nowPlayingR]) => {
+      .then(([rowsR, externalR, snapR]) => {
         if (cancelled) return;
 
         if (rowsR.status === "fulfilled") {
@@ -268,24 +233,7 @@ export function SettingsPanel({
           setExternalError("Could not load external workers. Try again.");
         }
 
-        if (promptR.status === "fulfilled") {
-          setCustomPrompt(promptR.value.custom);
-          setSavedCustom(promptR.value.custom);
-          setBasePrompt(promptR.value.base);
-          setPromptPath(promptR.value.customPath);
-        } else {
-          setBasePrompt("");
-          setPromptError("Could not load your instructions. Try again.");
-        }
-
-        setSkills(skillsR.status === "fulfilled" ? skillsR.value : []);
-        if (skillsR.status === "rejected") {
-          setError("Could not load skills. Try again.");
-        }
-
         setUsage(snapR.status === "fulfilled" ? snapR.value : null);
-        setPlugins(pluginsR.status === "fulfilled" ? pluginsR.value : []);
-        setNowPlaying(nowPlayingR.status === "fulfilled" ? nowPlayingR.value : null);
       })
       .finally(() => {
         if (!cancelled) {
@@ -316,21 +264,6 @@ export function SettingsPanel({
     };
   }, [open, sending]);
 
-  // Media metadata is intentionally polled only while Settings is visible and
-  // the user has opted into the plugin. No background listener is kept alive.
-  useEffect(() => {
-    if (!open || !plugins.some((plugin) => plugin.id === "now-playing" && plugin.enabled)) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      void getBackend()
-        .nowPlaying()
-        .then(setNowPlaying)
-        .catch(() => undefined);
-    }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [open, plugins]);
-
   useEffect(() => {
     if (!open) return;
 
@@ -355,37 +288,6 @@ export function SettingsPanel({
       ? "Reconnect"
       : "Connect";
 
-  const promptDirty = customPrompt !== savedCustom;
-  const overSoftLimit = customPrompt.length > CUSTOM_SOFT_LIMIT;
-  const promptHint = savedCustom.trim()
-    ? `${savedCustom.trim().slice(0, 42)}${savedCustom.trim().length > 42 ? "…" : ""}`
-    : "Default Zest rules";
-
-  async function savePrompt() {
-    setPromptSaving(true);
-    setPromptError(null);
-    setPromptSavedFlash(false);
-    try {
-      const info = await getBackend().setSystemPrompt(customPrompt);
-      setCustomPrompt(info.custom);
-      setSavedCustom(info.custom);
-      setBasePrompt(info.base);
-      setPromptPath(info.customPath);
-      setPromptSavedFlash(true);
-      window.setTimeout(() => setPromptSavedFlash(false), 1600);
-      const nextSkills = await getBackend().listSkills().catch(() => skills);
-      setSkills(nextSkills);
-    } catch {
-      setPromptError("Could not save your instructions. Try again.");
-    } finally {
-      setPromptSaving(false);
-    }
-  }
-
-  function revertPrompt() {
-    setCustomPrompt(savedCustom);
-    setPromptError(null);
-  }
 
   const profileDirty =
     displayName !== profile.displayName || avatarDataUrl !== profile.avatarDataUrl;
@@ -467,40 +369,6 @@ export function SettingsPanel({
     }
   }
 
-  async function togglePlugin(plugin: PluginView) {
-    setPluginBusy(plugin.id);
-    try {
-      const next = await getBackend().setPluginEnabled(plugin.id, !plugin.enabled);
-      setPlugins(next);
-      setNowPlaying(await getBackend().nowPlaying());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not change this extra.");
-    } finally {
-      setPluginBusy(null);
-    }
-  }
-
-  async function refreshPlugins() {
-    try {
-      const backend = getBackend();
-      const [next, music] = await Promise.all([backend.listPlugins(), backend.nowPlaying()]);
-      setPlugins(next);
-      setNowPlaying(music);
-    } catch {
-      setError("Could not refresh extras.");
-    }
-  }
-
-  async function openPluginFolder() {
-    setPluginFolderBusy(true);
-    try {
-      await getBackend().openPluginsFolder();
-    } catch {
-      setError("Could not open the extras folder.");
-    } finally {
-      setPluginFolderBusy(false);
-    }
-  }
 
   async function checkExternalAgent(agent: ExternalAgentRow) {
     if (!agent.configured || sending) return;
@@ -511,21 +379,6 @@ export function SettingsPanel({
       setExternalChecks((previous) => ({ ...previous, [agent.id]: result }));
     } catch {
       setExternalError(`Could not check ${agent.label}. Try again.`);
-    } finally {
-      setExternalBusy(null);
-    }
-  }
-
-  async function toggleExternalAgentMcp(agent: ExternalAgentRow) {
-    if (!agent.preset || !agent.configured || sending) return;
-    setExternalBusy({ id: agent.id, action: "mcp" });
-    setExternalError(null);
-    try {
-      await getBackend().setExternalAgentMcp(agent.id, !agent.mcpAllowed);
-      setExternalAgents(await getBackend().listExternalAgents());
-      if (onReloadSession) await onReloadSession();
-    } catch {
-      setExternalError(`Could not update MCP access for ${agent.label}. Try again.`);
     } finally {
       setExternalBusy(null);
     }
@@ -862,32 +715,6 @@ export function SettingsPanel({
                           />
                         </div>
                       ) : null}
-                      {agent.preset && agent.configured ? (
-                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-2.5">
-                          <div className="min-w-0">
-                            <div className="text-xs font-medium">Optional MCP access</div>
-                            <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                              Lets {agent.label} use the MCP servers already configured in its CLI.
-                              This does not change provider routing.
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={agent.mcpAllowed ? "secondary" : "outline"}
-                            disabled={sending || busy || externalBusy !== null || externalLoading}
-                            aria-pressed={agent.mcpAllowed}
-                            aria-label={`${agent.mcpAllowed ? "Turn off" : "Turn on"} MCP access for ${agent.label}`}
-                            onClick={() => void toggleExternalAgentMcp(agent)}
-                          >
-                            {busy && externalBusy?.action === "mcp"
-                              ? "Saving..."
-                              : agent.mcpAllowed
-                                ? "On"
-                                : "Off"}
-                          </Button>
-                        </div>
-                      ) : null}
                     </li>
                   );
                 })}
@@ -1005,195 +832,20 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
-            title="Extras"
-            icon={PuzzleIcon}
-            hint={
-              plugins.length
-                ? `${plugins.filter((plugin) => plugin.enabled).length} on`
-                : "None yet"
-            }
-          >
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-wrap gap-1.5">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={pluginFolderBusy}
-                  onClick={() => void openPluginFolder()}
-                >
-                  <FolderOpenIcon data-icon="inline-start" aria-hidden="true" />
-                  Open folder
-                </Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => void refreshPlugins()}>
-                  <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
-                  Refresh
-                </Button>
-              </div>
-
-              {plugins.length ? (
-                <div className="flex flex-col gap-2">
-                  {plugins.map((plugin) => (
-                    <div
-                      key={plugin.id}
-                      className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium">{plugin.name}</div>
-                          <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                            {plugin.description}
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={plugin.enabled ? "outline" : "default"}
-                          disabled={!plugin.available || pluginBusy === plugin.id}
-                          onClick={() => void togglePlugin(plugin)}
-                        >
-                          {pluginBusy === plugin.id
-                            ? "Wait…"
-                            : plugin.enabled
-                              ? "Turn off"
-                              : plugin.available
-                                ? "Turn on"
-                                : "Not ready"}
-                        </Button>
-                      </div>
-                      {plugin.detail !== "Ready" ? (
-                        <div className="mt-2 text-[10px] text-muted-foreground">
-                          {plugin.detail}
-                        </div>
-                      ) : null}
-                      {plugin.id === "now-playing" && plugin.enabled ? (
-                        <NowPlayingCard value={nowPlaying} />
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-                  Open the folder to add extras.
-                </p>
-              )}
-              <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-                Extras stay on this PC.
-              </p>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection title="System prompt" icon={ScrollTextIcon} hint={promptHint}>
-            <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              Optional project instructions. Saved to{" "}
-              <span className="font-mono text-[11px] text-foreground/80">{promptPath}</span>
-              . Leave it blank to use Zest's default instructions.
-              Takes effect on the next message.
-            </p>
-            {!customPrompt.trim() && basePrompt.trim() ? (
-              <div className="mb-2 rounded-lg border border-border/60 bg-card/40 px-3 py-2">
-                <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Default (active while empty)
-                </div>
-                <p className="m-0 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
-                  {basePrompt}
-                </p>
-              </div>
-            ) : null}
-            <textarea
-              value={customPrompt}
-              onChange={(e) => setCustomPrompt(e.target.value)}
-              disabled={sending || promptSaving}
-              rows={7}
-              spellCheck={false}
-              placeholder={"Optional: You are …\nProject conventions, tone, extra rules…"}
-              className={cn(
-                "w-full resize-y rounded-lg border border-border/80 bg-card/80 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground caret-foreground outline-none",
-                "placeholder:text-muted-foreground/70 focus-visible:ring-2 focus-visible:ring-ring/50",
-                "disabled:opacity-60"
-              )}
-            />
-            <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-              <span className={overSoftLimit ? "text-destructive" : undefined}>
-                {customPrompt.length.toLocaleString()} chars
-                {overSoftLimit ? " · long prompts may use more context" : ""}
-              </span>
-              {promptSavedFlash ? (
-                <span className="text-primary">Saved — next message uses it</span>
-              ) : null}
-            </div>
-            {promptError ? (
-              <p className="mt-1.5 text-xs text-destructive">{promptError}</p>
-            ) : null}
-            <div className="mt-2.5 flex flex-wrap gap-1.5">
-              <Button
-                type="button"
-                size="sm"
-                disabled={sending || promptSaving || !promptDirty}
-                onClick={() => void savePrompt()}
-              >
-                {promptSaving ? "Saving…" : "Save"}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={sending || promptSaving || !promptDirty}
-                onClick={revertPrompt}
-              >
-                Revert
-              </Button>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Skills"
-            icon={BookOpenIcon}
-            hint={
-              skills.length === 0
-                ? "None loaded"
-                : `${skills.length} skill${skills.length === 1 ? "" : "s"}`
-            }
+            title="Customize"
+            icon={SlidersHorizontalIcon}
+            hint="MCP servers, skills, extras, rules"
           >
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              Your skills are kept on this computer. Zest loads <span className="font-mono text-[11px]">SKILL.md</span> files from{" "}
-              <span className="font-mono text-[11px]">~/.agents/skills/</span> and{" "}
-              <span className="font-mono text-[11px]">~/.zest/skills/</span>.
+              MCP servers, skills, extras, this project&apos;s instructions, and keyboard
+              shortcuts all live in Customize, where each one has room for its own list.
             </p>
-            {skills.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No skills loaded.</p>
-            ) : (
-              <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-                {skills.map((skill) => (
-                  <li
-                    key={skill.name}
-                    className="rounded-md border border-border/70 bg-card/60 px-2.5 py-2"
-                  >
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{skill.name}</span>
-                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        Personal
-                      </span>
-                    </div>
-                    <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                      {skill.description}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <Button type="button" size="sm" onClick={onOpenCustomize}>
+              <SlidersHorizontalIcon data-icon="inline-start" aria-hidden="true" />
+              Open Customize
+            </Button>
           </SettingsSection>
 
-          <div ref={shortcutsRef}>
-            <SettingsSection
-              title="Keyboard shortcuts"
-              icon={KeyboardIcon}
-              hint="Rebind commands"
-              openSignal={focusShortcuts}
-            >
-              <KeyboardShortcuts />
-            </SettingsSection>
-          </div>
 
           {error ? (
             <p className="px-4 py-3 text-xs text-destructive">{error}</p>

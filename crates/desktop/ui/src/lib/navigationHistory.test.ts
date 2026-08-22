@@ -12,6 +12,8 @@ const chat: NavigationDestination = { kind: "chat" };
 const profile: NavigationDestination = { kind: "profile" };
 const usage: NavigationDestination = { kind: "usage" };
 const settings: NavigationDestination = { kind: "settings", focusUser: true };
+const customizeMcp: NavigationDestination = { kind: "customize", tab: "mcp" };
+const customizeRules: NavigationDestination = { kind: "customize", tab: "rules" };
 
 describe("navigation history", () => {
   it("records visits and clears forward history after a new destination", () => {
@@ -47,6 +49,20 @@ describe("navigation history", () => {
     let history = pushNavigation(createNavigationHistory(), chat);
     history = pushNavigation(history, profile);
     const same = pushNavigation(history, profile);
+    assert.equal(same, history);
+  });
+
+  /** Back out of the Rules tab returns to MCPs, not all the way to the chat. */
+  it("treats each Customize tab as its own entry", () => {
+    let history = pushNavigation(createNavigationHistory(), chat);
+    history = pushNavigation(history, customizeMcp);
+    history = pushNavigation(history, customizeRules);
+
+    const back = travelNavigation(history, -1);
+    assert.ok(back);
+    assert.deepEqual(back.destination, customizeMcp);
+
+    const same = pushNavigation(history, customizeRules);
     assert.equal(same, history);
   });
 });

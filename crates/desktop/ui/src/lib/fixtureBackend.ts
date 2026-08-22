@@ -25,6 +25,7 @@ import type {
   DelegationTargetOptionView,
   DelegationUpdateInput,
   GitContext,
+  McpServerRow,
   SessionInfo,
   ThreadSummary,
   WorkspaceChange,
@@ -49,6 +50,9 @@ const FIXTURE_SESSION: SessionInfo = {
   isFreeChat: false,
   threadId: "fixture",
   defaultModel: DEFAULT_CODEX_MODEL,
+  // The fixture stands in for an API provider, so Zest owns the loop and the
+  // Customize screen shows MCP servers as applying here.
+  ownsAgentLoop: false,
   models: FIXTURE_MODELS,
   checkpoints: [],
   messages: [],
@@ -74,6 +78,25 @@ export function createFixtureBackend(): DesktopBackend {
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
+  /** Zest-owned MCP servers. One row so the Customize screen has something to
+   *  render offline, including the never-checked state. */
+  const fixtureMcpServers = new Map<string, McpServerRow>([
+    [
+      "github",
+      {
+        id: "github",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-github"],
+        envVars: ["GITHUB_TOKEN"],
+        enabled: true,
+        timeoutSecs: 120,
+        scope: "the fixture config",
+        tools: ["search_issues", "create_issue"],
+        statusLabel: "Ready",
+        detail: "2 tools · checked just now",
+      },
+    ],
+  ]);
   let fixtureNowPlayingEnabled = false;
   let fixtureNowPlayingStatus: "playing" | "paused" = "playing";
   let fixtureNowPlayingVolume = 83;
@@ -246,6 +269,51 @@ export function createFixtureBackend(): DesktopBackend {
         available: false,
         authenticated: null,
         detail: "CLI checks are unavailable in the fixture.",
+      };
+    },
+    async listMcpServers() {
+      return [...fixtureMcpServers.values()];
+    },
+    async saveMcpServer(input) {
+      const id = input.id.trim();
+      // The fixture starts no process, so a saved server is honestly
+      // "not checked" rather than pretending to have listed tools.
+      fixtureMcpServers.set(id, {
+        id,
+        command: input.command.trim(),
+        args: input.args.filter((arg) => arg.trim().length > 0),
+        envVars: input.envVars.filter((name) => name.trim().length > 0),
+        enabled: input.enabled,
+        timeoutSecs: input.timeoutSecs ?? 120,
+        scope: "the fixture config",
+        tools: [],
+        statusLabel: input.enabled ? "Not checked" : "Off",
+        detail: input.enabled
+          ? "Check the server to load the tools it offers."
+          : "Turn it on to load its tools into new chats.",
+      });
+      return [...fixtureMcpServers.values()];
+    },
+    async setMcpServerEnabled(id, enabled) {
+      const existing = fixtureMcpServers.get(id);
+      if (existing) {
+        fixtureMcpServers.set(id, {
+          ...existing,
+          enabled,
+          statusLabel: enabled ? (existing.tools.length ? "Ready" : "Not checked") : "Off",
+        });
+      }
+      return [...fixtureMcpServers.values()];
+    },
+    async removeMcpServer(id) {
+      fixtureMcpServers.delete(id);
+      return [...fixtureMcpServers.values()];
+    },
+    async checkMcpServer() {
+      return {
+        ok: false,
+        detail: "MCP servers cannot be started in the fixture.",
+        tools: [],
       };
     },
     async listProviders() {
@@ -950,6 +1018,9 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async getWorkspaceFolder() {
       return workspace;
+    },
+    async revealWorkspaceFolder() {
+      notAvailable("reveal the project folder");
     },
     async listWorkspaceFiles(relativePath?: string | null) {
       const normalized = relativePath?.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "") ?? "";

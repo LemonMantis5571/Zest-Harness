@@ -36,8 +36,8 @@ use zest_core::{
     start_codex_cli_login as core_start_codex_cli_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
     AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, CredentialPolicy,
-    ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginProcess, PersistPriority,
-    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
+    ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginProcess, McpCatalog,
+    PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
     ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
     ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
     PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
@@ -878,6 +878,9 @@ struct SessionMeta {
     is_free_chat: bool,
     thread_id: String,
     default_model: String,
+    /// See [`SessionInfo::owns_agent_loop`]. Present on both so the UI's
+    /// `{ ...meta }` merge after a model change cannot drop it.
+    owns_agent_loop: bool,
     models: Vec<ModelCapability>,
     checkpoints: Vec<ThreadCheckpointView>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -906,6 +909,11 @@ struct SessionInfo {
     thread_id: String,
     /// Rust-authoritative catalogue for the active provider (UI may only add labels).
     default_model: String,
+    /// The provider runs its own agent loop and tool stack — Claude Code or
+    /// Codex. Zest's tools, including its MCP servers, are not registered on
+    /// such a chat, and the UI has to say so rather than offer a switch that
+    /// would do nothing here.
+    owns_agent_loop: bool,
     models: Vec<ModelCapability>,
     checkpoints: Vec<ThreadCheckpointView>,
     /// UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
@@ -1746,6 +1754,318 @@ async fn check_external_agent(
         authenticated,
         detail,
     })
+}
+
+/// Zest's own MCP servers, as the Customize screen shows them.
+///
+/// Deliberately not merged with [`ExternalAgentView`]'s `mcpAllowed`: that flag
+/// says a CLI worker may use *its own* servers, which Zest never sees. These
+/// are Zest's, and a native provider with no CLI behind it is the only way to
+/// reach an MCP server at all.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "McpServerView.ts", rename_all = "camelCase")
+)]
+struct McpServerView {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    env_vars: Vec<String>,
+    enabled: bool,
+    /// Clamped to 600 by the config edit, so a 32-bit view is lossless — and
+    /// `u64` would reach the webview as a `bigint`.
+    timeout_secs: u32,
+    /// Where the entry lives, so the UI can say which file it is editing.
+    scope: String,
+    /// Tool names from the last successful check. Empty means never checked.
+    tools: Vec<String>,
+    status_label: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "McpCheckView.ts", rename_all = "camelCase")
+)]
+struct McpCheckView {
+    ok: bool,
+    detail: String,
+    tools: Vec<String>,
+}
+
+#[tauri::command]
+fn list_mcp_servers(state: State<'_, AppState>) -> Vec<McpServerView> {
+    let _read_guard = state.config_edit.lock().ok();
+    let config = load_workspace_config(&state);
+    let scope = external_agent_scope(&state);
+    let catalog = McpCatalog::load();
+    config
+        .mcp
+        .iter()
+        .map(|(id, server)| {
+            let cached = catalog.servers.get(id);
+            let tools: Vec<String> = cached
+                .map(|entry| entry.tools.iter().map(|tool| tool.name.clone()).collect())
+                .unwrap_or_default();
+            let (status_label, detail) = mcp_status(server.enabled, &tools, cached);
+            McpServerView {
+                id: id.clone(),
+                command: server.command.clone(),
+                args: server.args.clone(),
+                env_vars: server.env_vars.clone(),
+                enabled: server.enabled,
+                timeout_secs: u32::try_from(server.timeout_secs).unwrap_or(u32::MAX),
+                scope: scope.clone(),
+                tools,
+                status_label,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// Row copy for one server. The distinction that matters to the user is not
+/// "configured" but "will this chat actually get its tools" — a server that has
+/// never answered contributes nothing, however correct its entry looks.
+fn mcp_status(
+    enabled: bool,
+    tools: &[String],
+    cached: Option<&zest_core::mcp::McpServerCatalog>,
+) -> (String, String) {
+    if !enabled {
+        return (
+            "Off".into(),
+            "Turn it on to load its tools into new chats.".into(),
+        );
+    }
+    if tools.is_empty() {
+        return (
+            "Not checked".into(),
+            "Check the server to load the tools it offers.".into(),
+        );
+    }
+    let checked = cached
+        .map(|entry| entry.fetched_at)
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| format!(" · checked {}", mcp_age_label(seconds)))
+        .unwrap_or_default();
+    (
+        "Ready".into(),
+        format!(
+            "{} tool{}{checked}",
+            tools.len(),
+            if tools.len() == 1 { "" } else { "s" }
+        ),
+    )
+}
+
+fn mcp_age_label(fetched_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let age = now.saturating_sub(fetched_at);
+    match age {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", age / 60),
+        3_600..=86_399 => format!("{}h ago", age / 3_600),
+        _ => format!("{}d ago", age / 86_400),
+    }
+}
+
+fn mcp_server_input(
+    id: &str,
+    command: &str,
+    args: Vec<String>,
+    env_vars: Vec<String>,
+    enabled: bool,
+    timeout_secs: Option<u64>,
+) -> zest_core::config_edit::McpServerInput {
+    zest_core::config_edit::McpServerInput {
+        id: id.to_string(),
+        command: command.trim().to_string(),
+        args: args
+            .into_iter()
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| !arg.is_empty())
+            .collect(),
+        env_vars: env_vars
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect(),
+        enabled,
+        timeout_secs: timeout_secs.unwrap_or(120),
+    }
+}
+
+/// Write one `[mcp.<id>]` entry, holding the config-edit lock for the write and
+/// nothing else. Kept separate from the command so the probe that follows it
+/// cannot run while the lock is held.
+fn write_mcp_server(
+    state: &State<'_, AppState>,
+    input: zest_core::config_edit::McpServerInput,
+) -> Result<zest_core::config_edit::McpServerInput, String> {
+    let _edit_guard = lock_config_edit(state);
+    let current = load_workspace_config(state);
+    if !current.mcp.contains_key(input.id.as_str())
+        && current.mcp.len() >= zest_core::mcp::MAX_MCP_SERVERS
+    {
+        return Err(format!(
+            "Zest starts at most {} MCP servers. Remove one first.",
+            zest_core::mcp::MAX_MCP_SERVERS
+        ));
+    }
+    let path = editable_config_path(state)?;
+    zest_core::config_edit::upsert_mcp_server(&path, &input)?;
+    clear_workspace_config_cache(state);
+    Ok(input)
+}
+
+/// Add or replace one server. The whole entry is written every time, so the
+/// form is the truth and a field the user cleared is actually cleared.
+#[tauri::command]
+async fn save_mcp_server(
+    state: State<'_, AppState>,
+    id: String,
+    command: String,
+    args: Vec<String>,
+    env_vars: Vec<String>,
+    enabled: bool,
+    timeout_secs: Option<u64>,
+) -> Result<Vec<McpServerView>, String> {
+    let input = write_mcp_server(
+        &state,
+        mcp_server_input(id.trim(), &command, args, env_vars, enabled, timeout_secs),
+    )?;
+    // A saved command whose tools were never listed contributes nothing to a
+    // chat, so a save is also a check. A failed probe is not a failed save —
+    // the entry is on disk either way — so it shows up as an unchecked row
+    // rather than as an error that hides the successful write.
+    refresh_mcp_catalog(&state, &input).await;
+    Ok(list_mcp_servers(state))
+}
+
+#[tauri::command]
+async fn set_mcp_server_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<Vec<McpServerView>, String> {
+    let id = id.trim().to_string();
+    let existing = load_workspace_config(&state)
+        .mcp
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("{id} is not configured."))?;
+    let input = write_mcp_server(
+        &state,
+        mcp_server_input(
+            &id,
+            &existing.command,
+            existing.args.clone(),
+            existing.env_vars.clone(),
+            enabled,
+            Some(existing.timeout_secs),
+        ),
+    )?;
+    // Turning a server on is the moment its tools have to exist, and a server
+    // switched off since before the catalogue was written would otherwise
+    // come back on with nothing.
+    refresh_mcp_catalog(&state, &input).await;
+    Ok(list_mcp_servers(state))
+}
+
+#[tauri::command]
+fn remove_mcp_server(state: State<'_, AppState>, id: String) -> Result<Vec<McpServerView>, String> {
+    let id = id.trim().to_string();
+    {
+        let _edit_guard = lock_config_edit(&state);
+        let path = editable_config_path(&state)?;
+        zest_core::config_edit::remove_mcp_server(&path, &id)?;
+        clear_workspace_config_cache(&state);
+    }
+    // The cached tool list would otherwise outlive the server and be
+    // registered again if an unrelated entry later reused the id.
+    let mut catalog = McpCatalog::load();
+    catalog.forget(&id);
+    let _ = catalog.save();
+    Ok(list_mcp_servers(state))
+}
+
+/// Start the server, ask what it exposes, and stop it again.
+///
+/// This is also what makes its tools available: registration reads the cached
+/// list, so a server that has never answered contributes nothing to a chat.
+#[tauri::command]
+async fn check_mcp_server(state: State<'_, AppState>, id: String) -> Result<McpCheckView, String> {
+    let id = id.trim().to_string();
+    let config = load_workspace_config(&state);
+    let server = config
+        .mcp
+        .get(&id)
+        .ok_or_else(|| format!("{id} is not configured."))?
+        .clone();
+    let root = active_or_free_chat_root(&state)?;
+
+    match zest_core::probe_mcp_server(&id, &server, &root).await {
+        Ok(tools) => {
+            let names = tools.iter().map(|tool| tool.name.clone()).collect();
+            let mut catalog = McpCatalog::load();
+            catalog.set(&id, tools);
+            catalog.save()?;
+            let count = catalog.tools(&id).len();
+            Ok(McpCheckView {
+                ok: true,
+                detail: if count == 0 {
+                    "Server started but offered no tools.".to_string()
+                } else {
+                    format!("Ready — {count} tool{}.", if count == 1 { "" } else { "s" })
+                },
+                tools: names,
+            })
+        }
+        Err(error) => Ok(McpCheckView {
+            ok: false,
+            detail: error,
+            tools: Vec::new(),
+        }),
+    }
+}
+
+/// Refresh one server's cached tool list after its entry was written.
+///
+/// Best effort by design: the caller has already saved, and a server that is
+/// not installed yet must not turn a successful save into an error dialog. The
+/// row reports itself as unchecked instead.
+async fn refresh_mcp_catalog(
+    state: &State<'_, AppState>,
+    input: &zest_core::config_edit::McpServerInput,
+) {
+    if !input.enabled {
+        return;
+    }
+    let Ok(root) = active_or_free_chat_root(state) else {
+        return;
+    };
+    let server = zest_core::McpServerConfig {
+        command: input.command.clone(),
+        args: input.args.clone(),
+        env_vars: input.env_vars.clone(),
+        enabled: input.enabled,
+        timeout_secs: input.timeout_secs,
+    };
+    if let Ok(tools) = zest_core::probe_mcp_server(&input.id, &server, &root).await {
+        let mut catalog = McpCatalog::load();
+        catalog.set(&input.id, tools);
+        let _ = catalog.save();
+    }
 }
 
 fn scrub_external_environment(command: &mut Command) {
@@ -2916,6 +3236,7 @@ fn session_meta_from(session: &Session, warning: Option<String>) -> SessionMeta 
         is_free_chat: is_free_chat_root(&session.root),
         thread_id: session.thread_id.clone(),
         default_model,
+        owns_agent_loop: session.agent.provider().owns_agent_loop(),
         models,
         checkpoints: session
             .thread
@@ -2941,6 +3262,7 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
         is_free_chat: is_free_chat_root(&session.root),
         thread_id: session.thread_id.clone(),
         default_model,
+        owns_agent_loop: session.agent.provider().owns_agent_loop(),
         models,
         checkpoints: session
             .thread
@@ -5373,6 +5695,21 @@ fn get_workspace_folder(state: State<'_, AppState>) -> Result<String, String> {
     Ok(display_path(&resolve_workspace_root(&state)?))
 }
 
+/// Show the active project in the operating system's file manager.
+///
+/// Refuses a projectless chat rather than opening Zest's own free-chat store:
+/// that folder is Zest's bookkeeping, not somewhere the user put anything, and
+/// silently revealing it would be a confusing answer to "open my project".
+#[tauri::command]
+fn reveal_workspace_folder(state: State<'_, AppState>) -> Result<(), String> {
+    let root = resolve_workspace_root(&state)?;
+    if is_free_chat_root(&root) {
+        return Err("This chat has no project folder. Open one first.".into());
+    }
+    open_path_in_editor(&root)
+        .map_err(|error| format!("Could not open the project folder: {error}"))
+}
+
 /// List one project directory for the Workbench file browser.
 ///
 /// This is intentionally shallow: the UI can ask for a child directory after
@@ -6382,6 +6719,11 @@ pub fn run() {
             set_external_agent_mcp,
             set_external_agent_model,
             check_external_agent,
+            list_mcp_servers,
+            save_mcp_server,
+            set_mcp_server_enabled,
+            remove_mcp_server,
+            check_mcp_server,
             set_provider_key,
             delete_provider_key,
             provider_key_present,
@@ -6440,6 +6782,7 @@ pub fn run() {
             list_skills,
             list_commands,
             get_workspace_folder,
+            reveal_workspace_folder,
             list_workspace_files,
             read_workspace_file,
             pick_workspace_folder,

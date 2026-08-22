@@ -1,7 +1,21 @@
+/** Which Customize panel a destination opens. */
+export type CustomizeTab = "mcp" | "skills" | "plugins" | "rules" | "shortcuts";
+
+/**
+ * Destinations that render inside the chat shell, taking the transcript's place
+ * while the sidebar and header stay put.
+ *
+ * A sidebar entry that removes the sidebar is disorienting, so anything reached
+ * from that nav belongs here rather than replacing the window.
+ */
+export type ShellPanel =
+  | { kind: "customize"; tab: CustomizeTab }
+  | { kind: "profile" }
+  | { kind: "usage" };
+
 export type NavigationDestination =
   | { kind: "chat" }
-  | { kind: "profile" }
-  | { kind: "usage" }
+  | ShellPanel
   | { kind: "settings"; focusUser: boolean };
 
 export type NavigationHistory = {
@@ -19,8 +33,15 @@ export function sameDestination(
   right: NavigationDestination | null
 ) {
   if (!left || !right || left.kind !== right.kind) return false;
-  if (left.kind !== "settings" || right.kind !== "settings") return true;
-  return left.focusUser === right.focusUser;
+  if (left.kind === "settings" && right.kind === "settings") {
+    return left.focusUser === right.focusUser;
+  }
+  // Switching Customize tabs is a move within one screen, so each tab is its
+  // own history entry — Back out of Rules returns to MCPs, not to the chat.
+  if (left.kind === "customize" && right.kind === "customize") {
+    return left.tab === right.tab;
+  }
+  return true;
 }
 
 /** Visit a destination like a browser: record the current view and discard forward history. */

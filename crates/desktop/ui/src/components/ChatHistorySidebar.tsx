@@ -18,6 +18,7 @@ import {
   PlusIcon,
   ShieldAlertIcon,
   SearchIcon,
+  SlidersHorizontalIcon,
   SquarePenIcon,
   TerminalIcon,
   Trash2Icon,
@@ -26,6 +27,7 @@ import {
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { UserAvatar, UserAvatarButton } from "@/components/UserAvatarButton";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -41,7 +43,7 @@ import {
   type ThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
-import type { ProjectChats, ThreadSummary } from "@/lib/types";
+import type { ProjectChats, ThreadSummary, UserProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -67,6 +69,18 @@ type Props = {
     freeChat: boolean
   ) => Promise<void>;
   onOpenFolder: () => void;
+  /** Absent in surfaces that have no app-level navigation (none today). */
+  onOpenCustomize?: () => void;
+  /** Customize is showing in place of the transcript. */
+  customizeActive?: boolean;
+  /** Name and avatar for the profile row at the bottom. */
+  profile: UserProfile;
+  /** Provider shown under the name, e.g. "Deepseek · No workspace". */
+  providerLabel?: string;
+  /** Open the profile screen. */
+  onOpenProfile?: () => void;
+  /** The profile screen is showing. */
+  profileActive?: boolean;
   canNavigateBack: boolean;
   canNavigateForward: boolean;
   onNavigateBack: () => void;
@@ -266,6 +280,12 @@ export function ChatHistorySidebar({
   onForkThread,
   onDeleteThread,
   onOpenFolder,
+  onOpenCustomize,
+  customizeActive = false,
+  profile,
+  providerLabel,
+  onOpenProfile,
+  profileActive = false,
   canNavigateBack,
   canNavigateForward,
   onNavigateBack,
@@ -866,6 +886,17 @@ export function ChatHistorySidebar({
               <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
               <span>Search chats</span>
             </button>
+            {onOpenCustomize ? (
+              <button
+                type="button"
+                onClick={onOpenCustomize}
+                aria-current={customizeActive ? "page" : undefined}
+                className={navItemClass(customizeActive)}
+              >
+                <SlidersHorizontalIcon className="size-4 shrink-0 text-muted-foreground" />
+                <span>Customize</span>
+              </button>
+            ) : null}
           </nav>
 
           {searchOpen ? (
@@ -1135,6 +1166,52 @@ export function ChatHistorySidebar({
 
         </div>
       ) : null}
+
+      {/*
+       * Who you are sits at the bottom, under the chats. It used to be the
+       * first thing in the chat header, where it competed with the project and
+       * branch the header is actually for.
+       */}
+      <div className="mt-auto shrink-0 border-t border-border/60 p-1.5">
+        {open ? (
+          <button
+            type="button"
+            onClick={onOpenProfile}
+            aria-current={profileActive ? "page" : undefined}
+            title="Your profile"
+            className={cn(
+              "flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors",
+              "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
+              profileActive && "bg-[var(--sidebar-accent)]"
+            )}
+          >
+            <UserAvatar
+              avatarDataUrl={profile.avatarDataUrl}
+              displayName={profile.displayName}
+              className="shrink-0"
+            />
+            <span className="min-w-0 flex-1 leading-tight">
+              <span className="block truncate text-[13px] font-medium text-foreground">
+                {profile.displayName.trim() || "Zest"}
+              </span>
+              {providerLabel ? (
+                <span className="block truncate text-[11px] text-muted-foreground">
+                  {providerLabel}
+                </span>
+              ) : null}
+            </span>
+          </button>
+        ) : (
+          <div className="flex justify-center">
+            <UserAvatarButton
+              avatarDataUrl={profile.avatarDataUrl}
+              displayName={profile.displayName}
+              title="Your profile"
+              onClick={() => onOpenProfile?.()}
+            />
+          </div>
+        )}
+      </div>
 
       <ConfirmDialog
         open={workspaceAction != null}

@@ -64,7 +64,7 @@ Keep responses focused. State what you verified and what you did not — \
 \"it compiles\" and \"it works\" are different claims.";
 
 /// Added only for the desktop parent runtime, which owns a local webview.
-pub const LOCAL_BROWSER_SYSTEM: &str = "\\
+pub const LOCAL_BROWSER_SYSTEM: &str = "\
 # Local browser
 
 Use `browser` when a task requires inspecting or operating a live web page. \
@@ -362,6 +362,29 @@ mod tests {
     use super::*;
     use crate::skills::parse_skill_markdown;
     use std::path::Path;
+
+    /// Every appended block is joined by the caller with a blank line, so a
+    /// block must start at its own heading. `"\\` instead of `"\` shipped a
+    /// literal backslash on its own line into the desktop system prompt, which
+    /// the model read as content and the prompt preview showed as a stray `\`.
+    #[test]
+    fn appended_prompt_blocks_start_at_their_heading() {
+        for block in [
+            LOCAL_BROWSER_SYSTEM,
+            EXTERNAL_DELEGATION_SYSTEM,
+            INTERACTIVE_QUESTION_SYSTEM,
+        ] {
+            assert!(
+                block.starts_with('#'),
+                "block should start at its heading, got {:?}",
+                &block[..block.len().min(24)]
+            );
+            assert!(
+                !block.ends_with('\n'),
+                "block should not end with a newline"
+            );
+        }
+    }
 
     #[test]
     fn compose_order_base_custom_skills() {

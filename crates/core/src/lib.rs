@@ -22,6 +22,7 @@ pub mod delegation;
 pub mod error;
 pub mod fsutil;
 pub mod handoff;
+pub mod mcp;
 pub mod persist;
 pub mod prefs;
 pub mod pricing;
@@ -63,8 +64,8 @@ pub use commands::{
 };
 pub use config::{
     ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
-    ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, ProviderConfig, Target,
-    DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
+    ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, McpServerConfig, ProviderConfig,
+    Target, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use delegated_worker::{
     run_acceptance_checks, run_provider_reviewer, run_provider_worker, NativeReviewerResult,
@@ -82,6 +83,9 @@ pub use delegation::{
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
+pub use mcp::{
+    probe_server as probe_mcp_server, register_mcp_tools, McpCatalog, McpServer, McpToolDef,
+};
 pub use persist::{
     PersistPriority, PersistWorker, Snapshot as PersistSnapshot, DELTA_CHECKPOINT_MS,
 };

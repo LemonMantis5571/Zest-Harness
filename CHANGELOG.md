@@ -16,6 +16,17 @@ a replacement for the commit history.
 
 ### Fixed
 
+- A narrow window squeezed the conversation into a ~300px column: the sidebar
+  held its full width and the transcript kept the left gutter that exists only
+  to clear the checkpoint rail. Below 768px the sidebar now collapses (restoring
+  your own choice when the window grows again), the rail steps aside, and the
+  transcript takes the width with even margins.
+- The desktop system prompt began with a stray `\` on its own line, which the
+  model read as content and the prompt preview showed verbatim. A `"\\` where
+  every neighbouring block used `"\`.
+- The default-instructions preview in the prompt editor rendered the whole base
+  prompt, pushing the box you came to type in off the bottom of the page. It is
+  now collapsed by default and scrolls when opened.
 - The model picker could offer a different set of models than the provider
   actually accepted. An `anthropic` entry with `model = "claude-haiku-5"` showed
   one model in the picker and accepted two at runtime.
@@ -46,6 +57,26 @@ a replacement for the commit history.
 
 ### Added
 
+- Customize panel (`Ctrl+Shift+,`, or Customize in the sidebar) holding MCP
+  servers, skills, extras, this project's instructions, and keyboard shortcuts.
+  Those last four moved out of Settings, which keeps User, Typography, Provider,
+  CLI delegation, and Usage and links across. Customize opens in the
+  transcript's place, so the sidebar and header stay put.
+- Your profile moved from the chat header to the bottom of the sidebar, and the
+  Profile and Usage pages now open inside the chat shell as well. The header is
+  free to lead with the project instead of your name.
+- A folder button in the chat header shows the active project in the operating
+  system's file manager. Hidden for a chat with no project, since Zest's own
+  free-chat store is not somewhere you put anything.
+- Zest's own MCP servers, configured under `[mcp.<id>]` in `zest.toml` or from
+  Customize > MCPs. This is separate from the existing `allow_mcp` switch, which
+  lets a CLI use servers Zest never sees: a Claude Code or Codex parent runs its
+  own agent loop and keeps using that path, while an API provider — an Anthropic
+  key, or an OpenAI-compatible endpoint such as DeepSeek — previously had no way
+  to reach an MCP server at all. Tools appear as `mcp__<server>__<tool>`, every
+  call is approval-gated as an exec-risk tool, and a server process is started
+  only when a chat calls one of its tools. `env_vars` names the environment
+  variables a server may keep; values stay out of `zest.toml`.
 - Windows-first Tauri desktop app and terminal front-end sharing one Rust core.
 - Linux x64 packages for the beta release.
 - Approval cards for file writes and shell commands, with diff previews.

@@ -3,6 +3,8 @@ import type { ModelCapability } from "./generated/ModelCapability.ts";
 import type { CommandView } from "./generated/CommandView.ts";
 import type { ExternalAgentCheckView } from "./generated/ExternalAgentCheckView.ts";
 import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
+import type { McpCheckView } from "./generated/McpCheckView.ts";
+import type { McpServerView } from "./generated/McpServerView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
 import type { SessionMeta as GeneratedSessionMeta } from "./generated/SessionMeta.ts";
@@ -76,6 +78,10 @@ export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
 
 export type ExternalAgentRow = ExternalAgentView;
 export type ExternalAgentCheck = ExternalAgentCheckView;
+
+/** Zest's own MCP servers — not the CLI-owned ones behind `mcpAllowed`. */
+export type McpServerRow = McpServerView;
+export type McpCheck = McpCheckView;
 
 export type LoginStarted = {
   browserTitle: string;

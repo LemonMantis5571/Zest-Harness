@@ -68,6 +68,29 @@ enabled = true
 # model = "gpt-5"
 # credential = "openai"
 
+# Zest's own MCP servers are optional, and are reached by the chat provider
+# itself. Add them from Customize > MCPs, or here.
+#
+# These are not the same thing as `allow_mcp` above: that lets a CLI use the MCP
+# servers configured in *its* own settings, which Zest never sees. A Claude Code
+# or Codex parent runs its own agent loop, so it uses that path and ignores the
+# servers below. Everything else — an Anthropic key, or an OpenAI-compatible
+# endpoint such as DeepSeek — has no CLI behind it, and this is the only way
+# such a chat can reach an MCP server.
+#
+# `env_vars` lists variable *names* only. Zest keeps credential-looking
+# variables out of the server process unless they are named here, and the values
+# stay in your environment so this file remains safe to commit. Every MCP tool
+# call is approval-gated, and a server is started only when a chat calls one of
+# its tools.
+#
+# [mcp.github]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env_vars = ["GITHUB_TOKEN"]
+# enabled = true
+# timeout_secs = 120
+
 # External workers are optional. Authenticate their CLIs separately, then
 # enable a worker here or from Settings > CLI delegation. The optional model
 # is owned by the worker CLI and is independent from the Zest chat model.

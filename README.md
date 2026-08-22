@@ -102,7 +102,7 @@ Run the full local verification gate with:
 Official Zest packages do not include plugins. Plugins are installed separately
 as folders under the user's Zest plugin directory.
 
-1. Open **Settings > Extras**.
+1. Open **Customize > Extras**.
 2. Press **Open folder**.
 3. Copy one complete plugin folder into the folder that opens.
 4. Press **Refresh**, then **Turn on**.
@@ -166,6 +166,7 @@ model.
 
 - [Plugins](docs/PLUGINS.md) — install, build, protocol, and review standard
 - [Skills](docs/SKILLS.md) — personal skills and install locations
+- [MCP servers](docs/MCP.md) — Zest's own servers, and how they differ from `allow_mcp`
 - [Provider quota](docs/QUOTA.md) — live limits, balances, and local usage
 - [Contributing](CONTRIBUTING.md) — development, tests, and pull requests
 - [Design notes](DESIGN.md) — product and architecture context

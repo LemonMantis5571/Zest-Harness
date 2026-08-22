@@ -38,6 +38,16 @@ pub struct Config {
     /// parent conversation.
     #[serde(default)]
     pub agents: BTreeMap<String, ExternalAgentConfig>,
+    /// MCP servers Zest itself connects to, keyed by id.
+    ///
+    /// Deliberately not the same thing as `allow_mcp` on a CLI provider or
+    /// worker: those servers belong to that CLI's configuration, and Zest
+    /// neither sees nor approves the calls. These are Zest's own, and they
+    /// exist because a native provider — an Anthropic key, or an
+    /// OpenAI-compatible endpoint such as DeepSeek — has no CLI harness to
+    /// borrow MCP servers from.
+    #[serde(default)]
+    pub mcp: BTreeMap<String, McpServerConfig>,
     /// Provider used when a front-end does not choose one explicitly.
     ///
     /// This is intentionally separate from external workers: ACP agents are
@@ -335,6 +345,41 @@ fn default_external_timeout_secs() -> u64 {
     900
 }
 
+/// One MCP server Zest starts and calls itself.
+///
+/// `command` and `args` go straight to the operating system process API; no
+/// shell is involved, and there is no placeholder expansion — an MCP server is
+/// a long-lived stdio process, not a per-prompt invocation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerConfig {
+    /// Executable name or absolute path.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Secret-looking host environment variables this server may keep, by
+    /// name.
+    ///
+    /// Names only, never values. Zest scrubs anything that looks like a
+    /// credential from the child environment; a server that genuinely needs a
+    /// token names the variable here, and the value stays in the machine's own
+    /// environment where `zest.toml` can still be committed.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    /// Configured servers stay in the file when switched off, so turning one
+    /// off is not the same as losing how it was set up.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-request limit. Clamped by the client, so a config typo cannot make
+    /// a turn wait indefinitely.
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_mcp_timeout_secs() -> u64 {
+    120
+}
+
 impl ProviderConfig {
     pub fn key_env(&self) -> Option<&str> {
         match self {
@@ -553,6 +598,7 @@ impl Config {
         Config {
             providers,
             agents: BTreeMap::new(),
+            mcp: BTreeMap::new(),
             default: Some(Target {
                 provider: "anthropic".to_string(),
                 model: None,
