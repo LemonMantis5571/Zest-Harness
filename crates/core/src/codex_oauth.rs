@@ -68,7 +68,8 @@ impl CodexOAuthSession {
     }
 
     pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string(self).map_err(|error| format!("could not encode ChatGPT session: {error}"))
+        serde_json::to_string(self)
+            .map_err(|error| format!("could not encode ChatGPT session: {error}"))
     }
 
     pub fn needs_refresh(&self, now: i64) -> bool {
@@ -386,8 +387,10 @@ fn session_from_token(
     previous_account: Option<String>,
     require_id: bool,
 ) -> Result<CodexOAuthSession, String> {
-    let parsed: TokenResponse =
-        serde_json::from_value(json).map_err(|_| "ChatGPT authorization response did not include usable Codex account credentials.".to_string())?;
+    let parsed: TokenResponse = serde_json::from_value(json).map_err(|_| {
+        "ChatGPT authorization response did not include usable Codex account credentials."
+            .to_string()
+    })?;
     let refresh = parsed
         .refresh_token
         .or(preserve_refresh)
@@ -506,9 +509,8 @@ mod tests {
 
     #[test]
     fn reads_chatgpt_account_id_from_id_token() {
-        let payload = URL_SAFE_NO_PAD.encode(
-            br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_test"}}"#,
-        );
+        let payload = URL_SAFE_NO_PAD
+            .encode(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_test"}}"#);
         let token = format!("aaa.{payload}.sig");
         assert_eq!(extract_account_id(&token).unwrap(), "acct_test");
     }

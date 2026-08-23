@@ -39,16 +39,15 @@ use zest_core::{
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
     AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, CredentialPolicy,
-    DEFAULT_CODEX_MODEL, LoginPoll,
-    ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginProcess, McpCatalog,
-    PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
-    ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
-    ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
-    PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
-    SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread, ThreadCheckpoint,
-    ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary,
-    ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginPoll, LoginProcess,
+    McpCatalog, PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats,
+    ProjectSessionState, ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest,
+    ProviderInteractionHost, ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry,
+    ProviderSlot, PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun,
+    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread,
+    ThreadCheckpoint, ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore,
+    ThreadSummary, ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
+    DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -672,9 +671,12 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     let auth_status = match configured_provider {
         Some(ProviderConfig::ClaudeCode { .. }) => detect_claude_code(),
         Some(ProviderConfig::CodexCli { .. }) => detect_codex_cli(),
-        Some(ProviderConfig::CodexOAuth { credential, .. }) => {
-            detect_codex_oauth(credential.as_deref().filter(|value| !value.is_empty()).unwrap_or(slot.id))
-        }
+        Some(ProviderConfig::CodexOAuth { credential, .. }) => detect_codex_oauth(
+            credential
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(slot.id),
+        ),
         _ => slot.status.clone(),
     };
     let (status_kind, status_label, detail) = match &auth_status {
@@ -1437,11 +1439,9 @@ fn chatgpt_codex_offer_view() -> ProviderView {
             "Unverified",
             "Zest could not verify this sign-in.",
         ),
-        AuthStatus::NotLoggedIn { .. } | AuthStatus::Unconfigured => (
-            "unconfigured",
-            "Not configured",
-            "Use your ChatGPT account",
-        ),
+        AuthStatus::NotLoggedIn { .. } | AuthStatus::Unconfigured => {
+            ("unconfigured", "Not configured", "Use your ChatGPT account")
+        }
     };
     ProviderView {
         id: CHATGPT_CODEX_ID.into(),
@@ -3289,10 +3289,17 @@ const CODEX_KIND_MISMATCH: &str =
     "This chat was started with a different Codex sign-in. Start a new chat to keep using the current one.";
 
 fn configured_provider_kind(config: &Config, provider_id: &str) -> Option<&'static str> {
-    config.providers.get(provider_id).map(ProviderConfig::kind_tag)
+    config
+        .providers
+        .get(provider_id)
+        .map(ProviderConfig::kind_tag)
 }
 
-fn stamp_thread_kind(thread: &mut Thread, config: &Config, provider_id: &str) -> Result<(), String> {
+fn stamp_thread_kind(
+    thread: &mut Thread,
+    config: &Config,
+    provider_id: &str,
+) -> Result<(), String> {
     if let Some(kind) = configured_provider_kind(config, provider_id) {
         thread
             .ensure_provider_kind(kind)
@@ -4729,7 +4736,8 @@ mod delete_thread_tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("zest-delete-thread-{name}-{}", new_id("test")));
+        let root =
+            std::env::temp_dir().join(format!("zest-delete-thread-{name}-{}", new_id("test")));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -5297,7 +5305,10 @@ enum DeleteThreadResult {
     Ready(Box<SessionInfo>),
     /// The deleted chat was the visible busy route. Open an unsaved draft so
     /// the user is not left on a transcript that no longer exists.
-    OpenDraft { provider_id: String, root: PathBuf },
+    OpenDraft {
+        provider_id: String,
+        root: PathBuf,
+    },
 }
 
 fn same_project_root(left: &Path, right: &Path) -> bool {
@@ -5309,9 +5320,9 @@ fn persist_worker_for(
     root: &Path,
 ) -> Option<PersistWorker> {
     let guard = persist.lock().ok()?;
-    guard.iter().find_map(|(key, worker)| {
-        same_project_root(key, root).then_some(worker.clone())
-    })
+    guard
+        .iter()
+        .find_map(|(key, worker)| same_project_root(key, root).then_some(worker.clone()))
 }
 
 fn current_session_info(sessions: &SessionController) -> Result<SessionInfo, String> {
@@ -7734,9 +7745,7 @@ credential = "codex-chatgpt"
         ];
         append_chatgpt_codex_offer(&mut rows, &config, true);
         assert_eq!(
-            rows.iter()
-                .filter(|row| row.id == "codex-chatgpt")
-                .count(),
+            rows.iter().filter(|row| row.id == "codex-chatgpt").count(),
             1
         );
         let oauth = rows.iter().find(|row| row.id == "codex-chatgpt").unwrap();

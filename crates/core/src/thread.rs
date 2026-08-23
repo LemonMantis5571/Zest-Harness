@@ -2258,12 +2258,10 @@ mod characterization {
             legacy.assert_provider_kind("codex_oauth"),
             Err(ThreadLoadError::ProviderKindMismatch { .. })
         ));
-        assert!(
-            legacy
-                .assert_provider_kind("codex_oauth")
-                .unwrap_err()
-                .to_string()
-                .contains("different Codex sign-in")
-        );
+        assert!(legacy
+            .assert_provider_kind("codex_oauth")
+            .unwrap_err()
+            .to_string()
+            .contains("different Codex sign-in"));
     }
 }

@@ -272,8 +272,7 @@ fn snapshot_thread_id(snapshot: &Snapshot) -> Option<String> {
 }
 
 fn is_forgotten(forgotten: &HashSet<String>, snapshot: &Snapshot) -> bool {
-    snapshot_thread_id(snapshot)
-        .is_some_and(|thread_id| forgotten.contains(&thread_id))
+    snapshot_thread_id(snapshot).is_some_and(|thread_id| forgotten.contains(&thread_id))
 }
 
 async fn flush_pending(

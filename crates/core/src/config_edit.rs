@@ -430,7 +430,10 @@ pub fn add_codex_cli_provider(path: &Path, input: &CodexCliProviderInput) -> Res
 
 /// Add or update a ChatGPT Codex parent while preserving comments and
 /// unrelated provider entries. Refuses if the id already has another kind.
-pub fn add_codex_oauth_provider(path: &Path, input: &CodexOAuthProviderInput) -> Result<(), String> {
+pub fn add_codex_oauth_provider(
+    path: &Path,
+    input: &CodexOAuthProviderInput,
+) -> Result<(), String> {
     let id = input.id.trim();
     let model = input.model.trim();
     let credential = input.credential.trim();
@@ -439,7 +442,11 @@ pub fn add_codex_oauth_provider(path: &Path, input: &CodexOAuthProviderInput) ->
     if model.is_empty() {
         return Err("a ChatGPT Codex model is required".into());
     }
-    let credential = if credential.is_empty() { id } else { credential };
+    let credential = if credential.is_empty() {
+        id
+    } else {
+        credential
+    };
 
     let original = read_config(path)?;
     let mut doc: DocumentMut = original

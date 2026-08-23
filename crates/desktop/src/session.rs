@@ -622,7 +622,8 @@ mod tests {
         let (first, first_turn) = ctl.begin_turn().unwrap();
 
         ctl.set_session(dummy_session("b")).unwrap();
-        assert!(ctl.with_session_if_idle(|session| session.thread_id.clone())
+        assert!(ctl
+            .with_session_if_idle(|session| session.thread_id.clone())
             .unwrap()
             .is_some());
 

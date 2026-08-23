@@ -100,9 +100,11 @@ impl Provider for CodexOAuthProvider {
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
-        let session = self.session.lock().map_err(|_| {
-            HarnessError::Other("ChatGPT session lock poisoned".into())
-        })?.clone();
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| HarnessError::Other("ChatGPT session lock poisoned".into()))?
+            .clone();
         let session = refresh_and_store(&self.account, session)
             .await
             .map_err(HarnessError::Other)?;
@@ -376,10 +378,7 @@ impl ResponsesAccumulator {
                     .to_string(),
             });
         }
-        let kind = event
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         if self.served_model.is_none() {
             self.served_model = event
                 .pointer("/response/model")
@@ -416,7 +415,9 @@ impl ResponsesAccumulator {
                 }
             }
             "response.completed" | "response.done" => {
-                if let Some(usage) = event.pointer("/response/usage").or_else(|| event.get("usage"))
+                if let Some(usage) = event
+                    .pointer("/response/usage")
+                    .or_else(|| event.get("usage"))
                 {
                     self.take_usage(usage);
                 }
@@ -449,10 +450,7 @@ impl ResponsesAccumulator {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let arguments = item
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
                 let tool = self.tools.entry(id.clone()).or_default();
                 if tool.id.is_empty() {
                     tool.id = id;

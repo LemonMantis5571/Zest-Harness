@@ -28,9 +28,9 @@ use super::claude_code::ClaudeCodeProvider;
 use super::codex_app_server::CodexAppServerProvider;
 use super::codex_oauth::CodexOAuthProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
-use crate::codex_oauth::SESSION_ENV;
 use super::{catalogue, EffortPolicy, ModelSpec, Provider, ProviderDescriptor, CODEX_KNOWN_MODELS};
 use crate::anthropic::types::DEFAULT_MODEL;
+use crate::codex_oauth::SESSION_ENV;
 use crate::config::{ProviderConfig, DEFAULT_CLAUDE_CODE_MODEL};
 
 /// The `kind = "…"` string this driver owns. Equal to the serde tag, and checked
@@ -451,9 +451,7 @@ impl ProviderDriver for CodexOAuthDriver {
         config: &ProviderConfig,
     ) -> std::result::Result<Arc<dyn Provider>, String> {
         let ProviderConfig::CodexOAuth {
-            model,
-            credential,
-            ..
+            model, credential, ..
         } = config
         else {
             unreachable!("driver_for routes only CodexOAuth entries here");
@@ -463,7 +461,8 @@ impl ProviderDriver for CodexOAuthDriver {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(ctx.id);
-        let provider = CodexOAuthProvider::from_key(ctx.id, account, ctx.key, model.clone(), models)?;
+        let provider =
+            CodexOAuthProvider::from_key(ctx.id, account, ctx.key, model.clone(), models)?;
         Ok(Arc::new(provider))
     }
 }

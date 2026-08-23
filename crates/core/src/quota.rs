@@ -444,19 +444,12 @@ async fn fetch_codex_oauth_usage(
     let request = credentials_for(provider_id, provider);
     let raw = match resolve(request) {
         Ok(Some(raw)) => raw,
-        Ok(None) => {
-            return unavailable_view(provider_id, "Sign in again to refresh Codex limits.")
-        }
+        Ok(None) => return unavailable_view(provider_id, "Sign in again to refresh Codex limits."),
         Err(error) => return error_view(provider_id, error),
     };
     let session = match crate::codex_oauth::CodexOAuthSession::parse_json(&raw) {
         Ok(session) => session,
-        Err(_) => {
-            return error_view(
-                provider_id,
-                "Sign in again to refresh Codex limits.",
-            )
-        }
+        Err(_) => return error_view(provider_id, "Sign in again to refresh Codex limits."),
     };
     let account = request
         .account
@@ -464,9 +457,7 @@ async fn fetch_codex_oauth_usage(
         .unwrap_or(provider_id);
     let session = match refresh_and_store(account, session).await {
         Ok(session) => session,
-        Err(_) => {
-            return error_view(provider_id, "Sign in again to refresh Codex limits.")
-        }
+        Err(_) => return error_view(provider_id, "Sign in again to refresh Codex limits."),
     };
 
     let response = match client
@@ -493,10 +484,7 @@ fn chatgpt_usage_from_http(provider_id: &str, status: u16, body: &str) -> Provid
         return error_view(provider_id, "Sign in again to refresh Codex limits.");
     }
     if !(200..300).contains(&status) {
-        return unavailable_view(
-            provider_id,
-            format!("Codex usage check failed ({status})."),
-        );
+        return unavailable_view(provider_id, format!("Codex usage check failed ({status})."));
     }
     match serde_json::from_str::<ChatgptWhamUsage>(body) {
         Ok(parsed) => chatgpt_quota_view(provider_id, parsed),
@@ -1124,7 +1112,10 @@ mod tests {
 
     #[test]
     fn quota_source_is_app_server_for_every_codex_cli_id() {
-        assert_eq!(quota_source(&cli_config()), Some(CodexQuotaSource::AppServer));
+        assert_eq!(
+            quota_source(&cli_config()),
+            Some(CodexQuotaSource::AppServer)
+        );
     }
 
     #[test]
@@ -1146,9 +1137,10 @@ mod tests {
     #[tokio::test]
     async fn a_config_with_both_codex_kinds_emits_two_quota_views() {
         let mut config = Config::default();
-        config
-            .providers
-            .insert("codex".into(), oauth_config("gpt-5.6-sol", Some("missing-oauth")));
+        config.providers.insert(
+            "codex".into(),
+            oauth_config("gpt-5.6-sol", Some("missing-oauth")),
+        );
         config.providers.insert("work-codex".into(), cli_config());
         let snapshot = fetch_provider_quotas(&config).await;
         assert_eq!(snapshot.providers.len(), 2);

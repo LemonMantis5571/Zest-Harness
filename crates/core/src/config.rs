@@ -935,9 +935,7 @@ kind = "codex_oauth"
         ));
         match &config.providers["chatgpt"] {
             ProviderConfig::CodexOAuth {
-                model,
-                credential,
-                ..
+                model, credential, ..
             } => {
                 assert_eq!(model, DEFAULT_CODEX_MODEL);
                 assert!(credential.is_none());
