@@ -116,19 +116,27 @@ pub trait ProviderDriver: Send + Sync {
 /// registry did not, so a provider with `credential = ""` asked the OS store for
 /// an empty account and reported its failure as a missing key.
 pub fn resolve(request: CredentialRequest<'_>) -> std::result::Result<Option<String>, String> {
-    let stored = request
-        .account
-        .filter(|account| !account.trim().is_empty())
-        .map(crate::credentials::get)
-        .transpose()
-        .map_err(|error| format!("could not read the saved API key: {error}"))?
-        .flatten();
-    Ok(stored.or_else(|| {
+    let from_env = || {
         request
             .env
             .and_then(|name| std::env::var(name).ok())
             .filter(|value| !value.trim().is_empty())
-    }))
+    };
+    let stored = match request.account.filter(|account| !account.trim().is_empty()) {
+        Some(account) => match crate::credentials::get(account) {
+            Ok(value) => value,
+            Err(error) => {
+                // Headless Linux CI has no Secret Service. The documented env
+                // fallback must still load the provider instead of skipping it.
+                return match from_env() {
+                    Some(value) => Ok(Some(value)),
+                    None => Err(format!("could not read the saved API key: {error}")),
+                };
+            }
+        },
+        None => None,
+    };
+    Ok(stored.or_else(from_env))
 }
 
 /// Credential request with the provider id filled in when the entry omitted it.
@@ -694,6 +702,21 @@ mod tests {
             !error.contains("auth.json"),
             "must not mention the vendor CLI store: {error}"
         );
+    }
+
+    #[test]
+    fn a_keyring_miss_or_error_still_uses_the_env_fallback() {
+        // Headless Linux has no Secret Service; get() is Err, not Ok(None).
+        // A unique env name keeps this from racing SESSION_ENV in other tests.
+        let env_name = format!("ZEST_TEST_KEYRING_ENV_{}", std::process::id());
+        std::env::set_var(&env_name, "from-env");
+        let key = resolve(CredentialRequest {
+            account: Some("zest-ci-missing-keyring-account"),
+            env: Some(env_name.as_str()),
+            policy: CredentialPolicy::RequiredToLoad,
+        });
+        std::env::remove_var(&env_name);
+        assert_eq!(key, Ok(Some("from-env".to_string())));
     }
 
     /// A blank account name is not a credential-manager lookup.

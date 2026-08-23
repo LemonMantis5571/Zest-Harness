@@ -4827,6 +4827,19 @@ mod delete_thread_tests {
         assert!(store.load(&active.id).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn same_project_root_treats_a_temp_dir_and_its_canonical_form_as_one_folder() {
+        let root = scratch("canon");
+        let canon = root.canonicalize().expect("temp dir must canonicalize");
+        assert!(
+            same_project_root(&root, &canon),
+            "raw={} canon={}",
+            root.display(),
+            canon.display()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// Switch project (and optional thread) while keeping the current provider.
@@ -5311,8 +5324,26 @@ enum DeleteThreadResult {
     },
 }
 
+fn path_text_eq(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let left = display_path(left);
+    let right = display_path(right);
+    left == right || (cfg!(windows) && left.eq_ignore_ascii_case(&right))
+}
+
 fn same_project_root(left: &Path, right: &Path) -> bool {
-    left == right || display_path(left) == display_path(right)
+    if path_text_eq(left, right) {
+        return true;
+    }
+    // Windows `canonicalize()` turns `%TEMP%\foo` into `\\?\C:\Users\…`.
+    // Comparing only the raw strings then misses the live turn and delete
+    // reports "choose a provider" after the chat is already gone.
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => path_text_eq(&left, &right),
+        _ => false,
+    }
 }
 
 fn persist_worker_for(
@@ -5445,7 +5476,7 @@ async fn delete_thread_inner(
     let live_turn = sessions
         .active_turn_for_thread(&id)
         .map_err(map_session_err)?
-        .filter(|turn| same_project_root(&turn.root, &target_root));
+        .filter(|turn| deleting_active || same_project_root(&turn.root, &target_root));
 
     if live_turn.is_some() {
         // Tombstone the persist worker before cancel so its terminal save

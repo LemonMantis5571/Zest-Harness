@@ -85,23 +85,39 @@ pub fn default_account(provider_id: &str) -> &str {
     }
 }
 
-pub fn session_present(account: &str) -> Result<bool, String> {
-    if credentials::present(account)? {
-        return Ok(true);
-    }
-    Ok(std::env::var(SESSION_ENV)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false))
-}
-
-pub fn load_session(account: &str) -> Result<Option<CodexOAuthSession>, String> {
-    if let Some(raw) = credentials::get(account)? {
-        return Ok(Some(CodexOAuthSession::parse_json(&raw)?));
-    }
+fn session_from_env() -> Result<Option<CodexOAuthSession>, String> {
     match std::env::var(SESSION_ENV) {
         Ok(raw) if !raw.trim().is_empty() => Ok(Some(CodexOAuthSession::parse_json(&raw)?)),
         _ => Ok(None),
     }
+}
+
+pub fn session_present(account: &str) -> Result<bool, String> {
+    match credentials::present(account) {
+        Ok(true) => return Ok(true),
+        Ok(false) => {}
+        Err(error) => {
+            if session_from_env()?.is_some() {
+                return Ok(true);
+            }
+            return Err(error);
+        }
+    }
+    Ok(session_from_env()?.is_some())
+}
+
+pub fn load_session(account: &str) -> Result<Option<CodexOAuthSession>, String> {
+    match credentials::get(account) {
+        Ok(Some(raw)) => return Ok(Some(CodexOAuthSession::parse_json(&raw)?)),
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(session) = session_from_env()? {
+                return Ok(Some(session));
+            }
+            return Err(error);
+        }
+    }
+    session_from_env()
 }
 
 pub fn store_session(account: &str, session: &CodexOAuthSession) -> Result<(), String> {
