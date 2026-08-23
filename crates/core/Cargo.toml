@@ -1,0 +1,48 @@
+[package]
+name = "zest-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent loop, model client, and tool layer for the Zest coding harness."
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+dirs.workspace = true
+dotenvy = "0.15"
+futures-util.workspace = true
+# OS entropy for the local gateway's API key. Already in the tree via rustls; a
+# direct dependency so the intent is visible rather than incidental.
+getrandom = "0.4"
+globset.workspace = true
+ignore.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+base64 = "0.22"
+similar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit = "0.25"
+tempfile = "3"
+
+# keyring ships NO credential store unless a backend feature is enabled — it
+# silently falls back to an in-memory mock, where `set` succeeds and a later
+# `get` from a fresh Entry finds nothing. That shipped: API keys appeared to
+# save and every provider then reported itself unconfigured.
+#
+# Per-target rather than one feature list, so Windows does not pull dbus.
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }

@@ -26,7 +26,9 @@ use std::sync::Arc;
 use super::anthropic::AnthropicProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::codex_app_server::CodexAppServerProvider;
+use super::codex_oauth::CodexOAuthProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
+use crate::codex_oauth::SESSION_ENV;
 use super::{catalogue, EffortPolicy, ModelSpec, Provider, ProviderDescriptor, CODEX_KNOWN_MODELS};
 use crate::anthropic::types::DEFAULT_MODEL;
 use crate::config::{ProviderConfig, DEFAULT_CLAUDE_CODE_MODEL};
@@ -127,6 +129,25 @@ pub fn resolve(request: CredentialRequest<'_>) -> std::result::Result<Option<Str
             .and_then(|name| std::env::var(name).ok())
             .filter(|value| !value.trim().is_empty())
     }))
+}
+
+/// Credential request with the provider id filled in when the entry omitted it.
+///
+/// ChatGPT Codex stores its session under the provider id by default. The
+/// driver cannot see that id from the config struct alone.
+pub fn credentials_for<'a>(id: &'a str, config: &'a ProviderConfig) -> CredentialRequest<'a> {
+    let driver = driver_for(config);
+    let mut request = driver.credentials(config);
+    if driver.kind().0 == "codex_oauth" {
+        let blank = request
+            .account
+            .map(|account| account.trim().is_empty())
+            .unwrap_or(true);
+        if blank {
+            request.account = Some(id);
+        }
+    }
+    request
 }
 
 /// Resolve and enforce in one step, so no caller can do the first without the second.
@@ -370,6 +391,83 @@ impl ProviderDriver for CodexCliDriver {
     }
 }
 
+// -------------------------------------------------------------- codex_oauth
+
+struct CodexOAuthDriver;
+
+impl CodexOAuthDriver {
+    fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
+        let ProviderConfig::CodexOAuth {
+            model,
+            models,
+            efforts,
+            ..
+        } = config
+        else {
+            unreachable!("driver_for routes only CodexOAuth entries here");
+        };
+        let catalogue = catalogue(
+            model,
+            models,
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(efforts),
+        );
+        (model.clone(), catalogue)
+    }
+}
+
+impl ProviderDriver for CodexOAuthDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind("codex_oauth")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "ChatGPT Codex"
+    }
+
+    fn credentials<'a>(&self, config: &'a ProviderConfig) -> CredentialRequest<'a> {
+        let ProviderConfig::CodexOAuth { credential, .. } = config else {
+            unreachable!("driver_for routes only CodexOAuth entries here");
+        };
+        CredentialRequest {
+            account: credential.as_deref(),
+            env: Some(SESSION_ENV),
+            policy: CredentialPolicy::RequiredToLoad,
+        }
+    }
+
+    fn descriptor(&self, id: &str, config: &ProviderConfig) -> ProviderDescriptor {
+        let (default_model, models) = Self::catalogue(config);
+        ProviderDescriptor {
+            id: id.to_string(),
+            default_model,
+            models,
+        }
+    }
+
+    fn create(
+        &self,
+        ctx: DriverContext<'_>,
+        config: &ProviderConfig,
+    ) -> std::result::Result<Arc<dyn Provider>, String> {
+        let ProviderConfig::CodexOAuth {
+            model,
+            credential,
+            ..
+        } = config
+        else {
+            unreachable!("driver_for routes only CodexOAuth entries here");
+        };
+        let (_, models) = Self::catalogue(config);
+        let account = credential
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(ctx.id);
+        let provider = CodexOAuthProvider::from_key(ctx.id, account, ctx.key, model.clone(), models)?;
+        Ok(Arc::new(provider))
+    }
+}
+
 // -------------------------------------------------------- openai_compatible
 
 struct OpenAiCompatibleDriver;
@@ -461,6 +559,7 @@ pub const BUILT_IN_DRIVERS: &[&(dyn ProviderDriver + Sync)] = &[
     &AnthropicDriver,
     &ClaudeCodeDriver,
     &CodexCliDriver,
+    &CodexOAuthDriver,
     &OpenAiCompatibleDriver,
 ];
 
@@ -473,6 +572,7 @@ pub fn driver_for(config: &ProviderConfig) -> &'static (dyn ProviderDriver + Syn
         ProviderConfig::Anthropic { .. } => &AnthropicDriver,
         ProviderConfig::ClaudeCode { .. } => &ClaudeCodeDriver,
         ProviderConfig::CodexCli { .. } => &CodexCliDriver,
+        ProviderConfig::CodexOAuth { .. } => &CodexOAuthDriver,
         ProviderConfig::OpenaiCompatible { .. } => &OpenAiCompatibleDriver,
     }
 }
@@ -496,6 +596,7 @@ mod tests {
             ("anthropic", "[providers.p]\nkind = \"anthropic\"\n"),
             ("claude_code", "[providers.p]\nkind = \"claude_code\"\n"),
             ("codex_cli", "[providers.p]\nkind = \"codex_cli\"\n"),
+            ("codex_oauth", "[providers.p]\nkind = \"codex_oauth\"\n"),
             (
                 "openai_compatible",
                 "[providers.p]\nkind = \"openai_compatible\"\nbase_url = \"http://x/v1\"\nmodel = \"m\"\n",
@@ -575,6 +676,25 @@ mod tests {
             assert!(request.account.is_none() && request.env.is_none());
             assert_eq!(resolve_required(request), Ok(None));
         }
+    }
+
+    #[test]
+    fn codex_oauth_is_required_to_load_and_does_not_read_vendor_files() {
+        let config = entry("[providers.p]\nkind = \"codex_oauth\"\n");
+        let request = credentials_for("p", &config);
+        assert_eq!(request.policy, CredentialPolicy::RequiredToLoad);
+        assert_eq!(request.account, Some("p"));
+        assert_eq!(request.env, Some(SESSION_ENV));
+        std::env::remove_var(SESSION_ENV);
+        let error = resolve_required(request).expect_err("a missing ChatGPT session must fail");
+        assert!(
+            error.contains("p") || error.contains(SESSION_ENV),
+            "{error}"
+        );
+        assert!(
+            !error.contains("auth.json"),
+            "must not mention the vendor CLI store: {error}"
+        );
     }
 
     /// A blank account name is not a credential-manager lookup.

@@ -100,7 +100,7 @@ fn build(
     root: &Path,
 ) -> std::result::Result<Arc<dyn Provider>, String> {
     let driver = driver::driver_for(entry);
-    let key = driver::resolve_required(driver.credentials(entry))?;
+    let key = driver::resolve_required(driver::credentials_for(id, entry))?;
     driver.create(driver::DriverContext { id, root, key }, entry)
 }
 

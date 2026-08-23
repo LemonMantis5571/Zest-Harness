@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckIcon, FolderOpenIcon, PlusIcon } from "lucide-react";
 
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ApiProviderForm } from "@/components/ApiProviderForm";
 import { AuthShell } from "@/components/AuthShell";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
+import { isChatgptCodexRow } from "@/lib/chatgptCodex";
 import { rawInvokeError } from "@/lib/invokeErrors";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import { getBackend } from "@/lib/backend";
@@ -82,6 +84,23 @@ export function ProviderPicker({
   const [addingApiProvider, setAddingApiProvider] = useState(false);
   const [configuringParentId, setConfiguringParentId] = useState<string | null>(null);
   const [configureParentError, setConfigureParentError] = useState<string | null>(null);
+  const [cliAvailable, setCliAvailable] = useState<boolean | null>(null);
+  const [confirmChatgpt, setConfirmChatgpt] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getBackend()
+      .codexCliAvailable()
+      .then((available) => {
+        if (!cancelled) setCliAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setCliAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const selected = providers.find((p) => p.id === selectedId) ?? null;
   const selectedNeedsConnect =
     selected != null && recentVerifyFailed(selected.id);
@@ -270,7 +289,10 @@ export function ProviderPicker({
         </div>
       ) : null}
 
-      {selected && !selected.configured && PARENT_CLI_DEFAULTS[selected.id] ? (
+      {selected &&
+      !selected.configured &&
+      PARENT_CLI_DEFAULTS[selected.id] &&
+      (selected.id !== "codex" || cliAvailable === true) ? (
         <div className="mt-4 rounded-lg border border-border/70 bg-card/40 p-3">
           <div className="text-xs font-medium">{PARENT_CLI_DEFAULTS[selected.id].title}</div>
           <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
@@ -384,7 +406,13 @@ export function ProviderPicker({
             type="button"
             variant="outline"
             disabled={continuing || connecting}
-            onClick={onConnect}
+            onClick={() => {
+              if (selected && isChatgptCodexRow(selected)) {
+                setConfirmChatgpt(true);
+                return;
+              }
+              onConnect();
+            }}
           >
             {connecting
               ? "Connecting…"
@@ -401,6 +429,18 @@ export function ProviderPicker({
           {continuing ? "Starting…" : "Continue"}
         </Button>
       </footer>
+      <ConfirmDialog
+        open={confirmChatgpt}
+        title="Use ChatGPT for Codex"
+        description="This signs you into ChatGPT and uses your Codex subscription from Zest. OpenAI does not publish this path for third-party apps, so it can stop working or affect your ChatGPT account. Continue only if you accept that."
+        confirmLabel="Continue"
+        cancelLabel="Cancel"
+        onCancel={() => setConfirmChatgpt(false)}
+        onConfirm={() => {
+          setConfirmChatgpt(false);
+          onConnect();
+        }}
+      />
     </AuthShell>
   );
 }

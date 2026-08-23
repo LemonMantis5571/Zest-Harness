@@ -12,6 +12,7 @@ pub mod bounded;
 pub mod cancel;
 pub mod chat_persistence;
 pub mod commands;
+pub mod codex_oauth;
 pub mod config;
 pub mod config_edit;
 pub mod config_migrate;
@@ -48,9 +49,10 @@ pub use anthropic::types::{
     DEFAULT_MODEL,
 };
 pub use auth::{
-    can_start_login, detect_all, detect_claude_code, detect_codex_cli, resolve_claude_code_login,
-    resolve_codex_cli_login, resolve_login, start_claude_code_login, start_codex_cli_login,
-    start_login, AuthStatus, LoginProcess, LoginSpawn, ProviderSlot,
+    can_start_login, codex_cli_on_path, detect_all, detect_claude_code, detect_codex_cli,
+    detect_codex_oauth, resolve_claude_code_login, resolve_codex_cli_login, resolve_login,
+    start_claude_code_login, start_codex_cli_login, start_codex_oauth_login, start_login,
+    AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -101,9 +103,10 @@ pub use prompt::{
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::claude_code::ClaudeCodeProvider;
 pub use provider::codex_app_server::CodexAppServerProvider;
+pub use provider::codex_oauth::CodexOAuthProvider;
 pub use provider::driver::{
-    driver_for, CredentialPolicy, CredentialRequest, DriverContext, DriverKind, ProviderDriver,
-    BUILT_IN_DRIVERS,
+    credentials_for, driver_for, CredentialPolicy, CredentialRequest, DriverContext, DriverKind,
+    ProviderDriver, BUILT_IN_DRIVERS,
 };
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{

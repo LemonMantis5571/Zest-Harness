@@ -1,9 +1,9 @@
-//! Detecting which providers are already signed in.
+//! Detecting which providers are already signed in, and starting a login.
 //!
-//! Zest does **not** implement OAuth. Each vendor CLI (or local gateway) already
-//! performs its own login and writes credentials to disk; Zest reads whether
-//! that happened and nothing more. Implementing three vendor OAuth flows would
-//! be the most fragile code in the project, and it would break without notice.
+//! Vendor CLIs still own their own sessions. Codex is the exception: when the
+//! `codex` binary is missing, Zest can run a ChatGPT sign-in itself and store
+//! its own session in the credential manager. That path still never reads
+//! tokens out of `~/.codex/auth.json`.
 //!
 //! Two rules this module holds to:
 //!
@@ -24,7 +24,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
+pub const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
 
 /// What a provider's sign-in looks like from the outside.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -84,19 +84,61 @@ pub struct LoginSpawn {
 /// A login helper that Zest can observe after it has been launched.
 pub struct LoginProcess {
     pub spawn: LoginSpawn,
-    child: Child,
+    child: Option<Child>,
+    oauth: Option<crate::codex_oauth::CodexOAuthLogin>,
 }
 
 impl LoginProcess {
+    /// Account used for an in-process ChatGPT sign-in. `None` for CLI logins.
+    pub fn oauth_account(&self) -> Option<&str> {
+        self.oauth.as_ref().map(|login| login.account())
+    }
+
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait()
+        if self.oauth.is_some() {
+            return Ok(None);
+        }
+        self.child
+            .as_mut()
+            .expect("login process has a child or an in-process sign-in")
+            .try_wait()
+    }
+
+    pub fn poll_status(&mut self) -> std::io::Result<LoginPoll> {
+        if let Some(oauth) = &self.oauth {
+            return Ok(match oauth.poll() {
+                crate::codex_oauth::CodexOAuthPoll::Running => LoginPoll::Running,
+                crate::codex_oauth::CodexOAuthPoll::Succeeded => LoginPoll::Succeeded,
+                crate::codex_oauth::CodexOAuthPoll::Failed(detail) => LoginPoll::Failed(detail),
+            });
+        }
+        Ok(match self.try_wait()? {
+            None => LoginPoll::Running,
+            Some(_) => LoginPoll::Failed("The sign-in did not finish. Try again.".into()),
+        })
     }
 
     pub fn kill(&mut self) -> std::io::Result<()> {
-        self.child.kill()?;
-        let _ = self.child.wait();
+        if let Some(oauth) = &self.oauth {
+            oauth.cancel();
+            return Ok(());
+        }
+        let child = self
+            .child
+            .as_mut()
+            .expect("login process has a child or an in-process sign-in");
+        child.kill()?;
+        let _ = child.wait();
         Ok(())
     }
+}
+
+/// Outcome of an in-flight Connect, including ChatGPT sign-in success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginPoll {
+    Running,
+    Succeeded,
+    Failed(String),
 }
 
 /// Every provider Zest knows how to look for, in display order.
@@ -129,13 +171,64 @@ pub fn detect_all() -> Vec<ProviderSlot> {
     ]
 }
 
-/// Codex readiness for Zest's default path: the Codex CLI's own `auth.json`.
-///
-/// Kept as a distinct name from [`detect_codex_cli`] because the picker asks
-/// about the *account* while the provider asks about the runtime. They report
-/// the same thing now that the only Codex path is the CLI.
+/// Codex readiness for the picker row: a Zest-held ChatGPT session **or**
+/// the Codex CLI's own `auth.json`. Detection never extracts tokens.
 pub fn detect_codex() -> AuthStatus {
-    detect_codex_cli()
+    match detect_codex_oauth("codex") {
+        AuthStatus::Ready { account } => return AuthStatus::Ready { account },
+        AuthStatus::Unknown { reason } => return AuthStatus::Unknown { reason },
+        _ => {}
+    }
+    let cli = detect_codex_cli();
+    if matches!(cli, AuthStatus::Ready { .. } | AuthStatus::Unknown { .. }) {
+        return cli;
+    }
+    if codex_cli_on_path() {
+        cli
+    } else {
+        AuthStatus::NotLoggedIn {
+            fix: "Connect with ChatGPT".into(),
+        }
+    }
+}
+
+/// Whether the credential manager (or `ZEST_CODEX_OAUTH_SESSION`) holds a
+/// Zest ChatGPT session. Presence only — the JSON is not returned.
+pub fn detect_codex_oauth(account: &str) -> AuthStatus {
+    match crate::codex_oauth::session_present(account) {
+        Ok(true) => AuthStatus::Ready { account: None },
+        Ok(false) => AuthStatus::NotLoggedIn {
+            fix: "Connect with ChatGPT".into(),
+        },
+        Err(_) => AuthStatus::Unknown {
+            reason: "Zest could not verify this sign-in.".into(),
+        },
+    }
+}
+
+/// `codex` / `codex.exe` / `codex.cmd` on PATH. Does not execute the binary.
+pub fn codex_cli_on_path() -> bool {
+    command_on_path("codex")
+}
+
+fn command_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path) {
+        if dir.join(name).is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            for ext in ["exe", "cmd", "bat"] {
+                if dir.join(format!("{name}.{ext}")).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Readiness for the native Codex CLI: whether its own `auth.json` holds a
@@ -314,7 +407,11 @@ pub fn start_login(provider_id: &str) -> std::result::Result<LoginProcess, Strin
         )
     })?;
 
-    Ok(LoginProcess { spawn, child })
+    Ok(LoginProcess {
+        spawn,
+        child: Some(child),
+        oauth: None,
+    })
 }
 
 /// Start the direct Claude Code subscription login without routing through a
@@ -323,7 +420,11 @@ pub fn start_claude_code_login() -> std::result::Result<LoginProcess, String> {
     let spawn = resolve_claude_code_login();
     let child = spawn_silent(&spawn.program, &spawn.args)
         .map_err(|e| format!("could not start Claude Code login: {e}"))?;
-    Ok(LoginProcess { spawn, child })
+    Ok(LoginProcess {
+        spawn,
+        child: Some(child),
+        oauth: None,
+    })
 }
 
 /// Start the direct Codex CLI subscription login without using a gateway store.
@@ -336,7 +437,25 @@ pub fn start_codex_cli_login() -> std::result::Result<LoginProcess, String> {
     let spawn = resolve_codex_cli_login();
     let child = spawn_silent(&spawn.program, &spawn.args)
         .map_err(|e| format!("could not start Codex CLI login: {e}"))?;
-    Ok(LoginProcess { spawn, child })
+    Ok(LoginProcess {
+        spawn,
+        child: Some(child),
+        oauth: None,
+    })
+}
+
+/// Start an in-process ChatGPT sign-in and store the session under `account`.
+pub fn start_codex_oauth_login(account: &str) -> std::result::Result<LoginProcess, String> {
+    if !codex_callback_port_available() {
+        return Err("Another ChatGPT sign-in is already open. Close it and try again.".into());
+    }
+    let spawn = resolve_codex_cli_login();
+    let oauth = crate::codex_oauth::start_login(account)?;
+    Ok(LoginProcess {
+        spawn,
+        child: None,
+        oauth: Some(oauth),
+    })
 }
 
 fn codex_callback_port_available() -> bool {
@@ -439,5 +558,33 @@ mod tests {
     fn start_login_rejects_providers_without_a_cli() {
         assert!(start_login("byok").is_err());
         assert!(start_login("antigravity").is_err());
+    }
+
+    #[test]
+    fn can_start_login_for_codex_without_the_cli() {
+        assert!(can_start_login("codex"));
+    }
+
+    #[test]
+    fn codex_cli_on_path_sees_a_temp_directory_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let dummy = if cfg!(windows) {
+            dir.path().join("codex.exe")
+        } else {
+            dir.path().join("codex")
+        };
+        std::fs::write(&dummy, []).unwrap();
+        let original = std::env::var_os("PATH");
+        let mut paths = vec![dir.path().to_path_buf()];
+        if let Some(ref orig) = original {
+            paths.extend(std::env::split_paths(orig));
+        }
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        let found = command_on_path("codex");
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(found, "PATH probe must see a dummy Codex CLI entry");
     }
 }

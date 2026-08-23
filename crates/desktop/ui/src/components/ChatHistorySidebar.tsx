@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
-  CircleAlertIcon,
   Clock3Icon,
   ChevronRightIcon,
   ChevronsLeftIcon,
@@ -12,15 +11,12 @@ import {
   GitBranchIcon,
   GitForkIcon,
   GitPullRequestIcon,
-  LoaderCircleIcon,
   MoreHorizontalIcon,
   PinIcon,
   PlusIcon,
-  ShieldAlertIcon,
   SearchIcon,
   SlidersHorizontalIcon,
   SquarePenIcon,
-  TerminalIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -173,17 +169,13 @@ function navItemClass(active = false) {
   );
 }
 
-function readableAction(value: string) {
-  return value.replaceAll("_", " ");
-}
-
 function activityStateLabel(activity: ThreadActivity) {
   return activity.state === "awaiting_approval" ? "Needs approval" : "Working";
 }
 
 function activityDescription(activity: ThreadActivity, now: number) {
   const parts = [activityStateLabel(activity)];
-  if (activity.tool) parts.push(`running ${readableAction(activity.tool)}`);
+  if (activity.tool) parts.push(`running ${activity.tool.replaceAll("_", " ")}`);
   const elapsed = elapsedLabel(activity.startedAt, now);
   if (elapsed) parts.push(`for ${elapsed}`);
   return parts.join(", ");
@@ -199,73 +191,6 @@ type EditingThread = {
 type WorkspaceAction = {
   project: ProjectChats;
 };
-
-function ThreadActivityCard({
-  activity,
-  now,
-}: {
-  activity: ThreadActivity;
-  now: number;
-}) {
-  const waiting = activity.state === "awaiting_approval";
-  const elapsed = elapsedLabel(activity.startedAt, now);
-
-  return (
-    <div
-      aria-hidden="true"
-      className={cn(
-        "pointer-events-none absolute inset-x-1 top-[calc(100%-2px)] z-30 rounded-lg border bg-popover p-2 text-popover-foreground opacity-0 shadow-lg transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100",
-        waiting ? "border-amber-400/35" : "border-primary/35"
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span
-          className={cn(
-            "flex min-w-0 items-center gap-1.5 text-[11px] font-medium",
-            waiting ? "text-amber-200" : "text-primary"
-          )}
-        >
-          {waiting ? (
-            <ShieldAlertIcon className="size-3.5 shrink-0" />
-          ) : (
-            <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />
-          )}
-          <span className="truncate">{activityStateLabel(activity)}</span>
-        </span>
-        {elapsed ? (
-          <span className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground">
-            <Clock3Icon className="size-3" />
-            {elapsed}
-          </span>
-        ) : null}
-      </div>
-
-      {activity.tool ? (
-        <div className="mt-1.5 flex min-w-0 items-start gap-1.5">
-          <TerminalIcon className="mt-0.5 size-3 shrink-0 text-muted-foreground" />
-          <div className="min-w-0">
-            <div className="text-[10px] text-muted-foreground">Running tool</div>
-            <code className="block truncate text-[11px] text-foreground">
-              {readableAction(activity.tool)}
-            </code>
-          </div>
-        </div>
-      ) : null}
-
-      {activity.lastAction ? (
-        <div className="mt-1.5 flex min-w-0 items-start gap-1.5">
-          <CircleAlertIcon className="mt-0.5 size-3 shrink-0 text-muted-foreground" />
-          <div className="min-w-0">
-            <div className="text-[10px] text-muted-foreground">Last action</div>
-            <div className="truncate text-[11px] text-foreground/85">
-              {readableAction(activity.lastAction)}
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 export function ChatHistorySidebar({
   open,
@@ -498,7 +423,8 @@ export function ChatHistorySidebar({
   }
 
   function beginRename(project: ProjectChats, thread: ThreadSummary, key: string) {
-    if (sending || deleting || renameBusy || pinning === thread.id) return;
+    const rowIsLiveTurn = sending && thread.id === activeThreadId;
+    if (rowIsLiveTurn || deleting || renameBusy || pinning === thread.id) return;
     renameCancelledRef.current = false;
     setRenameError(null);
     setEditingThread({
@@ -687,16 +613,29 @@ export function ChatHistorySidebar({
               />
             </span>
           ) : null}
-          {age ? (
+          {activity && activity.state !== "idle" ? (
+            <span
+              className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground"
+              aria-hidden="true"
+            >
+              {activity.state === "awaiting_approval" ? (
+                <span className="size-1.5 rounded-full bg-amber-400" />
+              ) : (
+                <span className="flex items-center gap-0.5">
+                  <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.32s]" />
+                  <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.16s]" />
+                  <span className="size-1 rounded-full bg-primary animate-bounce" />
+                </span>
+              )}
+              {elapsedLabel(activity.startedAt, now) ?? age}
+            </span>
+          ) : age ? (
             <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
               {age}
             </span>
           ) : null}
         </button>
         )}
-        {activity && activity.state !== "idle" ? (
-          <ThreadActivityCard activity={activity} now={now} />
-        ) : null}
         {/* One flex row rather than three fixed offsets. Fork only exists on
             the active chat, and pinning it to its own `right-7` slot meant
             every other row rendered that slot empty — a hole between the pin
@@ -710,7 +649,7 @@ export function ChatHistorySidebar({
             title={thread.pinned ? "Unpin chat" : "Pin chat"}
             aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
             aria-pressed={thread.pinned}
-            disabled={sending || deleting || pinning === thread.id}
+            disabled={deleting || pinning === thread.id || (sending && active)}
             className={cn(
               "text-muted-foreground transition-opacity",
               "hover:bg-muted hover:text-foreground",
@@ -751,7 +690,7 @@ export function ChatHistorySidebar({
             variant="ghost"
             size="icon-xs"
             title={`Delete “${title}”`}
-            disabled={sending || deleting}
+            disabled={deleting}
             className={cn(
               "text-muted-foreground transition-opacity",
               "hover:bg-destructive/15 hover:text-destructive",

@@ -173,8 +173,9 @@ fn default_bash_timeout_ms() -> u64 {
 ///
 /// `kind` discriminates, and it is the only thing that does: transport,
 /// credentials, and capabilities are all decided from this variant and never
-/// inferred from a provider id. Two of the four kinds spawn a vendor runtime
-/// that owns its own agent loop; see `Provider::owns_agent_loop`.
+/// inferred from a provider id. Two of the five kinds spawn a vendor runtime
+/// that owns its own agent loop; `codex_oauth` uses Zest's loop. See
+/// `Provider::owns_agent_loop`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderConfig {
@@ -238,6 +239,21 @@ pub enum ProviderConfig {
         allow_mcp: bool,
         #[serde(default = "default_external_timeout_secs")]
         timeout_secs: u64,
+    },
+    /// ChatGPT subscription via Zest-owned OAuth. Available even when the
+    /// Codex CLI is installed; the two kinds use different ids. Tokens live
+    /// in the credential manager, not here.
+    #[serde(rename = "codex_oauth")]
+    CodexOAuth {
+        #[serde(default = "default_codex_model")]
+        model: String,
+        #[serde(default)]
+        models: Vec<String>,
+        #[serde(default)]
+        efforts: Vec<String>,
+        /// OS credential-manager account. Defaults to the provider id.
+        #[serde(default)]
+        credential: Option<String>,
     },
     OpenaiCompatible {
         /// API root, for example `https://api.openai.com/v1` or
@@ -384,8 +400,22 @@ impl ProviderConfig {
     pub fn key_env(&self) -> Option<&str> {
         match self {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
-            ProviderConfig::ClaudeCode { .. } | ProviderConfig::CodexCli { .. } => None,
+            ProviderConfig::ClaudeCode { .. }
+            | ProviderConfig::CodexCli { .. }
+            | ProviderConfig::CodexOAuth { .. } => None,
             ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
+        }
+    }
+
+    /// The serde `kind` tag for this entry. Capability comes from this, never
+    /// from the provider id.
+    pub fn kind_tag(&self) -> &'static str {
+        match self {
+            ProviderConfig::Anthropic { .. } => "anthropic",
+            ProviderConfig::ClaudeCode { .. } => "claude_code",
+            ProviderConfig::CodexCli { .. } => "codex_cli",
+            ProviderConfig::CodexOAuth { .. } => "codex_oauth",
+            ProviderConfig::OpenaiCompatible { .. } => "openai_compatible",
         }
     }
 }
@@ -880,6 +910,9 @@ kind = "anthropic"
 kind = "openai_compatible"
 base_url = "http://127.0.0.1:11434/v1"
 model = "local"
+
+[providers.chatgpt]
+kind = "codex_oauth"
 "#,
         )
         .expect("valid provider-kind config");
@@ -900,6 +933,17 @@ model = "local"
             config.providers["local"],
             ProviderConfig::OpenaiCompatible { .. }
         ));
+        match &config.providers["chatgpt"] {
+            ProviderConfig::CodexOAuth {
+                model,
+                credential,
+                ..
+            } => {
+                assert_eq!(model, DEFAULT_CODEX_MODEL);
+                assert!(credential.is_none());
+            }
+            other => panic!("expected ChatGPT Codex, got {other:?}"),
+        }
     }
 
     #[test]

@@ -652,6 +652,12 @@ export function createFixtureBackend(): DesktopBackend {
     async configureCodexCliProvider() {
       notAvailable("configureCodexCliProvider");
     },
+    async configureCodexOAuthProvider() {
+      notAvailable("configureCodexOAuthProvider");
+    },
+    async codexCliAvailable() {
+      return true;
+    },
     async openProjectConfig() {
       notAvailable("openProjectConfig");
     },

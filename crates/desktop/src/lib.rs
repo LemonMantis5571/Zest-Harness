@@ -1,6 +1,7 @@
 //! Desktop front-end: provider picker + chat session.
 //!
-//! Codex Connect is a native shell over vendor OAuth (no token exchange in Zest).
+//! Codex Connect shells the vendor CLI login, or a ChatGPT sign-in that stays
+//! available even when that CLI is installed.
 //! Chat drives the same `Agent` loop as the CLI, streaming events into the UI.
 //! Thread projection is persisted under `<workspace>/.zest/threads/`.
 
@@ -29,13 +30,16 @@ use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
-    descriptor_from_config, detect_all, detect_claude_code, detect_codex_cli, display_path,
-    driver_for, env_context, load_custom_system, load_project_docs, new_id, probe,
-    save_custom_system, start_claude_code_login as core_start_claude_code_login,
-    start_codex_cli_login as core_start_codex_cli_login, start_login as core_start_login,
+    can_start_login, codex_cli_on_path, compose_system_with_docs, derive_profile_stats,
+    descriptor_for_picker_id, descriptor_from_config, detect_all, detect_claude_code,
+    detect_codex_cli, detect_codex_oauth, display_path, driver_for, env_context,
+    load_custom_system, load_project_docs, new_id, probe, save_custom_system,
+    start_claude_code_login as core_start_claude_code_login,
+    start_codex_cli_login as core_start_codex_cli_login,
+    start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
     AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, CredentialPolicy,
+    DEFAULT_CODEX_MODEL, LoginPoll,
     ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginProcess, McpCatalog,
     PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
     ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
@@ -59,7 +63,7 @@ pub(crate) use delegation::{
     DelegationTargetOption, UpdateDelegationJobRequest,
 };
 use plugins::{NowPlayingView, PluginView};
-use session::{Session, SessionController, SessionError};
+use session::{ActiveTurn, Session, SessionController, SessionError};
 use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 
 /// Providers shown in the desktop launch picker.
@@ -72,8 +76,57 @@ const PICKER_IDS: &[&str] = &["codex", "claude"];
 /// first-class parent provider; worker authentication remains CLI-owned.
 const DESKTOP_CONNECT_IDS: &[&str] = &["codex", "claude"];
 
+/// Sibling id when `[providers.codex]` is already a different kind. ChatGPT
+/// Codex stays a user choice even if the Codex CLI is installed.
+const CHATGPT_CODEX_ID: &str = "codex-chatgpt";
+
 fn desktop_can_start_login(provider_id: &str) -> bool {
-    DESKTOP_CONNECT_IDS.contains(&provider_id) && can_start_login(provider_id)
+    match provider_id {
+        "codex" | "claude" => {
+            DESKTOP_CONNECT_IDS.contains(&provider_id) && can_start_login(provider_id)
+        }
+        "codex-chatgpt" => true,
+        _ => false,
+    }
+}
+
+fn is_codex_oauth(config: &ProviderConfig) -> bool {
+    matches!(config, ProviderConfig::CodexOAuth { .. })
+}
+
+fn has_codex_oauth(config: &Config) -> bool {
+    config.providers.values().any(is_codex_oauth)
+}
+
+/// When ChatGPT Codex is not configured yet, offer it under a sibling id so
+/// the CLI parent can keep `codex`. The existing picker row is enough when
+/// that id is free and the CLI is not claiming first-run.
+fn chatgpt_codex_offer_id(config: &Config, cli_on_path: bool) -> Option<&'static str> {
+    if has_codex_oauth(config) {
+        return None;
+    }
+    if config.providers.contains_key("codex") || cli_on_path {
+        return Some(CHATGPT_CODEX_ID);
+    }
+    None
+}
+
+fn desktop_can_connect(provider_id: &str, config: &Config) -> bool {
+    desktop_can_start_login(provider_id)
+        || matches!(
+            config.providers.get(provider_id),
+            Some(ProviderConfig::CodexOAuth { .. })
+        )
+}
+
+fn provider_row_label(id: &str, config: &Config) -> String {
+    match config.providers.get(id) {
+        Some(ProviderConfig::CodexOAuth { .. }) | Some(ProviderConfig::CodexCli { .. }) => {
+            "Codex".into()
+        }
+        _ if id == CHATGPT_CODEX_ID => "Codex".into(),
+        _ => title_case_id(id),
+    }
 }
 
 /// Turn-scoped pending approval waiters (not persisted).
@@ -619,6 +672,9 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     let auth_status = match configured_provider {
         Some(ProviderConfig::ClaudeCode { .. }) => detect_claude_code(),
         Some(ProviderConfig::CodexCli { .. }) => detect_codex_cli(),
+        Some(ProviderConfig::CodexOAuth { credential, .. }) => {
+            detect_codex_oauth(credential.as_deref().filter(|value| !value.is_empty()).unwrap_or(slot.id))
+        }
         _ => slot.status.clone(),
     };
     let (status_kind, status_label, detail) = match &auth_status {
@@ -688,7 +744,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         // Both halves are required: a signed-in provider with no config cannot
         // serve a turn, and a configured provider with no sign-in cannot either.
         selectable: auth_status.selectable() && configured,
-        can_connect: desktop_can_start_login(slot.id),
+        can_connect: desktop_can_connect(slot.id, config),
         configured,
         default_model: descriptor.default_model,
         models: descriptor
@@ -716,44 +772,55 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         .get(id)
         .map(|entry| descriptor_from_config(id, entry))
         .unwrap_or_else(|| descriptor_for_picker_id(id));
-    let (status_kind, status_label, detail) = match ProviderRegistry::from_config(config)
-        .0
-        .get(id)
-        .map(|provider| provider.auth_status())
-    {
-        Some(AuthStatus::Ready { .. }) => ("ready", "Ready", format!("{method} provider")),
-        Some(AuthStatus::Unknown { reason }) => ("unknown", "Unverified", reason),
-        Some(AuthStatus::NotLoggedIn { fix }) => ("not_logged_in", "Not configured", fix),
-        Some(AuthStatus::Unconfigured) | None => (
-            "unconfigured",
-            "Not configured",
-            if method == "API key" {
-                "Add an API key in Settings".to_string()
-            } else {
-                format!("Configure {method} to continue")
-            },
+    let oauth_account = match config.providers.get(id) {
+        Some(ProviderConfig::CodexOAuth { credential, .. }) => Some(
+            credential
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id),
         ),
+        _ => None,
+    };
+    let (status_kind, status_label, detail) = if let Some(account) = oauth_account {
+        match detect_codex_oauth(account) {
+            AuthStatus::Ready { .. } => ("ready", "Signed in", method.clone()),
+            AuthStatus::Unknown { reason } => ("unknown", "Unverified", reason),
+            AuthStatus::NotLoggedIn { fix } => ("not_logged_in", "Not signed in", fix),
+            AuthStatus::Unconfigured => (
+                "unconfigured",
+                "Not configured",
+                "Use your ChatGPT account".into(),
+            ),
+        }
+    } else {
+        match ProviderRegistry::from_config(config)
+            .0
+            .get(id)
+            .map(|provider| provider.auth_status())
+        {
+            Some(AuthStatus::Ready { .. }) => ("ready", "Ready", format!("{method} provider")),
+            Some(AuthStatus::Unknown { reason }) => ("unknown", "Unverified", reason),
+            Some(AuthStatus::NotLoggedIn { fix }) => ("not_logged_in", "Not configured", fix),
+            Some(AuthStatus::Unconfigured) | None => (
+                "unconfigured",
+                "Not configured",
+                if method == "API key" {
+                    "Add an API key in Settings".to_string()
+                } else {
+                    format!("Configure {method} to continue")
+                },
+            ),
+        }
     };
     ProviderView {
         id: id.to_string(),
-        label: id
-            .split(['-', '_'])
-            .filter(|part| !part.is_empty())
-            .map(|part| {
-                let mut chars = part.chars();
-                chars
-                    .next()
-                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        label: provider_row_label(id, config),
         method,
         status_kind: status_kind.into(),
         status_label: status_label.into(),
         detail,
         selectable: status_kind == "ready",
-        can_connect: false,
+        can_connect: desktop_can_connect(id, config),
         configured: true,
         default_model: descriptor.default_model,
         models: descriptor
@@ -777,6 +844,9 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
 /// the driver's to state, so a new kind cannot arrive here unlabelled.
 fn provider_method(config: &ProviderConfig) -> String {
     let driver = driver_for(config);
+    if driver.kind().0 == "codex_oauth" {
+        return "ChatGPT sign-in".to_string();
+    }
     let request = driver.credentials(config);
     match request.policy {
         CredentialPolicy::VendorOwned => format!("{} subscription", driver.display_name()),
@@ -1349,7 +1419,69 @@ fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
         .collect();
 
     append_configured_direct_provider_views(&mut rows, &config);
+    append_chatgpt_codex_offer(&mut rows, &config, codex_cli_on_path());
     rows
+}
+
+fn chatgpt_codex_offer_view() -> ProviderView {
+    let descriptor = descriptor_for_picker_id(CHATGPT_CODEX_ID);
+    let auth = detect_codex_oauth(CHATGPT_CODEX_ID);
+    let (status_kind, status_label, detail) = match auth {
+        AuthStatus::Ready { .. } => (
+            "not_logged_in",
+            "Not configured",
+            "Signed in. Finish setup to use ChatGPT Codex.",
+        ),
+        AuthStatus::Unknown { .. } => (
+            "unknown",
+            "Unverified",
+            "Zest could not verify this sign-in.",
+        ),
+        AuthStatus::NotLoggedIn { .. } | AuthStatus::Unconfigured => (
+            "unconfigured",
+            "Not configured",
+            "Use your ChatGPT account",
+        ),
+    };
+    ProviderView {
+        id: CHATGPT_CODEX_ID.into(),
+        label: "Codex".into(),
+        method: "ChatGPT sign-in".into(),
+        status_kind: status_kind.into(),
+        status_label: status_label.into(),
+        detail: detail.into(),
+        selectable: false,
+        can_connect: true,
+        configured: false,
+        default_model: descriptor.default_model,
+        models: descriptor
+            .models
+            .into_iter()
+            .map(|model| ModelCapability {
+                id: model.id,
+                efforts: model.efforts,
+                context_window: model.context_window,
+                supports_tools: model.supports_tools,
+                supports_vision: model.supports_vision,
+            })
+            .collect(),
+    }
+}
+
+fn append_chatgpt_codex_offer(rows: &mut Vec<ProviderView>, config: &Config, cli_on_path: bool) {
+    let Some(id) = chatgpt_codex_offer_id(config, cli_on_path) else {
+        return;
+    };
+    if rows.iter().any(|row| row.id == id) {
+        return;
+    }
+    let view = chatgpt_codex_offer_view();
+    let insert_at = rows
+        .iter()
+        .position(|row| row.id == "codex")
+        .map(|index| index + 1)
+        .unwrap_or(rows.len());
+    rows.insert(insert_at, view);
 }
 
 /// Add a row for every configured provider the picker did not already list.
@@ -2248,6 +2380,31 @@ fn configure_codex_cli_provider(
     Ok(())
 }
 
+#[tauri::command]
+fn configure_codex_oauth_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let _edit_guard = lock_config_edit(&state);
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_codex_oauth_provider(
+        &path,
+        &zest_core::config_edit::CodexOAuthProviderInput {
+            id: id.clone(),
+            model,
+            credential: id,
+        },
+    )?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn codex_cli_available() -> bool {
+    codex_cli_on_path()
+}
+
 /// Open the project-local configuration in the user's default editor.
 ///
 /// Provider ownership is deliberately configured in `zest.toml`; this keeps
@@ -2560,7 +2717,8 @@ async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
 
 #[tauri::command]
 fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, String> {
-    if !desktop_can_start_login(&id) {
+    let config = load_workspace_config(&state);
+    if !desktop_can_connect(&id, &config) {
         return Err(match id.as_str() {
             "claude" => {
                 "Claude Code sign-in is managed by the Claude Code CLI. Run `claude login`, then enable Claude Code as a parent provider.".into()
@@ -2577,26 +2735,36 @@ fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, S
         .lock()
         .map_err(|_| "login state lock poisoned".to_string())?;
     if let Some(process) = active.as_mut() {
-        if process
-            .try_wait()
+        match process
+            .poll_status()
             .map_err(|e| format!("could not inspect the existing sign-in: {e}"))?
-            .is_none()
         {
-            return Err("A sign-in is already in progress. Finish it or cancel it first.".into());
+            LoginPoll::Running => {
+                return Err(
+                    "A sign-in is already in progress. Finish it or cancel it first.".into(),
+                )
+            }
+            LoginPoll::Succeeded | LoginPoll::Failed(_) => *active = None,
         }
-        *active = None;
     }
 
-    let native_codex = matches!(
-        load_workspace_config(&state).providers.get(&id),
-        Some(ProviderConfig::CodexCli { .. })
-    );
     let process = if id == "claude" {
         core_start_claude_code_login()?
-    } else if native_codex {
-        core_start_codex_cli_login()?
     } else {
-        core_start_login(&id)?
+        match config.providers.get(&id) {
+            Some(ProviderConfig::CodexCli { .. }) => core_start_codex_cli_login()?,
+            Some(ProviderConfig::CodexOAuth { credential, .. }) => {
+                let account = credential
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(&id);
+                core_start_codex_oauth_login(account)?
+            }
+            None if id == CHATGPT_CODEX_ID => core_start_codex_oauth_login(CHATGPT_CODEX_ID)?,
+            None if id == "codex" && !codex_cli_on_path() => core_start_codex_oauth_login("codex")?,
+            _ if id == "codex" => core_start_codex_cli_login()?,
+            _ => core_start_login(&id)?,
+        }
     };
     let spawn = &process.spawn;
     let started = LoginStarted {
@@ -2620,22 +2788,62 @@ fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
         });
     };
 
-    let Some(_status) = process
-        .try_wait()
+    match process
+        .poll_status()
         .map_err(|e| format!("could not inspect the sign-in process: {e}"))?
-    else {
-        return Ok(LoginStatus {
+    {
+        LoginPoll::Running => Ok(LoginStatus {
             state: "running".into(),
             detail: None,
-        });
-    };
+        }),
+        LoginPoll::Succeeded => {
+            let account = process.oauth_account().map(str::to_string);
+            if let Some(account) = account {
+                if let Err(detail) = ensure_codex_oauth_configured(&state, &account) {
+                    *active = None;
+                    return Ok(LoginStatus {
+                        state: "exited".into(),
+                        detail: Some(detail),
+                    });
+                }
+            }
+            Ok(LoginStatus {
+                state: "running".into(),
+                detail: None,
+            })
+        }
+        LoginPoll::Failed(detail) => {
+            *active = None;
+            Ok(LoginStatus {
+                state: "exited".into(),
+                detail: Some(detail),
+            })
+        }
+    }
+}
 
-    let detail = "The sign-in did not finish. Try again.".to_string();
-    *active = None;
-    Ok(LoginStatus {
-        state: "exited".into(),
-        detail: Some(detail),
-    })
+fn ensure_codex_oauth_configured(state: &AppState, account: &str) -> Result<(), String> {
+    let config = load_workspace_config(state);
+    if has_codex_oauth(&config) {
+        return Ok(());
+    }
+    let id = if account == CHATGPT_CODEX_ID || config.providers.contains_key("codex") {
+        CHATGPT_CODEX_ID
+    } else {
+        "codex"
+    };
+    let _edit_guard = lock_config_edit(state);
+    let path = editable_config_path(state)?;
+    zest_core::config_edit::add_codex_oauth_provider(
+        &path,
+        &zest_core::config_edit::CodexOAuthProviderInput {
+            id: id.into(),
+            model: DEFAULT_CODEX_MODEL.into(),
+            credential: id.into(),
+        },
+    )?;
+    clear_workspace_config_cache(state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3077,6 +3285,22 @@ struct ResolvedThread {
     draft: bool,
 }
 
+const CODEX_KIND_MISMATCH: &str =
+    "This chat was started with a different Codex sign-in. Start a new chat to keep using the current one.";
+
+fn configured_provider_kind(config: &Config, provider_id: &str) -> Option<&'static str> {
+    config.providers.get(provider_id).map(ProviderConfig::kind_tag)
+}
+
+fn stamp_thread_kind(thread: &mut Thread, config: &Config, provider_id: &str) -> Result<(), String> {
+    if let Some(kind) = configured_provider_kind(config, provider_id) {
+        thread
+            .ensure_provider_kind(kind)
+            .map_err(|_| CODEX_KIND_MISMATCH.to_string())?;
+    }
+    Ok(())
+}
+
 fn resolve_thread(
     root: &std::path::Path,
     store: &ThreadStore,
@@ -3084,6 +3308,7 @@ fn resolve_thread(
     config: &Config,
     allow_unowned: bool,
 ) -> Result<ResolvedThread, String> {
+    let kind = configured_provider_kind(config, provider_id);
     let state = ProjectSessionState::load(root, provider_id);
     if let Some(id) = state.get(provider_id).thread_id {
         match store.load_for_provider(&id, provider_id) {
@@ -3091,11 +3316,18 @@ fn resolve_thread(
                 if loaded.thread.provider_id.is_none() && !allow_unowned {
                     return Err(thread_provider_unknown_error(config, &loaded.thread.id));
                 }
+                if let Some(kind) = kind {
+                    loaded
+                        .thread
+                        .assert_provider_kind(kind)
+                        .map_err(|_| CODEX_KIND_MISMATCH.to_string())?;
+                }
                 let mut thread = loaded.thread;
                 // Pin missing owner once; never rewrite a different owner.
                 thread
                     .ensure_provider(provider_id)
                     .map_err(|e| e.to_string())?;
+                stamp_thread_kind(&mut thread, config, provider_id)?;
                 return Ok(ResolvedThread {
                     thread,
                     warning: loaded.warning,
@@ -3103,9 +3335,12 @@ fn resolve_thread(
                     draft: false,
                 });
             }
+            Err(ThreadLoadError::ProviderKindMismatch { .. }) => {
+                return Err(CODEX_KIND_MISMATCH.into());
+            }
             Err(ThreadLoadError::Corrupt { .. }) => {
                 let thread = store
-                    .create_for_provider(provider_id)
+                    .create_for_provider_kind(provider_id, kind)
                     .map_err(|e| e.to_string())?;
                 return Ok(ResolvedThread {
                     thread,
@@ -3133,6 +3368,7 @@ fn resolve_thread(
                 // expects.
                 let mut draft = Thread::new().with_provider(provider_id);
                 draft.id = id.clone();
+                stamp_thread_kind(&mut draft, config, provider_id)?;
                 return Ok(ResolvedThread {
                     thread: draft,
                     warning: None,
@@ -3148,7 +3384,7 @@ fn resolve_thread(
         }
     }
     let thread = store
-        .create_for_provider(provider_id)
+        .create_for_provider_kind(provider_id, kind)
         .map_err(|e| e.to_string())?;
     Ok(ResolvedThread {
         thread,
@@ -3247,6 +3483,26 @@ fn session_meta_from(session: &Session, warning: Option<String>) -> SessionMeta 
             .collect(),
         warning,
         recovery: session.recovery.as_ref().map(TurnRecoveryView::from),
+    }
+}
+
+fn session_info_from_turn(turn: &ActiveTurn) -> SessionInfo {
+    SessionInfo {
+        session_id: turn.session_id.clone(),
+        provider: turn.provider_id.clone(),
+        label: turn.provider_label.clone(),
+        model: turn.model.clone(),
+        effort: turn.effort.clone(),
+        root: display_path(&turn.root),
+        is_free_chat: is_free_chat_root(&turn.root),
+        thread_id: turn.thread_id.clone(),
+        default_model: turn.model.clone(),
+        owns_agent_loop: false,
+        models: Vec::new(),
+        checkpoints: Vec::new(),
+        messages: Vec::new(),
+        warning: None,
+        recovery: None,
     }
 }
 
@@ -3462,7 +3718,9 @@ async fn start_session_inner(
         .map_err(map_session_err)?
         .is_some();
     let claiming_legacy_thread = thread.provider_id.is_none();
-    let (recovery_warning, recovery) = if live_turn {
+    // A never-saved draft has no row for the restart reconciler to close.
+    // Opening one after deleting a busy chat must not look like a crash.
+    let (recovery_warning, recovery) = if live_turn || thread_is_draft {
         (None, None)
     } else {
         match recover_chat_on_load(&root, &store, &thread.id, load_warning.is_some()) {
@@ -4466,6 +4724,103 @@ mod chat_recovery_tests {
     }
 }
 
+#[cfg(test)]
+mod delete_thread_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("zest-delete-thread-{name}-{}", new_id("test")));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn saved_thread(store: &ThreadStore, text: &str) -> Thread {
+        let mut thread = store.create_for_provider("stub").unwrap();
+        thread.apply_user(&new_id("user"), text);
+        store.save(&thread).unwrap();
+        thread
+    }
+
+    #[tokio::test]
+    async fn deleting_another_chat_is_allowed_while_the_active_turn_is_busy() {
+        let root = scratch("other");
+        let store = ThreadStore::open(&root).unwrap();
+        let other = saved_thread(&store, "other chat");
+        let active = saved_thread(&store, "active chat");
+
+        let sessions = SessionController::new();
+        let persist = Mutex::new(HashMap::new());
+        let cache = Mutex::new(ChatSummaryCache::default());
+        sessions
+            .set_session(session::test_session(active.id.clone(), root.clone()))
+            .unwrap();
+        let (_session, _turn) = sessions.begin_turn().unwrap();
+
+        let result = delete_thread_inner(
+            &sessions,
+            &persist,
+            &cache,
+            other.id.clone(),
+            Some(display_path(&root)),
+            None,
+        )
+        .await
+        .unwrap();
+        match result {
+            DeleteThreadResult::Ready(info) => assert_eq!(info.thread_id, active.id),
+            DeleteThreadResult::OpenDraft { .. } => {
+                panic!("deleting a different chat must keep the busy route")
+            }
+        }
+        assert!(store.load(&other.id).is_err());
+        assert!(store.load(&active.id).is_ok());
+        assert!(sessions.active_turn().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_busy_chat_cancels_the_turn_then_removes_it() {
+        let root = scratch("self");
+        let store = ThreadStore::open(&root).unwrap();
+        let active = saved_thread(&store, "waiting for approval");
+
+        let sessions = SessionController::new();
+        let persist = Mutex::new(HashMap::new());
+        let cache = Mutex::new(ChatSummaryCache::default());
+        sessions
+            .set_session(session::test_session(active.id.clone(), root.clone()))
+            .unwrap();
+        let (_session, turn) = sessions.begin_turn().unwrap();
+
+        let result = delete_thread_inner(
+            &sessions,
+            &persist,
+            &cache,
+            active.id.clone(),
+            Some(display_path(&root)),
+            None,
+        )
+        .await
+        .unwrap();
+        match result {
+            DeleteThreadResult::OpenDraft {
+                provider_id,
+                root: draft_root,
+            } => {
+                assert_eq!(provider_id, "stub");
+                assert!(same_project_root(&draft_root, &root));
+            }
+            DeleteThreadResult::Ready(_) => {
+                panic!("deleting the busy visible chat must open a replacement draft")
+            }
+        }
+        assert!(turn.cancel.is_cancelled());
+        assert!(store.load(&active.id).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 /// Switch project (and optional thread) while keeping the current provider.
 /// A `null` root opens the user-local free-chat store without changing the
 /// active workspace.
@@ -4624,6 +4979,8 @@ async fn open_project_chat(
 
 #[tauri::command]
 fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, String> {
+    // In-place swap of the visible session body. The sidebar opens chats
+    // through `open_project_chat`, which backgrounds a waiting turn instead.
     state.sessions.require_idle().map_err(map_session_err)?;
 
     let root = state
@@ -4936,19 +5293,118 @@ async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultV
     Ok(output)
 }
 
-/// Delete a saved chat. If it is the active thread, switches the session to an
-/// unsaved empty draft for the same provider. The draft becomes a saved chat
-/// when its first message is persisted. `project_path` deletes from another
-/// known project without switching the open workspace.
+enum DeleteThreadResult {
+    Ready(Box<SessionInfo>),
+    /// The deleted chat was the visible busy route. Open an unsaved draft so
+    /// the user is not left on a transcript that no longer exists.
+    OpenDraft { provider_id: String, root: PathBuf },
+}
+
+fn same_project_root(left: &Path, right: &Path) -> bool {
+    left == right || display_path(left) == display_path(right)
+}
+
+fn persist_worker_for(
+    persist: &Mutex<HashMap<PathBuf, PersistWorker>>,
+    root: &Path,
+) -> Option<PersistWorker> {
+    let guard = persist.lock().ok()?;
+    guard.iter().find_map(|(key, worker)| {
+        same_project_root(key, root).then_some(worker.clone())
+    })
+}
+
+fn current_session_info(sessions: &SessionController) -> Result<SessionInfo, String> {
+    if let Some(info) = sessions
+        .session_info_snapshot(|session| session_info_from(session, None))
+        .map_err(map_session_err)?
+    {
+        return Ok(info);
+    }
+    let turn = sessions
+        .active_turn()
+        .map_err(map_session_err)?
+        .ok_or_else(|| map_session_err(SessionError::NoSession))?;
+    Ok(session_info_from_turn(&turn))
+}
+
+fn clear_abandoned_turn(turn: &ActiveTurn) {
+    turn.approval_hub.clear();
+    turn.question_hub.clear();
+    if let Ok(persistence) = ChatPersistence::open(&turn.root) {
+        let _ = persistence.interrupts.cancel_pending_by_run(&turn.turn_id);
+        let _ = persistence.runs.mark_aborted(&turn.turn_id);
+    }
+}
+
+fn reset_session_to_draft(session: &mut Session) -> Result<SessionInfo, String> {
+    let thread = Thread::new().with_provider(&session.provider_id);
+    session.agent.clear_messages();
+    session.thread_id = thread.id.clone();
+    session.thread = thread;
+    session.recovery = None;
+    // Keep the active provider pointing at the draft, but do not create a
+    // history row until the user sends a message. The pointer is what lets
+    // `resolve_thread` hand this same draft back if the project is reopened
+    // before anything is sent.
+    persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
+    Ok(session_info_from(session, None))
+}
+
+/// Delete a saved chat. A different chat can be removed while a turn is
+/// working. Deleting the busy chat itself cancels that turn first. If it is
+/// the visible thread, the session moves to an unsaved empty draft.
+/// `project_path` deletes from another known project without switching the
+/// open workspace.
 #[tauri::command]
-fn delete_thread(
+async fn delete_thread(
     state: State<'_, AppState>,
     id: String,
     project_path: Option<String>,
     free_chat: Option<bool>,
 ) -> Result<SessionInfo, String> {
-    state.sessions.require_idle().map_err(map_session_err)?;
+    match delete_thread_inner(
+        &state.sessions,
+        &state.persist,
+        &state.chat_summary_cache,
+        id,
+        project_path,
+        free_chat,
+    )
+    .await?
+    {
+        DeleteThreadResult::Ready(info) => Ok(*info),
+        DeleteThreadResult::OpenDraft { provider_id, root } => {
+            let draft = Thread::new().with_provider(&provider_id);
+            start_session_inner(
+                state,
+                provider_id,
+                None,
+                None,
+                Some(root),
+                Some((draft, None, true)),
+            )
+            .await
+            .map_err(|error| {
+                desktop_err(
+                    "no_session",
+                    format!(
+                        "Chat deleted, but a new chat could not be opened. Choose a provider. {error}"
+                    ),
+                )
+            })
+        }
+    }
+}
 
+async fn delete_thread_inner(
+    sessions: &SessionController,
+    persist: &Mutex<HashMap<PathBuf, PersistWorker>>,
+    chat_summary_cache: &Mutex<ChatSummaryCache>,
+    id: String,
+    project_path: Option<String>,
+    free_chat: Option<bool>,
+) -> Result<DeleteThreadResult, String> {
     let id = id.trim().to_string();
     if id.is_empty() {
         return Err(desktop_err("invalid", "chat id is empty"));
@@ -4963,72 +5419,112 @@ fn delete_thread(
             .filter(|s| !s.is_empty())
         {
             Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-            None => state
-                .sessions
+            None => sessions
                 .active_root()
                 .map_err(map_session_err)?
                 .ok_or_else(|| desktop_err("no_session", "open a chat before deleting a chat"))?,
         }
     };
 
-    // A background turn still owns the authoritative transcript. Refuse to
-    // delete it from a different route, otherwise its final save could
-    // recreate the chat after the sidebar reports success.
-    if state
-        .sessions
+    let deleting_active = sessions
+        .active_thread_id()
+        .map_err(map_session_err)?
+        .as_deref()
+        == Some(id.as_str());
+    let live_turn = sessions
         .active_turn_for_thread(&id)
         .map_err(map_session_err)?
-        .is_some_and(|turn| {
-            turn.root == target_root || display_path(&turn.root) == display_path(&target_root)
-        })
-    {
-        return Err(desktop_err(
-            "busy",
-            "this chat is still working — stop it before deleting it",
-        ));
+        .filter(|turn| same_project_root(&turn.root, &target_root));
+
+    if live_turn.is_some() {
+        // Tombstone the persist worker before cancel so its terminal save
+        // cannot recreate the file after this command reports success.
+        if let Some(worker) = persist_worker_for(persist, &target_root) {
+            let _ = worker.forget(&id).await;
+        }
+        if let Some(turn) = sessions
+            .abandon_turn_for_thread(&id)
+            .map_err(map_session_err)?
+        {
+            clear_abandoned_turn(&turn);
+        }
     }
 
-    state
-        .sessions
-        .with_session_mut(|session| -> Result<SessionInfo, String> {
-            let store = open_store(&target_root)?;
-            // Deletion is allowed across providers: the sidebar intentionally
-            // lists every provider's chats, and removing a chat does not
-            // restore or execute it. Reopening still uses load_for_provider
-            // and therefore keeps the cross-provider safety boundary.
-            let _ = store.load(&id).map_err(|e| e.to_string())?;
-            store.delete(&id).map_err(|e| e.to_string())?;
+    let store = open_store(&target_root)?;
+    // Deletion is allowed across providers: the sidebar intentionally
+    // lists every provider's chats, and removing a chat does not
+    // restore or execute it. Reopening still uses load_for_provider
+    // and therefore keeps the cross-provider safety boundary.
+    let _ = store.load(&id).map_err(|e| e.to_string())?;
+    store.delete(&id).map_err(|e| e.to_string())?;
 
-            // The transcript was only part of what this chat left behind. Its
-            // run and interrupt records lived on in the project, read on every
-            // open and never collected, describing a conversation the user
-            // asked to be rid of. Best effort, and after the thread is gone: a
-            // side record that will not unlink is no reason to report the
-            // deletion as failed.
-            if let Ok(persistence) = ChatPersistence::open(&target_root) {
-                let _ = persistence.forget_thread(&id);
-            }
+    // The transcript was only part of what this chat left behind. Its
+    // run and interrupt records lived on in the project, read on every
+    // open and never collected, describing a conversation the user
+    // asked to be rid of. Best effort, and after the thread is gone: a
+    // side record that will not unlink is no reason to report the
+    // deletion as failed.
+    if let Ok(persistence) = ChatPersistence::open(&target_root) {
+        let _ = persistence.forget_thread(&id);
+    }
 
-            // Compare via display paths — `session.root` may be `\\?\…` while the
-            // sidebar sends a stripped path that still canonicalizes differently.
-            let same_project = display_path(&session.root) == display_path(&target_root)
-                || session.root == target_root;
-            if same_project && session.thread_id == id {
-                let thread = Thread::new().with_provider(&session.provider_id);
-                session.agent.clear_messages();
-                session.thread_id = thread.id.clone();
-                session.thread = thread;
-                session.recovery = None;
-                // Keep the active provider pointing at the draft, but do not
-                // create a history row until the user sends a message. The
-                // pointer is what lets `resolve_thread` hand this same draft
-                // back if the project is reopened before anything is sent.
-                persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
-            }
-            Ok(session_info_from(session, None))
-        })
-        .map_err(map_session_err)
-        .and_then(|r| r)
+    if let Ok(mut cache) = chat_summary_cache.lock() {
+        cache.projects.remove(&target_root);
+        cache
+            .projects
+            .retain(|root, _| !same_project_root(root, &target_root));
+    }
+
+    if deleting_active {
+        if let Some(info) = sessions
+            .with_session_if_idle(|session| -> Result<Option<SessionInfo>, String> {
+                if same_project_root(&session.root, &target_root) && session.thread_id == id {
+                    return reset_session_to_draft(session).map(Some);
+                }
+                Ok(None)
+            })
+            .map_err(map_session_err)?
+            .transpose()?
+            .flatten()
+        {
+            return Ok(DeleteThreadResult::Ready(Box::new(info)));
+        }
+        let provider_id = live_turn
+            .as_ref()
+            .map(|turn| turn.provider_id.clone())
+            .or_else(last_provider)
+            .ok_or_else(|| {
+                desktop_err(
+                    "no_session",
+                    "Chat deleted, but a new chat could not be opened. Choose a provider.",
+                )
+            })?;
+        return Ok(DeleteThreadResult::OpenDraft {
+            provider_id,
+            root: target_root,
+        });
+    }
+
+    match current_session_info(sessions) {
+        Ok(info) => Ok(DeleteThreadResult::Ready(Box::new(info))),
+        Err(_) => Ok(DeleteThreadResult::Ready(Box::new(SessionInfo {
+            session_id: String::new(),
+            provider: last_provider().unwrap_or_default(),
+            label: String::new(),
+            model: String::new(),
+            effort: String::new(),
+            root: display_path(&target_root),
+            is_free_chat: is_free_chat_root(&target_root),
+            thread_id: String::new(),
+            default_model: String::new(),
+            owns_agent_loop: false,
+            models: Vec::new(),
+            checkpoints: Vec::new(),
+            messages: Vec::new(),
+            warning: None,
+            recovery: None,
+        }))),
+    }
 }
 
 /// Set a chat's sidebar pin without changing its activity timestamp. This is
@@ -5042,35 +5538,32 @@ fn set_thread_pinned(
     free_chat: Option<bool>,
     pinned: bool,
 ) -> Result<(), String> {
-    state.sessions.require_idle().map_err(map_session_err)?;
-
-    let target_root = state
+    let target_root = if free_chat.unwrap_or(false) {
+        free_chats_root()?
+    } else {
+        match project_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+            None => state
+                .sessions
+                .active_root()
+                .map_err(map_session_err)?
+                .ok_or_else(|| desktop_err("no_session", "open a chat before pinning a chat"))?,
+        }
+    };
+    let store = open_store(&target_root)?;
+    let summary = store.set_pinned(&id, pinned).map_err(|e| e.to_string())?;
+    let _ = state
         .sessions
-        .with_session_mut(|session| -> Result<PathBuf, String> {
-            let target_root = if free_chat.unwrap_or(false) {
-                free_chats_root()?
-            } else {
-                match project_path
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-                    None => session.root.clone(),
-                }
-            };
-            let store = open_store(&target_root)?;
-            let summary = store.set_pinned(&id, pinned).map_err(|e| e.to_string())?;
-
-            let same_project = display_path(&session.root) == display_path(&target_root)
-                || session.root == target_root;
-            if same_project && session.thread_id == id {
+        .with_session_if_idle(|session| {
+            if same_project_root(&session.root, &target_root) && session.thread_id == id {
                 session.thread.pinned = summary.pinned;
             }
-            Ok(target_root)
         })
-        .map_err(map_session_err)
-        .and_then(|result| result)?;
+        .map_err(map_session_err)?;
 
     // The scanner normally invalidates from file metadata. Remove the entry
     // explicitly as well so a fast pin/unpin always refreshes immediately on
@@ -5092,8 +5585,6 @@ fn rename_thread(
     free_chat: Option<bool>,
     title: String,
 ) -> Result<ThreadSummary, String> {
-    state.sessions.require_idle().map_err(map_session_err)?;
-
     let id = id.trim().to_string();
     if id.is_empty() {
         return Err(desktop_err("invalid", "chat id is empty"));
@@ -5103,38 +5594,40 @@ fn rename_thread(
         return Err(desktop_err("invalid", "chat title is empty"));
     }
 
-    let (target_root, summary) = state
+    let target_root = if free_chat.unwrap_or(false) {
+        free_chats_root()?
+    } else {
+        match project_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+            None => state
+                .sessions
+                .active_root()
+                .map_err(map_session_err)?
+                .ok_or_else(|| desktop_err("no_session", "open a chat before renaming a chat"))?,
+        }
+    };
+    let store = open_store(&target_root)?;
+    let summary = store.rename(&id, &title).map_err(|e| e.to_string())?;
+    let _ = state
         .sessions
-        .with_session_mut(|session| -> Result<(PathBuf, ThreadSummary), String> {
-            let target_root = if free_chat.unwrap_or(false) {
-                free_chats_root()?
-            } else {
-                match project_path
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-                    None => session.root.clone(),
-                }
-            };
-            let store = open_store(&target_root)?;
-            let summary = store.rename(&id, &title).map_err(|e| e.to_string())?;
-
-            let same_project = display_path(&session.root) == display_path(&target_root)
-                || session.root == target_root;
-            if same_project && session.thread_id == id {
+        .with_session_if_idle(|session| {
+            if same_project_root(&session.root, &target_root) && session.thread_id == id {
                 session.thread.title = summary.title.clone();
             }
-            Ok((target_root, summary))
         })
-        .map_err(map_session_err)
-        .and_then(|result| result)?;
+        .map_err(map_session_err)?;
 
     // Remove the cached summary explicitly so a rename is visible immediately
     // even on filesystems with coarse timestamp resolution.
     if let Ok(mut cache) = state.chat_summary_cache.lock() {
         cache.projects.remove(&target_root);
+        cache
+            .projects
+            .retain(|root, _| !same_project_root(root, &target_root));
     }
     Ok(summary)
 }
@@ -6731,6 +7224,8 @@ pub fn run() {
             configure_anthropic_provider,
             configure_claude_code_provider,
             configure_codex_cli_provider,
+            configure_codex_oauth_provider,
+            codex_cli_available,
             open_project_config,
             usage_snapshot,
             provider_quota,
@@ -7180,7 +7675,75 @@ mod characterization {
         assert_eq!(PICKER_IDS, &["codex", "claude"]);
         assert!(desktop_can_start_login("codex"));
         assert!(desktop_can_start_login("claude"));
+        assert!(desktop_can_start_login("codex-chatgpt"));
         assert!(!desktop_can_start_login("antigravity"));
+    }
+
+    #[test]
+    fn chatgpt_codex_stays_offered_when_the_cli_parent_already_owns_codex() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "codex_cli"
+model = "gpt-5.6-sol"
+"#,
+        )
+        .expect("valid cli config");
+        assert_eq!(
+            chatgpt_codex_offer_id(&config, false),
+            Some("codex-chatgpt")
+        );
+        let mut rows = vec![configured_provider_view("codex", &config)];
+        append_chatgpt_codex_offer(&mut rows, &config, false);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["codex", "codex-chatgpt"]
+        );
+        let offer = rows.iter().find(|row| row.id == "codex-chatgpt").unwrap();
+        assert_eq!(offer.label, "Codex");
+        assert_eq!(offer.method, "ChatGPT sign-in");
+        assert!(offer.can_connect);
+        assert!(!offer.configured);
+        assert!(!offer.selectable);
+    }
+
+    #[test]
+    fn chatgpt_codex_is_offered_when_the_cli_is_present_and_codex_is_free() {
+        let config = Config::env_fallback();
+        assert_eq!(chatgpt_codex_offer_id(&config, true), Some("codex-chatgpt"));
+        assert_eq!(chatgpt_codex_offer_id(&config, false), None);
+    }
+
+    #[test]
+    fn chatgpt_codex_is_not_offered_twice_when_oauth_is_already_configured() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "codex_cli"
+
+[providers.codex-chatgpt]
+kind = "codex_oauth"
+credential = "codex-chatgpt"
+"#,
+        )
+        .expect("valid dual config");
+        assert_eq!(chatgpt_codex_offer_id(&config, true), None);
+        let mut rows = vec![
+            configured_provider_view("codex", &config),
+            configured_provider_view("codex-chatgpt", &config),
+        ];
+        append_chatgpt_codex_offer(&mut rows, &config, true);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.id == "codex-chatgpt")
+                .count(),
+            1
+        );
+        let oauth = rows.iter().find(|row| row.id == "codex-chatgpt").unwrap();
+        assert_eq!(oauth.label, "Codex");
+        assert_eq!(oauth.method, "ChatGPT sign-in");
+        assert!(oauth.can_connect);
+        assert!(oauth.configured);
     }
 
     /// Every configured provider gets a row, and a picker id the caller already
@@ -7265,6 +7828,38 @@ model = "gpt-5.6-sol"
             }),
             "No authentication"
         );
+        assert_eq!(
+            provider_method(&ProviderConfig::CodexOAuth {
+                model: "gpt-5.6-sol".into(),
+                models: vec![],
+                efforts: vec![],
+                credential: Some("codex".into()),
+            }),
+            "ChatGPT sign-in"
+        );
+    }
+
+    #[test]
+    fn a_configured_codex_oauth_row_uses_chatgpt_detection_not_cli_auth() {
+        std::env::remove_var("ZEST_CODEX_OAUTH_SESSION");
+        let config = Config::parse(
+            r#"
+[providers.codex-chatgpt]
+kind = "codex_oauth"
+credential = "zest-test-codex-oauth-absent"
+"#,
+        )
+        .expect("valid oauth config");
+        let view = provider_view_from_slot(
+            &slot("codex-chatgpt", AuthStatus::Ready { account: None }),
+            &config,
+        );
+        assert_eq!(view.method, "ChatGPT sign-in");
+        assert_ne!(
+            view.status_kind, "ready",
+            "must not treat ~/.codex/auth.json as a ChatGPT session"
+        );
+        assert!(view.configured);
     }
 
     #[test]

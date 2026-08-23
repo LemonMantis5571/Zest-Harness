@@ -48,6 +48,14 @@ function parseDesktopError(error: unknown): DesktopErrorPayload | null {
   return null;
 }
 
+export function busyTurnMessage(error: unknown): string {
+  const text = rawInvokeError(error).replace(/^busy:\s*/i, "").trim();
+  if (text && !/^busy\b/i.test(text) && !text.toLowerCase().includes("already in progress")) {
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  return "This chat is still working. Switch chats or wait for it to finish.";
+}
+
 export function rawInvokeError(error: unknown): string {
   const raw = String(error);
   const parsed = parseDesktopError(error);

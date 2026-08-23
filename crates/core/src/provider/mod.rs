@@ -14,6 +14,7 @@ pub mod anthropic;
 pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod codex_app_server;
+pub mod codex_oauth;
 pub mod driver;
 pub mod openai_compatible;
 pub mod registry;
@@ -46,7 +47,7 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
 /// [`driver::driver_for`].
 pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
     let (default_model, builtin) = match provider_id {
-        "codex" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
+        "codex" | "codex-chatgpt" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
         "claude" | "anthropic" => (DEFAULT_MODEL.to_string(), &[][..]),
         "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
         _ => (DEFAULT_MODEL.to_string(), &[][..]),
@@ -792,12 +793,17 @@ mod tests {
                 "house",
                 "[providers.house]\nkind = \"codex_cli\"\nmodel = \"gpt-5.6-luna\"\nefforts = [\"low\"]\n",
             ),
+            ("house", "[providers.house]\nkind = \"codex_oauth\"\n"),
             (
                 "house",
                 "[providers.house]\nkind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:1/v1\"\nmodel = \"local\"\n",
             ),
         ];
 
+        std::env::set_var(
+            crate::codex_oauth::SESSION_ENV,
+            r#"{"access_token":"t","refresh_token":"r","account_id":"acct","expires_at":9999999999}"#,
+        );
         for (id, toml) in cases {
             let config = crate::config::Config::parse(toml).expect("valid");
             let entry = &config.providers[id];
@@ -827,6 +833,7 @@ mod tests {
             );
         }
         std::env::remove_var("ZEST_TEST_DRIFT_KEY");
+        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
     }
 
     #[test]

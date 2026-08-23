@@ -317,6 +317,14 @@ pub enum ThreadLoadError {
         owned: String,
         wanted: String,
     },
+    #[error(
+        "This chat was started with a different Codex sign-in. Start a new chat to keep using the current one."
+    )]
+    ProviderKindMismatch {
+        id: String,
+        owned: String,
+        wanted: String,
+    },
 }
 
 impl From<ThreadLoadError> for HarnessError {
@@ -342,6 +350,10 @@ pub struct Thread {
     /// Provider that owns this conversation (parent is always pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// Config kind that started this conversation. Missing on older files.
+    /// A Codex chat without a kind is treated as `codex_cli`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
     /// Provider-owned continuation cursor. It is non-secret and optional so
     /// gateway, Anthropic, Claude Code, and legacy v2 threads remain unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,6 +402,7 @@ impl Thread {
             title: None,
             pinned: false,
             provider_id: None,
+            provider_kind: None,
             provider_session: None,
             git_context: None,
             wire_format: default_wire_format(),
@@ -402,6 +415,22 @@ impl Thread {
     pub fn with_provider(mut self, provider_id: impl Into<String>) -> Self {
         self.provider_id = Some(provider_id.into());
         self
+    }
+
+    pub fn with_provider_kind(mut self, provider_kind: impl Into<String>) -> Self {
+        self.provider_kind = Some(provider_kind.into());
+        self
+    }
+
+    /// Stored kind, or `codex_cli` when a Codex chat predates this field.
+    pub fn effective_provider_kind(&self) -> Option<&str> {
+        if let Some(kind) = self.provider_kind.as_deref() {
+            return Some(kind);
+        }
+        if self.provider_id.as_deref() == Some("codex") {
+            return Some("codex_cli");
+        }
+        None
     }
 
     /// Set the sidebar pin without changing activity order. Pinning is a
@@ -493,6 +522,32 @@ impl Thread {
         self.assert_provider(provider_id)?;
         if self.provider_id.is_none() {
             self.provider_id = Some(provider_id.to_string());
+        }
+        Ok(())
+    }
+
+    pub fn assert_provider_kind(
+        &self,
+        provider_kind: &str,
+    ) -> std::result::Result<(), ThreadLoadError> {
+        match self.effective_provider_kind() {
+            None => Ok(()),
+            Some(owned) if owned == provider_kind => Ok(()),
+            Some(owned) => Err(ThreadLoadError::ProviderKindMismatch {
+                id: self.id.clone(),
+                owned: owned.to_string(),
+                wanted: provider_kind.to_string(),
+            }),
+        }
+    }
+
+    pub fn ensure_provider_kind(
+        &mut self,
+        provider_kind: &str,
+    ) -> std::result::Result<(), ThreadLoadError> {
+        self.assert_provider_kind(provider_kind)?;
+        if self.provider_kind.is_none() {
+            self.provider_kind = Some(provider_kind.to_string());
         }
         Ok(())
     }
@@ -997,7 +1052,18 @@ impl ThreadStore {
     }
 
     pub fn create_for_provider(&self, provider_id: &str) -> Result<Thread> {
-        let thread = Thread::new().with_provider(provider_id);
+        self.create_for_provider_kind(provider_id, None)
+    }
+
+    pub fn create_for_provider_kind(
+        &self,
+        provider_id: &str,
+        provider_kind: Option<&str>,
+    ) -> Result<Thread> {
+        let mut thread = Thread::new().with_provider(provider_id);
+        if let Some(kind) = provider_kind {
+            thread.provider_kind = Some(kind.to_string());
+        }
         self.save(&thread)?;
         Ok(thread)
     }
@@ -1303,6 +1369,9 @@ impl ThreadStore {
         fork.updated_at = fork.created_at;
         fork.pinned = false;
         fork.provider_id = provider_id.map(str::to_string);
+        if provider_id != source.provider_id.as_deref() {
+            fork.provider_kind = None;
+        }
         // A fork owns a new provider conversation. Its canonical transcript is
         // copied, but a native continuation cursor must never be shared.
         fork.provider_session = None;
@@ -2170,5 +2239,31 @@ mod characterization {
             }
             other => panic!("expected assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_codex_oauth_thread_does_not_resume_on_codex_cli() {
+        let oauth = Thread::new()
+            .with_provider("codex")
+            .with_provider_kind("codex_oauth");
+        assert!(oauth.assert_provider_kind("codex_oauth").is_ok());
+        assert!(matches!(
+            oauth.assert_provider_kind("codex_cli"),
+            Err(ThreadLoadError::ProviderKindMismatch { .. })
+        ));
+
+        let legacy = Thread::new().with_provider("codex");
+        assert!(legacy.assert_provider_kind("codex_cli").is_ok());
+        assert!(matches!(
+            legacy.assert_provider_kind("codex_oauth"),
+            Err(ThreadLoadError::ProviderKindMismatch { .. })
+        ));
+        assert!(
+            legacy
+                .assert_provider_kind("codex_oauth")
+                .unwrap_err()
+                .to_string()
+                .contains("different Codex sign-in")
+        );
     }
 }

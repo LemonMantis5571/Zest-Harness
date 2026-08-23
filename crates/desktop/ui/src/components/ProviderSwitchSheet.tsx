@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { getBackend } from "@/lib/backend";
+import { isChatgptCodexRow } from "@/lib/chatgptCodex";
 import { rawInvokeError } from "@/lib/invokeErrors";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import type { ProviderRow } from "@/lib/types";
@@ -70,7 +73,24 @@ export function ProviderSwitchSheet({
   const [keyError, setKeyError] = useState<string | null>(null);
   const [enablingParentId, setEnablingParentId] = useState<string | null>(null);
   const [enableParentError, setEnableParentError] = useState<string | null>(null);
+  const [cliAvailable, setCliAvailable] = useState(true);
+  const [confirmChatgptId, setConfirmChatgptId] = useState<string | null>(null);
   useDialogFocusTrap(open, dialogRef);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void getBackend()
+      .codexCliAvailable()
+      .then((available) => {
+        if (!cancelled) setCliAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setCliAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -175,7 +195,8 @@ export function ProviderSwitchSheet({
                     >
                       {current && row.statusKind === "ready" ? "Replace key" : "Set key"}
                     </Button>
-                  ) : PARENT_CLI_DEFAULTS[row.id] ? (
+                  ) : PARENT_CLI_DEFAULTS[row.id] &&
+                    (row.id !== "codex" || cliAvailable) ? (
                     <Button
                       type="button"
                       size="sm"
@@ -207,7 +228,13 @@ export function ProviderSwitchSheet({
                       size="sm"
                       variant="outline"
                       disabled={busy}
-                      onClick={() => onConnect(row.id)}
+                      onClick={() => {
+                        if (isChatgptCodexRow(row)) {
+                          setConfirmChatgptId(row.id);
+                          return;
+                        }
+                        onConnect(row.id);
+                      }}
                     >
                       Connect
                     </Button>
@@ -287,6 +314,19 @@ export function ProviderSwitchSheet({
           />
         )}
       </div>
+      <ConfirmDialog
+        open={confirmChatgptId != null}
+        title="Use ChatGPT for Codex"
+        description="This signs you into ChatGPT and uses your Codex subscription from Zest. OpenAI does not publish this path for third-party apps, so it can stop working or affect your ChatGPT account. Continue only if you accept that."
+        confirmLabel="Continue"
+        cancelLabel="Cancel"
+        onCancel={() => setConfirmChatgptId(null)}
+        onConfirm={() => {
+          const id = confirmChatgptId;
+          setConfirmChatgptId(null);
+          if (id) onConnect(id);
+        }}
+      />
     </div>
   );
 }

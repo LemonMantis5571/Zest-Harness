@@ -21,6 +21,7 @@ import {
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
 import {
+  busyTurnMessage,
   conversationRecovery,
   isWorkspaceProblem,
   rawInvokeError,
@@ -264,7 +265,7 @@ function formatInvokeError(err: unknown): string {
   if (isWorkspaceProblem(err)) return workspaceProblemMessage(err);
   const raw = rawInvokeError(err).toLowerCase();
   if (raw.includes("busy") || raw.includes("already in progress")) {
-    return "A turn is already in progress. Stop it before trying again.";
+    return busyTurnMessage(err);
   }
   if (raw.includes("thread_provider_unknown")) {
     return "Choose a provider before reopening this older chat.";
@@ -1809,9 +1810,9 @@ export default function App() {
       const deletedActive = session?.threadId === id;
       const info = await backend.deleteThread(id, projectPath, freeChat);
       saveDraft(id, "");
-      // Always refresh when the open thread was deleted (path strings from the
-      // sidebar may not match session.root byte-for-byte on Windows).
-      if (deletedActive || info.threadId !== session?.threadId) {
+      // Only the deleted open chat should replace the transcript. Applying a
+      // busy-route snapshot here would wipe the waiting chat's live messages.
+      if (deletedActive) {
         applySession(info, { clearDraft: true });
       }
       setWorkspacePath(info.isFreeChat ? null : info.root);

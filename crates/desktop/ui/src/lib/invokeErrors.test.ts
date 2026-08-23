@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  busyTurnMessage,
   conversationRecovery,
   isWorkspaceProblem,
   shouldOfferProviderReconnect,
@@ -132,4 +133,20 @@ test("new project chats expose provider recovery without a thread id", () => {
     configured: true,
     providers: [{ id: "deepseek", label: "DeepSeek", model: "deepseek-chat" }],
   });
+});
+
+test("busy errors keep the backend's next action", () => {
+  assert.equal(
+    busyTurnMessage(
+      JSON.stringify({
+        code: "busy",
+        message: "this chat is still working — switch chats or wait for it to finish",
+      })
+    ),
+    "This chat is still working — switch chats or wait for it to finish"
+  );
+  assert.equal(
+    busyTurnMessage("already in progress"),
+    "This chat is still working. Switch chats or wait for it to finish."
+  );
 });

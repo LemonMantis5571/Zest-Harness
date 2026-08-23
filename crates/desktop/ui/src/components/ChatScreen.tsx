@@ -52,6 +52,7 @@ import { UsageScreen } from "@/components/UsageScreen";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { ThinkingReasoning } from "@/components/ThinkingReasoning";
 import { WorkbenchPanel } from "@/components/WorkbenchPanel";
+import { WorkingIndicator } from "@/components/WorkingIndicator";
 import {
   Attachment,
   AttachmentContent,
@@ -79,7 +80,7 @@ import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
-import type { ThreadActivityMap } from "@/lib/threadActivity";
+import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import {
   TRANSCRIPT_REVEAL_STEP,
@@ -253,6 +254,9 @@ type ChatMessageRowProps = {
   onSubmitEdit: () => void;
   onResolveQuestion: (questionId: string, answer: string) => Promise<void>;
   pinQuestion?: boolean;
+  showWorking?: boolean;
+  workingStartedAt?: number;
+  workingAction?: string;
 };
 
 type MessageEditFormProps = {
@@ -382,6 +386,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onSubmitEdit,
   onResolveQuestion,
   pinQuestion = false,
+  showWorking = false,
+  workingStartedAt,
+  workingAction,
 }: ChatMessageRowProps) {
   if (msg.role === "user") {
     if (editing) {
@@ -591,21 +598,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
             </Bubble>
           ) : null}
 
-          {msg.streaming &&
-          !msg.text &&
-          !msg.thinking &&
-          msg.tools.length === 0 ? (
-            <ThinkingReasoning thinking="" streaming emptyLabel="Thinking..." />
-          ) : null}
-
-          {msg.streaming &&
-          !msg.text &&
-          msg.tools.length > 0 &&
-          !msg.tools.some(
-            (tool) =>
-              tool.status === "running" || tool.status === "awaiting_approval"
-          ) ? (
-            <ThinkingReasoning thinking="" streaming emptyLabel="Working..." />
+          {showWorking ? (
+            <WorkingIndicator
+              startedAt={workingStartedAt}
+              action={workingAction}
+            />
           ) : null}
         </MessageContent>
       </Message>
@@ -1089,6 +1086,16 @@ export function ChatScreen({
     return null;
   }, [messages]);
   const hasNeedsInput = pendingApprovals.length > 0 || pendingQuestion !== null;
+  const lastAssistant = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === "assistant") return message;
+    }
+    return undefined;
+  }, [messages]);
+  const turnActivity = threadActivity[session.threadId];
+  const workingAction = currentTurnAction(lastAssistant, turnActivity);
+  const showTurnWorking = sending && !hasNeedsInput;
   const pendingApprovalId = pendingApprovals[0]?.id;
   const pendingQuestionId = pendingQuestion?.messageId;
   const pendingQuestionText = pendingQuestion?.question;
@@ -1665,8 +1672,35 @@ export function ChatScreen({
                         pendingApprovals.length === 0 &&
                         pendingQuestion?.messageId === msg.id
                       }
+                      showWorking={
+                        showTurnWorking &&
+                        msg.role === "assistant" &&
+                        index === visibleMessages.length - 1
+                      }
+                      workingStartedAt={turnActivity?.startedAt}
+                      workingAction={workingAction}
                     />
                   ))}
+                  {showTurnWorking &&
+                  visibleMessages[visibleMessages.length - 1]?.role !==
+                    "assistant" ? (
+                    <MessageScrollerItem
+                      id="turn-working"
+                      messageId="turn-working"
+                    >
+                      <Message align="start">
+                        <MessageContent className="w-full max-w-full gap-2.5">
+                          <div className="text-[11px] font-medium tracking-wide text-muted-foreground/80">
+                            Zest
+                          </div>
+                          <WorkingIndicator
+                            startedAt={turnActivity?.startedAt}
+                            action={workingAction}
+                          />
+                        </MessageContent>
+                      </Message>
+                    </MessageScrollerItem>
+                  ) : null}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
               <TranscriptScrollerControls

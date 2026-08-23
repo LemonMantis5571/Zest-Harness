@@ -21,10 +21,15 @@ local token counts into a remaining plan number.
 - DeepSeek is checked on demand through its official `GET /user/balance`
   endpoint. The check runs only for `https://api.deepseek.com` and uses the
   existing key from the OS credential store or configured environment variable.
-- Codex is checked through the installed `codex app-server` when the provider
-  id is `codex`. Zest sends `account/rateLimits/read`; Codex owns the login and
-  makes the authenticated request. If Codex is not installed or signed in,
-  the panel explains that instead.
+- Codex CLI (`kind = "codex_cli"`) is checked through the installed
+  `codex app-server` for every configured CLI id. Zest sends
+  `account/rateLimits/read`; the CLI owns the login and makes the
+  authenticated request. If the CLI is not installed or signed in, the
+  panel explains that instead.
+- ChatGPT Codex (`kind = "codex_oauth"`) is checked with
+  `GET https://chatgpt.com/backend-api/wham/usage` using that provider's
+  stored session. A failed or unsigned-in check is an error or unavailable
+  state, never a 0% guess or a local ledger total.
 - Claude Desktop and Claude Code share the same Claude.ai usage limit. On
   Windows, Zest reads Claude Desktop's read-only local cache at
   `%APPDATA%\Claude\plan-usage-history.json` and shows its 5-hour and 7-day

@@ -142,6 +142,14 @@ export function configureCodexCliProvider(input: { id: string; model: string }) 
   return invoke<void>("configure_codex_cli_provider", input);
 }
 
+export function configureCodexOAuthProvider(input: { id: string; model: string }) {
+  return invoke<void>("configure_codex_oauth_provider", input);
+}
+
+export function codexCliAvailable() {
+  return invoke<boolean>("codex_cli_available");
+}
+
 export function openProjectConfig(root: string) {
   return invoke<void>("open_project_config", { root });
 }

@@ -35,6 +35,13 @@ pub struct ClaudeCodeProviderInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CodexOAuthProviderInput {
+    pub id: String,
+    pub model: String,
+    pub credential: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CodexCliProviderInput {
     pub id: String,
     pub command: String,
@@ -421,6 +428,54 @@ pub fn add_codex_cli_provider(path: &Path, input: &CodexCliProviderInput) -> Res
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// Add or update a ChatGPT Codex parent while preserving comments and
+/// unrelated provider entries. Refuses if the id already has another kind.
+pub fn add_codex_oauth_provider(path: &Path, input: &CodexOAuthProviderInput) -> Result<(), String> {
+    let id = input.id.trim();
+    let model = input.model.trim();
+    let credential = input.credential.trim();
+
+    validate_id(id, "provider")?;
+    if model.is_empty() {
+        return Err("a ChatGPT Codex model is required".into());
+    }
+    let credential = if credential.is_empty() { id } else { credential };
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("providers") {
+        doc["providers"] = Item::Table(Table::new());
+    }
+    let providers = doc["providers"]
+        .as_table_mut()
+        .ok_or_else(|| "[providers] is not a table".to_string())?;
+    let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
+    let provider = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("provider `{id}` is not a table"))?;
+    if let Some(kind) = provider.get("kind").and_then(Item::as_str) {
+        if kind != "codex_oauth" {
+            return Err(format!("provider `{id}` already has kind `{kind}`"));
+        }
+    }
+
+    provider["kind"] = toml_edit::value("codex_oauth");
+    provider["model"] = toml_edit::value(model);
+    provider["credential"] = toml_edit::value(credential);
+    provider.remove("command");
+    provider.remove("allow_mcp");
+    provider.remove("timeout_secs");
+    provider.remove("models");
+    provider.remove("efforts");
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 pub fn upsert_external_agent(path: &Path, input: &ExternalAgentInput) -> Result<(), String> {
     let id = input.id.trim();
     let command = input.command.trim();
@@ -753,6 +808,50 @@ mod tests {
             config.providers["codex"],
             crate::config::ProviderConfig::CodexCli { .. }
         ));
+    }
+
+    #[test]
+    fn adds_codex_oauth_parent_without_discarding_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "# keep me\n[default]\nprovider = \"claude\"\n").unwrap();
+
+        add_codex_oauth_provider(
+            &path,
+            &CodexOAuthProviderInput {
+                id: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                credential: "codex".into(),
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep me"));
+        assert!(raw.contains("kind = \"codex_oauth\""));
+        assert!(!raw.contains("access_token"));
+        let config = Config::parse(&raw).unwrap();
+        assert!(matches!(
+            config.providers["codex"],
+            crate::config::ProviderConfig::CodexOAuth { .. }
+        ));
+    }
+
+    #[test]
+    fn add_codex_oauth_refuses_a_kind_clash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "[providers.codex]\nkind = \"codex_cli\"\n").unwrap();
+        let err = add_codex_oauth_provider(
+            &path,
+            &CodexOAuthProviderInput {
+                id: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                credential: "codex".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("already has kind"), "{err}");
     }
 
     #[test]

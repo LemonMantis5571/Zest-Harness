@@ -18,7 +18,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::time::timeout;
 
+use crate::codex_oauth::{refresh_and_store, ORIGINATOR, USAGE_URL};
 use crate::config::{Config, ProviderConfig};
+use crate::provider::driver::{credentials_for, resolve};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -117,14 +119,32 @@ pub async fn fetch_provider_quotas(config: &Config) -> ProviderQuotaSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexQuotaSource {
+    AppServer,
+    Wham,
+}
+
+fn quota_source(provider: &ProviderConfig) -> Option<CodexQuotaSource> {
+    match provider {
+        ProviderConfig::CodexCli { .. } => Some(CodexQuotaSource::AppServer),
+        ProviderConfig::CodexOAuth { .. } => Some(CodexQuotaSource::Wham),
+        _ => None,
+    }
+}
+
 async fn fetch_provider_quota(
     provider_id: &str,
     provider: &ProviderConfig,
     client: Option<&reqwest::Client>,
     client_error: Option<&str>,
 ) -> ProviderQuotaView {
-    if provider_id.eq_ignore_ascii_case("codex") {
-        return fetch_codex_rate_limits(provider_id).await;
+    match quota_source(provider) {
+        Some(CodexQuotaSource::AppServer) => return fetch_codex_rate_limits(provider_id).await,
+        Some(CodexQuotaSource::Wham) => {
+            return fetch_codex_oauth_usage(provider_id, provider, client, client_error).await
+        }
+        None => {}
     }
 
     if is_claude_subscription_provider(provider) {
@@ -158,10 +178,9 @@ async fn fetch_provider_quota(
             "Anthropic exposes rate limits after a request, not a plan balance here.",
         ),
         ProviderConfig::ClaudeCode { .. } => fetch_claude_desktop_quota(provider_id).await,
-        ProviderConfig::CodexCli { .. } => unavailable_view(
-            provider_id,
-            "Codex account usage is owned by the native CLI.",
-        ),
+        ProviderConfig::CodexCli { .. } | ProviderConfig::CodexOAuth { .. } => {
+            unreachable!("Codex quota is dispatched by kind before this match")
+        }
         ProviderConfig::OpenaiCompatible { .. } => {
             unavailable_view(provider_id, "This API has no standard balance endpoint.")
         }
@@ -408,6 +427,133 @@ async fn fetch_codex_rate_limits(provider_id: &str) -> ProviderQuotaView {
         Ok(result) => codex_quota_view(provider_id, result),
         Err(detail) => unavailable_view(provider_id, detail),
     }
+}
+
+async fn fetch_codex_oauth_usage(
+    provider_id: &str,
+    provider: &ProviderConfig,
+    client: Option<&reqwest::Client>,
+    client_error: Option<&str>,
+) -> ProviderQuotaView {
+    let Some(client) = client else {
+        return error_view(
+            provider_id,
+            client_error.unwrap_or("Could not start the usage check."),
+        );
+    };
+    let request = credentials_for(provider_id, provider);
+    let raw = match resolve(request) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => {
+            return unavailable_view(provider_id, "Sign in again to refresh Codex limits.")
+        }
+        Err(error) => return error_view(provider_id, error),
+    };
+    let session = match crate::codex_oauth::CodexOAuthSession::parse_json(&raw) {
+        Ok(session) => session,
+        Err(_) => {
+            return error_view(
+                provider_id,
+                "Sign in again to refresh Codex limits.",
+            )
+        }
+    };
+    let account = request
+        .account
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(provider_id);
+    let session = match refresh_and_store(account, session).await {
+        Ok(session) => session,
+        Err(_) => {
+            return error_view(provider_id, "Sign in again to refresh Codex limits.")
+        }
+    };
+
+    let response = match client
+        .get(USAGE_URL)
+        .header("authorization", format!("Bearer {}", session.access_token))
+        .header("ChatGPT-Account-ID", &session.account_id)
+        .header("accept", "application/json")
+        .header("originator", ORIGINATOR)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return error_view(provider_id, format!("Could not read Codex limits: {error}"))
+        }
+    };
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    chatgpt_usage_from_http(provider_id, status, &body)
+}
+
+fn chatgpt_usage_from_http(provider_id: &str, status: u16, body: &str) -> ProviderQuotaView {
+    if status == 401 || status == 403 {
+        return error_view(provider_id, "Sign in again to refresh Codex limits.");
+    }
+    if !(200..300).contains(&status) {
+        return unavailable_view(
+            provider_id,
+            format!("Codex usage check failed ({status})."),
+        );
+    }
+    match serde_json::from_str::<ChatgptWhamUsage>(body) {
+        Ok(parsed) => chatgpt_quota_view(provider_id, parsed),
+        Err(_) => unavailable_view(provider_id, "Codex returned an unreadable usage report."),
+    }
+}
+
+fn chatgpt_quota_view(provider_id: &str, usage: ChatgptWhamUsage) -> ProviderQuotaView {
+    let Some(rate_limit) = usage.rate_limit else {
+        return unavailable_view(provider_id, "Codex did not report account limits.");
+    };
+    let mut windows = Vec::new();
+    for (label, window) in [
+        ("Primary", rate_limit.primary_window),
+        ("Secondary", rate_limit.secondary_window),
+    ] {
+        if let Some(window) = window {
+            match chatgpt_window_view(label, window) {
+                Some(view) => windows.push(view),
+                None => {
+                    return unavailable_view(
+                        provider_id,
+                        "Codex returned an unreadable usage report.",
+                    )
+                }
+            }
+        }
+    }
+    if windows.is_empty() {
+        return unavailable_view(provider_id, "Codex did not report an active quota window.");
+    }
+    ProviderQuotaView {
+        provider_id: provider_id.to_string(),
+        kind: ProviderQuotaKind::RateLimit,
+        detail: "Limits reported by ChatGPT.".to_string(),
+        available: Some(!rate_limit.limit_reached.unwrap_or(false)),
+        balances: Vec::new(),
+        windows,
+        plan: usage.plan_type.filter(|value| !value.is_empty()),
+        spend_limit: None,
+    }
+}
+
+fn chatgpt_window_view(label: &str, window: ChatgptWhamWindow) -> Option<ProviderQuotaWindowView> {
+    let used_percent = window.used_percent?;
+    let window_minutes = window.limit_window_seconds.map(|seconds| seconds / 60);
+    Some(ProviderQuotaWindowView {
+        label: format!(
+            "{label}{}",
+            window_minutes
+                .map(|minutes| format!(" ({})", format_window_duration(minutes)))
+                .unwrap_or_default()
+        ),
+        used_percent,
+        window_minutes,
+        resets_at: window.reset_at.and_then(non_negative_timestamp),
+    })
 }
 
 fn codex_cli_unavailable_detail() -> String {
@@ -682,6 +828,34 @@ struct DeepSeekBalance {
 }
 
 #[derive(Debug, Deserialize)]
+struct ChatgptWhamUsage {
+    #[serde(default)]
+    plan_type: Option<String>,
+    #[serde(default)]
+    rate_limit: Option<ChatgptWhamRateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatgptWhamRateLimit {
+    #[serde(default)]
+    limit_reached: Option<bool>,
+    #[serde(default)]
+    primary_window: Option<ChatgptWhamWindow>,
+    #[serde(default)]
+    secondary_window: Option<ChatgptWhamWindow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatgptWhamWindow {
+    #[serde(default)]
+    used_percent: Option<f64>,
+    #[serde(default)]
+    limit_window_seconds: Option<u64>,
+    #[serde(default)]
+    reset_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexRateLimitResponse {
     #[serde(default)]
@@ -890,7 +1064,118 @@ mod tests {
         assert!(snapshot.providers[1].detail.contains("API key"));
         assert!(matches!(
             snapshot.providers[2].kind,
-            ProviderQuotaKind::Unavailable
+            ProviderQuotaKind::Unavailable | ProviderQuotaKind::RateLimit
         ));
+    }
+
+    fn oauth_config(model: &str, credential: Option<&str>) -> ProviderConfig {
+        ProviderConfig::CodexOAuth {
+            model: model.into(),
+            models: Vec::new(),
+            efforts: Vec::new(),
+            credential: credential.map(str::to_string),
+        }
+    }
+
+    fn cli_config() -> ProviderConfig {
+        ProviderConfig::CodexCli {
+            command: "codex".into(),
+            model: "model".into(),
+            models: Vec::new(),
+            efforts: Vec::new(),
+            allow_mcp: false,
+            timeout_secs: 900,
+        }
+    }
+
+    #[test]
+    fn parses_chatgpt_wham_usage_windows() {
+        let usage: ChatgptWhamUsage = serde_json::from_str(
+            r#"{
+              "plan_type": "plus",
+              "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                  "used_percent": 34,
+                  "limit_window_seconds": 18000,
+                  "reset_at": 1778091218
+                },
+                "secondary_window": {
+                  "used_percent": 37,
+                  "limit_window_seconds": 604800,
+                  "reset_at": 1778605571
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let view = chatgpt_quota_view("codex", usage);
+        assert!(matches!(view.kind, ProviderQuotaKind::RateLimit));
+        assert_eq!(view.plan.as_deref(), Some("plus"));
+        assert_eq!(view.windows.len(), 2);
+        assert_eq!(view.windows[0].label, "Primary (5h)");
+        assert_eq!(view.windows[0].used_percent, 34.0);
+        assert_eq!(view.windows[0].window_minutes, Some(300));
+        assert_eq!(view.windows[1].label, "Secondary (7d)");
+        assert_eq!(view.windows[1].used_percent, 37.0);
+        assert_eq!(view.windows[1].window_minutes, Some(10_080));
+    }
+
+    #[test]
+    fn quota_source_is_app_server_for_every_codex_cli_id() {
+        assert_eq!(quota_source(&cli_config()), Some(CodexQuotaSource::AppServer));
+    }
+
+    #[test]
+    fn quota_source_is_wham_for_codex_oauth_even_when_id_is_codex() {
+        assert_eq!(
+            quota_source(&oauth_config("gpt-5.6-sol", None)),
+            Some(CodexQuotaSource::Wham)
+        );
+    }
+
+    #[test]
+    fn codex_oauth_named_codex_does_not_spawn_the_cli() {
+        assert_ne!(
+            quota_source(&oauth_config("gpt-5.6-sol", None)),
+            Some(CodexQuotaSource::AppServer)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_config_with_both_codex_kinds_emits_two_quota_views() {
+        let mut config = Config::default();
+        config
+            .providers
+            .insert("codex".into(), oauth_config("gpt-5.6-sol", Some("missing-oauth")));
+        config.providers.insert("work-codex".into(), cli_config());
+        let snapshot = fetch_provider_quotas(&config).await;
+        assert_eq!(snapshot.providers.len(), 2);
+        assert_eq!(snapshot.providers[0].provider_id, "codex");
+        assert_eq!(snapshot.providers[1].provider_id, "work-codex");
+        assert!(matches!(
+            snapshot.providers[0].kind,
+            ProviderQuotaKind::Unavailable | ProviderQuotaKind::Error
+        ));
+        assert!(
+            snapshot.providers[0]
+                .windows
+                .iter()
+                .all(|window| window.used_percent != 0.0)
+                || snapshot.providers[0].windows.is_empty()
+        );
+    }
+
+    #[test]
+    fn wham_usage_401_is_not_zero_percent() {
+        let view = chatgpt_usage_from_http("codex", 401, r#"{"error":"unauthorized"}"#);
+        assert!(matches!(
+            view.kind,
+            ProviderQuotaKind::Error | ProviderQuotaKind::Unavailable
+        ));
+        assert!(view.windows.is_empty());
+        assert!(view.detail.contains("Sign in again"), "{}", view.detail);
+        assert!(!matches!(view.kind, ProviderQuotaKind::RateLimit));
     }
 }
