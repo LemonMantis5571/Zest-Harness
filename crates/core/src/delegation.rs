@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ExternalAgentConfig, ExternalWorkspace};
 use crate::error::{HarnessError, Result};
 use crate::fsutil;
+use crate::orchestration::{
+    DispatchRole, DispatchStatus, GateStatus, LifecyclePhase, MessageKind, OrchestrationState,
+    WorktreeLineage,
+};
 use crate::tools::sensitive::is_sensitive_path;
 
 pub const DELEGATION_FORMAT_VERSION: u32 = 2;
@@ -656,6 +660,8 @@ pub struct DelegationJob {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default)]
+    pub orchestration: OrchestrationState,
 }
 
 /// Explain why a queued job cannot proceed because one of its prerequisites
@@ -741,6 +747,18 @@ impl DelegationJob {
         self.resolved_worker_target = Some(worker);
         self.resolved_reviewer_target = Some(reviewer);
         self.updated_at = now_millis();
+        self.orchestration.resolve_gate(
+            "approval",
+            GateStatus::Approved,
+            "Dispatch targets approved",
+            self.updated_at,
+        );
+        self.orchestration.add_message(
+            MessageKind::Decision,
+            "user",
+            "Dispatch targets approved",
+            self.updated_at,
+        );
         Ok(())
     }
 
@@ -854,12 +872,35 @@ impl DelegationJob {
         }
         self.status = next;
         self.updated_at = now_millis();
+        self.orchestration.set_phase(
+            LifecyclePhase::from(next),
+            self.updated_at,
+            format!("delegation status changed to {next:?}"),
+        );
         Ok(true)
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
-        self.error = Some(clip_chars(&message.into(), 4_000));
+        let message = clip_chars(&message.into(), 4_000);
+        self.error = Some(message.clone());
         self.updated_at = now_millis();
+        self.orchestration
+            .add_message(MessageKind::Error, "coordinator", message, self.updated_at);
+        match self.orchestration.phase {
+            LifecyclePhase::Blocked | LifecyclePhase::Failed => self.orchestration.open_gate(
+                "recovery",
+                "Recovery",
+                self.error.as_deref().unwrap_or_default(),
+                self.updated_at,
+            ),
+            LifecyclePhase::ChangesRequested => self.orchestration.open_gate(
+                "changes",
+                "Requested changes",
+                self.error.as_deref().unwrap_or_default(),
+                self.updated_at,
+            ),
+            _ => {}
+        }
     }
 
     pub fn start_attempt(&mut self, role: AttemptRole, agent: &str) -> Result<String> {
@@ -902,6 +943,7 @@ impl DelegationJob {
             AttemptRole::Reviewer => "reviewer",
         };
         let attempt_id = crate::thread::new_id(prefix);
+        let target_identity = resolved_target.target.identity().to_string();
         let attempt = DelegationAttempt {
             attempt_id: attempt_id.clone(),
             role: role.clone(),
@@ -920,6 +962,16 @@ impl DelegationJob {
         }
         self.attempts.push(attempt);
         self.updated_at = now_millis();
+        self.orchestration.start_dispatch(
+            attempt_id.clone(),
+            match role {
+                AttemptRole::Worker => DispatchRole::Worker,
+                AttemptRole::Reviewer => DispatchRole::Reviewer,
+            },
+            target_identity,
+            self.attempt,
+            self.updated_at,
+        );
         Ok(attempt_id)
     }
 
@@ -964,9 +1016,25 @@ impl DelegationJob {
             attempt.finished_at = Some(now_millis());
         }
         self.updated_at = now_millis();
+        self.orchestration.finish_dispatch(
+            DispatchStatus::Completed,
+            self.updated_at,
+            "dispatch completed",
+        );
     }
 
     pub fn finish_active_attempts(&mut self) {
+        self.finish_active_attempts_with_status(
+            DispatchStatus::Cancelled,
+            "dispatch stopped during recovery",
+        );
+    }
+
+    pub fn finish_active_attempts_with_status(
+        &mut self,
+        dispatch_status: DispatchStatus,
+        detail: impl AsRef<str>,
+    ) {
         let now = now_millis();
         let mut changed = false;
         for attempt in &mut self.attempts {
@@ -977,6 +1045,8 @@ impl DelegationJob {
         }
         if changed {
             self.updated_at = now;
+            self.orchestration
+                .finish_dispatch(dispatch_status, now, detail);
         }
     }
 }
@@ -1255,6 +1325,17 @@ impl DelegationStore {
             card.card_id
         };
         let now = now_millis();
+        let mut orchestration = OrchestrationState::new(
+            format!("run-{job_id}"),
+            card.card_id.clone(),
+            parent_thread_id,
+            capture_worktree_lineage(&self.root, &snapshot),
+        );
+        orchestration.set_phase(
+            LifecyclePhase::AwaitingApproval,
+            now,
+            "feature card is waiting for dispatch approval",
+        );
         let job = DelegationJob {
             version: DELEGATION_FORMAT_VERSION,
             job_id: job_id.clone(),
@@ -1290,6 +1371,7 @@ impl DelegationStore {
             created_at: now,
             updated_at: now,
             error: None,
+            orchestration,
         };
         if self.load(&job_id)?.is_some() {
             return Err(HarnessError::Other(
@@ -1442,7 +1524,7 @@ fn read_job(path: &Path, id: &str) -> Result<Option<DelegationJob>> {
             }
         }
     }
-    let job: DelegationJob = serde_json::from_value(value).map_err(|error| {
+    let mut job: DelegationJob = serde_json::from_value(value).map_err(|error| {
         HarnessError::Other(format!(
             "delegation job {id} is corrupt at {}: {error}",
             path.display()
@@ -1454,7 +1536,22 @@ fn read_job(path: &Path, id: &str) -> Result<Option<DelegationJob>> {
             job.version
         )));
     }
-    if version == u64::from(LEGACY_DELEGATION_FORMAT_VERSION) {
+    let needs_orchestration_repair = job.orchestration.is_uninitialized();
+    if needs_orchestration_repair {
+        let mut orchestration = OrchestrationState::new(
+            format!("run-{}", job.job_id),
+            job.card.card_id.clone(),
+            job.parent_thread_id.clone(),
+            capture_worktree_lineage(Path::new(&job.project_root), &job.base_workspace_snapshot),
+        );
+        orchestration.set_phase(
+            LifecyclePhase::from(job.status),
+            job.updated_at,
+            "recovered orchestration state from the delegation record",
+        );
+        job.orchestration = orchestration;
+    }
+    if version == u64::from(LEGACY_DELEGATION_FORMAT_VERSION) || needs_orchestration_repair {
         write_json(path, "migrated delegation job", id, &job)?;
     }
     Ok(Some(job))
@@ -1488,6 +1585,18 @@ fn write_json<T: Serialize>(path: &Path, kind: &str, id: &str, value: &T) -> Res
 /// Capture only stable checkout metadata. This is synchronous because it is
 /// used at the tool boundary and by the explicit apply command, never inside
 /// an external worker stream.
+pub fn capture_worktree_lineage(root: &Path, snapshot: &WorkspaceSnapshot) -> WorktreeLineage {
+    let branch = git_output(root, &["branch", "--show-current"]);
+    WorktreeLineage {
+        base_ref: branch.clone(),
+        start_ref: snapshot.head.clone(),
+        branch,
+        checkout_path: Some(root.to_string_lossy().into_owned()),
+        host: "local".into(),
+        parent_task: None,
+    }
+}
+
 pub fn capture_workspace_snapshot(root: &Path) -> WorkspaceSnapshot {
     let head = git_output(root, &["rev-parse", "HEAD"]);
     let status =
@@ -1813,6 +1922,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            orchestration: OrchestrationState::default(),
         };
         assert!(job.transition(DelegationStatus::AwaitingApproval).unwrap());
         assert!(!job.transition(DelegationStatus::AwaitingApproval).unwrap());
@@ -1901,6 +2011,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            orchestration: OrchestrationState::default(),
         };
         job.approve().unwrap();
         job.transition(DelegationStatus::Queued).unwrap();

@@ -24,6 +24,7 @@ pub mod error;
 pub mod fsutil;
 pub mod handoff;
 pub mod mcp;
+pub mod orchestration;
 pub mod persist;
 pub mod prefs;
 pub mod pricing;
@@ -74,19 +75,24 @@ pub use delegated_worker::{
     NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
 };
 pub use delegation::{
-    apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
-    validate_diff_paths, validate_diff_scope, validate_review_paths, AcceptanceCheckResult,
-    AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
-    DelegationOrigin, DelegationStatus, DelegationStore, DelegationTarget, FeatureCard,
-    ResolvedTargetMetadata, ReviewDecision, ReviewFinding, ReviewReport, ReviewSeverity,
-    ReviewerTarget, TargetFingerprint, WorkerResult, WorkspaceSnapshot, DELEGATION_FORMAT_VERSION,
-    LEGACY_DELEGATION_FORMAT_VERSION,
+    apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
+    diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths,
+    AcceptanceCheckResult, AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts,
+    DelegationAttempt, DelegationJob, DelegationOrigin, DelegationStatus, DelegationStore,
+    DelegationTarget, FeatureCard, ResolvedTargetMetadata, ReviewDecision, ReviewFinding,
+    ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
+    WorkspaceSnapshot, DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
 pub use mcp::{
     probe_server as probe_mcp_server, register_mcp_tools, McpCatalog, McpServer, McpToolDef,
+};
+pub use orchestration::{
+    DecisionGate, DispatchRole, DispatchState, DispatchStatus, ExternalSessionEvidence, GateStatus,
+    InboxMessage, LifecycleEntry, LifecyclePhase, MessageKind, OrchestrationState, RetryState,
+    WorktreeLineage, ORCHESTRATION_FORMAT_VERSION,
 };
 pub use persist::{
     PersistPriority, PersistWorker, Snapshot as PersistSnapshot, DELTA_CHECKPOINT_MS,

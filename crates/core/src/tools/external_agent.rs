@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -35,6 +35,7 @@ use super::Tool;
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
+use crate::orchestration::ExternalSessionEvidence;
 use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
 use crate::tools::isolated_workspace;
 use crate::usage::{ExternalCost, ExternalUsageReport};
@@ -90,6 +91,8 @@ pub(crate) struct ExternalAgentRun {
     pub(crate) diff: String,
     pub(crate) usage: Option<ExternalUsageReport>,
     pub(crate) limits: Option<RateLimitSnapshot>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) session_evidence: Option<ExternalSessionEvidence>,
 }
 
 /// Result exposed to the desktop coordinator. The low-level stream remains
@@ -102,6 +105,7 @@ pub struct ExternalAgentResult {
     pub errors: Vec<String>,
     pub malformed_lines: usize,
     pub usage: Option<ExternalUsageReport>,
+    pub session_evidence: Option<ExternalSessionEvidence>,
 }
 
 impl ExternalAgentRun {
@@ -116,6 +120,7 @@ impl ExternalAgentRun {
             errors,
             malformed_lines: self.malformed_lines,
             usage,
+            session_evidence: self.session_evidence,
         }
     }
 }
@@ -735,6 +740,36 @@ fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn session_evidence_for(
+    run: &ExternalAgentRun,
+    cwd: &Path,
+    config: &ExternalAgentConfig,
+) -> ExternalSessionEvidence {
+    let branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    let captured_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    ExternalSessionEvidence {
+        worker_id: config.command.clone(),
+        command: config.command.clone(),
+        model: config.model.clone(),
+        session_id: run.session_id.clone(),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        branch,
+        preview: None,
+        resumable: false,
+        captured_at,
+    }
+}
+
 async fn run_current(
     root: &Path,
     config: &ExternalAgentConfig,
@@ -746,6 +781,7 @@ async fn run_current(
         .ok()
         .filter(|value| !value.trim().is_empty());
     let mut run = spawn_and_run(root, config, prompt, parent_secret_envs).await?;
+    run.session_evidence = Some(session_evidence_for(&run, root, config));
     if let Some(base) = base {
         let diff = isolated_workspace::collect_git_diff(root, &base).await?;
         run.diff = clip_diff(&diff);
@@ -822,11 +858,13 @@ async fn run_isolated(
     let mut workspace = isolated_workspace::prepare(root)
         .await
         .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
+    let workspace_path = workspace.path().to_path_buf();
     let result = spawn_and_run(workspace.path(), config, prompt, parent_secret_envs).await;
     let diff = workspace.collect_diff().await;
     let cleanup = workspace.cleanup().await;
 
     let mut run = result?;
+    run.session_evidence = Some(session_evidence_for(&run, &workspace_path, config));
     let diff = diff?;
     cleanup?;
     run.diff = clip_diff(&diff);
@@ -883,6 +921,7 @@ pub async fn run_delegation_reviewer(
                 format!("prepare reviewer workspace: {error}")
             }
         })?;
+    let workspace_path = workspace.path().to_path_buf();
     let result = spawn_and_run_with_cancel(
         workspace.path(),
         config,
@@ -895,6 +934,7 @@ pub async fn run_delegation_reviewer(
     let reviewer_diff = workspace.collect_diff().await;
     let cleanup = workspace.cleanup().await;
     let mut run = result?;
+    run.session_evidence = Some(session_evidence_for(&run, &workspace_path, config));
     let reviewer_diff = reviewer_diff?;
     cleanup?;
     run.diff = clip_diff(&reviewer_diff);
@@ -916,6 +956,7 @@ async fn run_isolated_with_cancel(
     let mut workspace = isolated_workspace::prepare(root)
         .await
         .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
+    let workspace_path = workspace.path().to_path_buf();
     let result = spawn_and_run_with_cancel(
         workspace.path(),
         config,
@@ -928,6 +969,7 @@ async fn run_isolated_with_cancel(
     let diff = workspace.collect_diff().await;
     let cleanup = workspace.cleanup().await;
     let mut run = result?;
+    run.session_evidence = Some(session_evidence_for(&run, &workspace_path, config));
     let diff = diff?;
     cleanup?;
     run.diff = clip_diff(&diff);
@@ -1995,6 +2037,7 @@ async fn run_acp(
         .and_then(Value::as_str)
         .ok_or_else(|| "ACP session/new returned no sessionId".to_string())?
         .to_string();
+    run.session_id = Some(session_id.clone());
     next_id += 1;
 
     send_rpc(

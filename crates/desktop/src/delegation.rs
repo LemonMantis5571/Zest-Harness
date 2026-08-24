@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -10,15 +11,28 @@ use tokio::sync::Semaphore;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
-    resolve_provider_target, run_acceptance_checks, run_delegation_reviewer, run_delegation_worker,
-    run_provider_reviewer, run_provider_worker, validate_diff_scope, AttemptRole, AttemptUsage,
-    CheckStatus, Config, DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus,
-    DelegationStore, DelegationTarget, ExternalUsageReport, ProviderConfig, ResolvedTargetMetadata,
-    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
+    apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
+    diff_paths, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
+    run_delegation_worker, run_provider_reviewer, run_provider_worker, validate_diff_scope,
+    AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob, DelegationOrigin,
+    DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
+    ExternalUsageReport, ProviderConfig, ResolvedTargetMetadata, ReviewReport,
+    ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
+};
+use zest_core::{
+    DecisionGate, DispatchState, ExternalSessionEvidence, InboxMessage, LifecycleEntry,
+    OrchestrationState, RetryState, WorktreeLineage,
 };
 
 const MAX_ACTIVE_WORKER_JOBS: usize = 2;
+const HEARTBEAT_INTERVAL_SECS: u64 = 15;
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +289,284 @@ impl From<&DelegationOrigin> for DelegationOriginView {
     }
 }
 
+fn serialized_label<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "WorktreeLineageView.ts", rename_all = "camelCase")
+)]
+pub struct WorktreeLineageView {
+    pub base_ref: Option<String>,
+    pub start_ref: Option<String>,
+    pub branch: Option<String>,
+    pub checkout_path: Option<String>,
+    pub host: String,
+    pub parent_task: Option<String>,
+}
+
+impl From<&WorktreeLineage> for WorktreeLineageView {
+    fn from(lineage: &WorktreeLineage) -> Self {
+        Self {
+            base_ref: lineage.base_ref.clone(),
+            start_ref: lineage.start_ref.clone(),
+            branch: lineage.branch.clone(),
+            checkout_path: lineage.checkout_path.clone(),
+            host: lineage.host.clone(),
+            parent_task: lineage.parent_task.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "DispatchView.ts", rename_all = "camelCase")
+)]
+pub struct DispatchView {
+    pub id: String,
+    pub role: String,
+    pub target: String,
+    pub attempt: u32,
+    pub status: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub started_at: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub heartbeat_at: Option<u64>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub finished_at: Option<u64>,
+}
+
+impl From<&DispatchState> for DispatchView {
+    fn from(dispatch: &DispatchState) -> Self {
+        Self {
+            id: dispatch.id.clone(),
+            role: serialized_label(&dispatch.role),
+            target: dispatch.target.clone(),
+            attempt: dispatch.attempt,
+            status: serialized_label(&dispatch.status),
+            started_at: dispatch.started_at,
+            heartbeat_at: dispatch.heartbeat_at,
+            finished_at: dispatch.finished_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "InboxMessageView.ts", rename_all = "camelCase")
+)]
+pub struct InboxMessageView {
+    pub id: String,
+    pub kind: String,
+    pub sender: String,
+    pub body: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub created_at: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub read_at: Option<u64>,
+}
+
+impl From<&InboxMessage> for InboxMessageView {
+    fn from(message: &InboxMessage) -> Self {
+        Self {
+            id: message.id.clone(),
+            kind: serialized_label(&message.kind),
+            sender: message.sender.clone(),
+            body: message.body.clone(),
+            created_at: message.created_at,
+            read_at: message.read_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "DecisionGateView.ts", rename_all = "camelCase")
+)]
+pub struct DecisionGateView {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub required: bool,
+    pub detail: Option<String>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub opened_at: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub resolved_at: Option<u64>,
+}
+
+impl From<&DecisionGate> for DecisionGateView {
+    fn from(gate: &DecisionGate) -> Self {
+        Self {
+            id: gate.id.clone(),
+            label: gate.label.clone(),
+            status: serialized_label(&gate.status),
+            required: gate.required,
+            detail: gate.detail.clone(),
+            opened_at: gate.opened_at,
+            resolved_at: gate.resolved_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "RetryStateView.ts", rename_all = "camelCase")
+)]
+pub struct RetryStateView {
+    pub attempt: u32,
+    pub last_error: Option<String>,
+    pub next_action: Option<String>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub requested_at: Option<u64>,
+}
+
+impl From<&RetryState> for RetryStateView {
+    fn from(retry: &RetryState) -> Self {
+        Self {
+            attempt: retry.attempt,
+            last_error: retry.last_error.clone(),
+            next_action: retry.next_action.clone(),
+            requested_at: retry.requested_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "ExternalSessionEvidenceView.ts",
+        rename_all = "camelCase"
+    )
+)]
+pub struct ExternalSessionEvidenceView {
+    pub worker_id: String,
+    pub command: String,
+    pub model: Option<String>,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+    pub preview: Option<String>,
+    pub resumable: bool,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub captured_at: u64,
+}
+
+impl From<&ExternalSessionEvidence> for ExternalSessionEvidenceView {
+    fn from(evidence: &ExternalSessionEvidence) -> Self {
+        Self {
+            worker_id: evidence.worker_id.clone(),
+            command: evidence.command.clone(),
+            model: evidence.model.clone(),
+            session_id: evidence.session_id.clone(),
+            cwd: evidence.cwd.clone(),
+            branch: evidence.branch.clone(),
+            preview: evidence.preview.clone(),
+            resumable: evidence.resumable,
+            captured_at: evidence.captured_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "LifecycleEntryView.ts", rename_all = "camelCase")
+)]
+pub struct LifecycleEntryView {
+    pub phase: String,
+    pub detail: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub at: u64,
+    pub dispatch_id: Option<String>,
+}
+
+impl From<&LifecycleEntry> for LifecycleEntryView {
+    fn from(entry: &LifecycleEntry) -> Self {
+        Self {
+            phase: serialized_label(&entry.phase),
+            detail: entry.detail.clone(),
+            at: entry.at,
+            dispatch_id: entry.dispatch_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "OrchestrationView.ts", rename_all = "camelCase")
+)]
+pub struct OrchestrationView {
+    pub version: u32,
+    pub run_id: String,
+    pub task_id: String,
+    pub parent_thread_id: String,
+    pub phase: String,
+    pub dispatch: Option<DispatchView>,
+    pub worktree: WorktreeLineageView,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    pub heartbeat_at: Option<u64>,
+    pub inbox: Vec<InboxMessageView>,
+    pub decision_gates: Vec<DecisionGateView>,
+    pub retry: RetryStateView,
+    pub external_session: Option<ExternalSessionEvidenceView>,
+    pub external_session_history: Vec<ExternalSessionEvidenceView>,
+    pub lifecycle: Vec<LifecycleEntryView>,
+}
+
+impl From<&OrchestrationState> for OrchestrationView {
+    fn from(state: &OrchestrationState) -> Self {
+        Self {
+            version: state.version,
+            run_id: state.run_id.clone(),
+            task_id: state.task_id.clone(),
+            parent_thread_id: state.parent_thread_id.clone(),
+            phase: serialized_label(&state.phase),
+            dispatch: state.dispatch.as_ref().map(Into::into),
+            worktree: (&state.worktree).into(),
+            heartbeat_at: state.heartbeat_at,
+            inbox: state.inbox.iter().map(Into::into).collect(),
+            decision_gates: state.decision_gates.iter().map(Into::into).collect(),
+            retry: (&state.retry).into(),
+            external_session: state.external_session.as_ref().map(Into::into),
+            external_session_history: state
+                .external_session_history
+                .iter()
+                .map(Into::into)
+                .collect(),
+            lifecycle: state.lifecycle.iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -395,6 +687,9 @@ pub struct DelegationJobView {
     pub attempts: Vec<DelegationAttemptView>,
     pub attempt: u32,
     pub status: DelegationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    pub orchestration: Option<OrchestrationView>,
     pub changed_files: Vec<String>,
     pub changed_file_count: usize,
     pub acceptance_checks: Vec<AcceptanceCheckView>,
@@ -423,6 +718,7 @@ pub enum DelegationEvent {
     ApprovalRequired { job: DelegationJobView },
     Queued { job: DelegationJobView },
     WorkerStarted { job: DelegationJobView },
+    Heartbeat { job: DelegationJobView },
     WorkerCompleted { job: DelegationJobView },
     ReviewerStarted { job: DelegationJobView },
     ReviewerCompleted { job: DelegationJobView },
@@ -441,6 +737,7 @@ enum EventKind {
     ApprovalRequired,
     Queued,
     WorkerStarted,
+    Heartbeat,
     WorkerCompleted,
     ReviewerStarted,
     ReviewerCompleted,
@@ -721,6 +1018,7 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
             .collect(),
         attempt: job.attempt,
         status: job.status.into(),
+        orchestration: Some((&job.orchestration).into()),
         changed_file_count: changed_files.len(),
         changed_files,
         acceptance_checks,
@@ -749,6 +1047,58 @@ impl DelegationCoordinator {
             running: Mutex::new(HashMap::new()),
             ledger,
         }
+    }
+
+    fn record_heartbeat<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        root: &Path,
+        job_id: &str,
+        detail: &str,
+    ) -> bool {
+        let Ok(store) = DelegationStore::open(root) else {
+            return false;
+        };
+        let Ok(Some(mut job)) = store.load(job_id) else {
+            return false;
+        };
+        if !matches!(
+            job.status,
+            CoreDelegationStatus::WorkerRunning | CoreDelegationStatus::ReviewRunning
+        ) {
+            return false;
+        }
+        job.orchestration.heartbeat(unix_millis(), detail);
+        if store.update(job.clone()).is_err() {
+            return false;
+        }
+        self.emit(app, &store, &job, EventKind::Heartbeat);
+        true
+    }
+
+    fn start_heartbeat_loop<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: AppHandle<R>,
+        root: PathBuf,
+        job_id: String,
+        cancel: zest_core::CancelToken,
+        detail: String,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        let coordinator = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if !coordinator.record_heartbeat(&app, &root, &job_id, &detail) {
+                            break;
+                        }
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        })
     }
 
     pub fn list_targets(root: &Path) -> Result<Vec<DelegationTargetOption>, String> {
@@ -853,7 +1203,9 @@ impl DelegationCoordinator {
         };
         job.approve_with_resolved_targets(resolved.worker, resolved.reviewer)
             .map_err(|error| error.to_string())?;
-        job.base_workspace_snapshot = capture_workspace_snapshot(root);
+        let snapshot = capture_workspace_snapshot(root);
+        job.base_workspace_snapshot = snapshot.clone();
+        job.orchestration.worktree = capture_worktree_lineage(root, &snapshot);
         job.transition(CoreDelegationStatus::Queued)
             .map_err(|error| error.to_string())?;
         store
@@ -1066,7 +1418,22 @@ impl DelegationCoordinator {
             job.transition(CoreDelegationStatus::AwaitingApproval)
                 .map_err(|error| error.to_string())?;
         }
-        job.base_workspace_snapshot = capture_workspace_snapshot(root);
+        let retry_at = unix_millis();
+        let previous_error = job.error.clone();
+        job.orchestration.record_retry(
+            job.attempt.saturating_add(1),
+            previous_error.as_deref(),
+            retry_at,
+        );
+        job.orchestration.add_message(
+            zest_core::MessageKind::Decision,
+            "coordinator",
+            "Retry requested; approval is required before dispatch",
+            retry_at,
+        );
+        let snapshot = capture_workspace_snapshot(root);
+        job.base_workspace_snapshot = snapshot.clone();
+        job.orchestration.worktree = capture_worktree_lineage(root, &snapshot);
         job.error = None;
         store
             .update(job.clone())
@@ -1196,8 +1563,8 @@ impl DelegationCoordinator {
         }
     }
 
-    async fn run_job<R: Runtime>(
-        &self,
+    async fn run_job<R: Runtime + 'static>(
+        self: &Arc<Self>,
         app: &AppHandle<R>,
         root: &Path,
         job_id: &str,
@@ -1264,6 +1631,13 @@ impl DelegationCoordinator {
             .update(job.clone())
             .map_err(|error| error.to_string())?;
         self.emit(app, &store, &job, EventKind::WorkerStarted);
+        let worker_heartbeat = self.start_heartbeat_loop(
+            app.clone(),
+            root.to_path_buf(),
+            job_id.to_string(),
+            cancel.clone(),
+            "worker dispatch is still active".into(),
+        );
 
         let snapshot = job.base_workspace_snapshot.clone();
         let dependency_summary = dependencies
@@ -1299,6 +1673,7 @@ impl DelegationCoordinator {
             worker_prompt
         };
         let worker_target = resolved_targets.worker.target.clone();
+        let mut worker_evidence = None;
         let worker = match &worker_target {
             DelegationTarget::ExternalAgent { agent_id } => {
                 let agent = config
@@ -1320,6 +1695,11 @@ impl DelegationCoordinator {
                 let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
                 let parsed = WorkerResult::from_external(&result.text, &result.diff)
                     .ok_or_else(|| "worker returned no usable result".to_string())?;
+                if let Some(mut evidence) = result.session_evidence {
+                    evidence.worker_id = agent_id.clone();
+                    evidence.preview = Some(parsed.summary.clone());
+                    worker_evidence = Some(evidence);
+                }
                 Ok((parsed, result.diff, result.text, attempt_usage))
             }
             DelegationTarget::Provider { .. } => {
@@ -1341,6 +1721,7 @@ impl DelegationCoordinator {
                 ))
             }
         };
+        worker_heartbeat.abort();
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
@@ -1366,6 +1747,12 @@ impl DelegationCoordinator {
             job.set_attempt_usage(&worker_attempt, usage)
                 .map_err(|e| e.to_string())?;
         }
+        if let Some(evidence) = worker_evidence.take() {
+            job.orchestration.attach_external_session(evidence);
+        }
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
         let _ = worker_text;
         self.emit(app, &store, &job, EventKind::WorkerCompleted);
         if cancel.is_cancelled() {
@@ -1386,6 +1773,13 @@ impl DelegationCoordinator {
             .update(job.clone())
             .map_err(|error| error.to_string())?;
         self.emit(app, &store, &job, EventKind::ReviewerStarted);
+        let reviewer_heartbeat = self.start_heartbeat_loop(
+            app.clone(),
+            root.to_path_buf(),
+            job_id.to_string(),
+            cancel.clone(),
+            "review dispatch is still active".into(),
+        );
         let checks = run_acceptance_checks(
             root,
             config.clone(),
@@ -1397,6 +1791,7 @@ impl DelegationCoordinator {
         .map_err(|error| format!("acceptance checks failed: {error}"))?;
         let check_evidence = serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?;
         let review_prompt = format!("{}\n\n# Authoritative acceptance-check results\n```json\n{}\n```\nReport these exact command/status/output values in your checks array.", job.card.review_prompt(root, &snapshot, &worker_result), check_evidence);
+        let mut reviewer_evidence = None;
         let review = match &reviewer_target {
             DelegationTarget::ExternalAgent { agent_id } => {
                 let agent = config
@@ -1417,6 +1812,10 @@ impl DelegationCoordinator {
                     ledger.record_external(agent_id, result.usage.as_ref());
                 }
                 let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
+                if let Some(mut evidence) = result.session_evidence {
+                    evidence.worker_id = agent_id.clone();
+                    reviewer_evidence = Some(evidence);
+                }
                 (result.text, result.diff, attempt_usage)
             }
             DelegationTarget::Provider { .. } => {
@@ -1434,6 +1833,14 @@ impl DelegationCoordinator {
                 (result.final_text, result.reviewer_diff, Some(result.usage))
             }
         };
+        reviewer_heartbeat.abort();
+        if let Some(mut evidence) = reviewer_evidence.take() {
+            evidence.preview = Some(review.0.chars().take(8_000).collect());
+            job.orchestration.attach_external_session(evidence);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+        }
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
@@ -1611,7 +2018,10 @@ impl DelegationCoordinator {
                 CoreDelegationStatus::Failed
             };
             job.transition(next).map_err(|error| error.to_string())?;
-            job.finish_active_attempts();
+            job.finish_active_attempts_with_status(
+                zest_core::DispatchStatus::Failed,
+                "dispatch failed",
+            );
             job.set_error(error);
             store
                 .update(job.clone())
@@ -1649,6 +2059,7 @@ impl DelegationCoordinator {
             EventKind::ApprovalRequired => DelegationEvent::ApprovalRequired { job: view },
             EventKind::Queued => DelegationEvent::Queued { job: view },
             EventKind::WorkerStarted => DelegationEvent::WorkerStarted { job: view },
+            EventKind::Heartbeat => DelegationEvent::Heartbeat { job: view },
             EventKind::WorkerCompleted => DelegationEvent::WorkerCompleted { job: view },
             EventKind::ReviewerStarted => DelegationEvent::ReviewerStarted { job: view },
             EventKind::ReviewerCompleted => DelegationEvent::ReviewerCompleted { job: view },

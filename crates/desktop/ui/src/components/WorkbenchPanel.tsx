@@ -23,6 +23,7 @@ import { Blobatar } from "blobatar/react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { OrchestrationStatus } from "@/components/OrchestrationStatus";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import type {
@@ -997,6 +998,13 @@ function WorkbenchBody({
                 </button>
               ))}
             </div>
+            {visibleDelegationJobs.length ? (
+              <div className="flex flex-col gap-1.5">
+                {visibleDelegationJobs.slice(0, 6).map((job) => (
+                  <OrchestrationStatus key={`orchestration:${job.jobId}`} job={job} />
+                ))}
+              </div>
+            ) : null}
             {createOpen ? (
               <div className="rounded-lg border border-primary/30 bg-primary/5 p-2.5">
                 <div className="mb-2 text-[11px] font-medium">Create a bounded job</div>

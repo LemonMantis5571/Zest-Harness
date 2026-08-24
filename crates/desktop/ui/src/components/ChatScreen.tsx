@@ -31,6 +31,7 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CustomizePanel } from "@/components/CustomizePanel";
 import { CheckpointRail } from "@/components/CheckpointRail";
+import { ConversationTurnHistory } from "@/components/ConversationTurnHistory";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
@@ -76,6 +77,7 @@ import {
 import { ZestPulse } from "@/components/ZestPulse";
 import { toast } from "@/components/ui/toast";
 import { getBackend } from "@/lib/backend";
+import { buildConversationTurns } from "@/lib/conversationTurns";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
@@ -811,6 +813,10 @@ export function ChatScreen({
     () => messages.slice(transcriptStart),
     [messages, transcriptStart]
   );
+  const conversationTurns = useMemo(
+    () => buildConversationTurns(messages, session.checkpoints),
+    [messages, session.checkpoints]
+  );
 
   useEffect(() => {
     setTranscriptWindow((current) => {
@@ -1429,6 +1435,11 @@ export function ChatScreen({
             {/* Branch changes moved out of this row and into BranchChangesBar
                 below the header, where the counts can say which project and
                 branch they belong to. */}
+            <ConversationTurnHistory
+              turns={conversationTurns}
+              messageCount={messages.length}
+              onJump={jumpToMessage}
+            />
             <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
             <NowPlayingButton />
             {/* Only with a project: a projectless chat has no folder to show,
@@ -1554,8 +1565,7 @@ export function ChatScreen({
               spare, so it steps aside and the transcript takes the width. */}
           {narrow ? null : (
             <CheckpointRail
-              checkpoints={session.checkpoints}
-              messages={messages}
+              turns={conversationTurns}
               onJump={jumpToMessage}
             />
           )}

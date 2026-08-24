@@ -6388,7 +6388,7 @@ dependencies = [
 
 [[package]]
 name = "zest"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6399,7 +6399,7 @@ dependencies = [
 
 [[package]]
 name = "zest-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6426,7 +6426,7 @@ dependencies = [
 
 [[package]]
 name = "zest-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6448,7 +6448,7 @@ dependencies = [
 
 [[package]]
 name = "zest-now-playing-plugin"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -6459,7 +6459,7 @@ dependencies = [
 
 [[package]]
 name = "zest-plugin-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]

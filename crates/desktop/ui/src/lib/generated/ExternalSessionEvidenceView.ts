@@ -1,0 +1,1 @@
+export type ExternalSessionEvidenceView = { workerId: string, command: string, model: string | null, sessionId: string | null, cwd: string | null, branch: string | null, preview: string | null, resumable: boolean, capturedAt: number, };
