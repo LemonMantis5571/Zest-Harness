@@ -33,6 +33,8 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { getBackend } from "@/lib/backend";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
+import { isBooleanRecord, parseJson } from "@/lib/json";
 import {
   elapsedLabel,
   type ThreadActivity,
@@ -134,8 +136,8 @@ function readExpandedMap(): Record<string, boolean> {
   try {
     const raw = localStorage.getItem(EXPANDED_KEY);
     if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, boolean>;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const parsed = parseJson(raw);
+    return isBooleanRecord(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -559,9 +561,9 @@ export function ChatHistorySidebar({
           type="button"
           onClick={() => {
             if (active) return;
-            void openThread(project, thread).catch(() => {
-              /* Parent handlers surface the actionable error. */
-            });
+            void openThread(project, thread).catch((error) =>
+              ignoreExpectedFailure(error, "open chat from history")
+            );
           }}
           onDoubleClick={(event) => {
             event.preventDefault();

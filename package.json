@@ -1,0 +1,26 @@
+{
+  "name": "zest",
+  "private": true,
+  "workspaces": [
+    "crates/desktop",
+    "crates/desktop/ui"
+  ],
+  "engines": {
+    "node": "24.16.0",
+    "npm": "11.13.0"
+  },
+  "scripts": {
+    "dev": "npm run desktop:dev",
+    "dev:official": "npm run dev:official -w zest-desktop",
+    "ui:dev": "npm run dev -w ui",
+    "ui:build": "npm run build -w ui",
+    "ui:lint": "npm run lint -w ui",
+    "ui:lint:plugins": "npm run lint:plugins -w ui",
+    "ui:test": "npm run test -w ui",
+    "desktop:dev": "npm run dev -w zest-desktop",
+    "desktop:build": "npm run build -w zest-desktop",
+    "verify": "node ./scripts/dev-verify.mjs",
+    "release:version": "node ./scripts/check-release-version.mjs",
+    "release:checksums": "node ./scripts/release-checksums.mjs"
+  }
+}

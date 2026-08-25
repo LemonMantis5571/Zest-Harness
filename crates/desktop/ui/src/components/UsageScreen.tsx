@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { modelLabel } from "@/lib/models";
 import { cn } from "@/lib/utils";
 import type {
@@ -73,7 +74,7 @@ export function UsageScreen({ onBack }: Props) {
           })
           // A failed refresh is not a failed screen. The cached rates are
           // already on it, and their age is already shown.
-          .catch(() => undefined);
+          .catch((error) => ignoreExpectedFailure(error, "refresh usage rates"));
       })
       .catch(() => {
         if (live) setError("Could not read the usage ledger. Try again.");

@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "jsPlugins": [
+    {
+      "name": "zest",
+      "specifier": "./.oxlint-plugins/zest-boundaries.mjs"
+    }
+  ],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": "off",
+    "zest/no-unvalidated-persisted-json": "error",
+    "zest/no-secret-persistence-or-sink": "error",
+    "zest/require-safe-html-provenance": "error",
+    "zest/no-unowned-background-rejection": "error",
+    "zest/no-object-url-leak": "error"
+  }
+}

@@ -29,6 +29,7 @@ import {
   AttachmentTitle,
 } from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { IconSwap } from "@/components/ui/icon-swap";
 import {
   chipLabel,
@@ -135,8 +136,9 @@ export function Composer({
       .then((next) => {
         if (!cancelled) setCommands(next);
       })
-      .catch(() => {
+      .catch((error) => {
         // No commands is a normal state, not an error worth a toast.
+        ignoreExpectedFailure(error, "load composer commands");
       });
     return () => {
       cancelled = true;

@@ -1,3 +1,5 @@
+import { isRecord, parseJson } from "./json.ts";
+
 /**
  * Keyboard commands, their bindings, and the storage behind both.
  *
@@ -252,7 +254,8 @@ export function loadBindings(): Bindings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return bindings;
-    const saved = JSON.parse(raw) as Record<string, unknown>;
+    const saved = parseJson(raw);
+    if (!isRecord(saved)) return bindings;
     for (const command of COMMANDS) {
       const value = saved[command.id];
       if (typeof value !== "string") continue;

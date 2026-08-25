@@ -1,3 +1,5 @@
+import { isRecord, parseJson } from "./json.ts";
+
 type DesktopErrorPayload = {
   code?: unknown;
   message?: unknown;
@@ -35,15 +37,13 @@ export type ConversationRecovery =
 
 function parseDesktopError(error: unknown): DesktopErrorPayload | null {
   const raw = String(error);
-  try {
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      const parsed = JSON.parse(raw.slice(start, end + 1)) as DesktopErrorPayload;
-      if (parsed && typeof parsed === "object") return parsed;
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const parsed = parseJson(raw.slice(start, end + 1));
+    if (isRecord(parsed)) {
+      return { code: parsed.code, message: parsed.message, details: parsed.details };
     }
-  } catch {
-    // Keep the raw value available for internal classification only.
   }
   return null;
 }

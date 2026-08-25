@@ -76,6 +76,7 @@ import {
 import { ZestPulse } from "@/components/ZestPulse";
 import { toast } from "@/components/ui/toast";
 import { getBackend } from "@/lib/backend";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { buildConversationTurns } from "@/lib/conversationTurns";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
@@ -748,7 +749,9 @@ export function ChatScreen({
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const refreshAndOpenProviderSwitch = useCallback(() => {
     void onRefreshProviders()
-      .catch(() => {})
+      .catch((error) =>
+        ignoreExpectedFailure(error, "refresh providers before provider switch")
+      )
       .finally(() => setProviderSwitchOpen(true));
   }, [onRefreshProviders]);
   const refreshAndOpenProviderSwitchRef = useRef(refreshAndOpenProviderSwitch);
@@ -879,8 +882,9 @@ export function ChatScreen({
         }
         setDiffTarget(branchTarget(change));
       })
-      .catch(() => {
+      .catch((error) => {
         // A persisted open state is best-effort when the workspace is unavailable.
+        ignoreExpectedFailure(error, "restore branch diff pane");
       });
     return () => {
       cancelled = true;

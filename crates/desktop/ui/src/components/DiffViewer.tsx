@@ -17,6 +17,7 @@ import {
 import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
 import { generateReadingDiff, type ReadingDiffView } from "@/lib/api";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { splitDiffSections, type DiffSection } from "@/lib/diffSections";
 import { makeReadingDiff, type ReadingDiff } from "@/lib/readingDiff";
 import { cn } from "@/lib/utils";
@@ -85,9 +86,10 @@ export function DiffViewer({
       .then((result) => {
         if (!cancelled) setReading(result);
       })
-      .catch(() => {
+      .catch((error) => {
         // The local conservative view remains useful when the provider is
         // unavailable or returns an invalid plan.
+        ignoreExpectedFailure(error, "generate reading diff");
       });
     return () => {
       cancelled = true;

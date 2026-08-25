@@ -13,6 +13,7 @@ import {
 
 import { FontPicker } from "@/components/FontPicker";
 import { Button } from "@/components/ui/button";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import {
   Collapsible,
   CollapsibleContent,
@@ -256,8 +257,9 @@ export function SettingsPanel({
       .then((snap) => {
         if (!cancelled) setUsage(snap);
       })
-      .catch(() => {
+      .catch((error) => {
         /* keep last good snapshot */
+        ignoreExpectedFailure(error, "refresh settings usage snapshot");
       });
     return () => {
       cancelled = true;

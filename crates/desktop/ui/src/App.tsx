@@ -10,6 +10,10 @@ import { toast, Toaster } from "@/components/ui/toast";
 import { admitAttachments } from "@/lib/attachmentLimits";
 import { getBackend } from "@/lib/backend";
 import {
+  fallbackOnFailure,
+  ignoreExpectedFailure,
+} from "@/lib/backgroundFailure";
+import {
   findApprovalTool,
   initialChatUiState,
   markApprovalRunning,
@@ -856,8 +860,9 @@ export default function App() {
             window.setTimeout(() => attempt(remaining - 1), 40);
           }
         })
-        .catch(() => {
+        .catch((error) => {
           /* checkpoint metadata is best-effort UI state */
+          ignoreExpectedFailure(error, "refresh checkpoint metadata");
         });
     };
 
@@ -1310,8 +1315,9 @@ export default function App() {
     void backend
       .approvalMode()
       .then((mode) => setApprovalModeState(mode as ApprovalMode))
-      .catch(() => {
+      .catch((error) => {
         /* keep the current chip; the picker is not worth an error toast */
+        ignoreExpectedFailure(error, "restore approval mode chip");
       });
     const loadedMessages = normalizeMessages(info.messages);
     const cachedState = chatStatesRef.current.get(info.threadId);
@@ -1415,9 +1421,11 @@ export default function App() {
     markStartup("boot-effect");
 
     // Before any turn is recorded: core buckets usage by day, and only the
-    // webview knows what day it is here. Failing is not worth blocking boot —
-    // the cost is buckets landing on UTC days instead of local ones.
-    void backend.setLocalOffset().catch(() => {});
+    // The webview knows the local day. If this fails, keep booting and accept
+    // UTC buckets for this session.
+    void backend
+      .setLocalOffset()
+      .catch((error) => ignoreExpectedFailure(error, "set local timezone offset"));
 
     if (backend.mode === "fixture") {
       void (async () => {
@@ -1448,12 +1456,19 @@ export default function App() {
       try {
         const [rows, prefer, folder, userProfile] = await Promise.all([
           withTimeout(backend.listProviders(), "provider list"),
-          withTimeout(backend.lastProvider(), "saved provider").catch(() => null),
-          withTimeout(backend.getWorkspaceFolder(), "workspace folder").catch(() => null),
-          withTimeout(backend.getUserProfile(), "user profile").catch(() => ({
-            displayName: "",
-            avatarDataUrl: "",
-          })),
+          withTimeout(backend.lastProvider(), "saved provider").catch((error) =>
+            fallbackOnFailure(error, null, "load saved provider")
+          ),
+          withTimeout(backend.getWorkspaceFolder(), "workspace folder").catch((error) =>
+            fallbackOnFailure(error, null, "load workspace folder")
+          ),
+          withTimeout(backend.getUserProfile(), "user profile").catch((error) =>
+            fallbackOnFailure(
+              error,
+              { displayName: "", avatarDataUrl: "" },
+              "load user profile"
+            )
+          ),
         ]);
         setProviders(rows);
         markStartup("backend-ready");
@@ -1591,7 +1606,9 @@ export default function App() {
         return;
       }
       if (screen === "picker") {
-        loadProviders(selectedIdRef.current).catch(() => {});
+        loadProviders(selectedIdRef.current).catch((error) =>
+          ignoreExpectedFailure(error, "refresh providers on window focus")
+        );
       }
     };
     window.addEventListener("focus", onFocus);
@@ -1641,7 +1658,9 @@ export default function App() {
   async function cancelWait() {
     loginAttemptRef.current += 1;
     stopPolling();
-    await withTimeout(backend.cancelLogin(), "cancel sign-in").catch(() => {});
+    await withTimeout(backend.cancelLogin(), "cancel sign-in").catch((error) =>
+      ignoreExpectedFailure(error, "cancel sign-in")
+    );
     setWaitingError(null);
     if (session) {
       setScreen("chat");
@@ -1775,8 +1794,9 @@ export default function App() {
    */
   useEffect(() => {
     if (!activeThreadId || activeIsFreeChat) return;
-    void refreshWorkspaceChanges().catch(() => {
+    void refreshWorkspaceChanges().catch((error) => {
       // Best effort: a workspace Git cannot read simply shows no strip.
+      ignoreExpectedFailure(error, "refresh workspace changes");
     });
   }, [activeThreadId, activeIsFreeChat, refreshWorkspaceChanges]);
 
@@ -1893,7 +1913,9 @@ export default function App() {
       applySession(info, { clearDraft: Boolean(options.newThread) });
       // Refresh the picker catalogue so the model list and key status match the
       // project we actually opened instead of the project we just left.
-      void loadProviders(info.provider).catch(() => {});
+      void loadProviders(info.provider).catch((error) =>
+        ignoreExpectedFailure(error, "refresh providers after opening chat")
+      );
       setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       return true;
@@ -1928,7 +1950,9 @@ export default function App() {
       const provider = pending.recovery.providers.find((item) => item.id === providerId);
       setPendingConversationRecovery(null);
       applySession(info);
-      void loadProviders(info.provider).catch(() => {});
+      void loadProviders(info.provider).catch((error) =>
+        ignoreExpectedFailure(error, "refresh providers after switching chat")
+      );
       setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       toast.add({
@@ -1972,7 +1996,9 @@ export default function App() {
         workspace: false,
       });
       setScreen("picker");
-      void loadProviders(selectedIdRef.current).catch(() => {});
+      void loadProviders(selectedIdRef.current).catch((error) =>
+        ignoreExpectedFailure(error, "refresh providers after recovery")
+      );
       return;
     }
 

@@ -1,3 +1,5 @@
+import { isRecord, parseJson } from "./json.ts";
+
 /**
  * Turning the MCP server form into something the backend can store.
  *
@@ -113,10 +115,7 @@ export function validateMcpServerDraft(
 export function messageFromError(error: unknown, fallback: string): string {
   const raw = typeof error === "string" ? error : (error as Error)?.message;
   if (!raw) return fallback;
-  try {
-    const parsed = JSON.parse(raw) as { message?: string };
-    return parsed.message?.trim() || raw;
-  } catch {
-    return raw;
-  }
+  const parsed = parseJson(raw);
+  if (!isRecord(parsed)) return raw;
+  return typeof parsed.message === "string" ? parsed.message.trim() || raw : raw;
 }

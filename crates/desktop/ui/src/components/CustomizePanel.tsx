@@ -19,6 +19,7 @@ import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getBackend, type SkillSummary, type SystemPromptInfo } from "@/lib/backend";
+import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { messageFromError, validateMcpServerDraft } from "@/lib/mcpServerForm";
 import type { CustomizeTab } from "@/lib/navigationHistory";
 import type {
@@ -684,7 +685,10 @@ function PluginsPanel() {
   useEffect(() => {
     if (!plugins.some((plugin) => plugin.id === "now-playing" && plugin.enabled)) return;
     const timer = window.setInterval(() => {
-      void getBackend().nowPlaying().then(setNowPlaying).catch(() => undefined);
+      void getBackend()
+        .nowPlaying()
+        .then(setNowPlaying)
+        .catch((error) => ignoreExpectedFailure(error, "refresh now playing metadata"));
     }, 5_000);
     return () => window.clearInterval(timer);
   }, [plugins]);
