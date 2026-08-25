@@ -645,6 +645,15 @@ describe("reduceChatEvent characterization", () => {
     assert.match(tool.summary ?? "", /approval expired/);
   });
 
+  it("retires an approval after optimistic running state", () => {
+    const state = reduceAll([pendingApproval("ap1", "t1")]);
+    const running = markApprovalRunning(state.messages, "ap1");
+    const retired = retireApprovalCard(running, "ap1", "t1");
+    const tool = assistant({ ...state, messages: retired }).tools[0];
+    assert.equal(tool.status, "error");
+    assert.match(tool.summary ?? "", /approval expired/);
+  });
+
   /**
    * A terminal turn cannot leave a tool waiting on a human. These rows used to
    * survive, and because the approval queue scans the whole transcript in

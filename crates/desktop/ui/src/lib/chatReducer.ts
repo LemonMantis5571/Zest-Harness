@@ -649,19 +649,28 @@ export function restoreApprovalCard(
  * The counterpart to {@link restoreApprovalCard}: restoring is right when the
  * resolve failed for a transient reason and the user should try again, but a
  * dropped waiter is permanent. Putting that card back leaves a button that can
- * only ever fail, sitting ahead of the live approval in the queue.
+ * only ever fail, sitting ahead of the live approval in the queue. `toolId`
+ * lets the caller retire an approval after it was optimistically changed to
+ * `running`.
  */
 export function retireApprovalCard(
   messages: ChatMessage[],
-  approvalId: string
+  approvalId: string,
+  toolId?: string
 ): ChatMessage[] {
   return messages.map((m) => {
     if (m.role !== "assistant") return m;
-    if (!m.tools.some((t) => t.approvalId === approvalId)) return m;
+    if (
+      !m.tools.some(
+        (t) => t.approvalId === approvalId || (toolId != null && t.id === toolId)
+      )
+    ) {
+      return m;
+    }
     return {
       ...m,
       tools: m.tools.map((t) =>
-        t.approvalId === approvalId
+        t.approvalId === approvalId || (toolId != null && t.id === toolId)
           ? {
               ...t,
               status: "error" as const,

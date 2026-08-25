@@ -331,15 +331,16 @@ function formatInvokeError(err: unknown): string {
 }
 
 /**
- * `ApprovalHub` rejected the resolve because its waiter is gone: the turn ended
- * (`no active turn for approval`) or the oneshot was already taken or cleared
- * (`no pending approval with that id`). Neither is retryable, so the card must
- * be retired rather than restored.
+ * The backend rejected an interaction because its waiter is gone: the turn
+ * ended or the one-shot request was already taken or cleared. Neither is
+ * retryable, so the UI should retire it rather than raise another alert.
  */
 function isDroppedApprovalError(raw: string): boolean {
   return (
     raw.includes("no pending approval") ||
     raw.includes("no active turn for approval") ||
+    raw.includes("no pending question") ||
+    raw.includes("no active turn for question") ||
     raw.includes("no turn in progress")
   );
 }
@@ -598,6 +599,8 @@ export default function App() {
   const currentTurnIdRef = useRef<string | null>(null);
   const turnStartedAtByThreadRef = useRef(new Map<string, number>());
   const notifiedApprovalIdsByThreadRef = useRef(new Map<string, Set<string>>());
+  const resolvingApprovalIdsRef = useRef(new Set<string>());
+  const resolvingQuestionIdsRef = useRef(new Set<string>());
   const notifiedDelegationEventsRef = useRef(new Set<string>());
   const compactionInFlightRef = useRef(false);
   const draftRef = useRef(draft);
@@ -2350,9 +2353,15 @@ export default function App() {
     approvalId: string,
     decision: ApprovalChoice
   ) {
+    const resolving = resolvingApprovalIdsRef.current;
+    if (resolving.has(approvalId)) return;
+
     const allow = decision !== "deny";
     const snapshot = findApprovalTool(messagesRef.current, approvalId);
-    if (allow && snapshot) {
+    if (!snapshot || snapshot.status !== "awaiting_approval") return;
+    resolving.add(approvalId);
+    const threadId = threadIdRef.current;
+    if (allow) {
       const next = markApprovalRunning(messagesRef.current, approvalId);
       messagesRef.current = next;
       setMessages(next);
@@ -2361,7 +2370,7 @@ export default function App() {
       await backend.resolveApproval(
         approvalId,
         decision,
-        threadIdRef.current ?? undefined
+        threadId ?? undefined
       );
     } catch (err) {
       // A dropped waiter is permanent: putting the card back would leave a
@@ -2369,9 +2378,10 @@ export default function App() {
       // transcript position it would keep shadowing the live card behind it.
       // Retire it instead so the queue advances.
       if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) {
-        const retired = retireApprovalCard(messagesRef.current, approvalId);
+        const retired = retireApprovalCard(messagesRef.current, approvalId, snapshot.id);
         messagesRef.current = retired;
         setMessages(retired);
+        return;
       } else if (allow && snapshot) {
         const restored = restoreApprovalCard(messagesRef.current, snapshot);
         messagesRef.current = restored;
@@ -2383,23 +2393,33 @@ export default function App() {
         description: formatInvokeError(err),
       });
       throw err;
+    } finally {
+      resolving.delete(approvalId);
     }
   }
 
   async function onResolveQuestion(questionId: string, answer: string) {
+    const resolving = resolvingQuestionIdsRef.current;
+    if (resolving.has(questionId)) return;
+    const isPending = messagesRef.current.some(
+      (message) =>
+        message.role === "assistant" && message.question?.questionId === questionId
+    );
+    if (!isPending) return;
+    resolving.add(questionId);
+    const threadId = threadIdRef.current;
     try {
-      await backend.resolveQuestion(
-        questionId,
-        answer,
-        threadIdRef.current ?? undefined
-      );
+      await backend.resolveQuestion(questionId, answer, threadId ?? undefined);
     } catch (err) {
+      if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) return;
       toast.add({
         type: "error",
         title: "Could not send answer",
         description: formatInvokeError(err),
       });
       throw err;
+    } finally {
+      resolving.delete(questionId);
     }
   }
 
