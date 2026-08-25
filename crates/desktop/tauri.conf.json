@@ -32,7 +32,7 @@
       "icons/zest-icon-128.png",
       "icons/zest-icon-512.png",
       "icons/icon.icns",
-      "icons/zest-icon.ico"
+      "icons/icon.ico"
     ],
     "windows": {
       "wix": {
@@ -42,8 +42,8 @@
       "nsis": {
         "headerImage": "installer/nsis-header.bmp",
         "sidebarImage": "installer/nsis-sidebar.bmp",
-        "installerIcon": "icons/zest-icon.ico",
-        "uninstallerIcon": "icons/zest-icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     }
   }

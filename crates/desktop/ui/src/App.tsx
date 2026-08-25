@@ -66,11 +66,9 @@ import {
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
 import {
-  enqueueThreadTurn as appendQueuedTurn,
-  peekThreadTurn,
-  removeThreadTurn,
+  pendingInputToQueuedTurn,
   updateThreadTurn,
-  type QueuedTurn,
+  removeThreadTurn,
   type ThreadQueueMap,
 } from "@/lib/threadQueue";
 import type {
@@ -591,12 +589,6 @@ export default function App() {
   sendingRef.current = sending;
   const threadActivityRef = useRef<ThreadActivityMap>({});
   const threadQueuesRef = useRef<ThreadQueueMap>({});
-  const queueDrainInFlightRef = useRef(new Set<string>());
-  const queueDrainTimersRef = useRef(new Map<string, number>());
-  const drainQueuedTurnRef = useRef<(threadId: string) => void>(() => {});
-  const scheduleQueuedTurnRef = useRef<
-    (threadId: string, delay?: number) => void
-  >(() => {});
   const threadIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
@@ -674,36 +666,30 @@ export default function App() {
     [replaceDelegationJob, session?.root]
   );
 
-  const publishThreadQueues = useCallback((next: ThreadQueueMap) => {
-    threadQueuesRef.current = next;
-    setThreadQueues(next);
-  }, []);
-
-  const enqueueTurn = useCallback(
-    (threadId: string, turn: QueuedTurn) => {
-      publishThreadQueues(
-        appendQueuedTurn(threadQueuesRef.current, threadId, turn)
-      );
-    },
-    [publishThreadQueues]
-  );
-
   const updateQueuedTurn = useCallback(
     (threadId: string, turnId: string, text: string) => {
-      publishThreadQueues(
-        updateThreadTurn(threadQueuesRef.current, threadId, turnId, text)
-      );
+      void backend.updateQueuedInput(threadId, turnId, text).catch((error) => {
+        toast.add({
+          type: "error",
+          title: "Could not edit queued message",
+          description: formatInvokeError(error),
+        });
+      });
     },
-    [publishThreadQueues]
+    []
   );
 
   const discardQueuedTurn = useCallback(
     (threadId: string, turnId: string) => {
-      publishThreadQueues(
-        removeThreadTurn(threadQueuesRef.current, threadId, turnId)
-      );
+      void backend.removeQueuedInput(threadId, turnId).catch((error) => {
+        toast.add({
+          type: "error",
+          title: "Could not remove queued message",
+          description: formatInvokeError(error),
+        });
+      });
     },
-    [publishThreadQueues]
+    []
   );
 
   const loadProviders = useCallback(async (prefer?: string | null) => {
@@ -968,6 +954,59 @@ export default function App() {
   const applyChatEventNow = useCallback((event: ChatEvent) => {
     const threadKey = event.thread_id;
     const isCurrent = threadIdRef.current === threadKey;
+
+    // Queue and job events are authoritative projections, not transcript
+    // events. Handle them before the chat reducer so an old turn id cannot
+    // make a durable queue item disappear from the compact composer list.
+    if (event.kind === "input_queued") {
+      const current = threadQueuesRef.current[threadKey] ?? [];
+      if (!current.some((turn) => turn.id === event.input.id)) {
+        const next = {
+          ...threadQueuesRef.current,
+          [threadKey]: [
+            ...current,
+            pendingInputToQueuedTurn(event.input, threadKey),
+          ],
+        };
+        threadQueuesRef.current = next;
+        setThreadQueues(next);
+      }
+      return;
+    }
+    if (event.kind === "input_updated") {
+      const next = updateThreadTurn(
+        threadQueuesRef.current,
+        threadKey,
+        event.input_id,
+        event.text
+      );
+      if (next !== threadQueuesRef.current) {
+        threadQueuesRef.current = next;
+        setThreadQueues(next);
+      }
+      return;
+    }
+    if (event.kind === "input_removed") {
+      const next = removeThreadTurn(
+        threadQueuesRef.current,
+        threadKey,
+        event.input_id
+      );
+      if (next !== threadQueuesRef.current) {
+        threadQueuesRef.current = next;
+        setThreadQueues(next);
+      }
+      return;
+    }
+    if (event.kind === "job_completed") {
+      void showAttention(
+        "Background job finished",
+        `${event.label} · ${event.status}`,
+        event.status === "completed" ? "success" : "warning"
+      );
+      return;
+    }
+
     if (isCurrent && event.kind === "workspace_changed") {
       setWorkspaceChange(event.change);
     }
@@ -1078,15 +1117,6 @@ export default function App() {
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
     }
 
-    if (
-      event.kind === "done" ||
-      event.kind === "error" ||
-      event.kind === "cancelled"
-    ) {
-      // Rust emits the terminal event just before releasing its turn slot.
-      // Defer the drain a beat so the queued send cannot race that release.
-      scheduleQueuedTurnRef.current(threadKey, 80);
-    }
   }, [maybeAutoCompact, refreshCheckpointMetadata]);
 
   /**
@@ -1305,6 +1335,20 @@ export default function App() {
     sessionIdRef.current = info.sessionId;
     setAttachments([]);
 
+    // Hydrate the compact queue from the Rust snapshot. React only renders
+    // this projection; restart, navigation, and delivery remain core-owned.
+    const hydratedQueue = info.pendingInputs.map((input) =>
+      pendingInputToQueuedTurn(input, info.threadId)
+    );
+    const nextQueues = { ...threadQueuesRef.current };
+    if (hydratedQueue.length > 0) {
+      nextQueues[info.threadId] = hydratedQueue;
+    } else {
+      delete nextQueues[info.threadId];
+    }
+    threadQueuesRef.current = nextQueues;
+    setThreadQueues(nextQueues);
+
     const savedDraft = opts?.clearDraft ? "" : loadDraft(info.threadId);
     const recoveryMessage = info.recovery
       ? messages.find(
@@ -1337,7 +1381,6 @@ export default function App() {
 
     setPickerError(null);
     setScreen("chat");
-    scheduleQueuedTurnRef.current(info.threadId, 80);
   }, []);
 
   const enterChat = useCallback(
@@ -2089,23 +2132,34 @@ export default function App() {
     const shouldQueue =
       queueThreadId !== null &&
       (sendingRef.current ||
-        peekThreadTurn(threadQueuesRef.current, queueThreadId) !== undefined);
+        (threadQueuesRef.current[queueThreadId]?.length ?? 0) > 0);
 
     if (shouldQueue && queueThreadId) {
-      enqueueTurn(queueThreadId, {
-        id: newId("queued"),
-        threadId: queueThreadId,
-        text,
-        attachments: pending.map((attachment) => ({ ...attachment })),
-        createdAt: Date.now(),
-      });
-      if (!directAnswer) {
-        setDraft("");
-        setAttachments([]);
-        saveDraft(queueThreadId, "");
-      }
-      if (!sendingRef.current) {
-        scheduleQueuedTurnRef.current(queueThreadId, 80);
+      try {
+        await backend.sendMessage(
+          text,
+          pending.map((a) => ({
+            name: a.name,
+            detail: a.detail,
+            content: a.content,
+            status: a.status,
+            kind: a.kind,
+            mediaType: a.mediaType,
+            dataBase64: a.dataBase64,
+          })),
+          "followup"
+        );
+        if (!directAnswer) {
+          setDraft("");
+          setAttachments([]);
+          saveDraft(queueThreadId, "");
+        }
+      } catch (error) {
+        toast.add({
+          type: "error",
+          title: "Could not queue message",
+          description: formatInvokeError(error),
+        });
       }
       return;
     }
@@ -2216,53 +2270,6 @@ export default function App() {
       return { accepted: false, retryable };
     }
   }
-
-  async function drainQueuedTurn(threadId: string) {
-    if (
-      threadId !== threadIdRef.current ||
-      sendingRef.current ||
-      compactionInFlightRef.current ||
-      queueDrainInFlightRef.current.has(threadId)
-    ) {
-      return;
-    }
-
-    const queued = peekThreadTurn(threadQueuesRef.current, threadId);
-    if (!queued) return;
-
-    queueDrainInFlightRef.current.add(threadId);
-    try {
-      const result = await submitTurn(
-        queued.text,
-        [...queued.attachments],
-        { restoreDraftOnFailure: false }
-      );
-      const current = peekThreadTurn(threadQueuesRef.current, threadId);
-      if (current?.id !== queued.id) return;
-
-      if (result.accepted || !result.retryable) {
-        publishThreadQueues(
-          removeThreadTurn(threadQueuesRef.current, threadId, queued.id)
-        );
-      } else {
-        // A terminal event can race Rust's turn-slot release. Keep the item
-        // queued and retry after the short backoff instead of dropping it.
-        scheduleQueuedTurnRef.current(threadId, 250);
-      }
-    } finally {
-      queueDrainInFlightRef.current.delete(threadId);
-    }
-  }
-
-  drainQueuedTurnRef.current = drainQueuedTurn;
-  scheduleQueuedTurnRef.current = (threadId, delay = 0) => {
-    if (queueDrainTimersRef.current.has(threadId)) return;
-    const timer = window.setTimeout(() => {
-      queueDrainTimersRef.current.delete(threadId);
-      void drainQueuedTurnRef.current(threadId);
-    }, delay);
-    queueDrainTimersRef.current.set(threadId, timer);
-  };
 
   /**
    * Leave Plan mode and tell the model to build what it just planned.

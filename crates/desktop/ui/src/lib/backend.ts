@@ -20,6 +20,9 @@ import type {
   ExternalAgentCheck,
   ExternalAgentRow,
   GitContext,
+  InputTarget,
+  JobRead,
+  JobSnapshot,
   LoginStarted,
   LoginStatus,
   McpCheck,
@@ -161,7 +164,24 @@ export type DesktopBackend = {
     title: string,
     freeChat?: boolean
   ): Promise<ThreadSummary>;
-  sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
+  sendMessage(
+    text: string,
+    attachments?: AttachmentInput[],
+    target?: InputTarget
+  ): Promise<void>;
+  updateQueuedInput(threadId: string, inputId: string, text: string): Promise<void>;
+  removeQueuedInput(threadId: string, inputId: string): Promise<void>;
+  listJobs(threadId?: string): Promise<JobSnapshot[]>;
+  jobOutput(
+    jobId: string,
+    options?: {
+      offset?: number;
+      wait?: boolean;
+      timeoutMs?: number;
+      threadId?: string;
+    }
+  ): Promise<JobRead>;
+  jobKill(jobId: string, reason?: string, threadId?: string): Promise<JobSnapshot>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
   cancelTurn(threadId?: string): Promise<void>;
   resolveApproval(
@@ -278,7 +298,15 @@ export function createTauriBackend(): DesktopBackend {
       tauriApi.setThreadPinned(id, projectPath, pinned, freeChat ?? projectPath == null),
     renameThread: (id, projectPath, title, freeChat) =>
       tauriApi.renameThread(id, projectPath, title, freeChat ?? projectPath == null),
-    sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
+    sendMessage: (text, attachments, target) =>
+      tauriApi.sendMessage(text, attachments, target),
+    updateQueuedInput: (threadId, inputId, text) =>
+      tauriApi.updateQueuedInput(threadId, inputId, text),
+    removeQueuedInput: (threadId, inputId) =>
+      tauriApi.removeQueuedInput(threadId, inputId),
+    listJobs: (threadId) => tauriApi.listJobs(threadId),
+    jobOutput: (jobId, options) => tauriApi.jobOutput(jobId, options),
+    jobKill: (jobId, reason, threadId) => tauriApi.jobKill(jobId, reason, threadId),
     saveMarkdown: (suggestedName, markdown) =>
       tauriApi.saveMarkdown(suggestedName, markdown),
     cancelTurn: (threadId) => tauriApi.cancelTurn(threadId),

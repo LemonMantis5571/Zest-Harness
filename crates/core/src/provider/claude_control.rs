@@ -3,8 +3,10 @@
 //! The CLI asks permission over its own stdout/stdin control protocol when it is
 //! started with `--permission-prompt-tool stdio`. Without that flag it decides
 //! locally and simply denies whatever it cannot auto-approve, which is why a
-//! driver that only sets `--input-format stream-json` never sees a request. No
-//! client handshake is involved — the flag alone routes the prompts here.
+//! driver that only sets `--input-format stream-json` never sees a request.
+//! `--input-format stream-json` also means the prompt is a JSON user message on
+//! stdin, not an argv leftover — and an inbound `initialize` control request
+//! has to be acknowledged or the CLI sits idle.
 //!
 //! This module is the translation layer and nothing else: request in, decision
 //! out. Process lifetime lives in [`super::session::JsonlProcess`] and the turn
@@ -93,6 +95,47 @@ pub(crate) fn surface_for(tool_name: &str) -> Surface {
         "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" => Surface::Command(ToolRisk::Read),
         _ => Surface::Command(ToolRisk::Exec),
     }
+}
+
+/// The JSON user message `--input-format stream-json` waits for on stdin.
+///
+/// Observed shape from Claude Code 2.1.x hosts: a `user` envelope, not the
+/// prompt as a raw argv string. `session_id` is empty in stdio / `--print` mode.
+pub(crate) fn stream_json_user_message(prompt: &str) -> Value {
+    json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": prompt,
+        },
+        "parent_tool_use_id": Value::Null,
+        "session_id": "",
+    })
+}
+
+/// An inbound `initialize` handshake. `None` when this is not one, or when it
+/// has no id to correlate a reply on.
+pub(crate) fn initialize_request_id(message: &Value) -> Option<&str> {
+    if message.get("type").and_then(Value::as_str) != Some("control_request") {
+        return None;
+    }
+    let request = message.get("request")?;
+    if request.get("subtype").and_then(Value::as_str) != Some("initialize") {
+        return None;
+    }
+    message.get("request_id").and_then(Value::as_str)
+}
+
+/// Acknowledge an inbound initialize so the CLI continues the turn.
+pub(crate) fn initialize_response(request_id: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {},
+        },
+    })
 }
 
 /// The decision, in the shape the CLI's schema accepts.
@@ -282,6 +325,37 @@ mod tests {
         ] {
             assert!(ToolPermissionRequest::parse(&other).is_none(), "{other}");
         }
+    }
+
+    #[test]
+    fn an_initialize_request_with_an_id_is_acknowledged() {
+        let message = json!({
+            "type": "control_request",
+            "request_id": "init-1",
+            "request": { "subtype": "initialize" },
+        });
+        assert_eq!(initialize_request_id(&message), Some("init-1"));
+        let reply = initialize_response("init-1");
+        assert_eq!(reply["type"], "control_response");
+        assert_eq!(reply["response"]["request_id"], "init-1");
+        assert_eq!(reply["response"]["subtype"], "success");
+    }
+
+    #[test]
+    fn initialize_without_an_id_is_unanswerable() {
+        let message = json!({
+            "type": "control_request",
+            "request": { "subtype": "initialize" },
+        });
+        assert!(initialize_request_id(&message).is_none());
+    }
+
+    #[test]
+    fn stream_json_user_message_is_a_user_envelope() {
+        let message = stream_json_user_message("inspect the loader");
+        assert_eq!(message["type"], "user");
+        assert_eq!(message["message"]["role"], "user");
+        assert_eq!(message["message"]["content"], "inspect the loader");
     }
 
     #[test]

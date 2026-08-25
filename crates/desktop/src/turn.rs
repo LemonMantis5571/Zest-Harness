@@ -25,7 +25,46 @@ pub(crate) async fn run(
     attachments: Option<Vec<AttachmentInput>>,
 ) -> Result<(), String> {
     let sink = TauriEventSink { app: app.clone() };
-    run_with_sink(&sink, Some(app), state, text, attachments).await
+    let thread_id = state
+        .sessions
+        .active_thread_id()
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("no_session", "no active chat"))?;
+    let mut next = Some((text, attachments));
+    while let Some((text, attachments)) = next.take() {
+        let completed = run_with_sink(&sink, Some(app.clone()), state, text, attachments).await?;
+        if !completed {
+            break;
+        }
+        let Some((input, root, snapshot)) = state
+            .sessions
+            .take_followup_for_thread(&thread_id)
+            .map_err(map_session_err)?
+        else {
+            break;
+        };
+        let store = ThreadStore::open(&root).map_err(|error| error.to_string())?;
+        store.save(&snapshot).map_err(|error| error.to_string())?;
+        next = Some((
+            input.text,
+            Some(
+                input
+                    .attachments
+                    .into_iter()
+                    .map(|attachment| AttachmentInput {
+                        name: attachment.name,
+                        detail: attachment.detail,
+                        content: attachment.content,
+                        status: attachment.status,
+                        kind: attachment.kind,
+                        media_type: attachment.media_type,
+                        data_base64: attachment.data_base64,
+                    })
+                    .collect(),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn run_with_sink<S: EventSink>(
@@ -34,7 +73,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     state: &AppState,
     text: String,
     attachments: Option<Vec<AttachmentInput>>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let text = text.trim().to_string();
     let attachments = attachments.unwrap_or_default();
     if text.is_empty() && !has_usable_attachment(&attachments) {
@@ -49,6 +88,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     let multimodal = has_images(&attachments);
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
+    let live_thread = turn.live_thread.clone();
     // A new user submission supersedes the one-time retry affordance restored
     // from a previous process. The durable run record remains available for
     // diagnostics, but the session no longer advertises the stale action.
@@ -75,18 +115,28 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             return Err(error);
         }
     };
-    let label = if session.thread.messages.is_empty() {
+    let label = if live_thread
+        .lock()
+        .map(|thread| thread.messages.is_empty())
+        .unwrap_or(false)
+    {
         "Conversation start"
     } else {
         "Before turn"
     };
-    if let Err(error) = store.create_checkpoint_with_metadata(
-        &mut session.thread,
-        label,
-        Some(user_message_id.clone()),
-        Some(checkpoint_preview),
-        zest_core::ThreadCheckpointKind::Turn,
-    ) {
+    let checkpoint_result = live_thread
+        .lock()
+        .map_err(|_| zest_core::HarnessError::Other("thread state is unavailable".into()))
+        .and_then(|mut thread| {
+            store.create_checkpoint_with_metadata(
+                &mut thread,
+                label,
+                Some(user_message_id.clone()),
+                Some(checkpoint_preview),
+                zest_core::ThreadCheckpointKind::Turn,
+            )
+        });
+    if let Err(error) = checkpoint_result {
         turn.approval_hub.clear();
         turn.question_hub.clear();
         let _ = state.sessions.finish_turn(&turn, session);
@@ -172,7 +222,9 @@ pub(crate) async fn run_with_sink<S: EventSink>(
         message_id: user_message_id,
         text: display_text,
     };
-    apply_event_to_thread(&mut session.thread, &user_event);
+    if let Ok(mut thread) = live_thread.lock() {
+        apply_event_to_thread(&mut thread, &user_event);
+    }
     let assistant_start = ChatEvent::AssistantStart {
         session_id: session_id.clone(),
         thread_id: thread_id.clone(),
@@ -180,10 +232,15 @@ pub(crate) async fn run_with_sink<S: EventSink>(
         message_id: assistant_message_id.clone(),
         command: command.clone(),
     };
-    apply_event_to_thread(&mut session.thread, &assistant_start);
+    if let Ok(mut thread) = live_thread.lock() {
+        apply_event_to_thread(&mut thread, &assistant_start);
+        thread.record_event(zest_core::ThreadEventKind::TurnStarted {
+            turn_id: turn_id.clone(),
+        });
+    }
     if worker
         .save_and_wait(
-            PersistSnapshot::owned(session.thread.clone()),
+            PersistSnapshot::Live(live_thread.clone()),
             PersistPriority::Immediate,
         )
         .await
@@ -199,10 +256,29 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     sink.emit(&user_event);
     sink.emit(&assistant_start);
 
-    let live_thread = Arc::new(Mutex::new(std::mem::take(&mut session.thread)));
     let cancel = turn.cancel.clone();
     let delegation_coordinator = state.delegations.clone();
     let delegation_root = session.root.clone();
+
+    // Claiming a steer/inject is a durable mutation before it reaches the
+    // provider. If the process dies after this callback, the event ledger says
+    // exactly which input was delivered and the queue cannot replay it.
+    {
+        let claim_thread = live_thread.clone();
+        let claim_worker = worker.clone();
+        turn.input_inbox
+            .set_claim_observer(Arc::new(move |claimed| {
+                if let Ok(mut thread) = claim_thread.lock() {
+                    for input in claimed {
+                        let _ = thread.claim_input(&input.id);
+                    }
+                }
+                let _ = claim_worker.enqueue(
+                    PersistSnapshot::Live(claim_thread.clone()),
+                    PersistPriority::Immediate,
+                );
+            }));
+    }
 
     let result = {
         // Capture external context once per turn. A song title is user-device
@@ -483,6 +559,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
                 match live_thread.lock() {
                     Ok(mut thread) => {
                         let priority = event_priority(&event);
+                        record_ledger_event(&mut thread, &event);
                         apply_event_to_thread(&mut thread, &event);
                         Some(priority)
                     }
@@ -513,7 +590,12 @@ pub(crate) async fn run_with_sink<S: EventSink>(
         let result = if multimodal {
             session
                 .agent
-                .send_blocks_cancellable(user_blocks, &mut on_event, Some(&cancel))
+                .send_blocks_cancellable_with_inbox(
+                    user_blocks,
+                    &mut on_event,
+                    Some(&cancel),
+                    Some(&turn.input_inbox),
+                )
                 .await
         } else {
             // Text-only path keeps prior wire shape (single text block).
@@ -531,17 +613,22 @@ pub(crate) async fn run_with_sink<S: EventSink>(
                 .unwrap_or_default();
             session
                 .agent
-                .send_cancellable(&agent_text, &mut on_event, Some(&cancel))
+                .send_cancellable_with_inbox(
+                    &agent_text,
+                    &mut on_event,
+                    Some(&cancel),
+                    Some(&turn.input_inbox),
+                )
                 .await
         };
         session.agent.system = previous_system;
         result
     };
 
-    session.thread = match Arc::try_unwrap(live_thread) {
-        Ok(mutex) => mutex.into_inner().unwrap_or_else(|e| e.into_inner()),
-        Err(arc) => arc.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-    };
+    session.thread = live_thread
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     // Wire history is already transactional inside Agent; only sync committed
     // messages after a successful terminal turn.
@@ -602,6 +689,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             change: change.into(),
         });
     }
+    record_ledger_event_with_status(&mut session.thread, &final_event, &turn_id);
     apply_event_to_thread(&mut session.thread, &final_event);
     let history_save_failed = if worker
         .save_and_wait(
@@ -667,7 +755,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
 
     // Error/cancel already emitted as chat-events; keep invoke Ok to avoid
     // double toasts on the frontend catch path.
-    Ok(())
+    Ok(matches!(result, Ok(())))
 }
 
 async fn workspace_changes_for(session: &Session) -> Option<zest_core::WorkspaceChangeSet> {
@@ -679,6 +767,62 @@ async fn workspace_changes_for(session: &Session) -> Option<zest_core::Workspace
     )
     .await
     .ok()
+}
+
+fn record_ledger_event(thread: &mut Thread, event: &ChatEvent) {
+    match event {
+        ChatEvent::ToolCallStart {
+            turn_id, id, name, ..
+        } => {
+            thread.record_event(zest_core::ThreadEventKind::ToolCalled {
+                turn_id: turn_id.clone(),
+                call_id: id.clone(),
+                name: name.clone(),
+            });
+        }
+        ChatEvent::ApprovalNeeded {
+            turn_id,
+            approval_id,
+            tool_call_id,
+            tool_name,
+            ..
+        } => {
+            thread.record_event(zest_core::ThreadEventKind::ApprovalRequested {
+                turn_id: turn_id.clone(),
+                approval_id: approval_id.clone(),
+                call_id: tool_call_id.clone(),
+                name: tool_name.clone(),
+            });
+        }
+        ChatEvent::ToolCallResult {
+            turn_id,
+            id,
+            name,
+            is_error,
+            ..
+        } => {
+            thread.record_event(zest_core::ThreadEventKind::ToolResult {
+                turn_id: turn_id.clone(),
+                call_id: id.clone(),
+                name: name.clone(),
+                is_error: *is_error,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn record_ledger_event_with_status(thread: &mut Thread, event: &ChatEvent, turn_id: &str) {
+    let status = match event {
+        ChatEvent::Done { .. } => "completed",
+        ChatEvent::Cancelled { .. } => "cancelled",
+        ChatEvent::Error { .. } => "failed",
+        _ => return,
+    };
+    thread.record_event(zest_core::ThreadEventKind::TurnCompleted {
+        turn_id: turn_id.to_string(),
+        status: status.into(),
+    });
 }
 
 async fn changed_workspace(
@@ -784,5 +928,79 @@ mod tests {
                 ChatEvent::Done { .. }
             ]
         ));
+    }
+
+    #[test]
+    fn lifecycle_ledger_records_tool_approval_result_and_terminal_order() {
+        let mut thread = Thread::new();
+        let thread_id = thread.id.clone();
+        let turn_id = "turn-ledger";
+        record_ledger_event(
+            &mut thread,
+            &ChatEvent::ToolCallStart {
+                session_id: "s".into(),
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.into(),
+                message_id: "a".into(),
+                name: "bash".into(),
+                id: "call-1".into(),
+            },
+        );
+        record_ledger_event(
+            &mut thread,
+            &ChatEvent::ApprovalNeeded {
+                session_id: "s".into(),
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.into(),
+                message_id: "a".into(),
+                approval_id: "approval-1".into(),
+                tool_name: "bash".into(),
+                tool_call_id: "call-1".into(),
+                risk: "exec".into(),
+                path: "cargo test".into(),
+                summary: "run tests".into(),
+                diff: String::new(),
+            },
+        );
+        record_ledger_event(
+            &mut thread,
+            &ChatEvent::ToolCallResult {
+                session_id: "s".into(),
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.into(),
+                message_id: "a".into(),
+                name: "bash".into(),
+                id: "call-1".into(),
+                summary: "passed".into(),
+                is_error: false,
+                path: None,
+                diff: None,
+                metadata: None,
+            },
+        );
+        record_ledger_event_with_status(
+            &mut thread,
+            &ChatEvent::Done {
+                session_id: "s".into(),
+                thread_id,
+                turn_id: turn_id.into(),
+                message_id: "a".into(),
+            },
+            turn_id,
+        );
+
+        assert!(matches!(
+            thread.events.iter().map(|entry| &entry.event).collect::<Vec<_>>().as_slice(),
+            [
+                ThreadEventKind::ToolCalled { .. },
+                ThreadEventKind::ApprovalRequested { .. },
+                ThreadEventKind::ToolResult { .. },
+                ThreadEventKind::TurnCompleted { status, .. }
+            ] if status == "completed"
+        ));
+        assert!(thread
+            .events
+            .windows(2)
+            .all(|events| events[0].sequence < events[1].sequence));
     }
 }

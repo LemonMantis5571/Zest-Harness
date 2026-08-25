@@ -610,6 +610,14 @@ async fn spawn_headless_with_session(
     let mut process = JsonlProcess::spawn_command(command, &config.command)
         .await
         .map_err(|error| error.to_string())?;
+    if let Some(responder) = &control {
+        for message in responder.prelude(prompt) {
+            process
+                .send(&message)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
     let timeout = Duration::from_secs(config.timeout_secs.min(MAX_TIMEOUT_SECS));
     let run_result = tokio::select! {
         result = read_headless_with_session(&mut process, on_event, control, timeout) => result,
@@ -1001,6 +1009,14 @@ pub(crate) type ExternalEventSink<'a> = dyn FnMut(ExternalAgentEvent) + Send + '
 /// Returning `None` leaves the line to ordinary accumulation.
 #[async_trait]
 pub(crate) trait ControlResponder: Send {
+    /// Messages written on stdin after spawn, before the stdout read loop.
+    ///
+    /// Claude's `--input-format stream-json` waits for a JSON user message and
+    /// sits idle if the prompt only exists as an argv leftover.
+    fn prelude(&self, _prompt: &str) -> Vec<Value> {
+        Vec::new()
+    }
+
     async fn respond(&mut self, message: &Value) -> Option<Value>;
 }
 
@@ -1140,10 +1156,26 @@ async fn spawn_and_run_with_cancel(
     Ok(result)
 }
 
+fn uses_stream_json_input(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        arg == "--input-format=stream-json"
+            || (arg == "--input-format"
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| value == "stream-json"))
+    })
+}
+
 fn expanded_args(config: &ExternalAgentConfig, prompt: &str) -> Vec<String> {
+    let stream_json_input = uses_stream_json_input(&config.args);
     let mut has_prompt = false;
     let mut args = Vec::with_capacity(config.args.len() + 1);
     for arg in &config.args {
+        if stream_json_input && arg.contains(PROMPT_PLACEHOLDER) {
+            // The prompt is a stdin JSON user message. Leaving it on argv
+            // either duplicates the turn or is ignored while the CLI waits.
+            continue;
+        }
         let mut value = arg.clone();
         if value.contains(PROMPT_PLACEHOLDER) {
             has_prompt = true;
@@ -1156,7 +1188,7 @@ fn expanded_args(config: &ExternalAgentConfig, prompt: &str) -> Vec<String> {
         }
         args.push(value);
     }
-    if config.mode == ExternalAgentMode::Headless && !has_prompt {
+    if config.mode == ExternalAgentMode::Headless && !has_prompt && !stream_json_input {
         args.push(prompt.to_string());
     }
     normalize_external_args(config, args)
@@ -1183,7 +1215,15 @@ fn normalize_claude_args(config: &ExternalAgentConfig, mut args: Vec<String>) ->
             .iter()
             .any(|arg| arg == "--strict-mcp-config" || arg.starts_with("--strict-mcp-config="))
         {
-            let insert_at = args.len().saturating_sub(1);
+            // Before a leftover positional prompt, keep the prompt last. After
+            // the stream-json hang fix the parent has no argv prompt, so the
+            // last token is `--model`'s value. Inserting before that made the
+            // CLI take `--strict-mcp-config` as the model and exit 1.
+            let insert_at = if uses_stream_json_input(&args) {
+                args.len()
+            } else {
+                args.len().saturating_sub(1)
+            };
             args.insert(insert_at, "--strict-mcp-config".into());
         }
     }
@@ -2872,6 +2912,35 @@ mod tests {
     }
 
     #[test]
+    fn stream_json_input_keeps_the_prompt_off_argv() {
+        let mut config = config(ExternalAgentMode::Headless);
+        config.command = "claude".into();
+        config.args = vec![
+            "--print".into(),
+            "--input-format".into(),
+            "stream-json".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--model".into(),
+            "sonnet".into(),
+            "{prompt}".into(),
+        ];
+        let args = expanded_args(&config, "inspect the loader");
+        assert!(
+            !args.iter().any(|arg| arg.contains("inspect the loader")),
+            "prompt must travel on stdin, not argv: {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "--input-format"));
+        let model_at = args.iter().position(|arg| arg == "--model").unwrap();
+        assert_eq!(
+            args.get(model_at + 1).map(String::as_str),
+            Some("sonnet"),
+            "strict-mcp-config must not steal the model value: {args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("--strict-mcp-config"));
+    }
+
+    #[test]
     fn leaves_non_claude_stream_configs_unchanged() {
         let mut config = config(ExternalAgentMode::Headless);
         config.command = "other-agent".into();
@@ -3248,6 +3317,50 @@ mod tests {
             ExternalAgentEvent::ToolCall { id, status, .. }
                 if id == "tool-1" && status == "completed"
         )));
+    }
+
+    #[tokio::test]
+    async fn stream_json_input_sends_the_user_message_and_acks_initialize() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = fixture_config("stream_json_input", false);
+        config.args = vec![
+            "stream_json_input".into(),
+            "--input-format".into(),
+            "stream-json".into(),
+        ];
+        config.timeout_secs = 5;
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        struct Handshake;
+        #[async_trait]
+        impl ControlResponder for Handshake {
+            fn prelude(&self, prompt: &str) -> Vec<Value> {
+                vec![crate::provider::claude_control::stream_json_user_message(
+                    prompt,
+                )]
+            }
+            async fn respond(&mut self, message: &Value) -> Option<Value> {
+                crate::provider::claude_control::initialize_request_id(message)
+                    .map(crate::provider::claude_control::initialize_response)
+            }
+        }
+        let mut handshake = Handshake;
+        let run = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_headless_command_streaming(
+                temp.path(),
+                &config,
+                "inspect the loader",
+                None,
+                &mut sink,
+                Some(&mut handshake),
+            ),
+        )
+        .await
+        .expect("stream-json input must not hang waiting for a user message")
+        .unwrap();
+
+        assert_eq!(run.text(), "got user");
     }
 
     #[tokio::test]

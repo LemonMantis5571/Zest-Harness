@@ -23,6 +23,8 @@ pub mod delegation;
 pub mod error;
 pub mod fsutil;
 pub mod handoff;
+pub mod inbox;
+pub mod jobs;
 pub mod mcp;
 pub mod orchestration;
 pub mod persist;
@@ -86,6 +88,8 @@ pub use delegation::{
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
+pub use inbox::InputInbox;
+pub use jobs::{JobEvent, JobOutput, JobRead, JobRegistry, JobSnapshot, JobStatus};
 pub use mcp::{
     probe_server as probe_mcp_server, register_mcp_tools, McpCatalog, McpServer, McpToolDef,
 };
@@ -139,7 +143,8 @@ pub use skills::{
 };
 pub use thread::{
     new_id, PullRequestLink, StoredMessage, Thread, ThreadCheckpoint, ThreadCheckpointKind,
-    ThreadGitContext, ThreadId, ThreadLoad, ThreadLoadError, ThreadStore, ThreadSummary,
+    ThreadEvent, ThreadEventKind, ThreadGitContext, ThreadId, ThreadInput, ThreadInputAttachment,
+    ThreadInputTarget, ThreadLoad, ThreadLoadError, ThreadStore, ThreadSummary,
     ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION, WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
 pub use tools::approval::{
@@ -162,9 +167,9 @@ pub use tools::read_file::ReadFile;
 pub use tools::sensitive::is_sensitive_path;
 pub use tools::write_file::WriteFile;
 pub use tools::{
-    register_browser_tool, register_question_tool, register_read_tools, register_skill_tools,
-    register_write_tools, FeatureDelegator, Tool, ToolMetadata, ToolOutcome, ToolRegistry,
-    DELEGATE_FEATURE_TOOL,
+    register_browser_tool, register_exec_tools, register_exec_tools_with_jobs, register_job_tools,
+    register_question_tool, register_read_tools, register_skill_tools, register_write_tools,
+    FeatureDelegator, Tool, ToolMetadata, ToolOutcome, ToolRegistry, DELEGATE_FEATURE_TOOL,
 };
 pub use transcripts::{CliKind, ScanResult, ScanStatus};
 pub use usage::{

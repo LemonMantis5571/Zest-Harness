@@ -8,6 +8,7 @@ pub mod external_agent;
 pub mod glob_files;
 pub mod grep;
 pub(crate) mod isolated_workspace;
+pub mod jobs;
 pub mod list_dir;
 pub mod outcome;
 pub mod prepared;
@@ -28,6 +29,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::anthropic::types::{Message, ToolDef};
+use crate::jobs::JobRegistry;
 use crate::skills::SkillSet;
 
 use self::approval::ToolRisk;
@@ -287,8 +289,38 @@ pub fn register_exec_tools(
     root: impl AsRef<Path>,
     settings: self::bash::BashSettings,
 ) -> std::io::Result<()> {
-    registry.register(Arc::new(Bash::new(root)?.with_settings(settings)));
+    register_exec_tools_with_jobs(registry, root, settings, Arc::new(JobRegistry::new()), None)
+}
+
+/// Register shell execution plus the shared background-job controls. The
+/// registry is supplied by the front-end so a new runtime does not orphan
+/// jobs started by the previous one.
+pub fn register_exec_tools_with_jobs(
+    registry: &mut ToolRegistry,
+    root: impl AsRef<Path>,
+    settings: self::bash::BashSettings,
+    jobs: Arc<JobRegistry>,
+    owner_thread_id: Option<String>,
+) -> std::io::Result<()> {
+    let mut bash = Bash::new(root)?
+        .with_settings(settings)
+        .with_job_registry(jobs.clone());
+    if let Some(owner) = owner_thread_id.clone() {
+        bash = bash.with_job_owner(owner);
+    }
+    registry.register(Arc::new(bash));
+    jobs::register_job_tools(registry, jobs, owner_thread_id);
     Ok(())
+}
+
+/// Register only the model-facing job controls, useful when a provider owns
+/// its own shell but Zest still needs to expose jobs created by another tool.
+pub fn register_job_tools(
+    registry: &mut ToolRegistry,
+    jobs: Arc<JobRegistry>,
+    owner_thread_id: Option<String>,
+) {
+    jobs::register_job_tools(registry, jobs, owner_thread_id);
 }
 
 #[cfg(test)]
@@ -381,6 +413,20 @@ mod characterization {
         assert_eq!(reg.risk("missing"), None);
         let err = reg.prepare("missing", serde_json::json!({})).unwrap_err();
         assert!(err.contains("unknown tool"), "{err}");
+    }
+
+    #[test]
+    fn shared_job_tools_are_registered_with_owner_safe_risk() {
+        let mut reg = ToolRegistry::new();
+        register_job_tools(
+            &mut reg,
+            Arc::new(JobRegistry::new()),
+            Some("thread-a".into()),
+        );
+        assert_eq!(reg.names(), vec!["job_list", "job_output", "job_kill"]);
+        assert_eq!(reg.risk("job_list"), Some(ToolRisk::Read));
+        assert_eq!(reg.risk("job_output"), Some(ToolRisk::Read));
+        assert_eq!(reg.risk("job_kill"), Some(ToolRisk::Exec));
     }
 
     /// A tool that returns a body of a requested size, or an error.

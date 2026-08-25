@@ -24,7 +24,8 @@ use crate::fsutil;
 /// v2 adds optional typed [`ToolPart::metadata`] (delegation provenance).
 /// v3 adds anchored checkpoint metadata while keeping every new field
 /// optional so older thread files remain readable.
-pub const THREAD_FORMAT_VERSION: u32 = 3;
+/// v4 adds durable pending inputs and the thin lifecycle ledger.
+pub const THREAD_FORMAT_VERSION: u32 = 4;
 
 /// Anthropic Messages API content blocks (today's only wire format).
 pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
@@ -254,8 +255,117 @@ pub struct ThreadSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     pub message_count: usize,
+    /// Number of pending followup/steer/inject inputs owned by this thread.
+    #[serde(default)]
+    pub pending_input_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_context: Option<ThreadGitContext>,
+}
+
+/// Where a user or the runtime wants an input delivered.
+///
+/// This is deliberately a small enum instead of three ad-hoc queues. The
+/// distinction is the delivery contract: followups wait for the current turn
+/// to finish, while steer/inject inputs are claimed at the next provider step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadInputTarget {
+    Followup,
+    Steer,
+    Inject,
+}
+
+/// An input that has been accepted by the thread but has not yet been
+/// delivered to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadInput {
+    pub id: String,
+    pub target: ThreadInputTarget,
+    pub text: String,
+    pub created_at: u64,
+    /// Prepared attachments are kept in the thread so an attachment-only
+    /// followup survives a restart too. The desktop converts this core shape
+    /// back to its provider-facing input just before execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ThreadInputAttachment>,
+}
+
+/// Provider-neutral attachment payload for a durable queued input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadInputAttachment {
+    pub name: String,
+    pub detail: String,
+    pub content: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub data_base64: Option<String>,
+}
+
+/// Thin, append-only lifecycle metadata. Transcript text and tool bodies stay
+/// in the existing snapshot; this ledger only records enough identity to
+/// repair and replay a turn after a crash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreadEventKind {
+    TurnStarted {
+        turn_id: String,
+    },
+    ToolCalled {
+        turn_id: String,
+        call_id: String,
+        name: String,
+    },
+    ApprovalRequested {
+        turn_id: String,
+        approval_id: String,
+        call_id: String,
+        name: String,
+    },
+    ToolResult {
+        turn_id: String,
+        call_id: String,
+        name: String,
+        is_error: bool,
+    },
+    TurnCompleted {
+        turn_id: String,
+        status: String,
+    },
+    InputQueued {
+        input_id: String,
+        target: ThreadInputTarget,
+    },
+    InputClaimed {
+        input_id: String,
+        target: ThreadInputTarget,
+    },
+    InputCancelled {
+        input_id: String,
+        target: ThreadInputTarget,
+    },
+    JobStarted {
+        job_id: String,
+        kind: String,
+    },
+    JobCompleted {
+        job_id: String,
+        status: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadEvent {
+    pub id: String,
+    pub sequence: u64,
+    pub at: u64,
+    pub event: ThreadEventKind,
 }
 
 /// The reason a checkpoint exists. The UI uses this to give turn checkpoints
@@ -376,6 +486,14 @@ pub struct Thread {
     /// Wire messages for restoring `Agent.messages` so the model sees prior context.
     #[serde(default)]
     pub agent_messages: Vec<Message>,
+    /// Inputs accepted while a turn was busy, or while the runtime was
+    /// restarting. The queue is part of the thread snapshot, never webview
+    /// state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_inputs: Vec<ThreadInput>,
+    /// Compact lifecycle metadata used for crash repair and transcript replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<ThreadEvent>,
 }
 
 fn default_wire_format() -> String {
@@ -409,6 +527,8 @@ impl Thread {
             messages: Vec::new(),
             checkpoints: Vec::new(),
             agent_messages: Vec::new(),
+            pending_inputs: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -662,8 +782,155 @@ impl Thread {
             pinned: self.pinned,
             provider_id: self.provider_id.clone(),
             message_count: self.messages.len(),
+            pending_input_count: self.pending_inputs.len(),
             git_context: self.git_context.clone(),
         }
+    }
+
+    /// Append one lifecycle record and return its durable identity.
+    ///
+    /// The sequence is derived from the last record rather than from a
+    /// process-global counter, so loading a thread in another process cannot
+    /// create duplicate sequence numbers.
+    pub fn record_event(&mut self, event: ThreadEventKind) -> String {
+        let id = new_id("event");
+        let sequence = self
+            .events
+            .last()
+            .map(|entry| entry.sequence.saturating_add(1))
+            .unwrap_or(1);
+        self.events.push(ThreadEvent {
+            id: id.clone(),
+            sequence,
+            at: now_secs(),
+            event,
+        });
+        self.touch();
+        id
+    }
+
+    /// Enqueue a validated input in FIFO order.
+    pub fn enqueue_input(
+        &mut self,
+        target: ThreadInputTarget,
+        text: impl Into<String>,
+        attachments: Vec<ThreadInputAttachment>,
+    ) -> std::result::Result<ThreadInput, String> {
+        let text = text.into();
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Err("queued input must contain text or an attachment".into());
+        }
+        let input = ThreadInput {
+            id: new_id("input"),
+            target,
+            text,
+            created_at: now_secs(),
+            attachments,
+        };
+        self.pending_inputs.push(input.clone());
+        self.record_event(ThreadEventKind::InputQueued {
+            input_id: input.id.clone(),
+            target,
+        });
+        Ok(input)
+    }
+
+    /// Update queued text without moving the input.
+    pub fn update_input(
+        &mut self,
+        input_id: &str,
+        text: impl Into<String>,
+    ) -> std::result::Result<bool, String> {
+        let text = text.into();
+        let Some(input) = self
+            .pending_inputs
+            .iter_mut()
+            .find(|input| input.id == input_id)
+        else {
+            return Ok(false);
+        };
+        if text.trim().is_empty() && input.attachments.is_empty() {
+            return Err("queued input must contain text or an attachment".into());
+        }
+        if input.text == text {
+            return Ok(false);
+        }
+        input.text = text;
+        self.touch();
+        Ok(true)
+    }
+
+    /// Remove one pending input and record why it left the durable queue.
+    pub fn remove_input(&mut self, input_id: &str) -> bool {
+        let Some(index) = self
+            .pending_inputs
+            .iter()
+            .position(|input| input.id == input_id)
+        else {
+            return false;
+        };
+        let input = self.pending_inputs.remove(index);
+        self.record_event(ThreadEventKind::InputCancelled {
+            input_id: input.id,
+            target: input.target,
+        });
+        true
+    }
+
+    /// Remove one input because the live agent is about to deliver it.
+    pub fn claim_input(&mut self, input_id: &str) -> Option<ThreadInput> {
+        let index = self
+            .pending_inputs
+            .iter()
+            .position(|input| input.id == input_id)?;
+        let input = self.pending_inputs.remove(index);
+        self.record_event(ThreadEventKind::InputClaimed {
+            input_id: input.id.clone(),
+            target: input.target,
+        });
+        Some(input)
+    }
+
+    /// Claim all step-scoped inputs in insertion order. Followups remain in
+    /// the queue until the active turn has completed.
+    pub fn claim_next_step_inputs(&mut self) -> Vec<ThreadInput> {
+        let mut claimed = Vec::new();
+        let mut remaining = Vec::with_capacity(self.pending_inputs.len());
+        for input in self.pending_inputs.drain(..) {
+            if matches!(
+                input.target,
+                ThreadInputTarget::Steer | ThreadInputTarget::Inject
+            ) {
+                claimed.push(input);
+            } else {
+                remaining.push(input);
+            }
+        }
+        self.pending_inputs = remaining;
+        for input in &claimed {
+            self.record_event(ThreadEventKind::InputClaimed {
+                input_id: input.id.clone(),
+                target: input.target,
+            });
+        }
+        if !claimed.is_empty() {
+            self.touch();
+        }
+        claimed
+    }
+
+    /// Claim the oldest followup for the next turn.
+    pub fn claim_followup(&mut self) -> Option<ThreadInput> {
+        let index = self
+            .pending_inputs
+            .iter()
+            .position(|input| input.target == ThreadInputTarget::Followup)?;
+        let input = self.pending_inputs.remove(index);
+        self.record_event(ThreadEventKind::InputClaimed {
+            input_id: input.id.clone(),
+            target: input.target,
+        });
+        Some(input)
     }
 
     pub fn touch(&mut self) {
@@ -1375,6 +1642,9 @@ impl ThreadStore {
         // A fork owns a new provider conversation. Its canonical transcript is
         // copied, but a native continuation cursor must never be shared.
         fork.provider_session = None;
+        // Pending work belongs to the source runtime. Copying it into a branch
+        // would execute the same user request twice after a fork.
+        fork.pending_inputs.clear();
         fork.title = title
             .map(str::to_string)
             .or_else(|| source.title.as_ref().map(|t| format!("Copy of {t}")));
@@ -1568,6 +1838,114 @@ mod characterization {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, thread.id);
         assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn durable_input_queue_and_ledger_survive_restart_and_claim_in_order() {
+        let root = scratch("durable-inputs");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        let followup = thread
+            .enqueue_input(ThreadInputTarget::Followup, "run the tests", Vec::new())
+            .unwrap();
+        let steer = thread
+            .enqueue_input(
+                ThreadInputTarget::Steer,
+                "focus on the failing test",
+                Vec::new(),
+            )
+            .unwrap();
+        let inject = thread
+            .enqueue_input(ThreadInputTarget::Inject, "job finished", Vec::new())
+            .unwrap();
+        store.save(&thread).unwrap();
+
+        let mut restored = store.load(&thread.id).unwrap();
+        assert_eq!(restored.pending_inputs.len(), 3);
+        assert_eq!(restored.summary().pending_input_count, 3);
+        assert!(restored.events.iter().any(|entry| matches!(
+            entry.event,
+            ThreadEventKind::InputQueued { ref input_id, target: ThreadInputTarget::Steer }
+                if input_id == &steer.id
+        )));
+
+        let step_inputs = restored.claim_next_step_inputs();
+        assert_eq!(
+            step_inputs
+                .iter()
+                .map(|input| input.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![steer.id.as_str(), inject.id.as_str()]
+        );
+        assert_eq!(restored.claim_followup().unwrap().id, followup.id);
+        assert!(restored.pending_inputs.is_empty());
+        assert_eq!(
+            restored
+                .events
+                .iter()
+                .filter(|entry| matches!(entry.event, ThreadEventKind::InputClaimed { .. }))
+                .count(),
+            3
+        );
+        assert!(restored
+            .events
+            .windows(2)
+            .all(|entries| entries[0].sequence < entries[1].sequence));
+    }
+
+    #[test]
+    fn v3_thread_migrates_without_inventing_pending_work() {
+        let root = scratch("v3-migration");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = Thread::new().with_provider("codex");
+        let path = store.dir().join(format!("{}.json", thread.id));
+        let body = serde_json::json!({
+            "version": 3,
+            "id": thread.id,
+            "createdAt": thread.created_at,
+            "updatedAt": thread.updated_at,
+            "providerId": "codex",
+            "wireFormat": WIRE_FORMAT_ANTHROPIC_MESSAGES,
+            "messages": [],
+            "checkpoints": [],
+            "agentMessages": []
+        });
+        fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+
+        let loaded = store.load_with_recovery(&thread.id).unwrap();
+        assert_eq!(loaded.thread.version, THREAD_FORMAT_VERSION);
+        assert!(loaded.thread.pending_inputs.is_empty());
+        assert!(loaded.thread.events.is_empty());
+        assert!(loaded
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("migrated thread from format v3")));
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], THREAD_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn fork_drops_pending_runtime_inputs_but_keeps_transcript_ledger() {
+        let root = scratch("fork-pending");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut source = store.create_for_provider("codex").unwrap();
+        source.apply_user("u1", "inspect the build");
+        source.record_event(ThreadEventKind::TurnStarted {
+            turn_id: "turn-1".into(),
+        });
+        source
+            .enqueue_input(ThreadInputTarget::Followup, "then fix it", Vec::new())
+            .unwrap();
+        store.save(&source).unwrap();
+
+        let fork = store.fork(&source, Some("branch".into())).unwrap();
+        assert!(fork.pending_inputs.is_empty());
+        assert_eq!(
+            serde_json::to_value(&fork.messages).unwrap(),
+            serde_json::to_value(&source.messages).unwrap()
+        );
+        assert_eq!(fork.events, source.events);
     }
 
     #[test]

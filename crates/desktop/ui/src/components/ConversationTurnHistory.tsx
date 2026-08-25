@@ -81,18 +81,23 @@ export function ConversationTurnHistory({ turns, messageCount, onJump }: Props) 
       <Button
         type="button"
         variant="ghost"
-        size="sm"
+        size="icon-sm"
         className={cn(
-          "h-7 max-w-[250px] gap-1.5 px-2 text-[11px] text-muted-foreground",
+          "size-7 shrink-0 px-0 text-muted-foreground",
           open && "bg-secondary/70 text-foreground"
         )}
-        aria-label="Open chat turn history"
+        aria-label={`Open chat turn history: ${summaryLabel(turns, messageCount)}`}
+        title="Open chat history"
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <MessageSquareTextIcon className="size-3.5 shrink-0" aria-hidden="true" />
-        <span className="truncate">{summaryLabel(turns, messageCount)}</span>
+        <span className="flex flex-col items-start gap-1" aria-hidden="true">
+          {turns.slice(0, 3).map((turn) => (
+            <span key={turn.id} className="block h-px w-3 rounded-full bg-muted-foreground/65" />
+          ))}
+        </span>
+        <span className="sr-only">{summaryLabel(turns, messageCount)}</span>
       </Button>
 
       {open ? (

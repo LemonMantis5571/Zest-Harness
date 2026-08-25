@@ -5,7 +5,6 @@ import {
   Clock3Icon,
   ChevronRightIcon,
   ChevronsLeftIcon,
-  ChevronsRightIcon,
   FolderIcon,
   FolderOpenIcon,
   GitBranchIcon,
@@ -762,18 +761,7 @@ export function ChatHistorySidebar({
               <ChevronsLeftIcon />
             </Button>
           </div>
-        ) : (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            title="Expand projects (Ctrl+B)"
-            aria-expanded={open}
-            onClick={() => onOpenChange(true)}
-          >
-            <ChevronsRightIcon />
-          </Button>
-        )}
+        ) : null}
       </div>
 
       {!open ? (

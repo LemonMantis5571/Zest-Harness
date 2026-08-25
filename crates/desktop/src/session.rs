@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-use zest_core::{new_id, Agent, CancelToken, RecoverableRun, SkillSet, Thread};
+#[cfg(test)]
+use zest_core::ThreadInputTarget;
+use zest_core::{
+    new_id, Agent, CancelToken, InputInbox, RecoverableRun, SkillSet, Thread, ThreadInput,
+};
 
 use super::{ApprovalHub, QuestionHub};
 
@@ -49,6 +53,12 @@ pub struct ActiveTurn {
     pub model: String,
     pub effort: String,
     pub cancel: CancelToken,
+    /// Live transcript shared with queue commands while the session body is in
+    /// the turn worker. This prevents a queue write from racing a streaming
+    /// snapshot and overwriting newer deltas.
+    pub(crate) live_thread: Arc<Mutex<Thread>>,
+    /// Runtime projection of the same durable queue for steer/inject delivery.
+    pub(crate) input_inbox: Arc<InputInbox>,
     pub(crate) approval_hub: Arc<ApprovalHub>,
     pub(crate) question_hub: Arc<QuestionHub>,
 }
@@ -212,6 +222,31 @@ impl SessionController {
         Ok(Some(f(session)))
     }
 
+    /// Mutate a durable chat by id while it is idle, even when that chat is
+    /// not the route currently visible in the window. Background completion
+    /// notices use this to update the owning thread without stealing focus.
+    pub fn with_thread_if_idle<R>(
+        &self,
+        thread_id: &str,
+        f: impl FnOnce(&mut Session) -> R,
+    ) -> Result<Option<R>, SessionError> {
+        let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        let slot = g.sessions.values_mut().find(|slot| {
+            slot.turn.is_none()
+                && slot
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.thread_id == thread_id)
+        });
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        let Some(session) = slot.session.as_mut() else {
+            return Ok(None);
+        };
+        Ok(Some(f(session)))
+    }
+
     /// Durable chat id for the visible route, including while its body is
     /// held by a turn.
     pub fn active_thread_id(&self) -> Result<Option<String>, SessionError> {
@@ -311,6 +346,10 @@ impl SessionController {
             model: session.model.clone(),
             effort: session.effort.clone(),
             cancel: CancelToken::new(),
+            live_thread: Arc::new(Mutex::new(session.thread.clone())),
+            input_inbox: Arc::new(InputInbox::from_pending(
+                session.thread.pending_inputs.clone(),
+            )),
             approval_hub: session.approval_hub.clone(),
             question_hub: session.question_hub.clone(),
         };
@@ -369,6 +408,38 @@ impl SessionController {
         };
         turn.cancel.cancel();
         Ok(true)
+    }
+
+    /// Claim one followup after an active turn has restored its session body.
+    /// The returned snapshot is what the caller persists before starting the
+    /// next turn, making the claim crash-safe.
+    pub fn take_followup_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<(ThreadInput, PathBuf, Thread)>, SessionError> {
+        let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        let slot = g.sessions.values_mut().find(|slot| {
+            slot.turn
+                .as_ref()
+                .is_some_and(|turn| turn.thread_id == thread_id)
+                || slot
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.thread_id == thread_id)
+        });
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        if slot.turn.is_some() {
+            return Ok(None);
+        }
+        let Some(session) = slot.session.as_mut() else {
+            return Ok(None);
+        };
+        let Some(input) = session.thread.claim_followup() else {
+            return Ok(None);
+        };
+        Ok(Some((input, session.root.clone(), session.thread.clone())))
     }
 
     /// Cancel a thread's turn and mark its slot ended so [`Self::finish_turn`]
@@ -563,6 +634,61 @@ mod tests {
         let (_session, turn) = ctl.begin_turn().unwrap();
         assert!(ctl.cancel_turn().unwrap());
         assert!(turn.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn queued_followup_survives_finish_until_the_next_turn_claims_it() {
+        let ctl = SessionController::new();
+        ctl.set_session(dummy_session("queued")).unwrap();
+        let (mut session, turn) = ctl.begin_turn().unwrap();
+        let queued = turn
+            .live_thread
+            .lock()
+            .unwrap()
+            .enqueue_input(ThreadInputTarget::Followup, "continue", Vec::new())
+            .unwrap();
+        turn.input_inbox.enqueue(queued.clone());
+        session.thread = turn.live_thread.lock().unwrap().clone();
+
+        assert!(ctl.finish_turn(&turn, session).unwrap());
+        let (claimed, root, snapshot) = ctl
+            .take_followup_for_thread("thread-queued")
+            .unwrap()
+            .expect("followup remains after the first turn");
+        assert_eq!(claimed.id, queued.id);
+        assert_eq!(claimed.text, "continue");
+        assert_eq!(root, PathBuf::from("."));
+        assert!(snapshot.pending_inputs.is_empty());
+        assert!(snapshot.events.iter().any(|entry| matches!(
+            entry.event,
+            zest_core::ThreadEventKind::InputClaimed { ref input_id, .. }
+                if input_id == &queued.id
+        )));
+    }
+
+    #[test]
+    fn cancellation_restores_the_session_without_discarding_queued_followups() {
+        let ctl = SessionController::new();
+        ctl.set_session(dummy_session("cancel-queue")).unwrap();
+        let (mut session, turn) = ctl.begin_turn().unwrap();
+        session
+            .thread
+            .enqueue_input(
+                ThreadInputTarget::Followup,
+                "retry after cancel",
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(ctl.cancel_turn().unwrap());
+        assert!(turn.cancel.is_cancelled());
+        assert!(ctl.finish_turn(&turn, session).unwrap());
+
+        let pending = ctl
+            .session_info_snapshot(|session| session.thread.pending_inputs.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, "retry after cancel");
     }
 
     #[test]

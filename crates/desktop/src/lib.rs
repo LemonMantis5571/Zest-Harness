@@ -39,15 +39,16 @@ use zest_core::{
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
     AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, CredentialPolicy,
-    ExternalAgentMode, ExternalWorkspace, HarnessError, Ledger, LoginPoll, LoginProcess,
-    McpCatalog, PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats,
-    ProjectSessionState, ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest,
-    ProviderInteractionHost, ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry,
-    ProviderSlot, PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun,
-    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread,
-    ThreadCheckpoint, ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore,
-    ThreadSummary, ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
-    DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    ExternalAgentMode, ExternalWorkspace, HarnessError, JobEvent, JobRegistry, JobSnapshot,
+    JobStatus, Ledger, LoginPoll, LoginProcess, McpCatalog, PersistPriority, PersistSnapshot,
+    PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderCommandRequest,
+    ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
+    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
+    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
+    StreamEvent, SystemPrompt, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadEventKind,
+    ThreadGitContext, ThreadInput, ThreadInputAttachment, ThreadInputTarget, ThreadLoadError,
+    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport, UsageSnapshot,
+    DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -392,6 +393,9 @@ struct AppState {
     /// Mode + session grants. Outlives any one project so switching folders
     /// does not silently reset the user's chosen permission level.
     policy: Arc<Mutex<ApprovalPolicy>>,
+    /// Process-wide jobs survive runtime/tool reconstruction and are fenced by
+    /// their owning thread when exposed to a model or the UI.
+    jobs: Arc<JobRegistry>,
     ledger: Arc<Mutex<Ledger>>,
     /// Serialize comment-preserving config read-modify-write operations made
     /// by Settings so two quick preset changes cannot overwrite each other.
@@ -575,6 +579,94 @@ impl From<ThreadCheckpoint> for ThreadCheckpointView {
             }
             .into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "PendingInputAttachment.ts",
+        rename_all = "camelCase"
+    )
+)]
+struct PendingInputAttachmentView {
+    name: String,
+    detail: String,
+    content: Option<String>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    data_base64: Option<String>,
+}
+
+impl From<ThreadInputAttachment> for PendingInputAttachmentView {
+    fn from(attachment: ThreadInputAttachment) -> Self {
+        Self {
+            name: attachment.name,
+            detail: attachment.detail,
+            content: attachment.content,
+            status: attachment.status,
+            kind: attachment.kind,
+            media_type: attachment.media_type,
+            data_base64: attachment.data_base64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "PendingInput.ts", rename_all = "camelCase")
+)]
+struct PendingInputView {
+    id: String,
+    #[cfg_attr(
+        feature = "export-bindings",
+        ts(type = "\"followup\" | \"steer\" | \"inject\"")
+    )]
+    target: String,
+    text: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    created_at: u64,
+    attachments: Vec<PendingInputAttachmentView>,
+}
+
+impl From<ThreadInput> for PendingInputView {
+    fn from(input: ThreadInput) -> Self {
+        Self {
+            id: input.id,
+            target: match input.target {
+                ThreadInputTarget::Followup => "followup",
+                ThreadInputTarget::Steer => "steer",
+                ThreadInputTarget::Inject => "inject",
+            }
+            .into(),
+            text: input.text,
+            created_at: input.created_at,
+            attachments: input
+                .attachments
+                .into_iter()
+                .map(PendingInputAttachmentView::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<&ThreadInput> for PendingInputView {
+    fn from(input: &ThreadInput) -> Self {
+        input.clone().into()
     }
 }
 
@@ -955,6 +1047,7 @@ struct SessionMeta {
     owns_agent_loop: bool,
     models: Vec<ModelCapability>,
     checkpoints: Vec<ThreadCheckpointView>,
+    pending_inputs: Vec<PendingInputView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     warning: Option<String>,
@@ -988,6 +1081,7 @@ struct SessionInfo {
     owns_agent_loop: bool,
     models: Vec<ModelCapability>,
     checkpoints: Vec<ThreadCheckpointView>,
+    pending_inputs: Vec<PendingInputView>,
     /// UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
     #[cfg_attr(feature = "export-bindings", ts(type = "unknown[]"))]
     messages: Vec<StoredMessage>,
@@ -1248,6 +1342,48 @@ enum ChatEvent {
         turn_id: String,
         message_id: String,
     },
+    /// Rust-authoritative queue projection. The UI may render this, but never
+    /// decides whether the input is actually accepted or delivered.
+    InputQueued {
+        session_id: String,
+        thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        turn_id: Option<String>,
+        input: PendingInputView,
+    },
+    InputUpdated {
+        session_id: String,
+        thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        turn_id: Option<String>,
+        input_id: String,
+        text: String,
+    },
+    InputRemoved {
+        session_id: String,
+        thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        turn_id: Option<String>,
+        input_id: String,
+    },
+    JobCompleted {
+        session_id: String,
+        thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        turn_id: Option<String>,
+        job_id: String,
+        #[serde(rename = "jobKind")]
+        job_kind: String,
+        label: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        detail: Option<String>,
+    },
     Warning {
         session_id: String,
         thread_id: String,
@@ -1283,6 +1419,30 @@ fn desktop_err_with_details(
         details,
     })
     .unwrap_or(message)
+}
+
+fn parse_input_target(raw: Option<&str>) -> Result<ThreadInputTarget, String> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("followup") => Ok(ThreadInputTarget::Followup),
+        Some("steer") => Ok(ThreadInputTarget::Steer),
+        Some("inject") => Ok(ThreadInputTarget::Inject),
+        Some(other) => Err(desktop_err(
+            "invalid",
+            format!("unknown queued input target `{other}`"),
+        )),
+    }
+}
+
+fn thread_input_attachment(attachment: &AttachmentInput) -> ThreadInputAttachment {
+    ThreadInputAttachment {
+        name: attachment.name.clone(),
+        detail: attachment.detail.clone(),
+        content: attachment.content.clone(),
+        status: attachment.status.clone(),
+        kind: attachment.kind.clone(),
+        media_type: attachment.media_type.clone(),
+        data_base64: attachment.data_base64.clone(),
+    }
 }
 
 fn map_session_err(e: SessionError) -> String {
@@ -3488,12 +3648,29 @@ fn session_meta_from(session: &Session, warning: Option<String>) -> SessionMeta 
             .into_iter()
             .map(ThreadCheckpointView::from)
             .collect(),
+        pending_inputs: session
+            .thread
+            .pending_inputs
+            .iter()
+            .map(PendingInputView::from)
+            .collect(),
         warning,
         recovery: session.recovery.as_ref().map(TurnRecoveryView::from),
     }
 }
 
 fn session_info_from_turn(turn: &ActiveTurn) -> SessionInfo {
+    let pending_inputs = turn
+        .live_thread
+        .lock()
+        .map(|thread| {
+            thread
+                .pending_inputs
+                .iter()
+                .map(PendingInputView::from)
+                .collect()
+        })
+        .unwrap_or_default();
     SessionInfo {
         session_id: turn.session_id.clone(),
         provider: turn.provider_id.clone(),
@@ -3507,6 +3684,7 @@ fn session_info_from_turn(turn: &ActiveTurn) -> SessionInfo {
         owns_agent_loop: false,
         models: Vec::new(),
         checkpoints: Vec::new(),
+        pending_inputs,
         messages: Vec::new(),
         warning: None,
         recovery: None,
@@ -3533,6 +3711,12 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
             .clone()
             .into_iter()
             .map(ThreadCheckpointView::from)
+            .collect(),
+        pending_inputs: session
+            .thread
+            .pending_inputs
+            .iter()
+            .map(PendingInputView::from)
             .collect(),
         messages: session.thread.messages.clone(),
         warning,
@@ -3638,6 +3822,10 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::Cancelled { message_id, .. } => {
             thread.apply_error(message_id, "turn cancelled");
         }
+        ChatEvent::InputQueued { .. }
+        | ChatEvent::InputUpdated { .. }
+        | ChatEvent::InputRemoved { .. }
+        | ChatEvent::JobCompleted { .. } => {}
         ChatEvent::Warning { .. } => {}
     }
 }
@@ -3769,6 +3957,8 @@ async fn start_session_inner(
         .with_policy(state.policy.clone())
         .with_ledger(state.ledger.clone())
         .with_browser_adapter(state.browser.adapter())
+        .with_job_registry(state.jobs.clone())
+        .with_job_owner(thread.id.clone())
         .with_parent_thread_id(&thread.id)
         .with_remembered_options(prefs.model, prefs.effort)
         .enable_external_agents(true)
@@ -5562,6 +5752,7 @@ async fn delete_thread_inner(
             owns_agent_loop: false,
             models: Vec::new(),
             checkpoints: Vec::new(),
+            pending_inputs: Vec::new(),
             messages: Vec::new(),
             warning: None,
             recovery: None,
@@ -5680,9 +5871,589 @@ async fn send_message(
     state: State<'_, AppState>,
     text: String,
     attachments: Option<Vec<AttachmentInput>>,
+    target: Option<String>,
 ) -> Result<(), String> {
+    let explicit_target = target.is_some();
+    let target = parse_input_target(target.as_deref())?;
+    let requested_text = text.clone();
+    let requested_attachments = attachments.clone().unwrap_or_default();
+    let active_thread = state.sessions.active_thread_id().map_err(map_session_err)?;
+    if let Some(thread_id) = active_thread.as_deref() {
+        if let Some(turn) = state
+            .sessions
+            .active_turn_for_thread(thread_id)
+            .map_err(map_session_err)?
+        {
+            let input = {
+                let mut thread = turn
+                    .live_thread
+                    .lock()
+                    .map_err(|_| desktop_err("queue", "thread state is unavailable"))?;
+                thread
+                    .enqueue_input(
+                        target,
+                        requested_text,
+                        requested_attachments
+                            .iter()
+                            .map(thread_input_attachment)
+                            .collect(),
+                    )
+                    .map_err(|error| desktop_err("invalid", error))?
+            };
+            let worker = ensure_persist(state.inner(), &turn.root)?;
+            if worker
+                .save_and_wait(
+                    PersistSnapshot::Live(turn.live_thread.clone()),
+                    PersistPriority::Immediate,
+                )
+                .await
+                .is_err()
+            {
+                if let Ok(mut thread) = turn.live_thread.lock() {
+                    let _ = thread.remove_input(&input.id);
+                }
+                return Err(desktop_err(
+                    "persistence",
+                    "queued input could not be saved",
+                ));
+            }
+            turn.input_inbox.enqueue(input.clone());
+            let _ = app.emit(
+                "chat-event",
+                ChatEvent::InputQueued {
+                    session_id: turn.session_id,
+                    thread_id: turn.thread_id,
+                    turn_id: Some(turn.turn_id),
+                    input: input.into(),
+                },
+            );
+            return Ok(());
+        }
+    }
+
+    // A steer/inject sent while the runtime is idle is still durable. It is
+    // claimed by the next Agent step after the next normal turn begins.
+    if explicit_target || !matches!(target, ThreadInputTarget::Followup) {
+        if let Some(thread_id) = active_thread.as_deref() {
+            let queued = state
+                .sessions
+                .with_session_if_idle(|session| {
+                    let previous = session.thread.clone();
+                    let input = session.thread.enqueue_input(
+                        target,
+                        requested_text.clone(),
+                        requested_attachments
+                            .iter()
+                            .map(thread_input_attachment)
+                            .collect(),
+                    );
+                    (
+                        session.session_id.clone(),
+                        session.root.clone(),
+                        previous,
+                        session.thread.clone(),
+                        input,
+                    )
+                })
+                .map_err(map_session_err)?;
+            if let Some((session_id, root, previous, snapshot, queued)) = queued {
+                let input = queued.map_err(|error| desktop_err("invalid", error))?;
+                let worker = ensure_persist(state.inner(), &root)?;
+                if worker
+                    .save_and_wait(
+                        PersistSnapshot::Owned(Box::new(snapshot)),
+                        PersistPriority::Immediate,
+                    )
+                    .await
+                    .is_err()
+                {
+                    let _ = state.sessions.with_session_if_idle(|session| {
+                        session.thread = previous;
+                    });
+                    return Err(desktop_err(
+                        "persistence",
+                        "queued input could not be saved",
+                    ));
+                }
+                let _ = app.emit(
+                    "chat-event",
+                    ChatEvent::InputQueued {
+                        session_id,
+                        thread_id: thread_id.to_string(),
+                        turn_id: None,
+                        input: input.into(),
+                    },
+                );
+                return Ok(());
+            }
+        }
+    }
+
     turn::run(app, state.inner(), text, attachments).await
 }
+
+fn requested_thread_id(state: &AppState, thread_id: Option<&str>) -> Result<String, String> {
+    if let Some(thread_id) = thread_id.map(str::trim).filter(|id| !id.is_empty()) {
+        return Ok(thread_id.to_string());
+    }
+    state
+        .sessions
+        .active_thread_id()
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("no_session", "no active chat"))
+}
+
+#[tauri::command]
+async fn update_queued_input(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    thread_id: Option<String>,
+    input_id: String,
+    text: String,
+) -> Result<(), String> {
+    let thread_id = requested_thread_id(state.inner(), thread_id.as_deref())?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err(desktop_err("invalid", "queued input cannot be empty"));
+    }
+
+    if let Some(turn) = state
+        .sessions
+        .active_turn_for_thread(&thread_id)
+        .map_err(map_session_err)?
+    {
+        let previous = turn
+            .live_thread
+            .lock()
+            .map_err(|_| desktop_err("queue", "thread state is unavailable"))?
+            .clone();
+        let changed = {
+            let mut thread = turn
+                .live_thread
+                .lock()
+                .map_err(|_| desktop_err("queue", "thread state is unavailable"))?;
+            thread.update_input(&input_id, text.clone())?
+        };
+        if !changed {
+            return Err(desktop_err("not_found", "queued input was not found"));
+        }
+        let worker = ensure_persist(state.inner(), &turn.root)?;
+        if worker
+            .save_and_wait(
+                PersistSnapshot::Live(turn.live_thread.clone()),
+                PersistPriority::Immediate,
+            )
+            .await
+            .is_err()
+        {
+            if let Ok(mut thread) = turn.live_thread.lock() {
+                *thread = previous;
+            }
+            return Err(desktop_err(
+                "persistence",
+                "queued input could not be saved",
+            ));
+        }
+        turn.input_inbox.update_text(&input_id, text.clone());
+        let _ = app.emit(
+            "chat-event",
+            ChatEvent::InputUpdated {
+                session_id: turn.session_id,
+                thread_id,
+                turn_id: Some(turn.turn_id),
+                input_id,
+                text,
+            },
+        );
+        return Ok(());
+    }
+
+    let result = state
+        .sessions
+        .with_thread_if_idle(&thread_id, |session| -> Result<_, String> {
+            let previous = session.thread.clone();
+            let changed = session.thread.update_input(&input_id, text.clone())?;
+            Ok((
+                session.session_id.clone(),
+                session.root.clone(),
+                previous,
+                session.thread.clone(),
+                changed,
+            ))
+        })
+        .map_err(map_session_err)?;
+    let Some(result) = result else {
+        return Err(desktop_err("not_found", "queued input was not found"));
+    };
+    let (session_id, root, previous, snapshot, changed) = result?;
+    if !changed {
+        return Err(desktop_err("not_found", "queued input was not found"));
+    }
+    let worker = ensure_persist(state.inner(), &root)?;
+    if worker
+        .save_and_wait(
+            PersistSnapshot::Owned(Box::new(snapshot)),
+            PersistPriority::Immediate,
+        )
+        .await
+        .is_err()
+    {
+        let _ = state.sessions.with_thread_if_idle(&thread_id, |session| {
+            session.thread = previous;
+        });
+        return Err(desktop_err(
+            "persistence",
+            "queued input could not be saved",
+        ));
+    }
+    let _ = app.emit(
+        "chat-event",
+        ChatEvent::InputUpdated {
+            session_id,
+            thread_id,
+            turn_id: None,
+            input_id,
+            text,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_queued_input(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    thread_id: Option<String>,
+    input_id: String,
+) -> Result<(), String> {
+    let thread_id = requested_thread_id(state.inner(), thread_id.as_deref())?;
+
+    if let Some(turn) = state
+        .sessions
+        .active_turn_for_thread(&thread_id)
+        .map_err(map_session_err)?
+    {
+        let previous = turn
+            .live_thread
+            .lock()
+            .map_err(|_| desktop_err("queue", "thread state is unavailable"))?
+            .clone();
+        let removed = {
+            let mut thread = turn
+                .live_thread
+                .lock()
+                .map_err(|_| desktop_err("queue", "thread state is unavailable"))?;
+            thread.remove_input(&input_id)
+        };
+        if !removed {
+            return Err(desktop_err("not_found", "queued input was not found"));
+        }
+        let worker = ensure_persist(state.inner(), &turn.root)?;
+        if worker
+            .save_and_wait(
+                PersistSnapshot::Live(turn.live_thread.clone()),
+                PersistPriority::Immediate,
+            )
+            .await
+            .is_err()
+        {
+            if let Ok(mut thread) = turn.live_thread.lock() {
+                *thread = previous;
+            }
+            return Err(desktop_err(
+                "persistence",
+                "queued input could not be saved",
+            ));
+        }
+        turn.input_inbox.remove(&input_id);
+        let _ = app.emit(
+            "chat-event",
+            ChatEvent::InputRemoved {
+                session_id: turn.session_id,
+                thread_id,
+                turn_id: Some(turn.turn_id),
+                input_id,
+            },
+        );
+        return Ok(());
+    }
+
+    let result = state
+        .sessions
+        .with_thread_if_idle(&thread_id, |session| {
+            let previous = session.thread.clone();
+            let removed = session.thread.remove_input(&input_id);
+            (
+                session.session_id.clone(),
+                session.root.clone(),
+                previous,
+                session.thread.clone(),
+                removed,
+            )
+        })
+        .map_err(map_session_err)?;
+    let Some((session_id, root, previous, snapshot, removed)) = result else {
+        return Err(desktop_err("not_found", "queued input was not found"));
+    };
+    if !removed {
+        return Err(desktop_err("not_found", "queued input was not found"));
+    }
+    let worker = ensure_persist(state.inner(), &root)?;
+    if worker
+        .save_and_wait(
+            PersistSnapshot::Owned(Box::new(snapshot)),
+            PersistPriority::Immediate,
+        )
+        .await
+        .is_err()
+    {
+        let _ = state.sessions.with_thread_if_idle(&thread_id, |session| {
+            session.thread = previous;
+        });
+        return Err(desktop_err(
+            "persistence",
+            "queued input could not be saved",
+        ));
+    }
+    let _ = app.emit(
+        "chat-event",
+        ChatEvent::InputRemoved {
+            session_id,
+            thread_id,
+            turn_id: None,
+            input_id,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn list_jobs(
+    state: State<'_, AppState>,
+    thread_id: Option<String>,
+) -> Result<Vec<JobSnapshot>, String> {
+    let thread_id = requested_thread_id(state.inner(), thread_id.as_deref())?;
+    Ok(state.jobs.list(Some(&thread_id)))
+}
+
+#[tauri::command]
+async fn job_output(
+    state: State<'_, AppState>,
+    job_id: String,
+    offset: Option<u64>,
+    wait: Option<bool>,
+    timeout_ms: Option<u64>,
+    thread_id: Option<String>,
+) -> Result<zest_core::JobRead, String> {
+    let thread_id = requested_thread_id(state.inner(), thread_id.as_deref())?;
+    let offset = offset.unwrap_or(0);
+    let timeout = timeout_ms.map(|millis| Duration::from_millis(millis.min(60_000)));
+    if wait.unwrap_or(false) {
+        state
+            .jobs
+            .read_wait(&job_id, Some(&thread_id), offset, timeout)
+            .await
+    } else {
+        state.jobs.read(&job_id, Some(&thread_id), offset).await
+    }
+}
+
+#[tauri::command]
+async fn job_kill(
+    state: State<'_, AppState>,
+    job_id: String,
+    reason: Option<String>,
+    thread_id: Option<String>,
+) -> Result<JobSnapshot, String> {
+    let thread_id = requested_thread_id(state.inner(), thread_id.as_deref())?;
+    state
+        .jobs
+        .kill(&job_id, Some(&thread_id), reason.as_deref())
+        .await
+}
+
+fn job_status_wire(status: JobStatus) -> String {
+    match status {
+        JobStatus::Running => "running",
+        JobStatus::Stopping => "stopping",
+        JobStatus::Completed => "completed",
+        JobStatus::Killed => "killed",
+        JobStatus::Failed => "failed",
+    }
+    .into()
+}
+
+async fn inject_job_completion(
+    app: &AppHandle,
+    state: &AppState,
+    snapshot: &JobSnapshot,
+) -> Result<(), String> {
+    let Some(thread_id) = snapshot.owner_thread_id.as_deref() else {
+        return Ok(());
+    };
+    let status = job_status_wire(snapshot.status);
+    let notice = format!(
+        "Background job `{}` ({}) finished with status `{}`.{} Read more output with `job_output`.",
+        snapshot.id,
+        snapshot.label,
+        status,
+        snapshot
+            .detail
+            .as_deref()
+            .map(|detail| format!(" Detail: {detail}."))
+            .unwrap_or_default(),
+    );
+
+    if let Some(turn) = state
+        .sessions
+        .active_turn_for_thread(thread_id)
+        .map_err(map_session_err)?
+    {
+        let input = {
+            let mut thread = turn
+                .live_thread
+                .lock()
+                .map_err(|_| desktop_err("queue", "thread state is unavailable"))?;
+            thread.record_event(ThreadEventKind::JobCompleted {
+                job_id: snapshot.id.clone(),
+                status: status.clone(),
+            });
+            thread
+                .enqueue_input(ThreadInputTarget::Inject, notice, Vec::new())
+                .map_err(|error| desktop_err("queue", error))?
+        };
+        let worker = ensure_persist(state, &turn.root)?;
+        worker
+            .save_and_wait(
+                PersistSnapshot::Live(turn.live_thread.clone()),
+                PersistPriority::Immediate,
+            )
+            .await
+            .map_err(|_| desktop_err("persistence", "job completion could not be saved"))?;
+        turn.input_inbox.enqueue(input.clone());
+        let _ = app.emit(
+            "chat-event",
+            ChatEvent::JobCompleted {
+                session_id: turn.session_id.clone(),
+                thread_id: turn.thread_id.clone(),
+                turn_id: Some(turn.turn_id.clone()),
+                job_id: snapshot.id.clone(),
+                job_kind: snapshot.kind.clone(),
+                label: snapshot.label.clone(),
+                status,
+                detail: snapshot.detail.clone(),
+            },
+        );
+        let _ = app.emit(
+            "chat-event",
+            ChatEvent::InputQueued {
+                session_id: turn.session_id,
+                thread_id: turn.thread_id,
+                turn_id: Some(turn.turn_id),
+                input: input.into(),
+            },
+        );
+        return Ok(());
+    }
+
+    let result = state
+        .sessions
+        .with_thread_if_idle(thread_id, |session| -> Result<_, String> {
+            session.thread.record_event(ThreadEventKind::JobCompleted {
+                job_id: snapshot.id.clone(),
+                status: status.clone(),
+            });
+            let input = session
+                .thread
+                .enqueue_input(ThreadInputTarget::Inject, notice.clone(), Vec::new())
+                .map_err(|error| desktop_err("queue", error))?;
+            Ok((
+                session.session_id.clone(),
+                session.root.clone(),
+                session.thread.clone(),
+                input,
+            ))
+        })
+        .map_err(map_session_err)?;
+    if let Some(result) = result {
+        let (session_id, root, thread, input) = result?;
+        let worker = ensure_persist(state, &root)?;
+        worker
+            .save_and_wait(
+                PersistSnapshot::Owned(Box::new(thread)),
+                PersistPriority::Immediate,
+            )
+            .await
+            .map_err(|_| desktop_err("persistence", "job completion could not be saved"))?;
+        let _ = app.emit(
+            "chat-event",
+            ChatEvent::JobCompleted {
+                session_id: session_id.clone(),
+                thread_id: thread_id.to_string(),
+                turn_id: None,
+                job_id: snapshot.id.clone(),
+                job_kind: snapshot.kind.clone(),
+                label: snapshot.label.clone(),
+                status: status.clone(),
+                detail: snapshot.detail.clone(),
+            },
+        );
+        let _ = app.emit(
+            "chat-event",
+            ChatEvent::InputQueued {
+                session_id,
+                thread_id: thread_id.to_string(),
+                turn_id: None,
+                input: input.into(),
+            },
+        );
+        return Ok(());
+    }
+
+    // The route may have been closed after the job started. The registry keeps
+    // the owning root so the completion still becomes durable instead of
+    // disappearing with the in-memory session slot.
+    if let Some(root) = snapshot.owner_root.as_deref() {
+        let store = ThreadStore::open(root).map_err(|error| error.to_string())?;
+        let mut thread = store.load(thread_id).map_err(|error| error.to_string())?;
+        thread.record_event(ThreadEventKind::JobCompleted {
+            job_id: snapshot.id.clone(),
+            status,
+        });
+        let _ = thread
+            .enqueue_input(ThreadInputTarget::Inject, notice, Vec::new())
+            .map_err(|error| desktop_err("queue", error))?;
+        store.save(&thread).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn forward_job_events(app: AppHandle, jobs: Arc<JobRegistry>) {
+    let mut events = jobs.subscribe();
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+        let JobEvent::Completed(snapshot) = event else {
+            continue;
+        };
+        if snapshot.owner_thread_id.is_none() {
+            continue;
+        }
+        let state = app.state::<AppState>();
+        match inject_job_completion(&app, &state, &snapshot).await {
+            Ok(()) => {
+                let _ = jobs
+                    .mark_reported(&snapshot.id, snapshot.owner_thread_id.as_deref())
+                    .await;
+            }
+            Err(error) => eprintln!("could not record background job completion: {error}"),
+        }
+    }
+}
+
 #[tauri::command]
 fn cancel_turn(state: State<'_, AppState>, thread_id: Option<String>) -> Result<(), String> {
     // Cancel token first so in-flight select! races abort before waiters clear.
@@ -7224,6 +7995,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage({
             let ledger = Arc::new(Mutex::new(Ledger::load()));
+            let jobs = Arc::new(JobRegistry::new());
             AppState {
                 sessions: SessionController::new(),
                 browser: Arc::new(BrowserHost::new()),
@@ -7235,6 +8007,7 @@ pub fn run() {
                 workspace_root: Mutex::new(initial_workspace_root()),
                 workspace_config: Mutex::new(None),
                 policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
+                jobs,
                 ledger: ledger.clone(),
                 config_edit: Mutex::new(()),
                 chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
@@ -7243,6 +8016,9 @@ pub fn run() {
         })
         .setup(|app| {
             app.state::<AppState>().browser.attach(app.handle().clone());
+            let jobs = app.state::<AppState>().jobs.clone();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(forward_job_events(app_handle, jobs));
             remove_retired_spaces_state();
             Ok(())
         })
@@ -7305,6 +8081,11 @@ pub fn run() {
             set_thread_pinned,
             rename_thread,
             send_message,
+            update_queued_input,
+            remove_queued_input,
+            list_jobs,
+            job_output,
+            job_kill,
             save_markdown,
             cancel_turn,
             resolve_approval,
@@ -7485,6 +8266,7 @@ mod export_bindings {
     fn export_bindings() {
         ChatEvent::export_all().expect("export ChatEvent bindings");
         SessionInfo::export_all().expect("export SessionInfo bindings");
+        SessionMeta::export_all().expect("export SessionMeta bindings");
         ProviderView::export_all().expect("export ProviderView bindings");
         ExternalAgentView::export_all().expect("export ExternalAgentView bindings");
         ExternalAgentCheckView::export_all().expect("export ExternalAgentCheckView bindings");
@@ -7495,6 +8277,8 @@ mod export_bindings {
         PullRequestView::export_all().expect("export PullRequestView bindings");
         GitContextView::export_all().expect("export GitContext bindings");
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
+        PendingInputAttachmentView::export_all().expect("export PendingInputAttachment bindings");
+        PendingInputView::export_all().expect("export PendingInput bindings");
         TurnRecoveryView::export_all().expect("export TurnRecovery bindings");
         ToolMetaView::export_all().expect("export ToolMetaView bindings");
         delegation::DelegationStatus::export_all().expect("export DelegationStatus bindings");

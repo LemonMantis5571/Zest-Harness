@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::claude_control::{
-    control_response, decide, render_diff, summarize, surface_for, Surface, ToolPermissionRequest,
+    control_response, decide, initialize_request_id, initialize_response, render_diff,
+    stream_json_user_message, summarize, surface_for, Surface, ToolPermissionRequest,
 };
 use super::{
     catalogue, Completion, EffortPolicy, ModelSpec, Provider, StreamEvent, SystemPrompt,
@@ -138,7 +139,9 @@ impl ClaudeCodeProvider {
                 self.effective_permission_mode().cli_value().into(),
                 "--model".into(),
                 "{model}".into(),
-                "{prompt}".into(),
+                // The prompt is a stdin JSON user message. `--input-format
+                // stream-json` waits for that line and ignores a leftover argv
+                // prompt, which left the child idle until the turn timed out.
             ],
             allow_mcp: self.allow_mcp,
             model: Some(model.to_string()),
@@ -360,7 +363,14 @@ struct ClaudePermissions {
 
 #[async_trait]
 impl ControlResponder for ClaudePermissions {
+    fn prelude(&self, prompt: &str) -> Vec<Value> {
+        vec![stream_json_user_message(prompt)]
+    }
+
     async fn respond(&mut self, message: &Value) -> Option<Value> {
+        if let Some(request_id) = initialize_request_id(message) {
+            return Some(initialize_response(request_id));
+        }
         let request = ToolPermissionRequest::parse(message)?;
         let surface = surface_for(&request.tool_name);
         let approval_id = new_id("claude-approval");
@@ -536,6 +546,10 @@ mod tests {
         assert!(
             interactive.contains("--input-format stream-json"),
             "{interactive}"
+        );
+        assert!(
+            !interactive.contains("{prompt}"),
+            "stream-json input carries the prompt on stdin, not argv: {interactive}"
         );
         // Configured `accept_edits` auto-approves before the callback is
         // consulted, so an interactive turn must not run in it.

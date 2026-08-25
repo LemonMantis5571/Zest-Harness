@@ -20,10 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex,
-};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,6 +30,7 @@ use super::approval::{ApprovalPreview, ToolRisk};
 use super::capture::{drain_bounded, Captured};
 use super::prepared::PreparedToolCall;
 use super::Tool;
+use crate::jobs::JobRegistry;
 
 /// Combined stdout+stderr kept from a command. Build logs are enormous and the
 /// interesting part is at both ends, so the middle is what gets dropped.
@@ -208,26 +206,11 @@ fn display_path(path: &Path) -> String {
     value.into_owned()
 }
 
-struct BackgroundProcess {
-    id: u64,
-    child: tokio::process::Child,
-}
-
-impl Drop for BackgroundProcess {
-    fn drop(&mut self) {
-        let Some(pid) = self.child.id() else {
-            return;
-        };
-
-        terminate_process_tree(pid);
-    }
-}
-
 pub struct Bash {
     root: PathBuf,
     settings: BashSettings,
-    background: Mutex<Vec<BackgroundProcess>>,
-    next_background_id: AtomicU64,
+    jobs: Arc<JobRegistry>,
+    owner_thread_id: Option<String>,
 }
 
 impl Bash {
@@ -235,13 +218,23 @@ impl Bash {
         Ok(Self {
             root: std::fs::canonicalize(root)?,
             settings: BashSettings::default(),
-            background: Mutex::new(Vec::new()),
-            next_background_id: AtomicU64::new(1),
+            jobs: Arc::new(JobRegistry::new()),
+            owner_thread_id: None,
         })
     }
 
     pub fn with_settings(mut self, settings: BashSettings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    pub fn with_job_registry(mut self, jobs: Arc<JobRegistry>) -> Self {
+        self.jobs = jobs;
+        self
+    }
+
+    pub fn with_job_owner(mut self, owner_thread_id: impl Into<String>) -> Self {
+        self.owner_thread_id = Some(owner_thread_id.into());
         self
     }
 
@@ -562,59 +555,39 @@ impl Bash {
         &self,
         parsed: ParsedCommand,
     ) -> std::result::Result<super::ToolOutcome, String> {
-        self.reap_background();
-        {
-            let processes = self
-                .background
-                .lock()
-                .map_err(|_| "background process state is unavailable".to_string())?;
-            if processes.len() >= MAX_BACKGROUND_PROCESSES {
-                return Err(format!(
-                    "too many background processes are already running (max {MAX_BACKGROUND_PROCESSES})"
-                ));
-            }
+        if self.jobs.count_running(self.owner_thread_id.as_deref()) >= MAX_BACKGROUND_PROCESSES {
+            return Err(format!(
+                "too many background jobs are already running (max {MAX_BACKGROUND_PROCESSES})"
+            ));
         }
 
-        let mut cmd = shell_command(&parsed.command);
-        cmd.current_dir(&parsed.cwd)
-            .stdin(Stdio::null())
-            // Dev servers are long-lived. Keep draining both streams so a
-            // verbose watcher cannot block on a full pipe, while startup
-            // failures can still be reported before the process is stored.
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|error| format!("cannot start background `{}`: {error}", parsed.command))?;
-        let pid = child.id();
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
-        let output_task = tokio::spawn(async move {
-            let read_out = drain_bounded(stdout.as_mut(), MAX_STREAM_BYTES);
-            let read_err = drain_bounded(stderr.as_mut(), MAX_STREAM_BYTES);
-            tokio::join!(read_out, read_err)
-        });
+        let job = self
+            .jobs
+            .start_process(
+                &parsed.command,
+                &parsed.cwd,
+                "bash",
+                parsed.command.clone(),
+                self.owner_thread_id.clone(),
+            )
+            .await?;
+        let process_id = job.id.clone();
 
         let deadline = tokio::time::Instant::now() + parsed.timeout;
         loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("could not inspect background process: {error}"))?
-            {
-                let (out, err) = output_task
-                    .await
-                    .map_err(|error| format!("could not collect startup output: {error}"))?;
-                let output = render_output(&parsed.command, status.code(), &out, &err);
+            let status = self
+                .jobs
+                .snapshot(&process_id, self.owner_thread_id.as_deref())
+                .await?;
+            if status.status.terminal() {
+                let output = self
+                    .jobs
+                    .read(&process_id, self.owner_thread_id.as_deref(), 0)
+                    .await?
+                    .text;
                 return Err(format!(
-                    "background process exited before it became ready:\n\n{output}"
+                    "background process exited before it became ready:\n\n$ {}\n{}",
+                    parsed.command, output
                 ));
             }
 
@@ -623,23 +596,14 @@ impl Bash {
                 None => true,
             };
             if ready {
-                let id = self.next_background_id.fetch_add(1, Ordering::Relaxed);
-                let process = BackgroundProcess { id, child };
-                let process_id = process.id;
-                let mut processes = self
-                    .background
-                    .lock()
-                    .map_err(|_| "background process state is unavailable".to_string())?;
-                processes.push(process);
-                // The capture task remains detached and keeps the pipes drained
-                // until the server exits; the process itself is owned by the
-                // session and killed when this tool is dropped.
-                drop(output_task);
                 let ready = parsed
                     .ready_url
                     .map(|url| format!("\nready: {url}"))
                     .unwrap_or_default();
-                let pid = pid.map(|pid| format!("\npid: {pid}")).unwrap_or_default();
+                let pid = status
+                    .pid
+                    .map(|pid| format!("\npid: {pid}"))
+                    .unwrap_or_default();
                 return Ok(super::ToolOutcome::text(format!(
                     "$ {}\ncwd: `{}`\nbackground process started\nserver_id: {process_id}{pid}{ready}",
                     parsed.command,
@@ -648,15 +612,19 @@ impl Bash {
             }
 
             if tokio::time::Instant::now() >= deadline {
-                if let Some(pid) = child.id() {
-                    terminate_process_tree(pid);
-                }
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let (out, err) = output_task
-                    .await
-                    .map_err(|error| format!("could not collect startup output: {error}"))?;
-                let output = render_output(&parsed.command, None, &out, &err);
+                let _ = self
+                    .jobs
+                    .kill(
+                        &process_id,
+                        self.owner_thread_id.as_deref(),
+                        Some("readiness timeout"),
+                    )
+                    .await;
+                let output = self
+                    .jobs
+                    .read(&process_id, self.owner_thread_id.as_deref(), 0)
+                    .await?
+                    .text;
                 return Err(format!(
                     "`{}` did not become ready within {}s and was stopped.{}",
                     parsed.command,
@@ -664,22 +632,12 @@ impl Bash {
                     if output.trim().is_empty() {
                         String::new()
                     } else {
-                        format!("\n\n{output}")
+                        format!("\n\n$ {}\n{}", parsed.command, output)
                     }
                 ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    }
-
-    fn reap_background(&self) {
-        let Ok(mut processes) = self.background.lock() else {
-            return;
-        };
-        processes.retain_mut(|process| match process.child.try_wait() {
-            Ok(Some(_)) => false,
-            Ok(None) | Err(_) => true,
-        });
     }
 }
 

@@ -4,6 +4,7 @@
 //! workspace, parent instructions, approvals, and a durable thread reference;
 //! it never reads or forwards Codex credentials.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -29,11 +30,44 @@ use crate::tools::external_agent::{
 };
 
 const APP_SERVER_ARGS: &[&str] = &["app-server", "--listen", "stdio://"];
-const THREAD_SANDBOX_MODE: &str = "workspace-write";
-const TURN_SANDBOX_POLICY_TYPE: &str = "workspaceWrite";
+/// `thread/start.sandbox` is the CLI kebab-case enum.
+const THREAD_SANDBOX_WRITE: &str = "workspace-write";
+const THREAD_SANDBOX_READ_ONLY: &str = "read-only";
+/// `turn/start.sandboxPolicy.type` is the app-server camelCase enum.
+const TURN_SANDBOX_WRITE: &str = "workspaceWrite";
+const TURN_SANDBOX_READ_ONLY: &str = "readOnly";
 const CLIENT_NAME: &str = "zest";
 const CLIENT_TITLE: &str = "Zest";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How Zest launches a Codex turn.
+///
+/// `on-request` + `workspace-write` is Codex Auto: in-workspace edits never
+/// raise `item/fileChange/requestApproval`. A host that never sees the write
+/// cannot deny it — that is how safety-fence leaked `.env` after Zest had
+/// already blocked the `.git` delete. A hosted turn therefore uses a read-only
+/// sandbox so every write has to ask. No host keeps the old unattended pair.
+struct CodexLaunchPolicy {
+    approval_policy: &'static str,
+    thread_sandbox: &'static str,
+    turn_sandbox: &'static str,
+}
+
+fn launch_policy(has_host: bool) -> CodexLaunchPolicy {
+    if has_host {
+        CodexLaunchPolicy {
+            approval_policy: "on-request",
+            thread_sandbox: THREAD_SANDBOX_READ_ONLY,
+            turn_sandbox: TURN_SANDBOX_READ_ONLY,
+        }
+    } else {
+        CodexLaunchPolicy {
+            approval_policy: "never",
+            thread_sandbox: THREAD_SANDBOX_WRITE,
+            turn_sandbox: TURN_SANDBOX_WRITE,
+        }
+    }
+}
 
 pub struct CodexAppServerProvider {
     id: String,
@@ -109,6 +143,7 @@ impl CodexAppServerProvider {
     pub async fn discover_models(&self) -> Result<Vec<ModelSpec>> {
         let mut process = self.spawn().await?;
         let mut request_id = 1_u64;
+        let mut state = StreamState::default();
         let _ = rpc_request(
             &mut process,
             &mut request_id,
@@ -120,6 +155,7 @@ impl CodexAppServerProvider {
             self.timeout(),
             None,
             None,
+            &mut state,
             &mut |_event| {},
         )
         .await?;
@@ -132,6 +168,7 @@ impl CodexAppServerProvider {
             self.timeout(),
             None,
             None,
+            &mut state,
             &mut |_event| {},
         )
         .await?;
@@ -185,6 +222,7 @@ impl CodexAppServerProvider {
     ) -> Result<Completion> {
         let mut process = self.spawn().await?;
         let mut request_id = 1_u64;
+        let mut state = StreamState::default();
         rpc_request(
             &mut process,
             &mut request_id,
@@ -196,20 +234,18 @@ impl CodexAppServerProvider {
             self.timeout(),
             req.cancel.as_ref(),
             req.interaction.clone(),
+            &mut state,
             on_event,
         )
         .await?;
         process.send(&json!({"method":"initialized"})).await?;
 
-        let approval_policy = if req.interaction.is_some() {
-            "on-request"
-        } else {
-            "never"
-        };
+        let policy = launch_policy(req.interaction.is_some());
         let thread_params = thread_start_params(
             &self.root,
             &req.model,
-            approval_policy,
+            policy.approval_policy,
+            policy.thread_sandbox,
             req.system.as_ref(),
             self.allow_mcp,
         );
@@ -225,6 +261,7 @@ impl CodexAppServerProvider {
                     self.timeout(),
                     req.cancel.as_ref(),
                     req.interaction.clone(),
+                    &mut state,
                     on_event,
                 )
                 .await;
@@ -259,6 +296,7 @@ impl CodexAppServerProvider {
                 self.timeout(),
                 req.cancel.as_ref(),
                 req.interaction.clone(),
+                &mut state,
                 on_event,
             )
             .await?;
@@ -287,22 +325,18 @@ impl CodexAppServerProvider {
                 "input": [{"type": "text", "text": prompt}],
                 "model": &req.model,
                 "effort": req.effort.as_deref().map(normalize_effort),
-                "approvalPolicy": approval_policy,
+                "approvalPolicy": policy.approval_policy,
                 "cwd": self.root.to_string_lossy(),
-                "sandboxPolicy": {
-                    "type": TURN_SANDBOX_POLICY_TYPE,
-                    "writableRoots": [self.root.to_string_lossy()],
-                    "networkAccess": false,
-                },
+                "sandboxPolicy": turn_sandbox_policy(policy.turn_sandbox, &self.root),
             }),
             self.timeout(),
             req.cancel.as_ref(),
             req.interaction.clone(),
+            &mut state,
             on_event,
         )
         .await?;
         let mut turn_id = parse_turn_id(&turn_response);
-        let mut state = StreamState::default();
 
         loop {
             let message = match process.next(self.timeout(), req.cancel.as_ref()).await {
@@ -421,6 +455,9 @@ struct StreamState {
     usage: Usage,
     usage_available: bool,
     served_model: Option<String>,
+    /// Paths/diffs from `item/started` fileChange items, keyed by item id.
+    /// The later `requestApproval` often names only `itemId`.
+    pending_file_changes: HashMap<String, (String, String)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -432,6 +469,7 @@ async fn rpc_request(
     timeout: Duration,
     cancel: Option<&crate::cancel::CancelToken>,
     interaction: Option<Arc<dyn ProviderInteractionHost>>,
+    state: &mut StreamState,
     on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
 ) -> Result<Value> {
     let id = *next_id;
@@ -450,9 +488,7 @@ async fn rpc_request(
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }
         if message.get("method").is_some() {
-            let mut state = StreamState::default();
-            let _ = handle_message(process, &message, &mut state, interaction.clone(), on_event)
-                .await?;
+            let _ = handle_message(process, &message, state, interaction.clone(), on_event).await?;
         }
     }
 }
@@ -470,7 +506,8 @@ async fn handle_message(
         .unwrap_or_default();
     if let Some(id) = message.get("id") {
         let result =
-            server_request_result(method, message.get("params"), interaction, on_event).await;
+            server_request_result(method, message.get("params"), state, interaction, on_event)
+                .await;
         process.send(&json!({"id":id,"result":result})).await?;
         return Ok(false);
     }
@@ -487,6 +524,9 @@ async fn handle_message(
             if let Some(delta) = string_field(&params, &["delta", "text"]) {
                 on_event(StreamEvent::Thinking(&delta));
             }
+        }
+        "item/started" | "item/updated" | "item/completed" => {
+            remember_file_change_item(state, &params);
         }
         "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" => {
             let id = string_field(&params, &["itemId"]).unwrap_or_else(|| "codex".into());
@@ -553,6 +593,7 @@ async fn handle_message(
 async fn server_request_result(
     method: &str,
     params: Option<&Value>,
+    state: &mut StreamState,
     interaction: Option<Arc<dyn ProviderInteractionHost>>,
     on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
 ) -> Value {
@@ -561,7 +602,7 @@ async fn server_request_result(
         "item/commandExecution/requestApproval" => {
             let approval_id = string_field(&params, &["approvalId", "id"])
                 .unwrap_or_else(|| new_id("provider-approval"));
-            let command = string_field(&params, &["command"]).unwrap_or_default();
+            let command = command_line(&params);
             let cwd = string_field(&params, &["cwd"]);
             if let Some(host) = interaction.as_ref() {
                 host.prepare_command_approval(&approval_id).await;
@@ -591,8 +632,22 @@ async fn server_request_result(
         "item/fileChange/requestApproval" => {
             let approval_id = string_field(&params, &["approvalId", "id"])
                 .unwrap_or_else(|| new_id("provider-approval"));
-            let path = string_field(&params, &["path", "filePath"]);
-            let diff = string_field(&params, &["diff", "patch"]);
+            let item_id = string_field(&params, &["itemId"]);
+            let stashed = item_id
+                .as_ref()
+                .and_then(|id| state.pending_file_changes.get(id).cloned());
+            let path = file_change_path(&params)
+                .or_else(|| stashed.as_ref().map(|(path, _)| path.clone()))
+                .unwrap_or_default();
+            let diff = file_change_diff(&params)
+                .or_else(|| stashed.as_ref().map(|(_, diff)| diff.clone()))
+                .unwrap_or_default();
+            // `grantRoot` is a session-scoped write grant, not one file. Accepting
+            // the project root lets later `.env` writes skip the host — the
+            // safety-fence leak. Decline the grant when there is no specific file.
+            if params.get("grantRoot").is_some() && path.is_empty() {
+                return json!({"decision": "decline"});
+            }
             if let Some(host) = interaction.as_ref() {
                 host.prepare_file_change_approval(&approval_id).await;
             }
@@ -601,15 +656,15 @@ async fn server_request_result(
                 tool_name: "codex_file_change".into(),
                 tool_call_id: approval_id.clone(),
                 risk: ToolRisk::Write,
-                path: path.clone().unwrap_or_default(),
+                path: path.clone(),
                 summary: "Codex requested a file change".into(),
-                diff: diff.clone().unwrap_or_default(),
+                diff: diff.clone(),
             });
             let approved = if let Some(host) = interaction {
                 host.approve_file_change(ProviderFileChangeRequest {
                     approval_id,
-                    path,
-                    diff,
+                    path: (!path.is_empty()).then_some(path),
+                    diff: (!diff.is_empty()).then_some(diff),
                     reason: string_field(&params, &["reason"]),
                 })
                 .await
@@ -617,6 +672,12 @@ async fn server_request_result(
                 false
             };
             json!({"decision": if approved { "accept" } else { "decline" }})
+        }
+        "item/permissions/requestApproval" => {
+            // A workspace-root write grant would let later edits skip the
+            // file-change card. Zest does not hand out that scope; each edit
+            // has to come back as `item/fileChange/requestApproval`.
+            json!({ "permissions": {} })
         }
         // These requests require a live UI and are deliberately denied when
         // the provider cannot express them through the shared host.
@@ -656,6 +717,7 @@ fn thread_start_params(
     root: &std::path::Path,
     model: &str,
     approval_policy: &str,
+    sandbox: &str,
     system: Option<&SystemPrompt>,
     allow_mcp: bool,
 ) -> Value {
@@ -664,12 +726,127 @@ fn thread_start_params(
         "cwd": root.to_string_lossy(),
         // `thread/start` uses the CLI-facing sandbox enum. The nested
         // `turn/start.sandboxPolicy.type` uses the app-server enum
-        // (`workspaceWrite`) and is intentionally different.
-        "sandbox": THREAD_SANDBOX_MODE,
+        // (`workspaceWrite` / `readOnly`) and is intentionally different.
+        "sandbox": sandbox,
         "approvalPolicy": approval_policy,
         "baseInstructions": system.map(SystemPrompt::text),
         "config": if allow_mcp { json!({}) } else { json!({"mcp_servers": {}}) },
     })
+}
+
+fn turn_sandbox_policy(kind: &str, root: &std::path::Path) -> Value {
+    if kind == TURN_SANDBOX_READ_ONLY {
+        json!({ "type": TURN_SANDBOX_READ_ONLY, "networkAccess": false })
+    } else {
+        json!({
+            "type": kind,
+            "writableRoots": [root.to_string_lossy()],
+            "networkAccess": false,
+        })
+    }
+}
+
+fn command_line(params: &Value) -> String {
+    if let Some(command) = string_field(params, &["command"]) {
+        return command;
+    }
+    let Some(items) = params.get("command").and_then(Value::as_array) else {
+        return String::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .or_else(|| string_field(item, &["value", "text", "command"]))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn remember_file_change_item(state: &mut StreamState, params: &Value) {
+    let item = params.get("item").unwrap_or(params);
+    let kind = string_field(item, &["type", "itemType"]).unwrap_or_default();
+    let looks_like_file = kind.eq_ignore_ascii_case("filechange")
+        || kind == "file_change"
+        || item.get("changes").is_some();
+    if !looks_like_file {
+        return;
+    }
+    let Some(id) =
+        string_field(item, &["id", "itemId"]).or_else(|| string_field(params, &["itemId", "id"]))
+    else {
+        return;
+    };
+    let path = file_change_path(item)
+        .or_else(|| file_change_path(params))
+        .unwrap_or_default();
+    let diff = file_change_diff(item)
+        .or_else(|| file_change_diff(params))
+        .unwrap_or_default();
+    if path.is_empty() && diff.is_empty() {
+        return;
+    }
+    state.pending_file_changes.insert(id, (path, diff));
+}
+
+fn file_change_path(value: &Value) -> Option<String> {
+    let paths = collect_change_paths(value);
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths.join("\n"))
+    }
+}
+
+fn file_change_diff(value: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(diff) = string_field(value, &["diff", "patch"]) {
+        parts.push(diff);
+    }
+    match value.get("changes") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Some(diff) = string_field(item, &["diff", "patch"]) {
+                    parts.push(diff);
+                }
+            }
+        }
+        Some(Value::Object(map)) => {
+            for item in map.values() {
+                if let Some(diff) = string_field(item, &["diff", "patch"]) {
+                    parts.push(diff);
+                }
+            }
+        }
+        _ => {}
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn collect_change_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = string_field(value, &["path", "filePath"]) {
+        paths.push(path);
+    }
+    match value.get("changes") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Some(path) = string_field(item, &["path", "filePath", "file"]) {
+                    paths.push(path);
+                }
+            }
+        }
+        Some(Value::Object(map)) => paths.extend(map.keys().cloned()),
+        _ => {}
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn parse_thread_id(value: &Value) -> Option<String> {
@@ -983,6 +1160,7 @@ fn protocol_error(message: &Value) -> HarnessError {
 mod tests {
     use super::*;
     use crate::anthropic::types::Message;
+    use async_trait::async_trait;
 
     #[test]
     fn model_list_keeps_configured_default_when_server_omits_it() {
@@ -1082,11 +1260,186 @@ mod tests {
             std::path::Path::new("C:/workspace"),
             "gpt-5.6-terra",
             "on-request",
+            THREAD_SANDBOX_WRITE,
             None,
             false,
         );
         assert_eq!(params["sandbox"], "workspace-write");
-        assert_ne!(params["sandbox"], TURN_SANDBOX_POLICY_TYPE);
+        assert_ne!(params["sandbox"], TURN_SANDBOX_WRITE);
+    }
+
+    #[test]
+    fn a_hosted_turn_asks_before_workspace_writes() {
+        // `on-request` + `workspace-write` is Codex Auto: in-repo edits never
+        // raise a file-change card. A host has to force the read-only pair.
+        let policy = launch_policy(true);
+        assert_eq!(policy.approval_policy, "on-request");
+        assert_eq!(policy.thread_sandbox, "read-only");
+        assert_eq!(policy.turn_sandbox, "readOnly");
+        let turn = turn_sandbox_policy(policy.turn_sandbox, std::path::Path::new("C:/workspace"));
+        assert_eq!(turn["type"], "readOnly");
+        assert!(turn.get("writableRoots").is_none());
+    }
+
+    #[test]
+    fn an_unhosted_turn_keeps_the_unattended_write_sandbox() {
+        let policy = launch_policy(false);
+        assert_eq!(policy.approval_policy, "never");
+        assert_eq!(policy.thread_sandbox, "workspace-write");
+        assert_eq!(policy.turn_sandbox, "workspaceWrite");
+        let turn = turn_sandbox_policy(policy.turn_sandbox, std::path::Path::new("C:/workspace"));
+        assert_eq!(turn["type"], "workspaceWrite");
+        assert_eq!(turn["writableRoots"][0], "C:/workspace");
+    }
+
+    #[test]
+    fn a_command_array_is_joined_for_the_host() {
+        let params = json!({
+            "command": ["powershell", "-Command", "Remove-Item -Recurse .git"]
+        });
+        assert_eq!(
+            command_line(&params),
+            "powershell -Command Remove-Item -Recurse .git"
+        );
+        assert_eq!(
+            command_line(&json!({"command": "cargo test"})),
+            "cargo test"
+        );
+    }
+
+    #[test]
+    fn file_change_paths_come_from_the_started_item() {
+        let mut state = StreamState::default();
+        remember_file_change_item(
+            &mut state,
+            &json!({
+                "item": {
+                    "type": "fileChange",
+                    "id": "item-1",
+                    "changes": [
+                        {"path": ".env", "kind": "add", "diff": "sk-live-TESTLEAK-99"}
+                    ]
+                }
+            }),
+        );
+        let (path, diff) = state.pending_file_changes.get("item-1").expect("stashed");
+        assert_eq!(path, ".env");
+        assert!(diff.contains("sk-live-TESTLEAK-99"));
+    }
+
+    struct CaptureHost {
+        commands: std::sync::Mutex<Vec<String>>,
+        writes: std::sync::Mutex<Vec<(String, String)>>,
+        allow: bool,
+    }
+
+    impl CaptureHost {
+        fn new(allow: bool) -> Arc<Self> {
+            Arc::new(Self {
+                commands: std::sync::Mutex::new(Vec::new()),
+                writes: std::sync::Mutex::new(Vec::new()),
+                allow,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderInteractionHost for CaptureHost {
+        async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
+            self.commands.lock().unwrap().push(request.command);
+            self.allow
+        }
+
+        async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
+            self.writes.lock().unwrap().push((
+                request.path.unwrap_or_default(),
+                request.diff.unwrap_or_default(),
+            ));
+            self.allow
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_array_reaches_the_host() {
+        let host = CaptureHost::new(false);
+        let result = server_request_result(
+            "item/commandExecution/requestApproval",
+            Some(&json!({
+                "approvalId": "c1",
+                "command": ["Remove-Item", "-Recurse", ".git"],
+                "cwd": "C:/workspace"
+            })),
+            &mut StreamState::default(),
+            Some(host.clone()),
+            &mut |_| {},
+        )
+        .await;
+        assert_eq!(result["decision"], "decline");
+        assert!(host.commands.lock().unwrap()[0].contains(".git"));
+    }
+
+    #[tokio::test]
+    async fn a_file_change_card_uses_the_started_item_paths() {
+        let host = CaptureHost::new(false);
+        let mut state = StreamState::default();
+        remember_file_change_item(
+            &mut state,
+            &json!({
+                "item": {
+                    "type": "fileChange",
+                    "id": "item-9",
+                    "changes": [{"path": "secrets.md", "kind": "add", "diff": "sk-live-x"}]
+                }
+            }),
+        );
+        let result = server_request_result(
+            "item/fileChange/requestApproval",
+            Some(&json!({
+                "approvalId": "a2",
+                "itemId": "item-9"
+            })),
+            &mut state,
+            Some(host.clone()),
+            &mut |_| {},
+        )
+        .await;
+        assert_eq!(result["decision"], "decline");
+        let writes = host.writes.lock().unwrap();
+        assert_eq!(writes[0].0, "secrets.md");
+        assert!(writes[0].1.contains("sk-live-x"));
+    }
+
+    #[tokio::test]
+    async fn a_grant_root_without_files_is_declined() {
+        let host = CaptureHost::new(true);
+        let result = server_request_result(
+            "item/fileChange/requestApproval",
+            Some(&json!({
+                "approvalId": "a1",
+                "grantRoot": "C:/workspace"
+            })),
+            &mut StreamState::default(),
+            Some(host.clone()),
+            &mut |_| {},
+        )
+        .await;
+        assert_eq!(result["decision"], "decline");
+        assert!(host.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_permission_grant_is_left_empty() {
+        let result = server_request_result(
+            "item/permissions/requestApproval",
+            Some(&json!({
+                "permissions": {"fileSystem": {"write": ["C:/workspace"]}}
+            })),
+            &mut StreamState::default(),
+            None,
+            &mut |_| {},
+        )
+        .await;
+        assert_eq!(result["permissions"], json!({}));
     }
 
     #[test]

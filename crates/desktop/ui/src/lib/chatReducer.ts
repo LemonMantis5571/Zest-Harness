@@ -555,6 +555,14 @@ export function reduceChatEvent(
       // synthetic transcript message or alter the turn state.
       return { state, effects };
     }
+    case "input_queued":
+    case "input_updated":
+    case "input_removed":
+    case "job_completed": {
+      // These are projected by App into the durable-input/job surfaces. They
+      // intentionally never mutate the transcript reducer.
+      return { state, effects };
+    }
   }
 }
 

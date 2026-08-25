@@ -16,15 +16,17 @@
 //! Sensitive tool results are redacted when committed to durable wire history
 //! while the live in-memory turn still sees the real body for the model.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::anthropic::types::{tool_result, tool_uses, Message, Usage};
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
+use crate::inbox::InputInbox;
 use crate::provider::{
     Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
 };
-use crate::thread::new_id;
+use crate::thread::{new_id, ThreadInput, ThreadInputTarget};
 use crate::tools::approval::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
     ToolRisk,
@@ -36,6 +38,27 @@ use crate::usage::Ledger;
 
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
+
+fn runtime_input_text(input: &ThreadInput) -> String {
+    let prefix = match input.target {
+        ThreadInputTarget::Steer => "Steering instruction",
+        ThreadInputTarget::Inject => "Runtime context update",
+        ThreadInputTarget::Followup => "Followup",
+    };
+    let attachments = input
+        .attachments
+        .iter()
+        .map(|attachment| format!("Attached: {} ({})", attachment.name, attachment.detail))
+        .collect::<Vec<_>>();
+    let body = if attachments.is_empty() {
+        input.text.clone()
+    } else if input.text.trim().is_empty() {
+        attachments.join("\n")
+    } else {
+        format!("{}\n\n{}", input.text, attachments.join("\n"))
+    };
+    format!("{prefix}:\n{body}")
+}
 
 /// What one compaction actually did.
 ///
@@ -444,7 +467,21 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<()> {
-        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel)
+        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, None)
+            .await
+    }
+
+    /// Send a turn while accepting durable runtime inputs between provider
+    /// steps. Existing callers keep the old API; the desktop uses this method
+    /// with an inbox shared by its active thread.
+    pub async fn send_cancellable_with_inbox(
+        &mut self,
+        user_input: &str,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+    ) -> Result<()> {
+        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, inbox)
             .await
     }
 
@@ -458,7 +495,21 @@ impl Agent {
         if content.is_empty() {
             return Err(HarnessError::Other("empty user content".into()));
         }
-        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel)
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, None)
+            .await
+    }
+
+    pub async fn send_blocks_cancellable_with_inbox(
+        &mut self,
+        content: Vec<serde_json::Value>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+    ) -> Result<()> {
+        if content.is_empty() {
+            return Err(HarnessError::Other("empty user content".into()));
+        }
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, inbox)
             .await
     }
 
@@ -467,6 +518,7 @@ impl Agent {
         user_message: Message,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
         self.turn_usage = None;
@@ -480,6 +532,15 @@ impl Agent {
 
         loop {
             Self::check_cancel(cancel)?;
+
+            // Step-scoped inputs are ordinary model-visible user messages, but
+            // their delivery point is explicit and durable rather than an
+            // implicit UI-state append.
+            if let Some(inbox) = inbox {
+                for input in inbox.claim_next_step() {
+                    staged.push(Message::user_text(runtime_input_text(&input)));
+                }
+            }
 
             let request = TurnRequest {
                 model: self.model.clone(),
@@ -836,11 +897,45 @@ impl Agent {
             }
         }
 
-        for (index, prepared) in gated {
-            slots[index] = Some(
-                self.run_gated_call(&calls[index], prepared, on_event, cancel)
-                    .await,
-            );
+        // Prepare snapshots the file once for the whole batch. After the first
+        // write to a path lands, later prepared calls for that same path still
+        // hold the old BLAKE3 — they have to be built again against the file
+        // the previous write left behind, or commit aborts as a stale approval.
+        let mut dirty_paths = HashSet::new();
+        for (index, mut prepared) in gated {
+            if should_reprepare(&prepared, &dirty_paths) {
+                match self
+                    .tools
+                    .prepare(&calls[index].name, calls[index].input.clone())
+                {
+                    Ok(fresh) => {
+                        if let Some(metadata) = fresh.metadata.clone() {
+                            on_event(StreamEvent::ToolCallUpdate {
+                                name: &calls[index].name,
+                                id: &calls[index].id,
+                                metadata,
+                            });
+                        }
+                        prepared = fresh;
+                    }
+                    Err(message) => {
+                        slots[index] = Some(ToolCallOutcome::failed(
+                            format!("cannot prepare `{}`: {message}", calls[index].name),
+                            prepared.risk,
+                        ));
+                        continue;
+                    }
+                }
+            }
+            let outcome = self
+                .run_gated_call(&calls[index], prepared, on_event, cancel)
+                .await;
+            if !outcome.is_error {
+                if let Some(path) = outcome.path.as_ref().filter(|path| !path.is_empty()) {
+                    dirty_paths.insert(path.clone());
+                }
+            }
+            slots[index] = Some(outcome);
         }
 
         slots
@@ -1063,6 +1158,10 @@ struct ToolCallOutcome {
     path: Option<String>,
     diff: Option<String>,
     metadata: Option<crate::tools::ToolMetadata>,
+}
+
+fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
+    !prepared.preview.path.is_empty() && dirty_paths.contains(&prepared.preview.path)
 }
 
 impl ToolCallOutcome {
@@ -1461,6 +1560,54 @@ mod tests {
         let mut sink = |_ev: StreamEvent<'_>| {};
         agent.send("hello", &mut sink).await.unwrap();
         assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn steer_and_inject_are_claimed_at_the_next_provider_step() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(RecordingProvider { seen: seen.clone() });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        let inbox = InputInbox::from_pending([
+            ThreadInput {
+                id: "followup-1".into(),
+                target: ThreadInputTarget::Followup,
+                text: "after this turn".into(),
+                created_at: 1,
+                attachments: Vec::new(),
+            },
+            ThreadInput {
+                id: "steer-1".into(),
+                target: ThreadInputTarget::Steer,
+                text: "change direction".into(),
+                created_at: 2,
+                attachments: Vec::new(),
+            },
+            ThreadInput {
+                id: "inject-1".into(),
+                target: ThreadInputTarget::Inject,
+                text: "the build finished".into(),
+                created_at: 3,
+                attachments: Vec::new(),
+            },
+        ]);
+        let mut sink = |_event: StreamEvent<'_>| {};
+
+        agent
+            .send_cancellable_with_inbox("hello", &mut sink, None, Some(&inbox))
+            .await
+            .unwrap();
+
+        let requests = seen.lock().unwrap();
+        let request = &requests[0];
+        let text = request
+            .iter()
+            .map(|message| message.content[0]["text"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(text[0], "hello");
+        assert!(text[1].starts_with("Steering instruction:\nchange direction"));
+        assert!(text[2].starts_with("Runtime context update:\nthe build finished"));
+        assert_eq!(inbox.snapshot().len(), 1);
+        assert_eq!(inbox.snapshot()[0].id, "followup-1");
     }
 
     #[tokio::test]
@@ -2106,6 +2253,127 @@ mod tests {
             vec!["enter:w1", "exit:w1", "enter:w2", "exit:w2"],
             "gated writes must not overlap"
         );
+    }
+
+    /// Two edits in one model batch are prepared against the same snapshot.
+    /// After the first write commits, the second has to be built again or the
+    /// pre-image check treats our own write as an external change.
+    #[tokio::test]
+    async fn same_file_edits_in_one_batch_are_reprepared_after_the_first_write() {
+        let dir =
+            std::env::temp_dir().join(format!("zest-agent-edit-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "alpha\nbeta\n").unwrap();
+
+        let mut tools = ToolRegistry::new();
+        crate::tools::register_write_tools(&mut tools, &dir).unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(ScriptedToolProvider {
+            calls: AtomicUsize::new(0),
+            first_round: vec![
+                (
+                    "edit_file".into(),
+                    json!({
+                        "path": "notes.txt",
+                        "old_string": "alpha",
+                        "new_string": "ALPHA"
+                    }),
+                ),
+                (
+                    "edit_file".into(),
+                    json!({
+                        "path": "notes.txt",
+                        "old_string": "beta",
+                        "new_string": "BETA"
+                    }),
+                ),
+            ],
+        });
+        let mut agent = Agent::new(provider, tools).with_policy(Arc::new(Mutex::new(
+            ApprovalPolicy::new(crate::tools::approval::ApprovalMode::Bypass),
+        )));
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        agent.send("edit both lines", &mut sink).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+            "ALPHA\nBETA\n"
+        );
+        let results = &agent.messages[2];
+        assert_eq!(results.role, "user");
+        for block in &results.content {
+            assert_ne!(
+                block.get("is_error").and_then(|value| value.as_bool()),
+                Some(true),
+                "{}",
+                block
+            );
+            let body = block["content"].as_str().unwrap_or_default();
+            assert!(
+                !body.contains("changed after approval"),
+                "same-turn edit was rejected as stale: {body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Emits a scripted tool batch on the first call and `end_turn` afterwards.
+    struct ScriptedToolProvider {
+        calls: AtomicUsize,
+        first_round: Vec<(String, serde_json::Value)>,
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedToolProvider {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn default_model(&self) -> &str {
+            "fake-model"
+        }
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+        async fn stream_turn(
+            &self,
+            _req: &TurnRequest,
+            _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if n > 0 {
+                return Ok(Completion {
+                    content: vec![json!({ "type": "text", "text": "done" })],
+                    stop_reason: Some("end_turn".into()),
+                    usage: Usage::default(),
+                    usage_available: true,
+                    limits: None,
+                    served_model: None,
+                    provider_session: None,
+                });
+            }
+            let content = self
+                .first_round
+                .iter()
+                .enumerate()
+                .map(|(index, (name, input))| {
+                    json!({
+                        "type": "tool_use",
+                        "id": format!("call_{index}_{name}"),
+                        "name": name,
+                        "input": input,
+                    })
+                })
+                .collect();
+            Ok(Completion {
+                content,
+                stop_reason: Some("tool_use".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            })
+        }
     }
 
     #[tokio::test]

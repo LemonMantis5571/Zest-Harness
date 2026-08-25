@@ -25,6 +25,9 @@ import type {
   DelegationTargetOptionView,
   DelegationUpdateInput,
   GitContext,
+  InputTarget,
+  JobRead,
+  JobSnapshot,
   McpServerRow,
   SessionInfo,
   ThreadSummary,
@@ -55,6 +58,7 @@ const FIXTURE_SESSION: SessionInfo = {
   ownsAgentLoop: false,
   models: FIXTURE_MODELS,
   checkpoints: [],
+  pendingInputs: [],
   messages: [],
 };
 
@@ -907,7 +911,39 @@ export function createFixtureBackend(): DesktopBackend {
       if (!summary) throw new Error(`fixture: unknown thread ${id}`);
       return summary;
     },
-    async sendMessage(text: string, attachments?: AttachmentInput[]) {
+    async sendMessage(
+      text: string,
+      attachments?: AttachmentInput[],
+      target?: InputTarget,
+    ) {
+      if (target === "followup" || target === "steer" || target === "inject") {
+        const input = {
+          id: `input-${crypto.randomUUID()}`,
+          target,
+          text,
+          createdAt: Date.now(),
+          attachments: (attachments ?? []).map((attachment) => ({
+            name: attachment.name,
+            detail: attachment.detail,
+            content: attachment.content ?? null,
+            status: attachment.status,
+            ...(attachment.kind ? { kind: attachment.kind } : {}),
+            ...(attachment.mediaType ? { mediaType: attachment.mediaType } : {}),
+            ...(attachment.dataBase64 ? { dataBase64: attachment.dataBase64 } : {}),
+          })),
+        };
+        session = {
+          ...session,
+          pendingInputs: [...session.pendingInputs, input],
+        };
+        chatHandler?.({
+          kind: "input_queued",
+          session_id: session.sessionId,
+          thread_id: session.threadId,
+          input,
+        });
+        return;
+      }
       if (!chatHandler) return;
       const turnId = `turn-${crypto.randomUUID()}`;
       const userId = `user-${crypto.randomUUID()}`;
@@ -965,6 +1001,49 @@ export function createFixtureBackend(): DesktopBackend {
         text: text.trim() || "(attachment)",
       });
       chatHandler({ kind: "done", ...id, message_id: assistantId });
+    },
+    async updateQueuedInput(threadId: string, inputId: string, text: string) {
+      if (threadId !== session.threadId) throw new Error("fixture: unknown thread");
+      const input = session.pendingInputs.find((candidate) => candidate.id === inputId);
+      if (!input) throw new Error("fixture: queued input not found");
+      session = {
+        ...session,
+        pendingInputs: session.pendingInputs.map((candidate) =>
+          candidate.id === inputId ? { ...candidate, text } : candidate,
+        ),
+      };
+      chatHandler?.({
+        kind: "input_updated",
+        session_id: session.sessionId,
+        thread_id: session.threadId,
+        input_id: inputId,
+        text,
+      });
+    },
+    async removeQueuedInput(threadId: string, inputId: string) {
+      if (threadId !== session.threadId) throw new Error("fixture: unknown thread");
+      if (!session.pendingInputs.some((candidate) => candidate.id === inputId)) {
+        throw new Error("fixture: queued input not found");
+      }
+      session = {
+        ...session,
+        pendingInputs: session.pendingInputs.filter((candidate) => candidate.id !== inputId),
+      };
+      chatHandler?.({
+        kind: "input_removed",
+        session_id: session.sessionId,
+        thread_id: session.threadId,
+        input_id: inputId,
+      });
+    },
+    async listJobs(_threadId?: string): Promise<JobSnapshot[]> {
+      return [];
+    },
+    async jobOutput(_jobId: string, _options?): Promise<JobRead> {
+      throw new Error("fixture: jobs are not available");
+    },
+    async jobKill(_jobId: string, _reason?: string, _threadId?: string): Promise<JobSnapshot> {
+      throw new Error("fixture: jobs are not available");
     },
     async saveMarkdown(suggestedName, markdown) {
       const filename = safeMarkdownFilename(suggestedName, "response");

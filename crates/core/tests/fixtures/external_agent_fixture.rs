@@ -41,6 +41,26 @@ fn wait_for_eof() {
     let _ = reader.read_line(&mut line);
 }
 
+/// Mimic Claude `--input-format stream-json`: emit initialize, then wait for
+/// an initialize ack and a JSON user message before producing a result.
+fn stream_json_input() {
+    send(r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#);
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut saw_user = false;
+    let mut saw_init_ack = false;
+    while !saw_user || !saw_init_ack {
+        let line = receive(&mut reader);
+        if line.contains("control_response") && line.contains("init-1") {
+            saw_init_ack = true;
+        }
+        if line.contains("\"type\":\"user\"") || line.contains("\"type\": \"user\"") {
+            saw_user = true;
+        }
+    }
+    send(r#"{"type":"result","response":"got user"}"#);
+}
+
 fn acp() {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -84,6 +104,7 @@ fn main() {
         Some("headless") => headless(),
         Some("stream") => stream(),
         Some("wait_for_eof") => wait_for_eof(),
+        Some("stream_json_input") => stream_json_input(),
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         other => panic!("unknown external-agent fixture mode: {other:?}"),

@@ -315,6 +315,11 @@ export function Composer({
                           <span className="mr-1 text-muted-foreground">
                             {index + 1}.
                           </span>
+                          {turn.target && turn.target !== "followup" ? (
+                            <span className="mr-1 rounded bg-muted px-1 text-[9px] uppercase tracking-wide text-muted-foreground">
+                              {turn.target}
+                            </span>
+                          ) : null}
                           {turn.text || "Attachment-only message"}
                           {turn.attachments.length > 0 ? (
                             <span className="ml-1 text-[10px] text-muted-foreground">

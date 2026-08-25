@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
+use crate::jobs::JobRegistry;
 use crate::mcp::register_mcp_tools;
 use crate::prompt::{
     compose_system_with_docs, env_context, load_custom_system, load_project_docs, DEFAULT_SYSTEM,
@@ -24,8 +25,9 @@ use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
 use crate::tools::{
-    register_browser_tool, register_exec_tools, register_question_tool, register_read_tools,
-    register_skill_tools, register_write_tools, BrowserAdapter, FeatureDelegator, ToolRegistry,
+    register_browser_tool, register_exec_tools_with_jobs, register_job_tools,
+    register_question_tool, register_read_tools, register_skill_tools, register_write_tools,
+    BrowserAdapter, FeatureDelegator, ToolRegistry,
 };
 use crate::usage::Ledger;
 
@@ -88,6 +90,8 @@ pub struct RuntimeBuilder {
     parent_thread_id: Option<String>,
     register_write: bool,
     register_exec: bool,
+    jobs: Option<Arc<JobRegistry>>,
+    job_owner: Option<String>,
     role: RuntimeRole,
 }
 
@@ -110,6 +114,8 @@ impl RuntimeBuilder {
             parent_thread_id: None,
             register_write: true,
             register_exec: true,
+            jobs: None,
+            job_owner: None,
             role: RuntimeRole::Parent,
         }
     }
@@ -208,6 +214,18 @@ impl RuntimeBuilder {
     /// `doctor --live` and delegated workers.
     pub fn register_exec_tools(mut self, on: bool) -> Self {
         self.register_exec = on;
+        self
+    }
+
+    /// Share a process-wide background-job registry with the front-end.
+    pub fn with_job_registry(mut self, jobs: Arc<JobRegistry>) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
+    /// Fence model-facing job controls to one durable thread.
+    pub fn with_job_owner(mut self, thread_id: impl Into<String>) -> Self {
+        self.job_owner = Some(thread_id.into());
         self
     }
 
@@ -410,10 +428,20 @@ impl RuntimeBuilder {
                 register_browser_tool(&mut tools, browser);
             }
         }
-        if is_parent && !provider_owns_agent_loop && self.register_exec && config.tools.bash.enabled
-        {
-            register_exec_tools(&mut tools, &root, config.tools.bash.settings())
+        if is_parent && !provider_owns_agent_loop && self.register_exec {
+            let jobs = self.jobs.clone().unwrap_or_default();
+            if config.tools.bash.enabled {
+                register_exec_tools_with_jobs(
+                    &mut tools,
+                    &root,
+                    config.tools.bash.settings(),
+                    jobs,
+                    self.job_owner.clone(),
+                )
                 .map_err(|e| HarnessError::Other(format!("register exec tools: {e}")))?;
+            } else {
+                register_job_tools(&mut tools, jobs, self.job_owner.clone());
+            }
         }
 
         // Zest-owned MCP servers, and only for a provider whose agent loop Zest

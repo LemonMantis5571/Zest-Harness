@@ -72,7 +72,6 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
   useMessageScroller,
-  useMessageScrollerScrollable,
 } from "@/components/ui/message-scroller";
 import { ZestPulse } from "@/components/ZestPulse";
 import { toast } from "@/components/ui/toast";
@@ -84,14 +83,6 @@ import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
-import {
-  TRANSCRIPT_REVEAL_STEP,
-  clampTranscriptStart,
-  initialTranscriptStart,
-  revealEarlierTranscriptStart,
-  shouldTrimTranscript,
-  transcriptStartForTarget,
-} from "@/lib/transcriptWindow";
 import { useKeybindings } from "@/lib/useKeybindings";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import type {
@@ -395,7 +386,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
   if (msg.role === "user") {
     if (editing) {
       return (
-        <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
+        <MessageScrollerItem
+          id={`message-${msg.id}`}
+          messageId={msg.id}
+          scrollAnchor={msg.role === "user"}
+        >
           <Message align="end" className="justify-end">
             <MessageContent className="items-end gap-1.5">
               <MessageEditForm
@@ -412,7 +407,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
     }
 
     return (
-      <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
+      <MessageScrollerItem
+        id={`message-${msg.id}`}
+        messageId={msg.id}
+        scrollAnchor={msg.role === "user"}
+      >
         <Message align="end" className="justify-end">
           <MessageContent className="items-end gap-1.5">
             <div className="group/user flex w-full flex-col items-end gap-1.5">
@@ -474,7 +473,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
     : onSend;
 
   return (
-    <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
+    <MessageScrollerItem
+      id={`message-${msg.id}`}
+      messageId={msg.id}
+      scrollAnchor={false}
+    >
       <Message align="start">
         <MessageContent className="w-full max-w-full gap-2.5">
           <div className="text-[11px] font-medium tracking-wide text-muted-foreground/80">
@@ -616,49 +619,21 @@ type ScrollToTranscriptMessage = ReturnType<
   typeof useMessageScroller
 >["scrollToMessage"];
 
-function TranscriptScrollerControls({
-  hiddenCount,
-  onRevealEarlier,
-  onAtEndChange,
+function TranscriptScrollRegistration({
   onRegisterScrollToMessage,
 }: {
-  hiddenCount: number;
-  onRevealEarlier: () => void;
-  onAtEndChange: (atEnd: boolean) => void;
   onRegisterScrollToMessage: (
     scrollToMessage: ScrollToTranscriptMessage | null
   ) => void;
 }) {
   const { scrollToMessage } = useMessageScroller();
-  const scrollable = useMessageScrollerScrollable();
-  const [mounted, setMounted] = useState(false);
 
   useLayoutEffect(() => {
     onRegisterScrollToMessage(scrollToMessage);
     return () => onRegisterScrollToMessage(null);
   }, [onRegisterScrollToMessage, scrollToMessage]);
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  useEffect(() => {
-    onAtEndChange(!scrollable.end);
-  }, [onAtEndChange, scrollable.end]);
-
-  if (!mounted || hiddenCount === 0 || scrollable.start) return null;
-  const revealCount = Math.min(hiddenCount, TRANSCRIPT_REVEAL_STEP);
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant="secondary"
-      className="absolute left-1/2 top-3 z-20 -translate-x-1/2 border border-border/80 bg-background/95 shadow-md backdrop-blur-sm"
-      onClick={onRevealEarlier}
-    >
-      Show {revealCount} earlier message{revealCount === 1 ? "" : "s"}
-    </Button>
-  );
+  return null;
 }
 
 export function ChatScreen({
@@ -797,43 +772,12 @@ export function ChatScreen({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [editingMessageBusy, setEditingMessageBusy] = useState(false);
-  const [transcriptWindow, setTranscriptWindow] = useState(() => ({
-    threadId: session.threadId,
-    start: initialTranscriptStart(messages.length),
-  }));
   const scrollToTranscriptMessageRef =
     useRef<ScrollToTranscriptMessage | null>(null);
-  const pendingTranscriptJumpRef = useRef<string | null>(null);
-
-  const transcriptStart =
-    transcriptWindow.threadId === session.threadId
-      ? clampTranscriptStart(messages.length, transcriptWindow.start)
-      : initialTranscriptStart(messages.length);
-  const visibleMessages = useMemo(
-    () => messages.slice(transcriptStart),
-    [messages, transcriptStart]
-  );
   const conversationTurns = useMemo(
     () => buildConversationTurns(messages, session.checkpoints),
     [messages, session.checkpoints]
   );
-
-  useEffect(() => {
-    setTranscriptWindow((current) => {
-      const start =
-        current.threadId === session.threadId
-          ? clampTranscriptStart(messages.length, current.start)
-          : initialTranscriptStart(messages.length);
-      if (current.threadId === session.threadId && current.start === start) {
-        return current;
-      }
-      return { threadId: session.threadId, start };
-    });
-  }, [messages.length, session.threadId]);
-
-  useEffect(() => {
-    pendingTranscriptJumpRef.current = null;
-  }, [session.threadId]);
 
   const registerScrollToTranscriptMessage = useCallback(
     (scrollToMessage: ScrollToTranscriptMessage | null) => {
@@ -854,36 +798,6 @@ export function ChatScreen({
     });
   }, []);
 
-  const revealEarlierMessages = useCallback(() => {
-    setTranscriptWindow({
-      threadId: session.threadId,
-      start: revealEarlierTranscriptStart(transcriptStart),
-    });
-  }, [session.threadId, transcriptStart]);
-
-  const handleTranscriptAtEndChange = useCallback(
-    (atEnd: boolean) => {
-      if (pendingTranscriptJumpRef.current || editingMessageId) return;
-      if (!shouldTrimTranscript(messages.length, transcriptStart, atEnd)) return;
-      setTranscriptWindow({
-        threadId: session.threadId,
-        start: initialTranscriptStart(messages.length),
-      });
-    },
-    [editingMessageId, messages.length, session.threadId, transcriptStart]
-  );
-
-  useLayoutEffect(() => {
-    const messageId = pendingTranscriptJumpRef.current;
-    if (!messageId) return;
-    const targetIndex = messages.findIndex((message) => message.id === messageId);
-    if (targetIndex < transcriptStart) return;
-    const frame = window.requestAnimationFrame(() => {
-      scrollToTranscriptMessage(messageId);
-      pendingTranscriptJumpRef.current = null;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [messages, scrollToTranscriptMessage, transcriptStart]);
   const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
   const toggleWorkbench = useCallback(() => {
     if (session.isFreeChat) return;
@@ -1217,19 +1131,10 @@ export function ChatScreen({
 
   const jumpToMessage = useCallback(
     (messageId: string) => {
-      const targetIndex = messages.findIndex((message) => message.id === messageId);
-      if (targetIndex < 0) return;
-      if (targetIndex < transcriptStart) {
-        pendingTranscriptJumpRef.current = messageId;
-        setTranscriptWindow({
-          threadId: session.threadId,
-          start: transcriptStartForTarget(transcriptStart, targetIndex),
-        });
-        return;
-      }
+      if (!messages.some((message) => message.id === messageId)) return;
       scrollToTranscriptMessage(messageId);
     },
-    [messages, scrollToTranscriptMessage, session.threadId, transcriptStart]
+    [messages, scrollToTranscriptMessage]
   );
 
   const paletteActions = useMemo<PaletteAction[]>(
@@ -1569,7 +1474,12 @@ export function ChatScreen({
               onJump={jumpToMessage}
             />
           )}
-          <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>
+          <MessageScrollerProvider
+            autoScroll
+            defaultScrollPosition="last-anchor"
+            scrollEdgeThreshold={24}
+            scrollPreviousItemPeek={64}
+          >
             <MessageScroller
               className={cn("absolute inset-0", !hasNeedsInput && "pb-40")}
               style={{
@@ -1583,8 +1493,8 @@ export function ChatScreen({
                 <MessageScrollerContent
                   className={cn(
                     "mx-auto w-full max-w-[var(--chat-max)] gap-6 py-6",
-                    // The extra left inset exists only to clear the rail.
-                    narrow ? "px-3" : "pl-10 pr-4"
+                    // Leave a narrow, stable gutter for the dash-only history rail.
+                    narrow ? "px-3" : "pl-8 pr-4"
                   )}
                 >
                   {messages.length === 0 ? (
@@ -1656,11 +1566,11 @@ export function ChatScreen({
                     </MessageScrollerItem>
                   ) : null}
 
-                  {visibleMessages.map((msg, index) => (
+                  {messages.map((msg, index) => (
                     <ChatMessageRow
                       key={msg.id}
                       message={msg}
-                      isLast={index === visibleMessages.length - 1}
+                      isLast={index === messages.length - 1}
                       sending={sending}
                       approvalMode={approvalMode}
                       planToBuild={planToBuild}
@@ -1685,15 +1595,14 @@ export function ChatScreen({
                       showWorking={
                         showTurnWorking &&
                         msg.role === "assistant" &&
-                        index === visibleMessages.length - 1
+                        index === messages.length - 1
                       }
                       workingStartedAt={turnActivity?.startedAt}
                       workingAction={workingAction}
                     />
                   ))}
                   {showTurnWorking &&
-                  visibleMessages[visibleMessages.length - 1]?.role !==
-                    "assistant" ? (
+                  messages[messages.length - 1]?.role !== "assistant" ? (
                     <MessageScrollerItem
                       id="turn-working"
                       messageId="turn-working"
@@ -1713,10 +1622,7 @@ export function ChatScreen({
                   ) : null}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
-              <TranscriptScrollerControls
-                hiddenCount={transcriptStart}
-                onRevealEarlier={revealEarlierMessages}
-                onAtEndChange={handleTranscriptAtEndChange}
+              <TranscriptScrollRegistration
                 onRegisterScrollToMessage={registerScrollToTranscriptMessage}
               />
               <MessageScrollerButton />

@@ -16,6 +16,9 @@ import type {
   CompactionResult,
   ContextUsage,
   GitContext,
+  InputTarget,
+  JobRead,
+  JobSnapshot,
   ExternalAgentCheck,
   ExternalAgentRow,
   LoginStarted,
@@ -350,10 +353,53 @@ export function renameThread(
   });
 }
 
-export function sendMessage(text: string, attachments?: AttachmentInput[]) {
+export function sendMessage(
+  text: string,
+  attachments?: AttachmentInput[],
+  target?: InputTarget,
+) {
   return invoke<void>("send_message", {
     text,
     attachments: attachments ?? null,
+    target: target ?? null,
+  });
+}
+
+export function updateQueuedInput(threadId: string, inputId: string, text: string) {
+  return invoke<void>("update_queued_input", { threadId, inputId, text });
+}
+
+export function removeQueuedInput(threadId: string, inputId: string) {
+  return invoke<void>("remove_queued_input", { threadId, inputId });
+}
+
+export function listJobs(threadId?: string) {
+  return invoke<JobSnapshot[]>("list_jobs", { threadId: threadId ?? null });
+}
+
+export function jobOutput(
+  jobId: string,
+  options?: {
+    offset?: number;
+    wait?: boolean;
+    timeoutMs?: number;
+    threadId?: string;
+  },
+) {
+  return invoke<JobRead>("job_output", {
+    jobId,
+    offset: options?.offset ?? null,
+    wait: options?.wait ?? false,
+    timeoutMs: options?.timeoutMs ?? null,
+    threadId: options?.threadId ?? null,
+  });
+}
+
+export function jobKill(jobId: string, reason?: string, threadId?: string) {
+  return invoke<JobSnapshot>("job_kill", {
+    jobId,
+    reason: reason ?? null,
+    threadId: threadId ?? null,
   });
 }
 

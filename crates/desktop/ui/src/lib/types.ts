@@ -10,6 +10,8 @@ import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInf
 import type { SessionMeta as GeneratedSessionMeta } from "./generated/SessionMeta.ts";
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { TurnRecoveryView } from "./generated/TurnRecovery.ts";
+import type { PendingInputView } from "./generated/PendingInput.ts";
+import type { PendingInputAttachmentView } from "./generated/PendingInputAttachment.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 import type { GitContextView as GeneratedGitContext } from "./generated/GitContext.ts";
 import type { PullRequestView } from "./generated/PullRequestView.ts";
@@ -173,6 +175,30 @@ export type SessionInfo = Omit<GeneratedSessionInfo, "messages"> & {
   messages: ChatMessage[];
 };
 
+export type PendingInput = PendingInputView;
+export type PendingInputAttachment = PendingInputAttachmentView;
+export type InputTarget = PendingInput["target"];
+
+export type JobStatus = "running" | "stopping" | "completed" | "killed" | "failed";
+export type JobSnapshot = {
+  id: string;
+  kind: string;
+  label: string;
+  ownerThreadId?: string;
+  status: JobStatus;
+  detail?: string;
+  startedAt: number;
+  finishedAt?: number;
+  pid?: number;
+  reported: boolean;
+};
+export type JobRead = {
+  snapshot: JobSnapshot;
+  text: string;
+  nextOffset: number;
+  truncated: boolean;
+};
+
 /**
  * A session without its transcript.
  *
@@ -205,6 +231,7 @@ export type ThreadSummary = {
   pinned: boolean;
   providerId?: string;
   messageCount: number;
+  pendingInputCount?: number;
   gitContext?: ThreadGitContext;
 };
 
