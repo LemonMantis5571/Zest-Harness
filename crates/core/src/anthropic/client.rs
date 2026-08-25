@@ -272,9 +272,16 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use crate::anthropic::types::Message;
+
+    async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
 
     /// Fast tests pin the backoff to zero via the server's own `retry-after`.
     fn spawn_server(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
@@ -372,6 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn retries_a_529_then_succeeds() {
+        let _guard = network_test_guard().await;
         let (base, hits) = spawn_server(vec![529]);
         let client = AnthropicClient::new("k".into())
             .unwrap()
@@ -384,6 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn gives_up_after_max_attempts_and_says_so() {
+        let _guard = network_test_guard().await;
         let (base, hits) = spawn_server(vec![529, 529, 529, 529]);
         let client = AnthropicClient::new("k".into())
             .unwrap()
@@ -407,6 +416,7 @@ mod tests {
     /// Formatting it into a string was reporting it as a bad Claude session.
     #[tokio::test]
     async fn a_dead_port_stays_classified_as_unreachable() {
+        let _guard = network_test_guard().await;
         // Bind then drop, so the port is real but nothing is accepting on it.
         let addr = {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -428,6 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn does_not_retry_a_bad_request() {
+        let _guard = network_test_guard().await;
         // A 400 is deterministic — retrying it just spends time and quota.
         let (base, hits) = spawn_server(vec![400, 400]);
         let client = AnthropicClient::new("k".into())
@@ -442,6 +453,7 @@ mod tests {
     /// Stop must not have to wait out a backoff sleep.
     #[tokio::test]
     async fn cancel_during_backoff_returns_immediately() {
+        let _guard = network_test_guard().await;
         // No `retry-after`, so the client uses its own ~1s backoff — there is
         // an actual sleep to interrupt.
         let (base, hits) = spawn_server_with(vec![503, 503, 503, 503], None);

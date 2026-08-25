@@ -484,6 +484,8 @@ impl Tool for Bash {
             // Backstop for every path out of this function, including the turn
             // being cancelled while the command is still running.
             .kill_on_drop(true);
+        #[cfg(not(windows))]
+        cmd.process_group(0);
 
         // No console flash on Windows — this runs inside a GUI app.
         #[cfg(windows)]
@@ -714,9 +716,13 @@ fn terminate_process_tree(pid: u32) {
 
     #[cfg(not(windows))]
     {
-        // `kill_on_drop` handles the child on Unix. Keep this function shared
-        // so the Windows tree-kill path remains explicit and testable.
-        let _ = pid;
+        let process_group = format!("-{pid}");
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &process_group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 

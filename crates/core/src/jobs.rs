@@ -215,6 +215,8 @@ impl JobRegistry {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(not(windows))]
+        process.process_group(0);
         #[cfg(windows)]
         {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -589,8 +591,9 @@ fn terminate_process_tree(pid: u32) {
 
 #[cfg(not(windows))]
 fn terminate_process_tree(pid: u32) {
+    let process_group = format!("-{pid}");
     let _ = std::process::Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
+        .args(["-KILL", "--", &process_group])
         .status();
 }
 
