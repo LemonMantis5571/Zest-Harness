@@ -39,6 +39,7 @@ export function UserAvatar({ avatarDataUrl, displayName, className }: AvatarProp
 type Props = AvatarProps & {
   title?: string;
   onClick: () => void;
+  avatarClassName?: string;
 };
 
 export function UserAvatarButton({
@@ -47,6 +48,7 @@ export function UserAvatarButton({
   title = "User settings",
   onClick,
   className,
+  avatarClassName,
 }: Props) {
   return (
     <button
@@ -55,12 +57,16 @@ export function UserAvatarButton({
       aria-label={title}
       onClick={onClick}
       className={cn(
-        "cursor-pointer rounded-md outline-none transition-colors",
+        "grid place-items-center cursor-pointer rounded-md outline-none transition-colors",
         "hover:[&>span]:ring-primary/50 focus-visible:ring-2 focus-visible:ring-ring/50",
         className
       )}
     >
-      <UserAvatar avatarDataUrl={avatarDataUrl} displayName={displayName} />
+      <UserAvatar
+        avatarDataUrl={avatarDataUrl}
+        displayName={displayName}
+        className={avatarClassName}
+      />
     </button>
   );
 }

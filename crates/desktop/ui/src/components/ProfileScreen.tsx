@@ -110,6 +110,7 @@ export function ProfileScreen({
           title="Edit profile"
           onClick={onEditProfile}
           className="size-16 rounded-full"
+          avatarClassName="size-full rounded-full"
         />
         <div>
           <h1 className="m-0 text-[22px] font-semibold leading-tight tracking-[-0.4px]">
