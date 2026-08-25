@@ -186,7 +186,7 @@ export function DiffViewer({
     <aside
         role="dialog"
         aria-labelledby={titleId}
-        className="relative z-40 flex h-full min-w-0 shrink-0 flex-col overflow-hidden border-l border-border/80 bg-[#0f1011] text-foreground shadow-2xl outline-none animate-in slide-in-from-right-2 duration-150 max-md:absolute max-md:inset-0 max-md:!w-full"
+        className="relative z-40 flex h-full min-w-0 shrink-0 flex-col overflow-hidden border-l border-border/80 bg-background text-foreground shadow-2xl outline-none animate-in slide-in-from-right-2 duration-150 max-md:absolute max-md:inset-0 max-md:!w-full"
         style={{ width }}
       >
         {onResize ? (
@@ -203,7 +203,7 @@ export function DiffViewer({
             onKeyDown={handleResizeKey}
           />
         ) : null}
-        <header className="shrink-0 border-b border-border/70 bg-[#141516]">
+        <header className="shrink-0 border-b border-border/70 bg-card">
           <div className="flex items-start justify-between gap-3 px-3 py-2.5">
             <div className="min-w-0">
               <div id={titleId} className="flex items-center gap-1.5 text-xs font-medium">
@@ -275,7 +275,7 @@ export function DiffViewer({
           ) : null}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto bg-[#0b0c0d]">
+        <div className="min-h-0 flex-1 overflow-y-auto bg-background">
           {sections.length > 0 ? (
             sections.map((section, index) => {
               const key = sectionKey(section, index);
@@ -305,7 +305,7 @@ export function DiffViewer({
                   {!isCollapsed ? (
                     <DiffPreview
                       diff={displayDiff}
-                      className="border-b-0 rounded-none bg-[#0b0c0d]"
+                      className="border-b-0 rounded-none bg-background"
                       maxHeightClass="max-h-none"
                     />
                   ) : null}

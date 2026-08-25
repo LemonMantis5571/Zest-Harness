@@ -28,6 +28,12 @@ Zest runs locally. It does not require a Zest account or send telemetry to a
 Zest server. Provider sign-ins remain with their providers, and external coding
 CLIs remain responsible for their own sessions.
 
+## Influences and UI foundations
+
+Zest is inspired by Comet, T3 Cursor, and DeepSeek Harness. Its desktop UI uses
+shadcn/ui and ReUI source components, adapted to Zest's local-first workflow and
+dark design system.
+
 ## What can Zest do?
 
 - **Reviewable changes** — inspect diffs and approve file writes or commands.
