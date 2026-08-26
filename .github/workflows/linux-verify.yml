@@ -9,7 +9,7 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Tauri v2 needs WebKitGTK and friends; keyring needs the Secret Service
       # (D-Bus) headers; aws-lc-rs needs cmake; AppImage bundling needs patchelf.
