@@ -63,6 +63,9 @@ Desktop.ini
 /context/
 /memory/
 
+# --- Private local plans ---
+/plans/
+
 # --- Scratch / local experiments ---
 /tmp/
 *.log
