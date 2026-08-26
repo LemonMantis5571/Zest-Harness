@@ -361,9 +361,26 @@ fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlaying
         command.creation_flags(0x0800_0000);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Could not start the add-on.".to_string())?;
+    let mut child = None;
+    for attempt in 0..2 {
+        match command.spawn() {
+            Ok(process) => {
+                child = Some(process);
+                break;
+            }
+            Err(error)
+                if attempt == 0
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return Err("Could not start the add-on.".to_string()),
+        }
+    }
+    let mut child = child.ok_or_else(|| "Could not start the add-on.".to_string())?;
 
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
