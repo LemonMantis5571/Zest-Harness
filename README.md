@@ -9,7 +9,7 @@
 [![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**A local-first coding workspace with approvals, diffs, quotas, and optional model delegation.**
+**A local-first, provider-aware AI coding harness for desktop and terminal workflows—with approval-gated tools, reviewable diffs, and explicit delegation.**
 
 Run AI-assisted work in your own projects while keeping files, commands,
 credentials, and provider accounts under local control.
@@ -20,13 +20,14 @@ credentials, and provider accounts under local control.
 
 ## What is Zest?
 
-Zest is a desktop and terminal coding workspace. It connects to supported model
-providers, opens a project folder, and shows proposed file changes and commands
-before they run.
+Zest is a local-first AI coding harness for desktop and terminal workflows. It
+connects supported model providers to your project folder and keeps tool use
+reviewable: proposed file changes and commands are shown before they run.
 
-Zest runs locally. It does not require a Zest account or send telemetry to a
-Zest server. Provider sign-ins remain with their providers, and external coding
-CLIs remain responsible for their own sessions.
+Provider choice remains explicit. Zest can use native APIs, OpenAI-compatible
+endpoints, or authenticated coding CLIs while keeping provider history,
+credentials, and usage accounting separate. It does not require a Zest account
+or send telemetry to a Zest server.
 
 ## Influences and UI foundations
 
