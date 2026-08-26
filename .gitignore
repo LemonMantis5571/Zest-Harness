@@ -66,6 +66,19 @@ Desktop.ini
 # --- Private local plans ---
 /plans/
 
+# --- Local agent instructions and maintainer notes ---
+/AGENTS.md
+/CONTEXT.md
+/PROJECT_CONTEXT.md
+/DESIGN.md
+/context/
+/memory/
+/references/
+/skills/
+/tools/
+/docs/adr/
+/docs/CODEBASE_AUDIT.md
+
 # --- Scratch / local experiments ---
 /tmp/
 *.log

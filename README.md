@@ -4,140 +4,65 @@
 
 # Zest
 
-[![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
-[![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
-[![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
+[![Windows verify](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/windows-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/windows-verify.yml)
+[![Linux verify](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/linux-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/linux-verify.yml)
+[![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest-Harness?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest-Harness/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**A local coding agent that shows the diff before it writes.**
+**A local-first coding harness for agent orchestration, with explicit delegation.**
 
-Desktop and terminal. Your providers, your keys. No Zest account and no
-telemetry to a Zest server.
+Keep the parent session on one provider. Hand bounded work to a worker. Review the result in a fresh workspace.
 
-[Install the beta](https://github.com/LemonMantis5571/Zest/releases/latest) ·
-[Build from source](#build-from-source) · [Docs](#docs)
+[Install the beta](https://github.com/LemonMantis5571/Zest-Harness/releases) · [Build from source](#build-from-source) · [Docs](#docs)
 
 <img src="./crates/desktop/ui/src/assets/hero.png" alt="" width="320" />
 
 </div>
 
-## Why Zest
+## What Zest is
 
-- **Review before it runs.** Inspect proposed file diffs and commands, then
-  approve them.
-- **Desktop and CLI.** Use the Tauri app or the `zest` terminal client.
-- **Your providers.** Use native APIs, OpenAI-compatible endpoints, or an
-  authenticated coding CLI. Credentials, history, and usage stay separate per
-  provider.
-- **Local history.** Keep project chats and checkpoints across restarts.
-- **Honest usage.** Track local requests and tokens without presenting them as
-  a provider balance. Show provider-reported limits only when an official,
-  supported source is available.
-- **Optional delegation.** Send a job to a worker or an external coding CLI,
-  review the returned diff in a fresh workspace, and apply it only after
-  approval.
-- **Optional plugins.** Add local integrations without rebuilding Zest.
+Zest is a coding harness. The parent session stays with the provider you picked: it reads the project, runs the agent loop, and keeps that transcript recoverable. Desktop and terminal both sit on the same core.
 
-| | Zest | [Cline](https://github.com/cline/cline) | [Aider](https://github.com/Aider-AI/aider) |
-| --- | --- | --- | --- |
-| Interface | Desktop app + CLI | VS Code + CLI | Terminal |
-| Before a write | Diff and command approval | Per-action approval | Git commit |
-| Account | None, use your keys | None, use your keys | None, use your keys |
+Orchestration is the point. When a task is better handled elsewhere, Zest does not switch the parent provider or fold another model into the same chat. It delegates.
 
-## Influences and UI foundations
+## Delegation
 
-Zest is inspired by Comet's branch-diff review, T3 Cursor's provider and session
-separation, and DeepSeek Harness's chat workflow. Its desktop UI uses shadcn/ui
-and ReUI components, restyled with Zest's dark color tokens.
+A delegated job is a **feature card**: objective, scope, selected context, dependencies, acceptance checks, worker target, and reviewer target. The coordinator owns that card, the queue, retries, and apply/review transitions. It is not a second parent agent.
+
+Two lanes share those records, not credentials or parent history:
+
+- **Native provider workers** run through Zest's own provider and runtime boundary.
+- **External workers** run through a configured ACP session or a signed-in CLI that already owns its own login.
+
+The parent conversation stays with its provider. Workers do not inherit the parent transcript. External CLIs keep their own credentials and sessions. Review happens in a fresh, isolated workspace; reviewer edits are discarded, and only a validated review report can make a job ready to apply.
+
+Delegation is opt-in and configured. Zest does not auto-route tasks between providers, implement vendor OAuth for workers, or manage a worker's own MCP servers.
+
+## Local-first
+
+No Zest account and no telemetry to a Zest server. Config lives at `~/.zest`. Provider credentials use the OS credential manager when available. Usage is recorded honestly per provider; external-CLI spend is never invented or merged into the parent balance.
+
+The parent can be a native API, an OpenAI-compatible endpoint, or an authenticated coding CLI. Optional plugins install as separate processes. See [Plugins](docs/PLUGINS.md) and [quota](docs/QUOTA.md).
 
 ## Install the beta
 
-Open the [latest Zest beta release](https://github.com/LemonMantis5571/Zest/releases/latest).
+Packages live on [GitHub Releases](https://github.com/LemonMantis5571/Zest-Harness/releases).
 
-- **Windows x64.** Install the `.msi` or `.exe` package.
-- **Linux x64.** Install the `.deb` or `.rpm` package, or run the AppImage.
+- **Windows 10/11 x64.** `.msi` or `.exe`
+- **Linux x64.** `.deb`, `.rpm`, or AppImage
 
-Each release includes a platform-specific `SHA256SUMS` file and third-party
-notices.
+Each release includes `SHA256SUMS` and third-party notices. Official packages do not bundle plugins.
 
 ### First session
 
 1. Launch Zest.
-2. Choose a provider in **Settings**.
+2. Choose a parent provider in **Settings**.
 3. Open a project folder.
-4. Start a chat and inspect the proposed changes or commands before they run.
+4. Work in the parent session, or create a feature card and delegate.
 
 ## Build from source
 
-Install Rust 1.97.1, Node.js 24.16.0, npm, Git, and PowerShell (`pwsh` on
-Linux or macOS). Linux also needs the desktop libraries listed in
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-### Windows PowerShell
-
-```powershell
-npm ci
-npm run dev
-```
-
-### Linux or macOS
-
-```bash
-npm ci
-npm run dev
-```
-
-Build the terminal client with Cargo:
-
-```bash
-cargo run -p zest -- --help
-```
-
-Run the full local verification gate with:
-
-```powershell
-.\scripts\release-verify.ps1
-```
-
-## Plugins
-
-Official Zest packages do not include plugins. Plugins are installed separately
-as folders under the user's Zest plugin directory.
-
-1. Open **Customize > Extras**.
-2. Press **Open folder**.
-3. Copy one complete plugin folder into the folder that opens.
-4. Press **Refresh**, then **Turn on**.
-
-On Windows, the folder is:
-
-```text
-%LOCALAPPDATA%\Zest\plugins
-```
-
-Install the included Windows music plugin from the repository root with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-now-playing-plugin.ps1
-```
-
-The install guide, plugin protocol, security rules, and acceptance
-checklist are in [`docs/PLUGINS.md`](docs/PLUGINS.md).
-
-## Providers and usage
-
-Zest stores user configuration at `~/.zest/zest.toml`. Supported provider
-credentials use the operating system credential manager when available; do not
-put secrets in project files or commit them to Git.
-
-Zest keeps these values separate:
-
-- local usage recorded by Zest;
-- rate limits returned by a provider; and
-- account balances or subscription limits owned by a provider.
-
-The quota panel only shows provider-reported data. See the
-[quota guide](docs/QUOTA.md) for provider-specific behavior.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pinned toolchain, Linux packages, and local verification gate.
 
 ## Platforms
 
@@ -150,19 +75,7 @@ The quota panel only shows provider-reported data. See the
 
 ## Security
 
-Zest's approval layer makes proposed writes and commands visible before
-execution. An approved command still runs with the user's operating-system
-permissions; Zest is not an operating-system sandbox.
-
-Plugins run as separate child processes, but the plugin boundary is not a
-sandbox either. Install only plugins whose source and behavior are trusted.
-
-Delegation is explicit and local-first. The selected parent provider remains
-the owner of the parent conversation; delegation does not silently switch the
-parent provider or inject the parent transcript into a worker. External CLIs
-keep their own credentials and sessions. The coordinator owns the project-local
-job boundary, queue and retry rules, reviewer isolation, and usage accounting
-model.
+Writes, commands, and delegated jobs are gated before they run. An approved command still runs with your OS permissions; Zest is not an operating-system sandbox. Plugins are separate child processes, not a sandbox either. Install only plugins you trust.
 
 ## Docs
 
@@ -171,12 +84,16 @@ model.
 - [MCP servers](docs/MCP.md). Zest's own servers and how they differ from `allow_mcp`.
 - [Provider quota](docs/QUOTA.md). Live limits, balances, and local usage.
 - [Contributing](CONTRIBUTING.md). Development, tests, and pull requests.
-- [Design notes](DESIGN.md). Product and architecture context.
+- [Contributors](CONTRIBUTORS.md). People who have contributed to Zest.
 - [Releasing](docs/RELEASING.md). Maintainer release checklist.
-- [Beta release notes](docs/releases/0.1.0.md). Scope and known limits.
 - [Changelog](CHANGELOG.md). User-facing changes.
 - [Security policy](SECURITY.md). Vulnerability reporting.
 - [Third-party notices](THIRD_PARTY_NOTICES.md). Dependency attribution.
+
+## Contributors
+
+- [LemonMantis5571](https://github.com/LemonMantis5571)
+- [rjamador](https://github.com/rjamador)
 
 ## Contributing
 
@@ -186,3 +103,7 @@ vulnerabilities privately using
 [`SECURITY.md`](SECURITY.md).
 
 Zest is released under the [MIT License](LICENSE).
+
+## Inspiration
+
+Zest is inspired by Comet's branch-diff review, T3 Cursor's provider and session separation, and DeepSeek Harness's chat workflow. Its desktop UI uses shadcn/ui and ReUI components, restyled with Zest's own design tokens.
