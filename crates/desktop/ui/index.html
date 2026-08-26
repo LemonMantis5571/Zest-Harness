@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/zest-favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Paint the app's own background before any CSS or JS has loaded. Without
+      this the webview shows a white frame on every launch, which is the first
+      thing anyone sees. Hardcoded because `--background` lives in index.css,
+      which is exactly what has not arrived yet; keep the two in step.
+
+      `color-scheme` also stops the webview drawing light scrollbars and form
+      controls during that same window.
+    -->
+    <meta name="color-scheme" content="dark" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0c0c0e;
+      }
+    </style>
+    <title>Zest</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

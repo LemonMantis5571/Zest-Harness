@@ -1,0 +1,9 @@
+{
+  "protocol": 1,
+  "id": "now-playing",
+  "name": "Now Playing",
+  "description": "See and control your music.",
+  "version": "0.1.0",
+  "executable": "zest-now-playing.exe",
+  "kind": "now-playing"
+}

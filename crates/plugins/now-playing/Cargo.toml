@@ -1,0 +1,29 @@
+[package]
+name = "zest-now-playing-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional Windows music controls for Zest."
+
+[[bin]]
+name = "zest-now-playing"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+zest-plugin-api = { path = "../../plugin-api" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+base64 = "0.22"
+windows = { version = "0.61.3", features = [
+    "Media_Control",
+    "Storage_Streams",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }

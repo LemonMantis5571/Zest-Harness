@@ -1,0 +1,12 @@
+[package]
+name = "zest-plugin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Small wire contract for Zest's optional local add-ons."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/LemonMantis5571/Zest/blob/main/docs/plugin.schema.json",
+  "title": "Zest plugin manifest",
+  "description": "Manifest for a Zest external-process plugin using protocol v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "id",
+    "name",
+    "description",
+    "version",
+    "executable"
+  ],
+  "properties": {
+    "protocol": {
+      "const": 1,
+      "description": "The Zest plugin protocol version."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9._-]{1,64}$",
+      "description": "Stable lowercase ID; must match the plugin folder name."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 180
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Plugin release version; use SemVer for public releases."
+    },
+    "executable": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 260,
+      "description": "Relative executable path inside the plugin folder."
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Behavior kind. Currently only now-playing is supported."
+    }
+  }
+}

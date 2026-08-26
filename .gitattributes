@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.ps1 text working-tree-encoding=UTF-8
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.ico binary
+*.bmp binary
