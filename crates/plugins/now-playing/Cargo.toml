@@ -18,7 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-base64 = "0.22"
+base64 = "0.23"
 windows = { version = "0.61.3", features = [
     "Media_Control",
     "Storage_Streams",
