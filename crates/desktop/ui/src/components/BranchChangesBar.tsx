@@ -16,22 +16,10 @@ type Props = {
 };
 
 /**
- * A strip announcing what the branch has accumulated, riding above the composer.
+ * Shows the current branch change count above the composer.
  *
- * It replaces the icon button that used to live in the top bar: an icon with a
- * bare count said "something changed" but not what, and it competed for space
- * with the quota, palette, workbench and settings controls. Given a row of its
- * own it can name the project and branch the counts belong to and still leave
- * the top bar for controls.
- *
- * That row started under the top bar, which made it a full-width band that
- * pushed the transcript down whenever the branch moved. Sitting in the
- * composer's overlay instead, it shares the composer's width and floats over
- * the conversation, so appearing costs no layout — and it is next to where the
- * user is already looking rather than at the far end of the window.
- *
- * Rendered only when the branch actually has changes, so a clean tree costs
- * nothing — there is no zero state to look at.
+ * The bar shares the composer's overlay so it does not push the transcript down.
+ * It appears only when the workspace has changes.
  */
 export function BranchChangesBar({
   projectLabel,
@@ -64,7 +52,7 @@ export function BranchChangesBar({
           title={`Review ${fileCount} changed ${fileCount === 1 ? "file" : "files"} on ${
             branch ?? "this branch"
           }`}
-          aria-label={`Show branch diff — ${fileCount} ${
+          aria-label={`Show branch diff: ${fileCount} ${
             fileCount === 1 ? "file" : "files"
           } changed, ${additions} added, ${deletions} removed`}
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left outline-none hover:bg-secondary/60 focus-visible:ring-2 focus-visible:ring-ring/50"

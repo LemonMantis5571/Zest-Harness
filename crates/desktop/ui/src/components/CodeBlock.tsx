@@ -18,9 +18,8 @@ type Props = {
 };
 
 /**
- * Editor-style fenced code with the shared ReUI surface and copy affordance.
- * The public Zest wrapper stays small so Markdown and Mermaid keep one stable
- * rendering entry point while the richer surface owns highlighting and line UI.
+ * Zest's wrapper keeps Markdown and Mermaid on one code-block path.
+ * ReUI supplies syntax highlighting and line controls.
  */
 export function CodeBlock({
   code,

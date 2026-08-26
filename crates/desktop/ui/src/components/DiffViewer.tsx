@@ -57,7 +57,7 @@ function sectionKey(section: DiffSection, index: number): string {
   return `${section.path}:${index}`;
 }
 
-/** Compact review sidebar for changed files — portal-free for WebView safety. */
+/** Changed-file review sidebar rendered in place for desktop WebView compatibility. */
 export function DiffViewer({
   target,
   onClose,

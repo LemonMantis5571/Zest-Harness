@@ -55,8 +55,8 @@ export function UsageScreen({ onBack }: Props) {
 
     // The report first and on its own: it is a local file read, so the screen
     // fills immediately whatever the network is doing. The rate refresh runs
-    // behind it and only costs a second read when the rates actually moved —
-    // which, given a 24h cache, is at most once a day.
+    // behind it and only costs a second read when the rates actually moved.
+    // Given a 24h cache, that happens at most once a day.
     void backend
       .usageReport(range)
       .then((next) => {
@@ -257,8 +257,8 @@ function Headline({ report }: { report: UsageReport }) {
           <span className="text-muted-foreground">*</span>
         </div>
         <p className="m-0 mt-2 text-[11px] leading-relaxed text-muted-foreground">
-          * combines provider-reported charges with list-rate estimates where needed. Not a bill
-          — Zest does not see your account, and a subscription does not charge this.
+          * combines provider-reported charges with list-rate estimates where needed. Not a bill.
+          Zest does not see your account, and a subscription does not charge this.
         </p>
       </div>
 
@@ -484,8 +484,8 @@ function DailyChart({
  *
  * The prompt is shown as three tiles that add up rather than as one input
  * figure with a hit rate beside it. In an agent loop the three differ by an
- * order of magnitude in both volume and price, and — more importantly — a lone
- * hit rate counts cache writes as failures, so a session busy filling its cache
+ * order of magnitude in both volume and price. More importantly, a lone hit
+ * rate counts cache writes as failures, so a session busy filling its cache
  * is indistinguishable from one whose cache never worked.
  */
 function StatStrip({ report }: { report: UsageReport }) {
@@ -734,11 +734,9 @@ function describeRateAge(rates: RatesStatus): string {
 /**
  * Where the numbers came from.
  *
- * Two sources are being added together, and they are not the same kind of fact.
- * Zest's own ledger is exact for turns Zest sent; the transcript scan is a
- * read-back of what the CLIs recorded for turns Zest never saw. Naming both, and
- * saying which directories were read, is what stops the total reading as one
- * seamless measurement it is not.
+ * The ledger and CLI transcript scan report different kinds of usage. The ledger
+ * covers turns Zest sent. The scan reads turns recorded by CLIs that Zest did not
+ * send. Label both sources and show which directories were read.
  */
 function SourcesCard({ report }: { report: UsageReport }) {
   const { scan } = report;
@@ -772,7 +770,7 @@ function SourcesCard({ report }: { report: UsageReport }) {
             <li key={root.path} className="text-[10px] text-muted-foreground">
               <span className="font-medium">{root.providerId}</span>{" "}
               <span className="break-all">{root.path}</span>
-              {root.exists ? null : " — not found"}
+              {root.exists ? null : ". Not found"}
             </li>
           ))}
         </ul>
@@ -786,17 +784,11 @@ function SourcesCard({ report }: { report: UsageReport }) {
 }
 
 /**
- * Worker figures sit beside the totals and are never added to them: these
- * processes authenticate against their own accounts and report their own
- * numbers, so folding them in would bill someone else's spend to you.
+ * Worker totals stay separate from Zest totals. The worker's CLI owns its
+ * account and may report tokens or cost for individual runs.
  *
- * Two things make this panel different from everything above it. Its figures are
- * lifetime rather than windowed, because worker usage has no daily buckets to
- * slice — so it says so rather than inheriting the range in the header. And when
- * a worker reports a cost, that cost is *reported*, not estimated from a local
- * price book: it is the only real money figure on this screen, and it is labelled
- * to say which run it belongs to, because workers bill per session and summing
- * them would invent a total nobody quoted.
+ * These values cover all time because worker records do not have daily buckets.
+ * Show reported cost as reported. Do not estimate it or add it to Zest totals.
  */
 function ExternalWorkers({ report }: { report: UsageReport }) {
   return (
@@ -831,9 +823,8 @@ function ExternalWorkers({ report }: { report: UsageReport }) {
         ))}
       </div>
       <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-        Reported by the worker's own CLI, against its own account and its own billing. Never
-        added to the totals above — and unlike them, a worker cost is measured rather than
-        estimated.
+        Reported by the worker's own CLI, against its own account and billing. Never added to
+        the totals above. Worker cost is measured rather than estimated.
       </p>
     </section>
   );
@@ -917,7 +908,7 @@ function bandColor(index: number): string {
 function costSourceTitle(source: ModelCostRow["costSource"]): string {
   switch (source) {
     case "providerReported":
-      return "Reported by the CLI — measured, not estimated";
+      return "Reported by the CLI. Measured, not estimated";
     case "modelPriced":
       return "Estimated from published rates";
     case "mixed":
@@ -929,7 +920,7 @@ function costSourceTitle(source: ModelCostRow["costSource"]): string {
 
 function describeDay(point: DayCostPoint, metric: Metric): string {
   const when = formatDate(point.date);
-  if (!point.requests) return `${when} — no activity`;
+  if (!point.requests) return `${when}: no activity`;
   const headline =
     metric === "cost" ? money(point.costUsd) : `${compact(point.tokens)} tokens`;
   const split = point.byProvider
@@ -939,7 +930,7 @@ function describeDay(point: DayCostPoint, metric: Metric): string {
         : `${band.providerId} ${compact(band.tokens)}`
     )
     .join(", ");
-  return split ? `${when} — ${headline} (${split})` : `${when} — ${headline}`;
+  return split ? `${when}: ${headline} (${split})` : `${when}: ${headline}`;
 }
 
 /**
@@ -963,10 +954,9 @@ function money(n: number): string {
  * A cost a worker reported, in the currency it reported.
  *
  * Core keeps the amount as text so the ledger never rounds or assumes a
- * currency. Formatting is a display concern, so it happens here — and falls back
- * to the raw string rather than dropping a figure whose currency code we cannot
- * format. Four decimals because a single delegated run is routinely under a
- * cent, and two would round real spend to nothing.
+ * currency. Formatting happens here. If the currency code is unknown, show the
+ * raw amount instead of dropping it. Four decimals preserve small delegated costs
+ * that would round to zero with two.
  */
 function reportedCost(cost: { amount: string; currency: string }): string {
   const amount = Number(cost.amount);
@@ -993,8 +983,8 @@ function compact(n: number): string {
 }
 
 function formatDate(iso: string): string {
-  // Parsed as local parts, not `new Date(iso)` — that reads a bare ISO date as
-  // UTC midnight and shows the previous day west of Greenwich.
+  // Parse local parts instead of calling `new Date(iso)`. A bare ISO date is
+  // read as UTC midnight and can show the previous day west of Greenwich.
   const [y, m, d] = iso.split("-").map(Number);
   if (!y || !m || !d) return iso;
   return new Date(y, m - 1, d).toLocaleDateString(undefined, {
