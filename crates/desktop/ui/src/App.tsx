@@ -87,6 +87,7 @@ import type {
   PreparedAttachment,
   ProviderRow,
   SessionInfo,
+  SessionMeta,
   SessionWarning,
   ToolPart,
   UserAttachmentChip,
@@ -464,6 +465,7 @@ export default function App() {
   const [threadActivity, setThreadActivity] = useState<ThreadActivityMap>({});
   const [delegationJobs, setDelegationJobs] = useState<DelegationJob[]>([]);
   const [threadQueues, setThreadQueues] = useState<ThreadQueueMap>({});
+  const [resumingQueuedThread, setResumingQueuedThread] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
@@ -698,6 +700,21 @@ export default function App() {
     },
     []
   );
+
+  const resumeQueuedMessages = useCallback((threadId: string) => {
+    if (resumingQueuedThread !== null) return;
+    setResumingQueuedThread(threadId);
+    void backend
+      .resumeQueuedInputs(threadId)
+      .catch((error) => {
+        toast.add({
+          type: "error",
+          title: "Could not resume queued messages",
+          description: formatInvokeError(error),
+        });
+      })
+      .finally(() => setResumingQueuedThread(null));
+  }, [resumingQueuedThread]);
 
   const loadProviders = useCallback(async (prefer?: string | null) => {
     const rows = await withTimeout(backend.listProviders(), "provider list");
@@ -2444,30 +2461,41 @@ export default function App() {
     }
   }
 
-  async function onModelChange(next: string) {
-    if (typeof next !== "string" || !next.trim()) return;
+  async function commitSessionOptions(
+    next: { model?: string; effort?: EffortId },
+    request: () => Promise<SessionMeta>,
+    errorTitle: string
+  ) {
     if (optionsUpdatingRef.current) return;
     if (screen !== "chat") {
-      setModel(next);
+      if (next.model) setModel(next.model);
+      if (next.effort) setEffort(next.effort);
       return;
     }
     const snapshot = { model: modelRef.current, effort: effortRef.current };
+    const optimisticModel = next.model ?? snapshot.model;
+    const optimisticEffort = next.effort ?? snapshot.effort;
     optionsUpdatingRef.current = true;
     setOptionsUpdating(true);
-    setModel(next);
-    setSession((prev) => (prev ? { ...prev, model: next } : prev));
+    setModel(optimisticModel);
+    setEffort(optimisticEffort);
+    setSession((prev) =>
+      prev
+        ? { ...prev, model: optimisticModel, effort: optimisticEffort }
+        : prev
+    );
     try {
-      const info = await backend.updateSessionOptions({ model: next });
+      const info = await request();
       setSession((prev) => mergeSessionOptions(prev, info));
       setModel(info.model);
-      setEffort(effortFromSession(info.effort, effortRef.current));
+      setEffort(effortFromSession(info.effort, optimisticEffort));
     } catch (err) {
       setSession((prev) => rollbackSessionOptions(prev, snapshot));
       setModel(snapshot.model);
       setEffort(snapshot.effort);
       toast.add({
         type: "error",
-        title: "Could not update model",
+        title: errorTitle,
         description: formatInvokeError(err),
       });
     } finally {
@@ -2476,35 +2504,30 @@ export default function App() {
     }
   }
 
+  async function onModelChange(next: string) {
+    if (typeof next !== "string" || !next.trim()) return;
+    await commitSessionOptions(
+      { model: next },
+      () => backend.updateSessionOptions({ model: next }),
+      "Could not update model"
+    );
+  }
+
   async function onEffortChange(next: EffortId) {
-    if (optionsUpdatingRef.current) return;
-    if (screen !== "chat") {
-      setEffort(next);
-      return;
-    }
-    const snapshot = { model: modelRef.current, effort: effortRef.current };
-    optionsUpdatingRef.current = true;
-    setOptionsUpdating(true);
-    setEffort(next);
-    setSession((prev) => (prev ? { ...prev, effort: next } : prev));
-    try {
-      const info = await backend.updateSessionOptions({ effort: next });
-      setSession((prev) => mergeSessionOptions(prev, info));
-      setModel(info.model);
-      setEffort(effortFromSession(info.effort, snapshot.effort));
-    } catch (err) {
-      setSession((prev) => rollbackSessionOptions(prev, snapshot));
-      setModel(snapshot.model);
-      setEffort(snapshot.effort);
-      toast.add({
-        type: "error",
-        title: "Could not update effort",
-        description: formatInvokeError(err),
-      });
-    } finally {
-      optionsUpdatingRef.current = false;
-      setOptionsUpdating(false);
-    }
+    await commitSessionOptions(
+      { effort: next },
+      () => backend.updateSessionOptions({ effort: next }),
+      "Could not update effort"
+    );
+  }
+
+  async function onResetOptions() {
+    const resetModel = session?.defaultModel ?? DEFAULT_CODEX_MODEL;
+    await commitSessionOptions(
+      { model: resetModel, effort: DEFAULT_EFFORT },
+      () => backend.resetSessionOptions(),
+      "Could not reset model and effort"
+    );
   }
 
   async function onApproveDelegation(jobId: string) {
@@ -2663,6 +2686,8 @@ export default function App() {
             onRemoveQueuedMessage={(turnId) =>
               discardQueuedTurn(session.threadId, turnId)
             }
+            onResumeQueuedMessages={() => resumeQueuedMessages(session.threadId)}
+            resumingQueuedMessages={resumingQueuedThread === session.threadId}
             threadActivity={threadActivity}
             model={model}
             effort={effort}
@@ -2696,6 +2721,7 @@ export default function App() {
             onProfileChange={setProfile}
             onModelChange={onModelChange}
             onEffortChange={onEffortChange}
+            onResetOptions={onResetOptions}
             onResolveApproval={onResolveApproval}
             onResolveQuestion={onResolveQuestion}
             onReconnectProvider={(providerId) => {

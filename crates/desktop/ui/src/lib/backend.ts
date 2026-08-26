@@ -128,6 +128,7 @@ export type DesktopBackend = {
     model?: string;
     effort?: string;
   }): Promise<SessionMeta>;
+  resetSessionOptions(): Promise<SessionMeta>;
   listThreads(): Promise<ThreadSummary[]>;
   forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
@@ -171,6 +172,7 @@ export type DesktopBackend = {
   ): Promise<void>;
   updateQueuedInput(threadId: string, inputId: string, text: string): Promise<void>;
   removeQueuedInput(threadId: string, inputId: string): Promise<void>;
+  resumeQueuedInputs(threadId: string): Promise<void>;
   listJobs(threadId?: string): Promise<JobSnapshot[]>;
   jobOutput(
     jobId: string,
@@ -280,6 +282,7 @@ export function createTauriBackend(): DesktopBackend {
     cancelLogin: () => tauriApi.cancelLogin(),
     startSession: (id, options) => tauriApi.startSession(id, options),
     updateSessionOptions: (options) => tauriApi.updateSessionOptions(options),
+    resetSessionOptions: () => tauriApi.resetSessionOptions(),
     listThreads: () => tauriApi.listThreads(),
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
@@ -304,6 +307,7 @@ export function createTauriBackend(): DesktopBackend {
       tauriApi.updateQueuedInput(threadId, inputId, text),
     removeQueuedInput: (threadId, inputId) =>
       tauriApi.removeQueuedInput(threadId, inputId),
+    resumeQueuedInputs: (threadId) => tauriApi.resumeQueuedInputs(threadId),
     listJobs: (threadId) => tauriApi.listJobs(threadId),
     jobOutput: (jobId, options) => tauriApi.jobOutput(jobId, options),
     jobKill: (jobId, reason, threadId) => tauriApi.jobKill(jobId, reason, threadId),

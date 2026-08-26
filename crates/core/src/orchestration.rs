@@ -36,9 +36,10 @@ pub struct WorktreeLineage {
     pub parent_task: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecyclePhase {
+    #[default]
     Planned,
     AwaitingApproval,
     Queued,
@@ -51,12 +52,6 @@ pub enum LifecyclePhase {
     Failed,
     Cancelled,
     ApplyConflict,
-}
-
-impl Default for LifecyclePhase {
-    fn default() -> Self {
-        Self::Planned
-    }
 }
 
 impl From<crate::delegation::DelegationStatus> for LifecyclePhase {

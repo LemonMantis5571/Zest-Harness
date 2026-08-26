@@ -1939,7 +1939,7 @@ mod characterization {
             .unwrap();
         store.save(&source).unwrap();
 
-        let fork = store.fork(&source, Some("branch".into())).unwrap();
+        let fork = store.fork(&source, Some("branch")).unwrap();
         assert!(fork.pending_inputs.is_empty());
         assert_eq!(
             serde_json::to_value(&fork.messages).unwrap(),

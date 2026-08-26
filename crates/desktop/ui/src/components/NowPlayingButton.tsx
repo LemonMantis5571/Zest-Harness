@@ -36,13 +36,21 @@ export function NowPlayingButton() {
         setValue(result.value);
         setError(null);
       }
-      return result.value;
+      return result.committed ? result.value : null;
     }
     if (result.status === "error" && result.committed) {
       setError(result.error instanceof Error ? result.error.message : "Could not read the music.");
     }
     return null;
   }, [coordinator]);
+
+  // A read that was already queued before an enable/disable action can finish
+  // stale. Once that shared read settles, the next read is a fresh generation
+  // and commits the first real track instead of leaving the card on Checking.
+  const readFreshNowPlaying = useCallback(async () => {
+    const value = await readNowPlaying();
+    return value ?? readNowPlaying();
+  }, [readNowPlaying]);
 
   const loadPlugin = useCallback(async () => {
     const requestId = ++pluginRequestRef.current;
@@ -56,7 +64,7 @@ export function NowPlayingButton() {
 
       setPlugin(next);
       if (next?.enabled && next.available) {
-        await readNowPlaying();
+        await readFreshNowPlaying();
       } else {
         clearRefreshTimer();
         coordinator.invalidate();
@@ -75,7 +83,7 @@ export function NowPlayingButton() {
         setLoading(false);
       }
     }
-  }, [clearRefreshTimer, coordinator, readNowPlaying]);
+  }, [clearRefreshTimer, coordinator, readFreshNowPlaying]);
 
   useEffect(() => {
     void loadPlugin();
@@ -84,10 +92,10 @@ export function NowPlayingButton() {
   useEffect(() => {
     if (!plugin?.enabled || !plugin.available) return;
     const timer = window.setInterval(() => {
-      void readNowPlaying();
+      void readFreshNowPlaying();
     }, 5_000);
     return () => window.clearInterval(timer);
-  }, [plugin?.available, plugin?.enabled, readNowPlaying]);
+  }, [plugin?.available, plugin?.enabled, readFreshNowPlaying]);
 
   useEffect(() => {
     if (!checked || plugin?.available) return;
@@ -101,7 +109,10 @@ export function NowPlayingButton() {
     return () => {
       pluginRequestRef.current += 1;
       clearRefreshTimer();
-      coordinator.dispose();
+      // React StrictMode replays effect cleanup/setup in development. Mark
+      // queued work stale without permanently disposing the coordinator that
+      // the replayed effect still shares.
+      coordinator.invalidate();
     };
   }, [clearRefreshTimer, coordinator]);
 
@@ -111,22 +122,27 @@ export function NowPlayingButton() {
     clearRefreshTimer();
     coordinator.invalidate();
     setBusy(true);
+    setLoading(true);
     setError(null);
     try {
       const next = await getBackend().setPluginEnabled(plugin.id, !plugin.enabled);
       const row = next.find((candidate) => candidate.id === plugin.id) ?? plugin;
       setPlugin(row);
       if (row.enabled && row.available) {
-        await readNowPlaying();
+        await readFreshNowPlaying();
       } else {
         coordinator.invalidate();
         setValue(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not change this extra.");
+      if (requestId === pluginRequestRef.current) {
+        setError(err instanceof Error ? err.message : "Could not change this extra.");
+      }
     } finally {
-      setBusy(false);
-      if (requestId === pluginRequestRef.current) setLoading(false);
+      if (requestId === pluginRequestRef.current) {
+        setBusy(false);
+        setLoading(false);
+      }
     }
   }
 
@@ -142,7 +158,7 @@ export function NowPlayingButton() {
         setError(null);
         refreshTimerRef.current = window.setTimeout(() => {
           refreshTimerRef.current = null;
-          void readNowPlaying();
+          void readFreshNowPlaying();
         }, 300);
       }
     } else if (result.status === "error" && result.committed) {
@@ -182,9 +198,9 @@ export function NowPlayingButton() {
 
   const handleOpenChange = useCallback(
     (nextOpen: boolean) => {
-      if (nextOpen) void loadPlugin();
+      if (nextOpen && !busy) void loadPlugin();
     },
-    [loadPlugin]
+    [busy, loadPlugin]
   );
 
   const hasTrack = Boolean(plugin?.enabled && plugin.available && value?.title?.trim());

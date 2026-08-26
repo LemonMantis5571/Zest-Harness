@@ -67,7 +67,15 @@ pub async fn run_acceptance_checks(
     let mut workspace = prepare_reviewer(root, worker_diff)
         .await
         .map_err(HarnessError::Other)?;
-    let execution = run_checks_in_workspace(&mut workspace, &config, commands, cancel).await;
+    let parent_secret_envs = config.provider_key_env_names();
+    let execution = run_checks_in_workspace(
+        &mut workspace,
+        &config,
+        commands,
+        cancel,
+        &parent_secret_envs,
+    )
+    .await;
     let cleanup = workspace.cleanup().await;
     match (execution, cleanup) {
         (Ok(results), Ok(())) => Ok(results),
@@ -86,6 +94,7 @@ async fn run_checks_in_workspace(
     config: &Config,
     commands: &[String],
     cancel: Option<&CancelToken>,
+    parent_secret_envs: &[String],
 ) -> Result<Vec<AcceptanceCheckResult>> {
     let settings = config.tools.bash.settings();
     let mut results = Vec::with_capacity(commands.len());
@@ -104,7 +113,16 @@ async fn run_checks_in_workspace(
             ));
             continue;
         }
-        results.push(run_auto_check(workspace.path(), command, settings.timeout_ms, cancel).await?);
+        results.push(
+            run_auto_check(
+                workspace.path(),
+                command,
+                settings.timeout_ms,
+                cancel,
+                parent_secret_envs,
+            )
+            .await?,
+        );
     }
     Ok(results)
 }
@@ -122,6 +140,7 @@ async fn run_auto_check(
     command: &str,
     timeout_ms: u64,
     cancel: Option<&CancelToken>,
+    parent_secret_envs: &[String],
 ) -> Result<AcceptanceCheckResult> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
@@ -140,6 +159,9 @@ async fn run_auto_check(
     {
         child.creation_flags(0x0800_0000);
     }
+    crate::tools::external_agent::prepare_external_command(&mut child);
+    crate::tools::external_agent::scrub_secret_environment(&mut child, parent_secret_envs);
+    crate::tools::external_agent::scrub_zest_secret_environment(&mut child, parent_secret_envs);
     let mut child = match child.spawn() {
         Ok(child) => child,
         Err(error) => {

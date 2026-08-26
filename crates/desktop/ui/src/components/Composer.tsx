@@ -45,7 +45,7 @@ import type {
   GitContext,
   PreparedAttachment,
 } from "@/lib/types";
-import type { QueuedTurn } from "@/lib/threadQueue";
+import { hasResumableThreadTurn, type QueuedTurn } from "@/lib/threadQueue";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -63,6 +63,8 @@ type Props = {
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
   onRemoveQueuedMessage: (turnId: string) => void;
+  onResumeQueuedMessages?: () => void;
+  resumingQueuedMessages?: boolean;
   showModelPicker: boolean;
   optionsDisabled?: boolean;
   attachments: PreparedAttachment[];
@@ -72,6 +74,7 @@ type Props = {
   onApprovalModeChange: (mode: ApprovalMode) => void;
   onModelChange: (model: string) => void;
   onEffortChange: (effort: EffortId) => void;
+  onResetOptions?: () => void;
   onAttachFiles: () => void;
   onOpenFolder: () => void;
   onRemoveAttachment: (id: string) => void;
@@ -101,6 +104,8 @@ export function Composer({
   queuedMessages,
   onUpdateQueuedMessage,
   onRemoveQueuedMessage,
+  onResumeQueuedMessages,
+  resumingQueuedMessages = false,
   showModelPicker,
   optionsDisabled = false,
   attachments,
@@ -110,6 +115,7 @@ export function Composer({
   onApprovalModeChange,
   onModelChange,
   onEffortChange,
+  onResetOptions,
   onAttachFiles,
   onOpenFolder,
   onRemoveAttachment,
@@ -118,6 +124,7 @@ export function Composer({
   aboveComposer,
 }: Props) {
   const supportsEffort = effortsForModel(models, model).length > 0;
+  const canResumeQueued = hasResumableThreadTurn(queuedMessages);
   const ref = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -253,7 +260,20 @@ export function Composer({
               <span className="font-medium uppercase tracking-wide">
                 Queued messages
               </span>
-              <span className="tabular-nums">{queuedMessages.length}</span>
+              <div className="flex items-center gap-2">
+                <span className="tabular-nums">{queuedMessages.length}</span>
+                {onResumeQueuedMessages && canResumeQueued ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    disabled={sending || compacting || resumingQueuedMessages}
+                    onClick={onResumeQueuedMessages}
+                  >
+                    {resumingQueuedMessages ? "Resuming…" : "Resume queued"}
+                  </Button>
+                ) : null}
+              </div>
             </div>
             <div className="space-y-1">
               {queuedMessages.map((turn, index) => {
@@ -531,6 +551,7 @@ export function Composer({
                   disabled={sending || compacting || optionsDisabled}
                   onModelChange={onModelChange}
                   onEffortChange={onEffortChange}
+                  onReset={onResetOptions}
                 />
               ) : (
                 <span className="truncate px-2 py-1 text-xs text-muted-foreground">

@@ -40,6 +40,7 @@ tempfile = "3"
 # Per-target rather than one feature list, so Windows does not pull dbus.
 [target.'cfg(windows)'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }
+windows-sys.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }

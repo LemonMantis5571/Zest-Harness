@@ -123,6 +123,8 @@ type Props = {
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
   onRemoveQueuedMessage: (turnId: string) => void;
+  onResumeQueuedMessages?: () => void;
+  resumingQueuedMessages?: boolean;
   threadActivity: ThreadActivityMap;
   model: string;
   effort: EffortId;
@@ -162,6 +164,7 @@ type Props = {
   onDismissWarning?: () => void;
   onModelChange: (model: string) => void;
   onEffortChange: (effort: EffortId) => void;
+  onResetOptions?: () => void;
   approvalMode: ApprovalMode;
   onApprovalModeChange: (mode: ApprovalMode) => void;
   /** Leave Plan mode and build the newest plan. */
@@ -649,6 +652,8 @@ export function ChatScreen({
   queuedMessages,
   onUpdateQueuedMessage,
   onRemoveQueuedMessage,
+  onResumeQueuedMessages,
+  resumingQueuedMessages,
   threadActivity,
   model,
   effort,
@@ -676,6 +681,7 @@ export function ChatScreen({
   onDismissWarning,
   onModelChange,
   onEffortChange,
+  onResetOptions,
   approvalMode,
   onApprovalModeChange,
   onBuildPlan,
@@ -1185,10 +1191,32 @@ export function ChatScreen({
         shortcut: "Ctrl+,",
         run: openSettings,
       },
+      ...(onOpenProfile
+        ? [
+            {
+              id: "open-profile",
+              label: "Open profile",
+              description: "View your profile and account details",
+              run: onOpenProfile,
+            },
+          ]
+        : []),
+      ...(onOpenUsage
+        ? [
+            {
+              id: "open-usage",
+              label: "Open usage",
+              description: "Review model usage and estimated cost",
+              run: onOpenUsage,
+            },
+          ]
+        : []),
     ],
     [
       onNewChat,
       onOpenCustomize,
+      onOpenProfile,
+      onOpenUsage,
       openSettings,
       session.isFreeChat,
       toggleWorkbench,
@@ -1671,6 +1699,8 @@ export function ChatScreen({
             queuedMessages={queuedMessages}
             onUpdateQueuedMessage={onUpdateQueuedMessage}
             onRemoveQueuedMessage={onRemoveQueuedMessage}
+            onResumeQueuedMessages={onResumeQueuedMessages}
+            resumingQueuedMessages={resumingQueuedMessages}
             showModelPicker={showPicker}
             optionsDisabled={optionsDisabled}
             attachments={attachments}
@@ -1679,6 +1709,7 @@ export function ChatScreen({
             onStop={onStop}
             onModelChange={onModelChange}
             onEffortChange={onEffortChange}
+            onResetOptions={onResetOptions}
             onAttachFiles={onAttachFiles}
             onOpenFolder={onOpenFolder}
             onRemoveAttachment={onRemoveAttachment}

@@ -253,6 +253,10 @@ export function updateSessionOptions(options: {
   });
 }
 
+export function resetSessionOptions() {
+  return invoke<SessionMeta>("reset_session_options");
+}
+
 export function listThreads() {
   return invoke<ThreadSummary[]>("list_threads");
 }
@@ -371,6 +375,10 @@ export function updateQueuedInput(threadId: string, inputId: string, text: strin
 
 export function removeQueuedInput(threadId: string, inputId: string) {
   return invoke<void>("remove_queued_input", { threadId, inputId });
+}
+
+export function resumeQueuedInputs(threadId: string) {
+  return invoke<void>("resume_queued_inputs", { threadId });
 }
 
 export function listJobs(threadId?: string) {

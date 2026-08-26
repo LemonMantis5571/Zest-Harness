@@ -99,3 +99,8 @@ export function threadQueueCount(
 ): number {
   return queues[threadId]?.length ?? 0;
 }
+
+/** Only followups can start a fresh idle turn; steer/inject wait for a turn. */
+export function hasResumableThreadTurn(turns: ReadonlyArray<QueuedTurn>): boolean {
+  return turns.some((turn) => turn.target === "followup" || turn.target == null);
+}

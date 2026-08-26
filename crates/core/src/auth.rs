@@ -479,6 +479,9 @@ fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Res
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Login helpers are not provider workers. They must not inherit the
+    // serialized OAuth session used by Zest's in-process client.
+    cmd.env_remove(crate::codex_oauth::SESSION_ENV);
 
     #[cfg(windows)]
     {

@@ -4,9 +4,9 @@ import type { DelegationAttemptView } from "./DelegationAttemptView";
 import type { DelegationOriginView } from "./DelegationOriginView";
 import type { DelegationStatus } from "./DelegationStatus";
 import type { DelegationTargetView } from "./DelegationTarget";
+import type { OrchestrationView } from "./OrchestrationView";
 import type { ResolvedTargetMetadataView } from "./ResolvedTargetMetadataView";
 import type { ReviewFinding } from "./ReviewFinding";
 import type { ReviewerTargetView } from "./ReviewerTarget";
-import type { OrchestrationView } from "./OrchestrationView";
 
 export type DelegationJobView = { jobId: string, parentThreadId: string, projectRoot: string, cardId: string, title: string, objective: string, lane: string, scope: Array<string>, context: Array<string>, dependsOn: Array<string>, agent: string, workerAttemptId?: string, reviewerAttemptId?: string, reviewerAgent: string, workerTarget: DelegationTargetView, reviewerTarget: ReviewerTargetView, resolvedWorkerTarget: ResolvedTargetMetadataView | null, resolvedReviewerTarget: ResolvedTargetMetadataView | null, approved: boolean, origin: DelegationOriginView | null, attempts: Array<DelegationAttemptView>, attempt: number, status: DelegationStatus, orchestration?: OrchestrationView, changedFiles: Array<string>, changedFileCount: number, acceptanceChecks: Array<AcceptanceCheckView>, reviewerFindings: Array<ReviewFinding>, workerSummary?: string, error?: string, createdAt: number, updatedAt: number, };

@@ -7,9 +7,9 @@
 //!
 //! ## Why the allowlist is written the way it is
 //!
-//! Prompting for `cargo check` on every iteration trains the user to click
-//! Allow without reading, which is worse than not prompting at all. So a small
-//! set of genuinely read-only commands runs unattended.
+//! Repository builds and tests execute code from the active checkout, so they
+//! stay behind the approval card even in Auto mode. Only inspection commands
+//! and toolchain metadata checks run unattended.
 //!
 //! The dangerous part of any allowlist is not the list — it is the shell.
 //! `cargo check && rm -rf /` starts with an allowlisted token. So a command is
@@ -58,12 +58,10 @@ const SHELL_METACHARACTERS: &[char] = &[
     '*', '?', '!', '#', '~', '=',
 ];
 
-/// Commands that only report. Matched on the leading tokens after splitting on
-/// whitespace, so `cargo check --all-targets` matches `cargo check`.
+/// Commands that only report. Commands that compile or execute repository code
+/// are intentionally absent: Auto mode must not turn a source change into an
+/// implicit execution grant.
 const READ_ONLY_PREFIXES: &[&[&str]] = &[
-    &["cargo", "check"],
-    &["cargo", "clippy"],
-    &["cargo", "test"],
     &["cargo", "fmt"],
     &["cargo", "tree"],
     &["cargo", "metadata"],
@@ -74,10 +72,7 @@ const READ_ONLY_PREFIXES: &[&[&str]] = &[
     &["git", "show"],
     &["git", "branch"],
     &["git", "rev-parse"],
-    &["npm", "test"],
     &["npm", "run", "lint"],
-    &["npm", "run", "ui:build"],
-    &["npm", "run", "ui:test"],
     &["rustc", "--version"],
     &["node", "--version"],
     &["node", "-v"],
@@ -97,9 +92,8 @@ fn subverts_read_only(tokens: &[&str]) -> bool {
     {
         return true;
     }
-    // `cargo test` compiles and runs the crate's own test binaries, which is
-    // intended. But `--` hands arbitrary args to them, and `cargo run` is not
-    // on the list at all.
+    // Repository-executing commands are deliberately not auto-eligible; this
+    // helper remains for write-capable variants of the inspection prefixes.
     false
 }
 
@@ -341,8 +335,9 @@ impl Tool for Bash {
         "Run a command in an explicit working directory and return its combined output. \
          Use this to verify your work — build, lint, run tests, inspect git \
          state — rather than assuming a change compiles. Read-only commands \
-         (cargo check/clippy/test, cargo fmt --check, git status/diff/log, npm \
-         test) run immediately; anything else asks the user first, showing the \
+         (cargo fmt --check, git status/diff/log, and toolchain version checks) \
+         run immediately; commands that compile or execute repository code \
+         still ask the user first, showing the \
          exact command. Every call must set `cwd`: use `.` for the active project \
          or an absolute path for another project. External directories are shown \
          in the approval preview and are never auto-run. For a long-running local \
@@ -493,6 +488,11 @@ impl Tool for Bash {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+
+        // Bash is an execution boundary too. Keep provider credentials,
+        // including the name-only OAuth session fallback, out of commands
+        // even after the user approves them.
+        crate::tools::external_agent::scrub_secret_environment(&mut cmd, &[]);
 
         let mut child = cmd
             .spawn()
@@ -787,22 +787,27 @@ mod tests {
     }
 
     #[test]
-    fn plain_read_only_commands_auto_run() {
+    fn inspection_commands_auto_run_but_repository_execution_does_not() {
+        for command in [
+            "cargo fmt --check",
+            "git status",
+            "git diff --stat HEAD",
+            "git log -n 5",
+            "rustc --version",
+            "node -v",
+        ] {
+            assert_eq!(clear(command), Clearance::AutoRun, "{command}");
+        }
         for command in [
             "cargo check",
             "cargo check --all-targets",
             "cargo clippy --workspace",
             "cargo test",
-            "cargo fmt --check",
-            "git status",
-            "git diff --stat HEAD",
-            "git log -n 5",
             "npm test",
+            "npm run ui:test",
             "npm run ui:build",
-            "rustc --version",
-            "node -v",
         ] {
-            assert_eq!(clear(command), Clearance::AutoRun, "{command}");
+            assert_eq!(clear(command), Clearance::NeedsApproval, "{command}");
         }
     }
 
@@ -879,7 +884,10 @@ mod tests {
             classify("cargo test --workspace", &[], &deny),
             Clearance::NeedsApproval
         );
-        assert_eq!(classify("cargo check", &[], &deny), Clearance::AutoRun);
+        assert_eq!(
+            classify("cargo check", &[], &deny),
+            Clearance::NeedsApproval
+        );
     }
 
     #[test]
@@ -914,10 +922,9 @@ mod tests {
         let dir = scratch("prep");
         let tool = Bash::new(&dir).unwrap();
 
-        // Risk stays Exec either way — whether the user is asked is the mode's
-        // decision, and Manual mode must still be able to ask about `cargo check`.
+        // Risk stays Exec either way; repository execution remains gated.
         let safe = tool
-            .prepare(json!({ "command": "cargo check", "cwd": "." }))
+            .prepare(json!({ "command": "git status", "cwd": "." }))
             .unwrap();
         assert_eq!(safe.risk, ToolRisk::Exec);
         assert!(safe.auto_eligible);

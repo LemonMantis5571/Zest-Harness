@@ -35,9 +35,11 @@ Reading three files takes as long as reading one.
 - To change an existing file, use edit_file with an exact unique string. Use \
 write_file only to create a file or replace one wholesale. Line numbers in \
 read_file output are display only; never include them in edit_file arguments.
-- Verify with bash, always passing `cwd`. Read-only commands (cargo check, \
-cargo test, git status, npm test) run without prompting inside the active \
-project, so use them rather than assuming a change compiles. To work on an \
+- Verify with bash, always passing `cwd`. Inspection commands such as git \
+status/diff/log, cargo fmt --check, and toolchain version checks run without \
+prompting inside the active project. Commands that compile or execute project \
+code (cargo check, cargo clippy, cargo test, npm test, and UI builds/tests) \
+require approval, so use them when the user has authorized verification. To work on an \
 external project, pass the exact absolute directory the user named as `cwd`; do \
 not substitute Zest's repository root or rely on `cd` or an inherited shell \
 directory. Do not create helper scripts or logs in the active project while \

@@ -18,7 +18,6 @@ import type {
   ApprovalMode,
   AttachmentInput,
   ChatEvent,
-  ChatMessage,
   DelegationEvent,
   DelegationCreateInput,
   DelegationJob,
@@ -68,7 +67,34 @@ function notAvailable(op: string): never {
 
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
-export function createFixtureBackend(): DesktopBackend {
+export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error";
+
+type FixtureBackendOptions = {
+  scenario?: FixtureScenario;
+};
+
+function scenarioFromLocation(): FixtureScenario | undefined {
+  if (typeof window === "undefined") return undefined;
+  const value = new URLSearchParams(window.location.search).get("scenario");
+  return value === "approval" ||
+    value === "question" ||
+    value === "cancel" ||
+    value === "tool-error"
+    ? value
+    : undefined;
+}
+
+type FixturePendingScenario = {
+  kind: "approval" | "question" | "cancel";
+  turnId: string;
+  assistantId: string;
+  toolId: string;
+  approvalId?: string;
+  questionId?: string;
+};
+
+export function createFixtureBackend(options: FixtureBackendOptions = {}): DesktopBackend {
+  const scenario = options.scenario ?? scenarioFromLocation();
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
@@ -104,6 +130,16 @@ export function createFixtureBackend(): DesktopBackend {
   let fixtureNowPlayingEnabled = false;
   let fixtureNowPlayingStatus: "playing" | "paused" = "playing";
   let fixtureNowPlayingVolume = 83;
+  let pendingScenario: FixturePendingScenario | null = null;
+  let cancelTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearFixtureScenario() {
+    pendingScenario = null;
+    if (cancelTimer !== null) {
+      clearTimeout(cancelTimer);
+      cancelTimer = null;
+    }
+  }
 
   const fixtureExternalModelOptions: Record<string, string[]> = {
     claude: ["sonnet", "opus"],
@@ -212,6 +248,213 @@ export function createFixtureBackend(): DesktopBackend {
     updateDelegation("review_running", "reviewer_completed");
     updateDelegation("ready_to_apply", "ready_to_apply");
     return delegationSnapshot();
+  }
+
+  function fixtureIds() {
+    return {
+      turnId: `turn-${crypto.randomUUID()}`,
+      userId: `user-${crypto.randomUUID()}`,
+      assistantId: `assistant-${crypto.randomUUID()}`,
+    };
+  }
+
+  function displayFixtureText(text: string, attachments?: AttachmentInput[]) {
+    let display = text.trim();
+    if (attachments?.length) {
+      const lines = attachments.map((a) => `Attached: ${a.name} (${a.detail})`);
+      display = display ? `${display}\n\n${lines.join("\n")}` : lines.join("\n");
+    }
+    return display;
+  }
+
+  function emitFixtureEcho(text: string, attachments?: AttachmentInput[]) {
+    if (!chatHandler) return;
+    const { turnId, userId, assistantId } = fixtureIds();
+    const id = {
+      session_id: session.sessionId,
+      thread_id: session.threadId,
+      turn_id: turnId,
+    };
+    const display = displayFixtureText(text, attachments);
+    const fixtureAssistantText = `Fixture echo: ${text.trim() || "(attachment)"}`;
+    session = {
+      ...session,
+      messages: [
+        ...session.messages,
+        {
+          id: userId,
+          role: "user",
+          text: display,
+          attachments: attachments?.length
+            ? attachments.map((attachment) => ({
+                name: attachment.name,
+                kind: attachment.kind ?? "file",
+              }))
+            : undefined,
+        },
+        {
+          id: assistantId,
+          role: "assistant",
+          text: fixtureAssistantText,
+          thinking: "",
+          tools: [],
+          streaming: false,
+        },
+      ],
+    };
+    chatHandler({ kind: "user", ...id, message_id: userId, text: display });
+    chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    chatHandler({
+      kind: "text_delta",
+      ...id,
+      message_id: assistantId,
+      text: "Fixture echo: ",
+    });
+    chatHandler({
+      kind: "text_delta",
+      ...id,
+      message_id: assistantId,
+      text: text.trim() || "(attachment)",
+    });
+    chatHandler({ kind: "done", ...id, message_id: assistantId });
+  }
+
+  function finishScenario(kind: "allow" | "deny" | "answer" | "cancel") {
+    const pending = pendingScenario;
+    if (!pending || !chatHandler) return false;
+    clearFixtureScenario();
+    const id = {
+      session_id: session.sessionId,
+      thread_id: session.threadId,
+      turn_id: pending.turnId,
+      message_id: pending.assistantId,
+    };
+    if (kind === "cancel") {
+      chatHandler({ kind: "cancelled", ...id });
+      return true;
+    }
+    const denied = kind === "deny";
+    const summary =
+      kind === "answer"
+        ? "Fixture question answered."
+        : denied
+          ? "Fixture approval denied."
+          : "Fixture approval allowed.";
+    chatHandler({
+      kind: "tool_call_result",
+      ...id,
+      name: "fixture_tool",
+      id: pending.toolId,
+      summary,
+      isError: denied,
+    });
+    chatHandler({
+      kind: "text_delta",
+      ...id,
+      text: denied
+        ? "Fixture stopped after the approval was denied."
+        : kind === "answer"
+          ? "Fixture received the answer."
+          : "Fixture continued after approval.",
+    });
+    chatHandler({ kind: "done", ...id });
+    return true;
+  }
+
+  function startFixtureScenario(text: string, attachments?: AttachmentInput[]) {
+    if (!chatHandler) return;
+    if (pendingScenario) {
+      throw new Error("fixture: a safety scenario is already waiting");
+    }
+    const { turnId, userId, assistantId } = fixtureIds();
+    const id = {
+      session_id: session.sessionId,
+      thread_id: session.threadId,
+      turn_id: turnId,
+    };
+    const display = displayFixtureText(text, attachments);
+    chatHandler({ kind: "user", ...id, message_id: userId, text: display });
+    chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    const toolId = `tool-${crypto.randomUUID()}`;
+    chatHandler({
+      kind: "tool_call_start",
+      ...id,
+      message_id: assistantId,
+      name: "fixture_tool",
+      id: toolId,
+    });
+
+    if (scenario === "tool-error") {
+      chatHandler({
+        kind: "tool_call_result",
+        ...id,
+        message_id: assistantId,
+        name: "fixture_tool",
+        id: toolId,
+        summary: "[fixture malformed tool output clipped]",
+        isError: true,
+      });
+      chatHandler({
+        kind: "text_delta",
+        ...id,
+        message_id: assistantId,
+        text: "Fixture closed the failed tool turn safely.",
+      });
+      chatHandler({ kind: "done", ...id, message_id: assistantId });
+      return;
+    }
+
+    if (scenario === "approval") {
+      const approvalId = `approval-${crypto.randomUUID()}`;
+      pendingScenario = {
+        kind: "approval",
+        turnId,
+        assistantId,
+        toolId,
+        approvalId,
+      };
+      chatHandler({
+        kind: "approval_needed",
+        ...id,
+        message_id: assistantId,
+        approval_id: approvalId,
+        tool_name: "fixture_tool",
+        tool_call_id: toolId,
+        risk: "exec",
+        path: "fixture://scenario",
+        summary: "Run the deterministic fixture tool.",
+        diff: "fixture scenario only",
+      });
+      return;
+    }
+
+    if (scenario === "question") {
+      const questionId = `question-${crypto.randomUUID()}`;
+      pendingScenario = {
+        kind: "question",
+        turnId,
+        assistantId,
+        toolId,
+        questionId,
+      };
+      chatHandler({
+        kind: "question_needed",
+        ...id,
+        message_id: assistantId,
+        question_id: questionId,
+        tool_call_id: toolId,
+        prompt: "Which deterministic fixture path should continue?",
+        choices: ["safe", "review"],
+        multiple: false,
+        placeholder: "Choose a path",
+      });
+      return;
+    }
+
+    pendingScenario = { kind: "cancel", turnId, assistantId, toolId };
+    cancelTimer = setTimeout(() => {
+      if (pendingScenario?.turnId === turnId) finishScenario("cancel");
+    }, 5_000);
   }
 
   return {
@@ -722,6 +965,7 @@ export function createFixtureBackend(): DesktopBackend {
       /* fixture: no child process to stop */
     },
     async startSession() {
+      clearFixtureScenario();
       fixturePinned = false;
       session = { ...FIXTURE_SESSION, messages: [] };
       return { ...session };
@@ -734,6 +978,15 @@ export function createFixtureBackend(): DesktopBackend {
       };
       // Metadata only, matching Rust: options do not touch the transcript, so
       // the reply does not carry one.
+      const { messages: _messages, ...meta } = session;
+      return meta;
+    },
+    async resetSessionOptions() {
+      session = {
+        ...session,
+        model: session.defaultModel ?? DEFAULT_CODEX_MODEL,
+        effort: DEFAULT_EFFORT,
+      };
       const { messages: _messages, ...meta } = session;
       return meta;
     },
@@ -821,6 +1074,7 @@ export function createFixtureBackend(): DesktopBackend {
       return { ...session };
     },
     async newThread() {
+      clearFixtureScenario();
       fixturePinned = false;
       session = {
         ...FIXTURE_SESSION,
@@ -944,63 +1198,11 @@ export function createFixtureBackend(): DesktopBackend {
         });
         return;
       }
-      if (!chatHandler) return;
-      const turnId = `turn-${crypto.randomUUID()}`;
-      const userId = `user-${crypto.randomUUID()}`;
-      const assistantId = `assistant-${crypto.randomUUID()}`;
-      const id = {
-        session_id: session.sessionId,
-        thread_id: session.threadId,
-        turn_id: turnId,
-      };
-      let display = text.trim();
-      if (attachments?.length) {
-        const lines = attachments.map((a) => `Attached: ${a.name} (${a.detail})`);
-        display = display ? `${display}\n\n${lines.join("\n")}` : lines.join("\n");
+      if (scenario) {
+        startFixtureScenario(text, attachments);
+        return;
       }
-      const fixtureAssistantText = `Fixture echo: ${text.trim() || "(attachment)"}`;
-      const fixtureUser: ChatMessage = {
-        id: userId,
-        role: "user",
-        text: display,
-        attachments: attachments?.length
-          ? attachments.map((attachment) => ({
-              name: attachment.name,
-              kind: attachment.kind ?? "file",
-            }))
-          : undefined,
-      };
-      const fixtureAssistant: ChatMessage = {
-        id: assistantId,
-        role: "assistant",
-        text: fixtureAssistantText,
-        thinking: "",
-        tools: [],
-        streaming: false,
-      };
-      session = {
-        ...session,
-        messages: [...session.messages, fixtureUser, fixtureAssistant],
-      };
-      chatHandler({ kind: "user", ...id, message_id: userId, text: display });
-      chatHandler({
-        kind: "assistant_start",
-        ...id,
-        message_id: assistantId,
-      });
-      chatHandler({
-        kind: "text_delta",
-        ...id,
-        message_id: assistantId,
-        text: "Fixture echo: ",
-      });
-      chatHandler({
-        kind: "text_delta",
-        ...id,
-        message_id: assistantId,
-        text: text.trim() || "(attachment)",
-      });
-      chatHandler({ kind: "done", ...id, message_id: assistantId });
+      emitFixtureEcho(text, attachments);
     },
     async updateQueuedInput(threadId: string, inputId: string, text: string) {
       if (threadId !== session.threadId) throw new Error("fixture: unknown thread");
@@ -1036,6 +1238,26 @@ export function createFixtureBackend(): DesktopBackend {
         input_id: inputId,
       });
     },
+    async resumeQueuedInputs(threadId: string) {
+      if (threadId !== session.threadId) throw new Error("fixture: unknown thread");
+      const input = session.pendingInputs.find((candidate) => candidate.target === "followup");
+      if (!input) throw new Error("fixture: no resumable queued messages");
+      session = {
+        ...session,
+        pendingInputs: session.pendingInputs.filter((candidate) => candidate.id !== input.id),
+      };
+      chatHandler?.({
+        kind: "input_removed",
+        session_id: session.sessionId,
+        thread_id: session.threadId,
+        input_id: input.id,
+      });
+      if (scenario) {
+        startFixtureScenario(input.text, input.attachments);
+      } else {
+        emitFixtureEcho(input.text, input.attachments);
+      }
+    },
     async listJobs(_threadId?: string): Promise<JobSnapshot[]> {
       return [];
     },
@@ -1057,13 +1279,33 @@ export function createFixtureBackend(): DesktopBackend {
       return filename;
     },
     async cancelTurn() {
-      /* no-op offline */
+      if (pendingScenario?.kind === "cancel") {
+        finishScenario("cancel");
+      }
     },
-    async resolveApproval() {
-      throw new Error("fixture: no pending approvals");
+    async resolveApproval(approvalId: string, decision) {
+      if (
+        !pendingScenario ||
+        pendingScenario.kind !== "approval" ||
+        pendingScenario.approvalId !== approvalId
+      ) {
+        throw new Error("fixture: no pending approval");
+      }
+      if (decision === "deny") {
+        finishScenario("deny");
+      } else {
+        finishScenario("allow");
+      }
     },
-    async resolveQuestion() {
-      throw new Error("fixture: no pending questions");
+    async resolveQuestion(questionId: string) {
+      if (
+        !pendingScenario ||
+        pendingScenario.kind !== "question" ||
+        pendingScenario.questionId !== questionId
+      ) {
+        throw new Error("fixture: no pending question");
+      }
+      finishScenario("answer");
     },
     async setApprovalMode(mode: ApprovalMode) {
       return mode;

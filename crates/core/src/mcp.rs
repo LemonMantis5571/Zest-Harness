@@ -34,6 +34,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::codex_oauth::SESSION_ENV;
 use crate::config::McpServerConfig;
 use crate::fsutil::atomic_write_json;
 use crate::tools::approval::{ApprovalPreview, ToolRisk};
@@ -584,14 +585,18 @@ fn scrub_environment(command: &mut Command, allowed: &[String]) {
         let secretish = ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
             .iter()
             .any(|marker| upper.contains(marker));
-        if secretish
-            && !allowed
-                .iter()
-                .any(|allow| allow.eq_ignore_ascii_case(&name))
+        if name.eq_ignore_ascii_case(SESSION_ENV)
+            || (secretish
+                && !allowed
+                    .iter()
+                    .any(|allow| allow.eq_ignore_ascii_case(&name)))
         {
             command.env_remove(name);
         }
     }
+    // This variable is a serialized OAuth session, not a conventional
+    // KEY/TOKEN name. It must never be revived by an explicit MCP allow-list.
+    command.env_remove(SESSION_ENV);
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -736,6 +741,7 @@ pub fn register_mcp_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn config() -> McpServerConfig {
         McpServerConfig {
@@ -876,5 +882,103 @@ mod tests {
             .block_on(server.list_tools())
             .expect_err("a missing command cannot list tools");
         assert!(error.contains("ghost"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn bounded_fixture_covers_handshake_call_denial_timeout_and_malformed_output() {
+        let node_available = std::process::Command::new(resolve_program("node"))
+            .arg("--version")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !node_available {
+            // The desktop verification job provisions Node; keep this unit
+            // test harmless for minimal Rust-only environments.
+            return;
+        }
+
+        let script = tempfile::NamedTempFile::new().unwrap();
+        let body = r#"
+const mode = process.argv[2];
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function reply(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+}
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    reply(request.id, { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fixture" } });
+  } else if (request.method === "tools/list") {
+    reply(request.id, {
+      tools: [{
+        name: "echo",
+        description: "env-session=" + Boolean(process.env.ZEST_CODEX_OAUTH_SESSION) + ";env-key=" + Boolean(process.env.ZEST_MCP_FIXTURE_KEY),
+        inputSchema: { type: "object" }
+      }]
+    });
+  } else if (request.method === "tools/call") {
+    if (mode === "timeout") return;
+    if (mode === "deny") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { message: "fixture denied" } }) + "\n");
+      return;
+    }
+    if (mode === "malformed") process.stdout.write("this is not JSON-RPC\n");
+    const text = mode === "large" ? "x".repeat(300000) : "fixture success";
+    reply(request.id, { content: [{ type: "text", text }] });
+  }
+});
+"#;
+        script.as_file().write_all(body.as_bytes()).unwrap();
+        std::env::set_var("ZEST_MCP_FIXTURE_KEY", "fixture");
+        std::env::set_var(crate::codex_oauth::SESSION_ENV, "fixture-session");
+
+        let mut success_config = config();
+        success_config.args = vec![script.path().display().to_string(), "success".into()];
+        success_config.timeout_secs = 1;
+        let success = McpServer::new("fixture", success_config, ".");
+        let tools = success.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert!(tools[0].description.contains("env-session=false"));
+        assert!(tools[0].description.contains("env-key=false"));
+        assert_eq!(
+            success.call_tool("echo", json!({})).await.unwrap(),
+            "fixture success"
+        );
+
+        let mut large_config = config();
+        large_config.args = vec![script.path().display().to_string(), "large".into()];
+        let large = McpServer::new("large", large_config, ".");
+        let clipped = large.call_tool("echo", json!({})).await.unwrap();
+        assert!(clipped.ends_with("clipped"));
+        assert!(clipped.len() <= MAX_RESULT_BYTES + 32);
+
+        let mut denied_config = config();
+        denied_config.args = vec![script.path().display().to_string(), "deny".into()];
+        let denied = McpServer::new("denied", denied_config, ".");
+        assert!(denied
+            .call_tool("echo", json!({}))
+            .await
+            .unwrap_err()
+            .contains("fixture denied"));
+
+        let mut malformed_config = config();
+        malformed_config.args = vec![script.path().display().to_string(), "malformed".into()];
+        let malformed = McpServer::new("malformed", malformed_config, ".");
+        assert_eq!(
+            malformed.call_tool("echo", json!({})).await.unwrap(),
+            "fixture success"
+        );
+
+        let mut timeout_config = config();
+        timeout_config.args = vec![script.path().display().to_string(), "timeout".into()];
+        timeout_config.timeout_secs = 1;
+        let timeout = McpServer::new("timeout", timeout_config, ".");
+        let error = timeout.call_tool("echo", json!({})).await.unwrap_err();
+        assert!(error.contains("did not answer"), "{error}");
+
+        std::env::remove_var("ZEST_MCP_FIXTURE_KEY");
+        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
     }
 }

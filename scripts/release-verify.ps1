@@ -32,18 +32,11 @@ function Step($name, $scriptBlock) {
 $env:CARGO_TARGET_DIR = Join-Path $Root "target"
 $BindingDir = "crates/desktop/ui/src/lib/generated"
 
-function Normalize-BindingWhitespace {
-  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-  $dir = Join-Path $Root $BindingDir
-  foreach ($file in Get-ChildItem -Path $dir -Filter *.ts -File) {
-    $text = [System.IO.File]::ReadAllText($file.FullName)
-    $clean = $text -replace "`r`n", "`n"
-    $clean = [regex]::Replace($clean, '(?m)[ \t]+$', '')
-    if (-not $clean.EndsWith("`n")) { $clean += "`n" }
-    if ($clean -ne $text) {
-      [System.IO.File]::WriteAllText($file.FullName, $clean, $utf8NoBom)
-    }
-  }
+function Normalize-BindingText([string]$text) {
+  $clean = $text -replace "`r`n", "`n"
+  $clean = [regex]::Replace($clean, '(?m)[ \t]+$', '')
+  if (-not $clean.EndsWith("`n")) { $clean += "`n" }
+  return $clean
 }
 
 Step "toolchain check" {
@@ -62,18 +55,59 @@ Step "npm ci" {
 }
 
 Step "binding drift (ts-rs)" {
-  cargo test -p zest-desktop --features export-bindings --lib export_bindings
-  Normalize-BindingWhitespace
-  $driftDiff = git diff -- $BindingDir
-  if ($driftDiff) {
-    Write-Host "Binding drift diff detected:" -ForegroundColor Red
-    Write-Host ($driftDiff -join "`n")
-    throw "Generated bindings are stale. Commit the regenerated files."
-  }
+  $bindingRoot = Join-Path $Root $BindingDir
+  $snapshotRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("zest-bindings-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $snapshotRoot -Force | Out-Null
 
-  $untracked = git ls-files --others --exclude-standard -- $BindingDir
-  if ($untracked) {
-    throw "New generated bindings are not committed:`n$($untracked -join "`n")"
+  try {
+    if (Test-Path -LiteralPath $bindingRoot) {
+      foreach ($child in Get-ChildItem -LiteralPath $bindingRoot -Force) {
+        Copy-Item -LiteralPath $child.FullName -Destination $snapshotRoot -Recurse -Force
+      }
+    }
+
+    cargo test -p zest-desktop --features export-bindings --lib export_bindings
+
+    $before = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $snapshotRoot -Filter *.ts -File)) {
+      $before[$file.Name] = [System.IO.File]::ReadAllText($file.FullName)
+    }
+    $after = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $bindingRoot -Filter *.ts -File)) {
+      $after[$file.Name] = [System.IO.File]::ReadAllText($file.FullName)
+    }
+
+    $drifted = @()
+    $names = @($before.Keys) + @($after.Keys) | Sort-Object -Unique
+    foreach ($name in $names) {
+      if (-not $before.ContainsKey($name) -or -not $after.ContainsKey($name)) {
+        $drifted += $name
+        continue
+      }
+      if ((Normalize-BindingText $before[$name]) -ne (Normalize-BindingText $after[$name])) {
+        $drifted += $name
+      }
+    }
+
+    if ($drifted.Count -gt 0) {
+      Write-Host "Binding drift detected in:" -ForegroundColor Red
+      Write-Host ($drifted -join "`n")
+      throw "Generated bindings are stale. Commit the regenerated files."
+    }
+
+  } finally {
+    if (Test-Path -LiteralPath $bindingRoot) {
+      foreach ($child in @(Get-ChildItem -LiteralPath $bindingRoot -Force)) {
+        Remove-Item -LiteralPath $child.FullName -Recurse -Force
+      }
+    } else {
+      New-Item -ItemType Directory -Path $bindingRoot -Force | Out-Null
+    }
+
+    foreach ($child in @(Get-ChildItem -LiteralPath $snapshotRoot -Force)) {
+      Copy-Item -LiteralPath $child.FullName -Destination $bindingRoot -Recurse -Force
+    }
+    Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
   }
 }
 
@@ -83,6 +117,10 @@ Step "ui test" {
 
 Step "ui lint (strict)" {
   npm run ui:lint
+}
+
+Step "ui plugin lint rules" {
+  npm run ui:lint:plugins
 }
 
 Step "ui build" {

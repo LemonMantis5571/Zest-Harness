@@ -16,7 +16,9 @@ mod workspace_files;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+#[cfg(any(unix, target_os = "macos"))]
+use std::process::Command as StdCommand;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -2361,15 +2363,7 @@ async fn refresh_mcp_catalog(
 }
 
 fn scrub_external_environment(command: &mut Command) {
-    for (name, _) in std::env::vars() {
-        let upper = name.to_ascii_uppercase();
-        if ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
-            .iter()
-            .any(|marker| upper.contains(marker))
-        {
-            command.env_remove(name);
-        }
-    }
+    zest_core::tools::external_agent::scrub_secret_environment(command, &[]);
 }
 
 #[tauri::command]
@@ -2590,13 +2584,28 @@ fn open_project_config(root: String) -> Result<(), String> {
 fn open_path_in_editor(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        // The empty argument is `start`'s title parameter. Without it a quoted
-        // path is consumed as the window title and nothing opens.
-        StdCommand::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+        let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+        let target: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if (result as isize) <= 32 {
+            return Err(format!("Windows could not open {}", path.display()));
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -6227,6 +6236,19 @@ async fn remove_queued_input(
     Ok(())
 }
 
+/// Explicitly start the oldest durable followup. Idle queues never spend
+/// provider quota on their own; the same turn runner then owns the remaining
+/// FIFO followups.
+#[tauri::command]
+async fn resume_queued_inputs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    thread_id: Option<String>,
+) -> Result<(), String> {
+    let thread_id = requested_thread_id(state.inner(), thread_id.as_deref())?;
+    turn::resume_queued(app, state.inner(), thread_id).await
+}
+
 #[tauri::command]
 fn list_jobs(
     state: State<'_, AppState>,
@@ -8083,6 +8105,7 @@ pub fn run() {
             send_message,
             update_queued_input,
             remove_queued_input,
+            resume_queued_inputs,
             list_jobs,
             job_output,
             job_kill,

@@ -1326,7 +1326,7 @@ fn remove_gemini_mcp_allowlist(args: Vec<String>) -> Vec<String> {
     output
 }
 
-pub(crate) fn scrub_secret_environment(command: &mut Command, parent_secret_envs: &[String]) {
+pub fn scrub_secret_environment(command: &mut Command, parent_secret_envs: &[String]) {
     for (name, _) in std::env::vars() {
         if should_scrub_secret_env(&name, parent_secret_envs) {
             command.env_remove(name);
@@ -1350,6 +1350,7 @@ pub(crate) fn scrub_zest_secret_environment(command: &mut Command, parent_secret
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "DEEPSEEK_API_KEY",
+        crate::codex_oauth::SESSION_ENV,
     ];
     for name in PARENT_SECRET_ENV {
         command.env_remove(name);
@@ -1364,6 +1365,7 @@ fn should_scrub_secret_env(name: &str, parent_secret_envs: &[String]) -> bool {
     ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
         .iter()
         .any(|marker| upper.contains(marker))
+        || name.eq_ignore_ascii_case(crate::codex_oauth::SESSION_ENV)
         || parent_secret_envs
             .iter()
             .any(|candidate| name.eq_ignore_ascii_case(candidate))
@@ -3090,6 +3092,10 @@ mod tests {
         assert!(should_scrub_secret_env("CUSTOM_AUTH", &configured));
         assert!(should_scrub_secret_env("custom_auth", &configured));
         assert!(should_scrub_secret_env("OPENAI_API_KEY", &[]));
+        assert!(should_scrub_secret_env(
+            crate::codex_oauth::SESSION_ENV,
+            &[]
+        ));
         assert!(!should_scrub_secret_env("MCP_SERVER_URL", &configured));
     }
 

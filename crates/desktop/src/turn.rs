@@ -24,15 +24,84 @@ pub(crate) async fn run(
     text: String,
     attachments: Option<Vec<AttachmentInput>>,
 ) -> Result<(), String> {
-    let sink = TauriEventSink { app: app.clone() };
     let thread_id = state
         .sessions
         .active_thread_id()
         .map_err(map_session_err)?
         .ok_or_else(|| desktop_err("no_session", "no active chat"))?;
-    let mut next = Some((text, attachments));
-    while let Some((text, attachments)) = next.take() {
-        let completed = run_with_sink(&sink, Some(app.clone()), state, text, attachments).await?;
+    run_loop(app, state, thread_id, Some((text, attachments, None))).await
+}
+
+/// Resume the oldest durable followup only after the user explicitly asks.
+/// The normal turn loop owns all subsequent FIFO followups.
+pub(crate) async fn resume_queued(
+    app: AppHandle,
+    state: &AppState,
+    thread_id: String,
+) -> Result<(), String> {
+    let active_thread = state
+        .sessions
+        .active_thread_id()
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("no_session", "no active chat"))?;
+    if active_thread != thread_id {
+        return Err(desktop_err(
+            "invalid",
+            "queued messages can only resume in the active chat",
+        ));
+    }
+    if state
+        .sessions
+        .active_turn_for_thread(&thread_id)
+        .map_err(map_session_err)?
+        .is_some()
+    {
+        return Err(desktop_err("busy", "this chat is still working"));
+    }
+    let input = state
+        .sessions
+        .peek_followup_for_thread(&thread_id)
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("not_found", "no resumable queued messages"))?;
+    let attachments = input
+        .attachments
+        .into_iter()
+        .map(|attachment| AttachmentInput {
+            name: attachment.name,
+            detail: attachment.detail,
+            content: attachment.content,
+            status: attachment.status,
+            kind: attachment.kind,
+            media_type: attachment.media_type,
+            data_base64: attachment.data_base64,
+        })
+        .collect();
+    run_loop(
+        app,
+        state,
+        thread_id,
+        Some((input.text, Some(attachments), Some(input.id))),
+    )
+    .await
+}
+
+async fn run_loop(
+    app: AppHandle,
+    state: &AppState,
+    thread_id: String,
+    mut next: Option<(String, Option<Vec<AttachmentInput>>, Option<String>)>,
+) -> Result<(), String> {
+    let sink = TauriEventSink { app: app.clone() };
+    while let Some((text, attachments, claim_input_id)) = next.take() {
+        let completed = run_with_sink_internal(
+            &sink,
+            Some(app.clone()),
+            state,
+            text,
+            attachments,
+            claim_input_id,
+        )
+        .await?;
         if !completed {
             break;
         }
@@ -45,6 +114,17 @@ pub(crate) async fn run(
         };
         let store = ThreadStore::open(&root).map_err(|error| error.to_string())?;
         store.save(&snapshot).map_err(|error| error.to_string())?;
+        let session_id = state
+            .sessions
+            .session_info_snapshot(|session| session.session_id.clone())
+            .map_err(map_session_err)?
+            .unwrap_or_default();
+        sink.emit(&ChatEvent::InputRemoved {
+            session_id,
+            thread_id: thread_id.clone(),
+            turn_id: None,
+            input_id: input.id.clone(),
+        });
         next = Some((
             input.text,
             Some(
@@ -62,20 +142,22 @@ pub(crate) async fn run(
                     })
                     .collect(),
             ),
+            None,
         ));
     }
     Ok(())
 }
 
-pub(crate) async fn run_with_sink<S: EventSink>(
+async fn run_with_sink_internal<S: EventSink>(
     sink: &S,
     delegation_app: Option<AppHandle>,
     state: &AppState,
     text: String,
     attachments: Option<Vec<AttachmentInput>>,
+    claim_input_id: Option<String>,
 ) -> Result<bool, String> {
-    let text = text.trim().to_string();
-    let attachments = attachments.unwrap_or_default();
+    let mut text = text.trim().to_string();
+    let mut attachments = attachments.unwrap_or_default();
     if text.is_empty() && !has_usable_attachment(&attachments) {
         return Err(desktop_err("invalid", "empty message"));
     }
@@ -89,6 +171,61 @@ pub(crate) async fn run_with_sink<S: EventSink>(
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     let live_thread = turn.live_thread.clone();
+    if let Some(input_id) = claim_input_id {
+        let claimed = live_thread
+            .lock()
+            .map_err(|_| desktop_err("queue", "thread state is unavailable"))?
+            .claim_input(&input_id);
+        let Some(claimed) = claimed else {
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(desktop_err(
+                "not_found",
+                "queued message was claimed by another turn",
+            ));
+        };
+        if claimed.target != zest_core::ThreadInputTarget::Followup {
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(desktop_err(
+                "invalid",
+                "only followup messages can resume an idle chat",
+            ));
+        }
+        text = claimed.text;
+        attachments = claimed
+            .attachments
+            .into_iter()
+            .map(|attachment| AttachmentInput {
+                name: attachment.name,
+                detail: attachment.detail,
+                content: attachment.content,
+                status: attachment.status,
+                kind: attachment.kind,
+                media_type: attachment.media_type,
+                data_base64: attachment.data_base64,
+            })
+            .collect();
+        let worker = ensure_persist(state, &session.root)?;
+        if worker
+            .save_and_wait(
+                PersistSnapshot::Live(live_thread.clone()),
+                PersistPriority::Immediate,
+            )
+            .await
+            .is_err()
+        {
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(desktop_err(
+                "persistence",
+                "queued message could not be claimed safely",
+            ));
+        }
+        sink.emit(&ChatEvent::InputRemoved {
+            session_id: turn.session_id.clone(),
+            thread_id: turn.thread_id.clone(),
+            turn_id: Some(turn.turn_id.clone()),
+            input_id,
+        });
+    }
     // A new user submission supersedes the one-time retry affordance restored
     // from a previous process. The durable run record remains available for
     // diagnostics, but the session no longer advertises the stale action.

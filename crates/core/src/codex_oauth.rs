@@ -201,11 +201,31 @@ pub fn open_https_url(url: &str) -> Result<(), String> {
 fn open_url(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+        let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+        let target: Vec<u16> = std::ffi::OsStr::new(url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // ShellExecuteW receives the URL as one wide-string argument; no cmd
+        // parser gets a chance to reinterpret ampersands or parentheses.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if (result as isize) <= 32 {
+            Err("Windows could not open the ChatGPT sign-in URL.".into())
+        } else {
+            Ok(())
+        }
     }
     #[cfg(target_os = "macos")]
     {

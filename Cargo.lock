@@ -6422,6 +6422,7 @@ dependencies = [
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6442,6 +6443,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ts-rs",
+ "windows-sys 0.61.2",
  "zest-core",
  "zest-plugin-api",
 ]

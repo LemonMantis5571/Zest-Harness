@@ -37,6 +37,9 @@ pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "
 rfd = "0.15"
 base64 = "0.22"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 

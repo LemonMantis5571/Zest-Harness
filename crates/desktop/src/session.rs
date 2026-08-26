@@ -10,10 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-#[cfg(test)]
-use zest_core::ThreadInputTarget;
 use zest_core::{
     new_id, Agent, CancelToken, InputInbox, RecoverableRun, SkillSet, Thread, ThreadInput,
+    ThreadInputTarget,
 };
 
 use super::{ApprovalHub, QuestionHub};
@@ -442,6 +441,33 @@ impl SessionController {
         Ok(Some((input, session.root.clone(), session.thread.clone())))
     }
 
+    /// Peek at the oldest durable followup without claiming it. The explicit
+    /// resume command uses this before the normal turn runner atomically takes
+    /// the turn slot and removes the same id from the live thread.
+    pub fn peek_followup_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ThreadInput>, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        let slot = g.sessions.values().find(|slot| {
+            slot.turn.is_none()
+                && slot
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.thread_id == thread_id)
+        });
+        Ok(slot.and_then(|slot| {
+            slot.session.as_ref().and_then(|session| {
+                session
+                    .thread
+                    .pending_inputs
+                    .iter()
+                    .find(|input| input.target == ThreadInputTarget::Followup)
+                    .cloned()
+            })
+        }))
+    }
+
     /// Cancel a thread's turn and mark its slot ended so [`Self::finish_turn`]
     /// will not restore that transcript. Used when the user deletes a chat
     /// that is still working or waiting for approval.
@@ -664,6 +690,54 @@ mod tests {
             zest_core::ThreadEventKind::InputClaimed { ref input_id, .. }
                 if input_id == &queued.id
         )));
+    }
+
+    #[test]
+    fn idle_resume_peek_is_fifo_and_does_not_claim() {
+        let ctl = SessionController::new();
+        ctl.set_session(dummy_session("peek")).unwrap();
+        ctl.with_session_mut(|session| {
+            session
+                .thread
+                .enqueue_input(ThreadInputTarget::Followup, "first", Vec::new())
+                .unwrap();
+            session
+                .thread
+                .enqueue_input(ThreadInputTarget::Followup, "second", Vec::new())
+                .unwrap();
+        })
+        .unwrap();
+
+        let peeked = ctl
+            .peek_followup_for_thread("thread-peek")
+            .unwrap()
+            .expect("the oldest followup is resumable");
+        assert_eq!(peeked.text, "first");
+        assert_eq!(
+            ctl.peek_followup_for_thread("thread-peek")
+                .unwrap()
+                .expect("peek is non-destructive")
+                .text,
+            "first"
+        );
+        let (_, _, snapshot) = ctl
+            .take_followup_for_thread("thread-peek")
+            .unwrap()
+            .expect("claim after explicit resume");
+        assert_eq!(snapshot.pending_inputs.len(), 1);
+        assert_eq!(snapshot.pending_inputs[0].text, "second");
+    }
+
+    #[test]
+    fn idle_resume_peek_rejects_busy_and_empty_states() {
+        let ctl = SessionController::new();
+        assert!(ctl.peek_followup_for_thread("missing").unwrap().is_none());
+        ctl.set_session(dummy_session("peek-busy")).unwrap();
+        let (_session, _turn) = ctl.begin_turn().unwrap();
+        assert!(ctl
+            .peek_followup_for_thread("thread-peek-busy")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createFixtureBackend } from "./fixtureBackend.ts";
-import type { DelegationEvent } from "./types.ts";
+import { createFixtureBackend, type FixtureScenario } from "./fixtureBackend.ts";
+import type { ChatEvent, DelegationEvent } from "./types.ts";
 
 describe("fixture chat rename", () => {
   it("persists a trimmed title through the sidebar listing", async () => {
@@ -157,5 +157,102 @@ describe("fixture plugins and workspace files", () => {
     const preview = await backend.readWorkspaceFile("src/main.ts");
     assert.equal(preview.content, "[fixture preview]");
     assert.equal(preview.byteCount, preview.content.length);
+  });
+});
+
+describe("fixture safety scenarios", () => {
+  async function scenarioEvents(scenario: FixtureScenario) {
+    const backend = createFixtureBackend({ scenario });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("exercise the boundary");
+    return { backend, events };
+  }
+
+  it("keeps an approval pending, then closes it exactly once when allowed", async () => {
+    const { backend, events } = await scenarioEvents("approval");
+    const approval = events.find((event) => event.kind === "approval_needed");
+    assert.ok(approval && approval.kind === "approval_needed");
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ["user", "assistant_start", "tool_call_start", "approval_needed"]
+    );
+
+    await backend.resolveApproval(approval.approval_id, "once");
+    assert.deepEqual(events.map((event) => event.kind).slice(-3), [
+      "tool_call_result",
+      "text_delta",
+      "done",
+    ]);
+    await assert.rejects(
+      backend.resolveApproval(approval.approval_id, "once"),
+      /no pending approval/
+    );
+    assert.equal(events.filter((event) => event.kind === "done").length, 1);
+  });
+
+  it("records a denial as an error tool result and still terminalizes the turn", async () => {
+    const { backend, events } = await scenarioEvents("approval");
+    const approval = events.find((event) => event.kind === "approval_needed");
+    assert.ok(approval && approval.kind === "approval_needed");
+    await backend.resolveApproval(approval.approval_id, "deny");
+    const result = events.findLast((event) => event.kind === "tool_call_result");
+    assert.ok(result && result.kind === "tool_call_result");
+    assert.equal(result.isError, true);
+    assert.equal(events.at(-1)?.kind, "done");
+  });
+
+  it("keeps a question pending until an answer is submitted", async () => {
+    const { backend, events } = await scenarioEvents("question");
+    const question = events.find((event) => event.kind === "question_needed");
+    assert.ok(question && question.kind === "question_needed");
+    assert.equal(events.at(-1)?.kind, "question_needed");
+    await backend.resolveQuestion(question.question_id, "safe");
+    assert.equal(events.at(-1)?.kind, "done");
+    await assert.rejects(
+      backend.resolveQuestion(question.question_id, "safe"),
+      /no pending question/
+    );
+  });
+
+  it("cancels an in-flight fixture turn once and never emits a completion", async () => {
+    const { backend, events } = await scenarioEvents("cancel");
+    await backend.cancelTurn();
+    await backend.cancelTurn();
+    assert.equal(events.at(-1)?.kind, "cancelled");
+    assert.equal(events.filter((event) => event.kind === "cancelled").length, 1);
+    assert.equal(events.some((event) => event.kind === "done"), false);
+  });
+
+  it("closes a failed tool event cleanly", async () => {
+    const { events } = await scenarioEvents("tool-error");
+    const result = events.find((event) => event.kind === "tool_call_result");
+    assert.ok(result && result.kind === "tool_call_result");
+    assert.equal(result.isError, true);
+    assert.equal(events.at(-1)?.kind, "done");
+  });
+});
+
+describe("fixture queued-message recovery", () => {
+  it("claims only the oldest durable followup before delivering it", async () => {
+    const backend = createFixtureBackend();
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("first", [], "followup");
+    await backend.sendMessage("second", [], "followup");
+    await backend.resumeQueuedInputs("fixture");
+    assert.deepEqual(events.map((event) => event.kind), [
+      "input_queued",
+      "input_queued",
+      "input_removed",
+      "user",
+      "assistant_start",
+      "text_delta",
+      "text_delta",
+      "done",
+    ]);
+    const info = await backend.sessionInfo();
+    assert.equal(info?.pendingInputs.length, 1);
+    assert.equal(info?.pendingInputs[0]?.text, "second");
   });
 });

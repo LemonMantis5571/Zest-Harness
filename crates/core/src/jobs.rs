@@ -92,23 +92,12 @@ pub enum JobEvent {
     Completed(JobSnapshot),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct OutputBuffer {
     bytes: VecDeque<u8>,
     base_offset: u64,
     total_seen: u64,
     truncated: bool,
-}
-
-impl Default for OutputBuffer {
-    fn default() -> Self {
-        Self {
-            bytes: VecDeque::new(),
-            base_offset: 0,
-            total_seen: 0,
-            truncated: false,
-        }
-    }
 }
 
 impl OutputBuffer {
@@ -222,6 +211,7 @@ impl JobRegistry {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             process.creation_flags(CREATE_NO_WINDOW);
         }
+        crate::tools::external_agent::scrub_secret_environment(&mut process, &[]);
         let mut child = process
             .spawn()
             .map_err(|error| format!("cannot start background job `{command}`: {error}"))?;
