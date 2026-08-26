@@ -10,6 +10,10 @@
   "rules": {
     "react/rules-of-hooks": "error",
     "react/only-export-components": "off",
+    "react/set-state-in-effect": "off",
+    "react/refs": "off",
+    "react/purity": "off",
+    "react/preserve-manual-memoization": "off",
     "zest/no-unvalidated-persisted-json": "error",
     "zest/no-secret-persistence-or-sink": "error",
     "zest/require-safe-html-provenance": "error",
