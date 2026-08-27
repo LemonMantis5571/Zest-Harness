@@ -29,7 +29,11 @@ const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024;
 const MAX_PLUGIN_REQUEST_BYTES: u64 = 32 * 1024;
 const MAX_PLUGIN_OUTPUT_BYTES: u64 = 512 * 1024;
-const MAX_WALLPAPER_BYTES: u64 = 2 * 1024 * 1024;
+/// The print look dithers every pixel, and dither noise barely compresses: a
+/// 1600×900 render lands near its 4.3MB of raw RGB however it is encoded. The
+/// old 2MB limit was sized for the smooth looks' JPEG and rejected every
+/// detailed one, so this leaves room for the add-on's whole pixel budget.
+const MAX_WALLPAPER_BYTES: u64 = 6 * 1024 * 1024;
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize)]
@@ -561,6 +565,14 @@ fn to_ui(plugin: &InstalledPlugin, data: PluginWallpaper) -> WallpaperView {
     if !canonical.starts_with(&plugin.directory) || !canonical.is_file() {
         view.status = "unavailable".into();
         view.detail = "Wallpaper file is not valid.".into();
+        return view;
+    }
+    // An oversized file and an absent one need different fixes, so they do not
+    // get to share a message. Reporting "missing" for a file sitting right
+    // there sent a real diagnosis the wrong way.
+    if canonical.metadata().is_ok_and(|meta| meta.len() > MAX_WALLPAPER_BYTES) {
+        view.status = "unavailable".into();
+        view.detail = "Wallpaper file is too large.".into();
         return view;
     }
     match read_bytes_bounded(&canonical, MAX_WALLPAPER_BYTES) {

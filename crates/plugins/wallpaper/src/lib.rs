@@ -12,11 +12,13 @@ use zest_plugin_api::{wallpaper_filter, PluginRequest, WallpaperView};
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
 const MAX_SOURCE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_EDGE: u32 = 1600;
+/// Total pixels allowed out, on top of [`MAX_EDGE`]. Equivalent to 1600×900.
+const MAX_PIXELS: u64 = 1_440_000;
 const STATE_FILE: &str = "state.json";
 const OUTPUT_PNG: &str = "wallpaper.png";
 const OUTPUT_JPG: &str = "wallpaper.jpg";
 /// Bump when any look changes so an already-rendered file is redone.
-const FILTER_VERSION: u32 = 3;
+const FILTER_VERSION: u32 = 4;
 /// Print-look steps per RGB channel. 4 keeps color instead of flattening to 1-bit gray.
 const TONE_LEVELS: u32 = 4;
 /// Frosted blur radius at the longest edge, as a fraction of that edge.
@@ -160,7 +162,7 @@ fn copy_source(image_path: &str) -> Result<(String, PathBuf), String> {
 
 fn render(source: &Path, filter: &str) -> Result<String, String> {
     let image = image::open(source).map_err(|_| "Could not read that image.".to_string())?;
-    let mut rgb = resize_max_edge(image.to_rgb8(), MAX_EDGE);
+    let mut rgb = downscale_for_output(image.to_rgb8());
     match filter {
         "print" => apply_print_look(&mut rgb),
         "noir" => apply_noir(&mut rgb),
@@ -171,7 +173,14 @@ fn render(source: &Path, filter: &str) -> Result<String, String> {
     // Print and noir carry per-pixel detail that JPEG smears, so they get PNG;
     // the smooth looks stay JPEG to keep the data URL the host inlines small.
     let output = output_name(filter);
-    DynamicImage::ImageRgb8(rgb)
+    // Noir is grey by definition, so one channel carries everything three did
+    // and the file it has to fit into is a third the size.
+    let encoded = if filter == "noir" {
+        DynamicImage::ImageLuma8(DynamicImage::ImageRgb8(rgb).into_luma8())
+    } else {
+        DynamicImage::ImageRgb8(rgb)
+    };
+    encoded
         .save(output)
         .map_err(|_| "Could not save the wallpaper.".to_string())?;
     let stale = if output == OUTPUT_PNG {
@@ -183,15 +192,25 @@ fn render(source: &Path, filter: &str) -> Result<String, String> {
     Ok(output.to_string())
 }
 
-fn resize_max_edge(image: RgbImage, max_edge: u32) -> RgbImage {
+/// Bounds the long edge *and* the pixel count.
+///
+/// The edge cap alone lets a square photo through at 1600×1600, which is 2.8×
+/// the pixels a landscape one becomes. That matters because the print look
+/// dithers every pixel and dither noise is close to incompressible — PNG came
+/// out at 0.92 of raw on a real 8K photo — so pixel count, not edge length, is
+/// what decides whether the file still fits the host's limit.
+fn downscale_for_output(image: RgbImage) -> RgbImage {
     let (width, height) = image.dimensions();
-    let long = width.max(height);
-    if long <= max_edge {
+    let long = f64::from(width.max(height));
+    let pixels = u64::from(width) * u64::from(height);
+    let by_edge = (f64::from(MAX_EDGE) / long).min(1.0);
+    let by_pixels = (MAX_PIXELS as f64 / pixels as f64).sqrt().min(1.0);
+    let scale = by_edge.min(by_pixels);
+    if scale >= 1.0 {
         return image;
     }
-    let scale = max_edge as f32 / long as f32;
-    let next_width = ((width as f32 * scale).round() as u32).max(1);
-    let next_height = ((height as f32 * scale).round() as u32).max(1);
+    let next_width = ((f64::from(width) * scale).round() as u32).max(1);
+    let next_height = ((f64::from(height) * scale).round() as u32).max(1);
     imageops::resize(
         &image,
         next_width,
@@ -385,6 +404,33 @@ mod tests {
         assert_eq!(wallpaper_filter("print"), "print");
         assert_eq!(wallpaper_filter(""), "none");
         assert_eq!(wallpaper_filter("kaleidoscope"), "none");
+    }
+
+    #[test]
+    fn the_pixel_budget_holds_whatever_shape_the_photo_is() {
+        // A square 8K photo is the case the edge cap alone missed: it passes
+        // 1600x1600, and the print look then dithers 2.8x the pixels a
+        // landscape one would into a file that barely compresses.
+        for (width, height) in [(7680, 4320), (4320, 4320), (2000, 8000), (8000, 1000)] {
+            let out = downscale_for_output(RgbImage::new(width, height));
+            let (out_width, out_height) = out.dimensions();
+            let pixels = u64::from(out_width) * u64::from(out_height);
+            assert!(
+                pixels <= MAX_PIXELS,
+                "{width}x{height} came out {out_width}x{out_height} = {pixels} pixels"
+            );
+            assert!(out_width.max(out_height) <= MAX_EDGE);
+            // Cropping is not resizing; the shape has to survive.
+            let before = f64::from(width) / f64::from(height);
+            let after = f64::from(out_width) / f64::from(out_height);
+            assert!((before - after).abs() < 0.01, "{before} became {after}");
+        }
+    }
+
+    #[test]
+    fn a_photo_already_inside_the_budget_is_left_alone() {
+        let out = downscale_for_output(RgbImage::new(1280, 720));
+        assert_eq!(out.dimensions(), (1280, 720));
     }
 
     #[test]
