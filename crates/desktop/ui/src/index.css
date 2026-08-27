@@ -238,7 +238,7 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, #0c0c0e 50%, transparent);
+  background: color-mix(in srgb, #0c0c0e 52%, transparent);
 }
 
 .zest-wallpaper[data-filter="print"]::after {
@@ -246,25 +246,27 @@
 }
 
 .zest-wallpaper[data-filter="frosted"]::after {
-  background: color-mix(in srgb, #0c0c0e 42%, transparent);
+  background: color-mix(in srgb, #0c0c0e 44%, transparent);
 }
 
 /*
  * How much photo survives is (1 - surface) * (1 - scrim), so these numbers
- * multiply with the scrim above and get small fast: the canvas at 82% behind a
- * 62% scrim left 7% of the photo, which reads as the wallpaper being broken
- * rather than as a subtle wallpaper.
+ * multiply with the scrim above and get small fast — at 82% behind a 62% scrim
+ * only 7% of the photo was left, which reads as the wallpaper being broken
+ * rather than as a subtle wallpaper. These are the values the wallpaper
+ * shipped with; treat them as the look and tune the scrim instead.
  *
- * Legibility is bought from the text instead. Near-white foreground already
- * clears any backdrop; it was only the thin muted greys — hints and section
- * subtitles, which sit directly on the canvas rather than on a card — that the
- * photo was eating, so those get lifted and the photo gets to stay visible.
+ * Legibility comes from the text rather than from cover. The near-white
+ * foreground already clears any backdrop, and body copy sits on opaque cards;
+ * it was only the thin muted greys — hints and section subtitles, which sit
+ * directly on the canvas — that the photo was eating, so those and the borders
+ * lift and the photo stays visible.
  */
 html.has-wallpaper {
   --chat-canvas: color-mix(in srgb, #0f1012 58%, transparent);
-  --chat-header: color-mix(in srgb, #121314 64%, transparent);
-  --sidebar: color-mix(in srgb, #121314 68%, transparent);
-  --background: color-mix(in srgb, #0c0c0e 38%, transparent);
+  --chat-header: color-mix(in srgb, #121314 55%, transparent);
+  --sidebar: color-mix(in srgb, #121314 64%, transparent);
+  --background: color-mix(in srgb, #0c0c0e 42%, transparent);
   --muted-foreground: #b7bcc5;
   --border: #383b42;
   --sidebar-border: #383b42;
@@ -273,32 +275,35 @@ html.has-wallpaper {
 /* Frosted has no fine detail left to read through, so it may show more. */
 html.has-wallpaper[data-wallpaper-filter="frosted"] {
   --chat-canvas: color-mix(in srgb, #0f1012 50%, transparent);
-  --chat-header: color-mix(in srgb, #121314 56%, transparent);
-  --sidebar: color-mix(in srgb, #121314 60%, transparent);
-  --background: color-mix(in srgb, #0c0c0e 30%, transparent);
+  --chat-header: color-mix(in srgb, #121314 48%, transparent);
+  --sidebar: color-mix(in srgb, #121314 58%, transparent);
+  --background: color-mix(in srgb, #0c0c0e 34%, transparent);
 }
 
 /*
- * Reduced transparency is a common desktop setting rather than a rare one, and
- * on Windows it is the same checkbox that turns off the taskbar tint, so it
- * cannot mean "discard the wallpaper the user just picked". Panels firm up
- * enough to stop reading as see-through and the muted text goes brighter
- * again; the photo stays present behind them.
+ * Only `prefers-contrast: more` pulls the app back to near-opaque, because only
+ * that is a request for contrast.
+ *
+ * `prefers-reduced-transparency: reduce` deliberately is not: on Windows it is
+ * the same Personalization checkbox that turns off the taskbar tint, so it is
+ * off on a great many ordinary desktops. Grouping it here meant the wallpaper
+ * was being discarded for people who had merely disabled a cosmetic effect,
+ * seconds after they picked the photo.
  */
-@media (prefers-contrast: more), (prefers-reduced-transparency: reduce) {
+@media (prefers-contrast: more) {
   html.has-wallpaper,
   html.has-wallpaper[data-wallpaper-filter="frosted"] {
-    --chat-canvas: color-mix(in srgb, #0f1012 74%, transparent);
-    --chat-header: color-mix(in srgb, #121314 80%, transparent);
-    --sidebar: color-mix(in srgb, #121314 82%, transparent);
-    --background: color-mix(in srgb, #0c0c0e 58%, transparent);
-    --muted-foreground: #c6cad2;
+    --chat-canvas: color-mix(in srgb, #0f1012 88%, transparent);
+    --chat-header: color-mix(in srgb, #121314 90%, transparent);
+    --sidebar: color-mix(in srgb, #121314 92%, transparent);
+    --background: color-mix(in srgb, #0c0c0e 76%, transparent);
+    --muted-foreground: #d4d8de;
   }
 
   .zest-wallpaper::after,
   .zest-wallpaper[data-filter="print"]::after,
   .zest-wallpaper[data-filter="frosted"]::after {
-    background: color-mix(in srgb, #0c0c0e 58%, transparent);
+    background: color-mix(in srgb, #0c0c0e 72%, transparent);
   }
 }
 
