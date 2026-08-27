@@ -120,7 +120,7 @@ export function WallpaperCard({
        * announcement that a hand-rolled button group would have to reimplement.
        */}
       <fieldset
-        className="m-0 flex flex-wrap items-center gap-1.5 border-0 border-t border-border/60 px-2.5 py-2"
+        className="m-0 flex flex-wrap items-center gap-1.5 border-t border-border/60 px-2.5 py-2"
         disabled={picking}
       >
         <legend className="sr-only">Background look</legend>
