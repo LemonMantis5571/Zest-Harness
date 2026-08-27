@@ -238,58 +238,67 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, #0c0c0e 62%, transparent);
+  background: color-mix(in srgb, #0c0c0e 50%, transparent);
 }
 
 .zest-wallpaper[data-filter="print"]::after {
-  background: color-mix(in srgb, #0c0c0e 68%, transparent);
+  background: color-mix(in srgb, #0c0c0e 58%, transparent);
 }
 
 .zest-wallpaper[data-filter="frosted"]::after {
-  background: color-mix(in srgb, #0c0c0e 52%, transparent);
+  background: color-mix(in srgb, #0c0c0e 42%, transparent);
 }
 
 /*
- * Surfaces that carry text stay close to opaque.
+ * How much photo survives is (1 - surface) * (1 - scrim), so these numbers
+ * multiply with the scrim above and get small fast: the canvas at 82% behind a
+ * 62% scrim left 7% of the photo, which reads as the wallpaper being broken
+ * rather than as a subtle wallpaper.
  *
- * At the 55-64% these were, hints and body copy — the small, thin, muted text
- * in Customize especially — sat on whatever the photo happened to be doing
- * underneath, which put them well under a readable contrast ratio on any busy
- * image. The wallpaper is a tinted backdrop around the app now rather than
- * something the text has to compete with.
+ * Legibility is bought from the text instead. Near-white foreground already
+ * clears any backdrop; it was only the thin muted greys — hints and section
+ * subtitles, which sit directly on the canvas rather than on a card — that the
+ * photo was eating, so those get lifted and the photo gets to stay visible.
  */
 html.has-wallpaper {
-  --chat-canvas: color-mix(in srgb, #0f1012 82%, transparent);
-  --chat-header: color-mix(in srgb, #121314 84%, transparent);
-  --sidebar: color-mix(in srgb, #121314 86%, transparent);
-  --background: color-mix(in srgb, #0c0c0e 70%, transparent);
+  --chat-canvas: color-mix(in srgb, #0f1012 58%, transparent);
+  --chat-header: color-mix(in srgb, #121314 64%, transparent);
+  --sidebar: color-mix(in srgb, #121314 68%, transparent);
+  --background: color-mix(in srgb, #0c0c0e 38%, transparent);
+  --muted-foreground: #b7bcc5;
+  --border: #383b42;
+  --sidebar-border: #383b42;
 }
 
 /* Frosted has no fine detail left to read through, so it may show more. */
 html.has-wallpaper[data-wallpaper-filter="frosted"] {
-  --chat-canvas: color-mix(in srgb, #0f1012 72%, transparent);
-  --chat-header: color-mix(in srgb, #121314 74%, transparent);
-  --sidebar: color-mix(in srgb, #121314 78%, transparent);
-  --background: color-mix(in srgb, #0c0c0e 58%, transparent);
+  --chat-canvas: color-mix(in srgb, #0f1012 50%, transparent);
+  --chat-header: color-mix(in srgb, #121314 56%, transparent);
+  --sidebar: color-mix(in srgb, #121314 60%, transparent);
+  --background: color-mix(in srgb, #0c0c0e 30%, transparent);
 }
 
 /*
- * Ask the OS for more contrast or less transparency and the app's own opaque
- * colours come back, leaving the wallpaper only at the edges.
+ * Reduced transparency is a common desktop setting rather than a rare one, and
+ * on Windows it is the same checkbox that turns off the taskbar tint, so it
+ * cannot mean "discard the wallpaper the user just picked". Panels firm up
+ * enough to stop reading as see-through and the muted text goes brighter
+ * again; the photo stays present behind them.
  */
 @media (prefers-contrast: more), (prefers-reduced-transparency: reduce) {
   html.has-wallpaper,
   html.has-wallpaper[data-wallpaper-filter="frosted"] {
-    --chat-canvas: color-mix(in srgb, #0f1012 97%, transparent);
-    --chat-header: color-mix(in srgb, #121314 97%, transparent);
-    --sidebar: color-mix(in srgb, #121314 98%, transparent);
-    --background: color-mix(in srgb, #0c0c0e 94%, transparent);
+    --chat-canvas: color-mix(in srgb, #0f1012 74%, transparent);
+    --chat-header: color-mix(in srgb, #121314 80%, transparent);
+    --sidebar: color-mix(in srgb, #121314 82%, transparent);
+    --background: color-mix(in srgb, #0c0c0e 58%, transparent);
+    --muted-foreground: #c6cad2;
   }
 
   .zest-wallpaper::after,
   .zest-wallpaper[data-filter="print"]::after,
   .zest-wallpaper[data-filter="frosted"]::after {
-    background: color-mix(in srgb, #0c0c0e 88%, transparent);
+    background: color-mix(in srgb, #0c0c0e 58%, transparent);
   }
 }
 
