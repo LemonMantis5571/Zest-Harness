@@ -94,8 +94,10 @@ import type {
   UserProfile,
   WorkspaceChange,
   WorkspaceReview,
+  WallpaperView,
 } from "@/lib/types";
 import { applyFont, getSavedFontId } from "@/lib/fonts";
+import { WALLPAPER_CHANGED_EVENT } from "@/lib/wallpaperSync";
 import { cn } from "@/lib/utils";
 
 type Screen =
@@ -473,6 +475,7 @@ export default function App() {
   const [approvalModeState, setApprovalModeState] =
     useState<ApprovalMode>("auto");
   const [optionsUpdating, setOptionsUpdating] = useState(false);
+  const [wallpaper, setWallpaper] = useState<WallpaperView | null>(null);
 
   const commitNavigation = useCallback((next: NavigationHistory) => {
     navigationRef.current = next;
@@ -557,6 +560,18 @@ export default function App() {
       }
     }
   }, [navigateBack, navigateTo]);
+  /**
+   * Bring the transcript back for an action that changes which chat is open.
+   *
+   * Starting, opening, or forking a chat from the sidebar used to leave whatever
+   * panel was showing in place, so from Customize or Usage "New chat" quietly
+   * swapped the session behind a screen the user could not see it on — the
+   * button read as broken. Recorded as a visit so Back still returns to the
+   * panel.
+   */
+  const showTranscript = useCallback(() => {
+    navigateTo({ kind: "chat" });
+  }, [navigateTo]);
 
   // The first loaded chat establishes the root of the app-view history. Boot,
   // provider selection, and sign-in progress are lifecycle states, not places
@@ -569,6 +584,40 @@ export default function App() {
   useEffect(() => {
     applyFont(getSavedFontId());
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadWallpaper = async () => {
+      try {
+        const next = await getBackend().wallpaper();
+        if (!cancelled) setWallpaper(next);
+      } catch (error) {
+        ignoreExpectedFailure(error, "read wallpaper");
+        if (!cancelled) setWallpaper(null);
+      }
+    };
+    void loadWallpaper();
+    const onChange = () => void loadWallpaper();
+    window.addEventListener(WALLPAPER_CHANGED_EVENT, onChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(WALLPAPER_CHANGED_EVENT, onChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const ready = wallpaper?.status === "ready" && Boolean(wallpaper.imageDataUrl);
+    document.documentElement.classList.toggle("has-wallpaper", Boolean(ready));
+    if (ready) {
+      document.documentElement.dataset.wallpaperFilter = wallpaper?.filter ?? "none";
+    } else {
+      delete document.documentElement.dataset.wallpaperFilter;
+    }
+    return () => {
+      document.documentElement.classList.remove("has-wallpaper");
+      delete document.documentElement.dataset.wallpaperFilter;
+    };
+  }, [wallpaper]);
   /**
    * The mode Plan mode interrupted, restored by Build.
    *
@@ -1752,6 +1801,7 @@ export default function App() {
         providerId: session?.provider ?? selectedId ?? undefined,
       });
       applySession(info, { clearDraft: true });
+      showTranscript();
     } catch (err) {
       const recovery = conversationRecovery(err);
       if (recovery) {
@@ -1778,6 +1828,7 @@ export default function App() {
     try {
       const info = await backend.forkThread();
       applySession(info, { clearDraft: true });
+      showTranscript();
       toast.add({
         type: "success",
         title: "Fork created",
@@ -1931,6 +1982,7 @@ export default function App() {
       const info = await backend.openProjectChat(options);
       setPendingConversationRecovery(null);
       applySession(info, { clearDraft: Boolean(options.newThread) });
+      showTranscript();
       // Refresh the picker catalogue so the model list and key status match the
       // project we actually opened instead of the project we just left.
       void loadProviders(info.provider).catch((error) =>
@@ -1970,6 +2022,7 @@ export default function App() {
       const provider = pending.recovery.providers.find((item) => item.id === providerId);
       setPendingConversationRecovery(null);
       applySession(info);
+      showTranscript();
       void loadProviders(info.provider).catch((error) =>
         ignoreExpectedFailure(error, "refresh providers after switching chat")
       );
@@ -2617,6 +2670,16 @@ export default function App() {
   const authMode = screen !== "chat";
 
   return (
+    <>
+      {wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+        <div
+          aria-hidden
+          className="zest-wallpaper"
+          data-filter={wallpaper.filter}
+          style={{ backgroundImage: `url("${wallpaper.imageDataUrl}")` }}
+        />
+      ) : null}
+      <div className="relative z-10 h-full min-h-0 w-full min-w-0">
     <Toaster>
       <div
         className={cn(
@@ -2788,5 +2851,7 @@ export default function App() {
         onChooseProvider={(providerId) => void chooseConversationProvider(providerId)}
       />
     </Toaster>
+      </div>
+    </>
   );
 }

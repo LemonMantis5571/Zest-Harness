@@ -39,6 +39,8 @@ import type {
   UsageReport,
   UsageSnapshot,
   UserProfile,
+  WallpaperFilterId,
+  WallpaperView,
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspacePickResult,
@@ -187,6 +189,22 @@ export function controlNowPlaying(action: "previous" | "toggle" | "next") {
 
 export function setNowPlayingVolume(volumePercent: number) {
   return invoke<NowPlayingView>("set_now_playing_volume", { volumePercent });
+}
+
+export function wallpaper() {
+  return invoke<WallpaperView>("wallpaper");
+}
+
+export function pickWallpaper() {
+  return invoke<WallpaperView>("pick_wallpaper");
+}
+
+export function setWallpaperFilter(filter: WallpaperFilterId) {
+  return invoke<WallpaperView>("set_wallpaper_filter", { filter });
+}
+
+export function clearWallpaper() {
+  return invoke<WallpaperView>("clear_wallpaper");
 }
 
 export function usageReport(days: number) {

@@ -149,6 +149,23 @@ describe("fixture plugins and workspace files", () => {
     assert.equal(paused.status, "paused");
     assert.equal((await backend.setNowPlayingVolume(42)).volumePercent, 42);
 
+    assert.equal((await backend.wallpaper()).status, "disabled");
+    await backend.setPluginEnabled("wallpaper", true);
+    assert.equal((await backend.wallpaper()).status, "empty");
+    const paper = await backend.pickWallpaper();
+    assert.equal(paper.status, "ready");
+    assert.equal(paper.sourceName, "fixture.png");
+    assert.equal(paper.filter, "none");
+    assert.equal(paper.imageDataUrl?.startsWith("data:image/"), true);
+    // Each look is its own preview, so switching is visible in the fixture UI.
+    for (const filter of ["print", "frosted", "noir"] as const) {
+      const filtered = await backend.setWallpaperFilter(filter);
+      assert.equal(filtered.filter, filter);
+      assert.notEqual(filtered.imageDataUrl, paper.imageDataUrl);
+    }
+    assert.equal((await backend.clearWallpaper()).filter, "none");
+    assert.equal((await backend.wallpaper()).status, "empty");
+
     const root = await backend.listWorkspaceFiles();
     assert.deepEqual(root.map((entry) => entry.name), ["src", "README.md", "Cargo.toml"]);
 

@@ -1,0 +1,26 @@
+[package]
+name = "zest-wallpaper-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional image wallpaper for Zest."
+
+[[bin]]
+name = "zest-wallpaper"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[lib]
+name = "zest_wallpaper_plugin"
+path = "src/lib.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+serde.workspace = true
+serde_json.workspace = true
+zest-plugin-api = { path = "../../plugin-api" }
+
+[dev-dependencies]
+tempfile = "3"

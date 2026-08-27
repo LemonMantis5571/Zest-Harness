@@ -21,6 +21,7 @@
     "desktop:build": "npm run build -w zest-desktop",
     "desktop:smoke": "node ./scripts/desktop-smoke.mjs",
     "verify": "node ./scripts/dev-verify.mjs",
+    "plugin:install": "node ./scripts/install-plugin.mjs",
     "release:version": "node ./scripts/check-release-version.mjs",
     "release:checksums": "node ./scripts/release-checksums.mjs"
   }

@@ -64,7 +64,7 @@ pub(crate) use delegation::{
     CreateDelegationJobRequest, DelegationCoordinator, DelegationHandoff, DelegationJobView,
     DelegationTargetOption, UpdateDelegationJobRequest,
 };
-use plugins::{NowPlayingView, PluginView};
+use plugins::{NowPlayingView, PluginView, WallpaperView};
 use session::{ActiveTurn, Session, SessionController, SessionError};
 use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 
@@ -2676,6 +2676,38 @@ async fn set_now_playing_volume(volume_percent: f64) -> Result<NowPlayingView, S
     tauri::async_runtime::spawn_blocking(move || plugins::set_volume(volume_percent))
         .await
         .map_err(|_| "Could not change the volume.".to_string())?
+}
+
+#[tauri::command]
+async fn wallpaper() -> Result<WallpaperView, String> {
+    tauri::async_runtime::spawn_blocking(plugins::wallpaper)
+        .await
+        .map_err(|_| "Could not read the wallpaper.".to_string())
+}
+
+#[tauri::command]
+fn pick_wallpaper() -> Result<WallpaperView, String> {
+    let dialog = rfd::FileDialog::new()
+        .set_title("Choose a wallpaper")
+        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+    let Some(path) = dialog.pick_file() else {
+        return Ok(plugins::wallpaper());
+    };
+    plugins::set_wallpaper(path)
+}
+
+#[tauri::command]
+async fn set_wallpaper_filter(filter: String) -> Result<WallpaperView, String> {
+    tauri::async_runtime::spawn_blocking(move || plugins::set_wallpaper_filter(&filter))
+        .await
+        .map_err(|_| "Could not update the wallpaper.".to_string())?
+}
+
+#[tauri::command]
+async fn clear_wallpaper() -> Result<WallpaperView, String> {
+    tauri::async_runtime::spawn_blocking(plugins::clear_wallpaper)
+        .await
+        .map_err(|_| "Could not clear the wallpaper.".to_string())?
 }
 
 /// Spend, tokens, and cost for the last `days` local days.
@@ -8075,6 +8107,10 @@ pub fn run() {
             now_playing,
             control_now_playing,
             set_now_playing_volume,
+            wallpaper,
+            pick_wallpaper,
+            set_wallpaper_filter,
+            clear_wallpaper,
             usage_report,
             open_prices_file,
             refresh_rates,

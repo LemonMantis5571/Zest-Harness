@@ -30,6 +30,7 @@ import type {
   McpServerRow,
   SessionInfo,
   ThreadSummary,
+  WallpaperFilterId,
   WorkspaceChange,
 } from "./types";
 
@@ -42,6 +43,15 @@ const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
 }));
 const FIXTURE_ARTWORK_DATA_URL =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%235e6ad2'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='96' height='96' rx='16' fill='url(%23g)'/%3E%3Ccircle cx='48' cy='48' r='22' fill='%23010102' opacity='.8'/%3E%3Ccircle cx='48' cy='48' r='7' fill='%23f4f4f5'/%3E%3C/svg%3E";
+/** One stand-in per look, so the fixture UI shows a real difference. */
+const FIXTURE_WALLPAPER_PREVIEWS: Record<WallpaperFilterId, string> = {
+  none: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='w' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%231c1d20'/%3E%3Cstop offset='1' stop-color='%235e6ad2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' fill='url(%23w)'/%3E%3C/svg%3E",
+  print:
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Crect width='8' height='8' fill='%231c1d20'/%3E%3Cpath fill='%235e6ad2' d='M0 0h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 1h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7zM0 2h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 3h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7z'/%3E%3Cpath fill='%23c4b5e0' d='M0 4h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 5h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7zM0 6h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 7h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7z'/%3E%3C/svg%3E",
+  frosted:
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3Cfilter id='f'%3E%3CfeGaussianBlur stdDeviation='7'/%3E%3C/filter%3E%3C/defs%3E%3Crect width='64' height='64' fill='%231c1d20'/%3E%3Cg filter='url(%23f)'%3E%3Ccircle cx='20' cy='22' r='16' fill='%235e6ad2'/%3E%3Ccircle cx='46' cy='44' r='18' fill='%23c084fc'/%3E%3C/g%3E%3C/svg%3E",
+  noir: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='n' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%23161616'/%3E%3Cstop offset='1' stop-color='%23d4d4d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' fill='url(%23n)'/%3E%3C/svg%3E",
+};
 const FIXTURE_SESSION: SessionInfo = {
   sessionId: "session-fixture",
   provider: "fixture",
@@ -130,6 +140,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   let fixtureNowPlayingEnabled = false;
   let fixtureNowPlayingStatus: "playing" | "paused" = "playing";
   let fixtureNowPlayingVolume = 83;
+  let fixtureWallpaperEnabled = false;
+  let fixtureWallpaperChosen = false;
+  let fixtureWallpaperFilter: WallpaperFilterId = "none";
   let pendingScenario: FixturePendingScenario | null = null;
   let cancelTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -627,13 +640,27 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           available: true,
           detail: "Ready",
         },
+        {
+          id: "wallpaper",
+          name: "Wallpaper",
+          description: "Use an image as the app background.",
+          enabled: fixtureWallpaperEnabled,
+          available: true,
+          detail: "Ready",
+        },
       ];
     },
     async openPluginsFolder() {},
     async setPluginEnabled(id: string, enabled: boolean) {
-      if (id !== "now-playing") throw new Error(`fixture: unknown plugin ${id}`);
-      fixtureNowPlayingEnabled = enabled;
-      return this.listPlugins();
+      if (id === "now-playing") {
+        fixtureNowPlayingEnabled = enabled;
+        return this.listPlugins();
+      }
+      if (id === "wallpaper") {
+        fixtureWallpaperEnabled = enabled;
+        return this.listPlugins();
+      }
+      throw new Error(`fixture: unknown plugin ${id}`);
     },
     async nowPlaying() {
       return fixtureNowPlayingEnabled
@@ -671,6 +698,53 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (!fixtureNowPlayingEnabled) throw new Error("fixture: Now Playing is disabled");
       fixtureNowPlayingVolume = Math.max(0, Math.min(100, volumePercent));
       return this.nowPlaying();
+    },
+    async wallpaper() {
+      if (!fixtureWallpaperEnabled) {
+        return {
+          status: "disabled" as const,
+          sourceName: null,
+          filter: "none" as const,
+          imageDataUrl: null,
+          detail: "Turn it on in Extras.",
+          observedAt: Math.floor(Date.now() / 1000),
+        };
+      }
+      if (!fixtureWallpaperChosen) {
+        return {
+          status: "empty" as const,
+          sourceName: null,
+          filter: fixtureWallpaperFilter,
+          imageDataUrl: null,
+          detail: "Choose an image.",
+          observedAt: Math.floor(Date.now() / 1000),
+        };
+      }
+      return {
+        status: "ready" as const,
+        sourceName: "fixture.png",
+        filter: fixtureWallpaperFilter,
+        imageDataUrl: FIXTURE_WALLPAPER_PREVIEWS[fixtureWallpaperFilter],
+        detail: "Ready",
+        observedAt: Math.floor(Date.now() / 1000),
+      };
+    },
+    async pickWallpaper() {
+      if (!fixtureWallpaperEnabled) throw new Error("fixture: Wallpaper is disabled");
+      fixtureWallpaperChosen = true;
+      return this.wallpaper();
+    },
+    async setWallpaperFilter(filter) {
+      if (!fixtureWallpaperEnabled) throw new Error("fixture: Wallpaper is disabled");
+      if (!fixtureWallpaperChosen) throw new Error("Choose an image first.");
+      fixtureWallpaperFilter = filter;
+      return this.wallpaper();
+    },
+    async clearWallpaper() {
+      if (!fixtureWallpaperEnabled) throw new Error("fixture: Wallpaper is disabled");
+      fixtureWallpaperChosen = false;
+      fixtureWallpaperFilter = "none";
+      return this.wallpaper();
     },
     async usageReport(days: number) {
       // Shaped to exercise the parts of the screen that only appear when

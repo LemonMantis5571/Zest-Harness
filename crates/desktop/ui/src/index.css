@@ -210,6 +210,93 @@
   animation: zest-shimmer 1.4s ease-in-out infinite;
 }
 
+.image-pixelated {
+  image-rendering: pixelated;
+}
+
+.zest-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.zest-wallpaper[data-filter="print"] {
+  image-rendering: pixelated;
+}
+
+/*
+ * The scrim between the photo and the app, weighted per look. Print keeps the
+ * most local contrast of the three — dots of full black beside dots of full
+ * colour — so it needs the most cover; frosted has already thrown its detail
+ * away and needs the least.
+ */
+.zest-wallpaper::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, #0c0c0e 62%, transparent);
+}
+
+.zest-wallpaper[data-filter="print"]::after {
+  background: color-mix(in srgb, #0c0c0e 68%, transparent);
+}
+
+.zest-wallpaper[data-filter="frosted"]::after {
+  background: color-mix(in srgb, #0c0c0e 52%, transparent);
+}
+
+/*
+ * Surfaces that carry text stay close to opaque.
+ *
+ * At the 55-64% these were, hints and body copy — the small, thin, muted text
+ * in Customize especially — sat on whatever the photo happened to be doing
+ * underneath, which put them well under a readable contrast ratio on any busy
+ * image. The wallpaper is a tinted backdrop around the app now rather than
+ * something the text has to compete with.
+ */
+html.has-wallpaper {
+  --chat-canvas: color-mix(in srgb, #0f1012 82%, transparent);
+  --chat-header: color-mix(in srgb, #121314 84%, transparent);
+  --sidebar: color-mix(in srgb, #121314 86%, transparent);
+  --background: color-mix(in srgb, #0c0c0e 70%, transparent);
+}
+
+/* Frosted has no fine detail left to read through, so it may show more. */
+html.has-wallpaper[data-wallpaper-filter="frosted"] {
+  --chat-canvas: color-mix(in srgb, #0f1012 72%, transparent);
+  --chat-header: color-mix(in srgb, #121314 74%, transparent);
+  --sidebar: color-mix(in srgb, #121314 78%, transparent);
+  --background: color-mix(in srgb, #0c0c0e 58%, transparent);
+}
+
+/*
+ * Ask the OS for more contrast or less transparency and the app's own opaque
+ * colours come back, leaving the wallpaper only at the edges.
+ */
+@media (prefers-contrast: more), (prefers-reduced-transparency: reduce) {
+  html.has-wallpaper,
+  html.has-wallpaper[data-wallpaper-filter="frosted"] {
+    --chat-canvas: color-mix(in srgb, #0f1012 97%, transparent);
+    --chat-header: color-mix(in srgb, #121314 97%, transparent);
+    --sidebar: color-mix(in srgb, #121314 98%, transparent);
+    --background: color-mix(in srgb, #0c0c0e 94%, transparent);
+  }
+
+  .zest-wallpaper::after,
+  .zest-wallpaper[data-filter="print"]::after,
+  .zest-wallpaper[data-filter="frosted"]::after {
+    background: color-mix(in srgb, #0c0c0e 88%, transparent);
+  }
+}
+
+html.has-wallpaper body {
+  background-color: transparent;
+}
+
 @media (prefers-reduced-motion: reduce) {
   /*
    * Everything, not a hand-maintained list. The previous block named only the

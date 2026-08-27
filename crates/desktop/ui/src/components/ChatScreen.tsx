@@ -31,7 +31,6 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CustomizePanel } from "@/components/CustomizePanel";
 import { CheckpointRail } from "@/components/CheckpointRail";
-import { ConversationTurnHistory } from "@/components/ConversationTurnHistory";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
@@ -1372,11 +1371,6 @@ export function ChatScreen({
             {/* Branch changes moved out of this row and into BranchChangesBar
                 below the header, where the counts can say which project and
                 branch they belong to. */}
-            <ConversationTurnHistory
-              turns={conversationTurns}
-              messageCount={messages.length}
-              onJump={jumpToMessage}
-            />
             <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
             <NowPlayingButton />
             {/* Only with a project: a projectless chat has no folder to show,
@@ -1779,10 +1773,6 @@ export function ChatScreen({
         onOpenFolder={() => {
           closeSettings();
           onOpenFolder();
-        }}
-        onOpenCustomize={() => {
-          closeSettings();
-          onOpenCustomize?.();
         }}
         onProfileChange={onProfileChange}
       />

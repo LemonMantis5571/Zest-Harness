@@ -41,6 +41,8 @@ import type {
   UsageSnapshot,
   ProviderQuotaSnapshot,
   UserProfile,
+  WallpaperFilterId,
+  WallpaperView,
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspacePickResult,
@@ -102,6 +104,10 @@ export type DesktopBackend = {
   nowPlaying(): Promise<NowPlayingView>;
   controlNowPlaying(action: "previous" | "toggle" | "next"): Promise<NowPlayingView>;
   setNowPlayingVolume(volumePercent: number): Promise<NowPlayingView>;
+  wallpaper(): Promise<WallpaperView>;
+  pickWallpaper(): Promise<WallpaperView>;
+  setWallpaperFilter(filter: WallpaperFilterId): Promise<WallpaperView>;
+  clearWallpaper(): Promise<WallpaperView>;
   usageReport(days: number): Promise<UsageReport>;
   /** Open the price book in the OS editor so rates can be corrected. */
   openPricesFile(): Promise<void>;
@@ -271,6 +277,10 @@ export function createTauriBackend(): DesktopBackend {
     nowPlaying: () => tauriApi.nowPlaying(),
     controlNowPlaying: (action) => tauriApi.controlNowPlaying(action),
     setNowPlayingVolume: (volumePercent) => tauriApi.setNowPlayingVolume(volumePercent),
+    wallpaper: () => tauriApi.wallpaper(),
+    pickWallpaper: () => tauriApi.pickWallpaper(),
+    setWallpaperFilter: (filter) => tauriApi.setWallpaperFilter(filter),
+    clearWallpaper: () => tauriApi.clearWallpaper(),
     usageReport: (days) => tauriApi.usageReport(days),
     openPricesFile: () => tauriApi.openPricesFile(),
     refreshRates: (force) => tauriApi.refreshRates(force),

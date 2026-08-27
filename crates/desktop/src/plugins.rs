@@ -12,19 +12,24 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zest_core::atomic_write_json;
 use zest_plugin_api::{
-    MediaCommand, PluginManifest, PluginRequest, PluginResponse, NOW_PLAYING_ID, PROTOCOL_VERSION,
+    wallpaper_filter, MediaCommand, PluginManifest, PluginRequest, PluginResponse, NOW_PLAYING_ID,
+    PROTOCOL_VERSION, WALLPAPER_ID,
 };
 
 pub(crate) use zest_plugin_api::NowPlayingView;
+use zest_plugin_api::WallpaperView as PluginWallpaper;
 
 const PLUGIN_SETTINGS_FILE: &str = "plugins.json";
 const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024;
 const MAX_PLUGIN_REQUEST_BYTES: u64 = 32 * 1024;
 const MAX_PLUGIN_OUTPUT_BYTES: u64 = 512 * 1024;
+const MAX_WALLPAPER_BYTES: u64 = 2 * 1024 * 1024;
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +41,17 @@ pub(crate) struct PluginView {
     pub enabled: bool,
     pub available: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WallpaperView {
+    pub status: String,
+    pub source_name: Option<String>,
+    pub filter: String,
+    pub image_data_url: Option<String>,
+    pub detail: String,
+    pub observed_at: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -135,6 +151,64 @@ pub(crate) fn set_volume(volume_percent: f64) -> Result<NowPlayingView, String> 
         },
     )
     .map_err(|_| "Could not change the volume.".into())
+}
+
+pub(crate) fn wallpaper() -> WallpaperView {
+    let Some(plugin) = enabled_plugin(WALLPAPER_ID) else {
+        return wallpaper_status("disabled", "Turn it on in Extras.");
+    };
+    match invoke::<PluginWallpaper>(&plugin, PluginRequest::Get) {
+        Ok(data) => to_ui(&plugin, data),
+        Err(_) => wallpaper_status("unavailable", "Wallpaper is not available right now."),
+    }
+}
+
+pub(crate) fn set_wallpaper(path: PathBuf) -> Result<WallpaperView, String> {
+    let plugin =
+        enabled_plugin(WALLPAPER_ID).ok_or_else(|| "Turn on Wallpaper in Extras.".to_string())?;
+    // A new image keeps whatever look is already chosen.
+    let filter = invoke::<PluginWallpaper>(&plugin, PluginRequest::Get)
+        .map(|current| wallpaper_filter(&current.filter))
+        .unwrap_or("none");
+    let data = invoke::<PluginWallpaper>(
+        &plugin,
+        PluginRequest::SetWallpaper {
+            image_path: path.to_string_lossy().into_owned(),
+            filter: filter.into(),
+        },
+    )
+    .map_err(|_| "Could not use that image.".to_string())?;
+    Ok(to_ui(&plugin, data))
+}
+
+pub(crate) fn set_wallpaper_filter(filter: &str) -> Result<WallpaperView, String> {
+    let plugin =
+        enabled_plugin(WALLPAPER_ID).ok_or_else(|| "Turn on Wallpaper in Extras.".to_string())?;
+    // Normalised here so the webview cannot push an arbitrary string into the
+    // add-on's request, whatever the UI sends.
+    let filter = wallpaper_filter(filter);
+    let data = invoke::<PluginWallpaper>(
+        &plugin,
+        PluginRequest::SetWallpaperFilter {
+            filter: filter.into(),
+        },
+    )
+    .map_err(|error| {
+        if error.contains("Choose an image") {
+            error
+        } else {
+            "Could not update the wallpaper.".into()
+        }
+    })?;
+    Ok(to_ui(&plugin, data))
+}
+
+pub(crate) fn clear_wallpaper() -> Result<WallpaperView, String> {
+    let plugin =
+        enabled_plugin(WALLPAPER_ID).ok_or_else(|| "Turn on Wallpaper in Extras.".to_string())?;
+    let data = invoke::<PluginWallpaper>(&plugin, PluginRequest::ClearWallpaper)
+        .map_err(|_| "Could not clear the wallpaper.".to_string())?;
+    Ok(to_ui(&plugin, data))
 }
 
 /// A bounded, delimited context block for the current turn.
@@ -284,7 +358,7 @@ fn load_plugin(directory: PathBuf) -> InstalledPlugin {
     {
         return invalid("Add-on file is not valid.");
     }
-    if manifest.kind != NOW_PLAYING_ID {
+    if !supported_kind(&manifest.kind) {
         return InstalledPlugin {
             manifest,
             directory,
@@ -326,7 +400,10 @@ fn load_plugin(directory: PathBuf) -> InstalledPlugin {
     }
 }
 
-fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlayingView, String> {
+fn invoke<T: DeserializeOwned>(
+    plugin: &InstalledPlugin,
+    request: PluginRequest,
+) -> Result<T, String> {
     let executable = plugin
         .executable
         .as_ref()
@@ -435,7 +512,7 @@ fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlaying
         return Err("The add-on returned an invalid response.".into());
     }
 
-    let response: PluginResponse = serde_json::from_slice(&output)
+    let response: PluginResponse<T> = serde_json::from_slice(&output)
         .map_err(|_| "The add-on returned an invalid response.".to_string())?;
     if !response.ok {
         return Err(response
@@ -444,7 +521,99 @@ fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlaying
     }
     response
         .data
-        .ok_or_else(|| "The add-on returned no music data.".into())
+        .ok_or_else(|| "The add-on returned no data.".into())
+}
+
+fn supported_kind(kind: &str) -> bool {
+    kind == NOW_PLAYING_ID || kind == WALLPAPER_ID
+}
+
+fn to_ui(plugin: &InstalledPlugin, data: PluginWallpaper) -> WallpaperView {
+    let mut view = WallpaperView {
+        status: data.status,
+        source_name: data.source_name,
+        filter: wallpaper_filter(&data.filter).into(),
+        image_data_url: None,
+        detail: data.detail,
+        observed_at: data.observed_at,
+    };
+    if view.status != "ready" {
+        return view;
+    }
+    let Some(image_file) = data.image_file.as_deref() else {
+        view.status = "empty".into();
+        view.detail = "Choose an image.".into();
+        return view;
+    };
+    let relative = Path::new(image_file);
+    if !is_safe_relative_path(relative) || !matches!(image_file, "wallpaper.png" | "wallpaper.jpg")
+    {
+        view.status = "unavailable".into();
+        view.detail = "Wallpaper file is not valid.".into();
+        return view;
+    }
+    let path = plugin.directory.join(relative);
+    let Ok(canonical) = fs::canonicalize(&path) else {
+        view.status = "unavailable".into();
+        view.detail = "Wallpaper file is missing.".into();
+        return view;
+    };
+    if !canonical.starts_with(&plugin.directory) || !canonical.is_file() {
+        view.status = "unavailable".into();
+        view.detail = "Wallpaper file is not valid.".into();
+        return view;
+    }
+    match read_bytes_bounded(&canonical, MAX_WALLPAPER_BYTES) {
+        Ok(bytes) => match image_data_url(&bytes) {
+            Some(url) => view.image_data_url = Some(url),
+            None => {
+                view.status = "unavailable".into();
+                view.detail = "Wallpaper file is not valid.".into();
+            }
+        },
+        Err(_) => {
+            view.status = "unavailable".into();
+            view.detail = "Wallpaper file is missing.".into();
+        }
+    }
+    view
+}
+
+fn image_data_url(bytes: &[u8]) -> Option<String> {
+    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        "image/jpeg"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn wallpaper_status(status: &str, detail: &str) -> WallpaperView {
+    WallpaperView {
+        status: status.into(),
+        source_name: None,
+        filter: "none".into(),
+        image_data_url: None,
+        detail: detail.into(),
+        observed_at: now_secs(),
+    }
+}
+
+fn read_bytes_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("file is too large".into());
+    }
+    Ok(bytes)
 }
 
 fn bounded_plugin_request(payload: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -677,35 +846,86 @@ mod tests {
     }
 
     #[test]
+    fn wallpaper_kind_is_ready_when_its_file_is_present() {
+        let root = tempfile::tempdir().expect("temp folder should exist");
+        let directory = root.path().join("wallpaper");
+        fs::create_dir(&directory).expect("plugin folder should be created");
+        fs::write(
+            directory.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+                "protocol": 1,
+                "id": "wallpaper",
+                "name": "Wallpaper",
+                "description": "Use an image as the app background.",
+                "version": "0.1.0",
+                "executable": "runner.exe",
+                "kind": "wallpaper"
+            }"#,
+        )
+        .expect("manifest should be written");
+        fs::write(directory.join("runner.exe"), b"test").expect("runner should be written");
+
+        let plugin = load_plugin(fs::canonicalize(directory).expect("plugin path should resolve"));
+        assert!(plugin.available);
+        assert_eq!(plugin.manifest.kind, WALLPAPER_ID);
+    }
+
+    #[test]
+    fn wallpaper_data_url_only_accepts_png_or_jpeg_bytes() {
+        let png = [0x89, b'P', b'N', b'G', 0, 1, 2, 3];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 1];
+        assert!(image_data_url(&png)
+            .expect("png")
+            .starts_with("data:image/png;base64,"));
+        assert!(image_data_url(&jpeg)
+            .expect("jpeg")
+            .starts_with("data:image/jpeg;base64,"));
+        assert!(image_data_url(b"not-an-image").is_none());
+        assert!(supported_kind(NOW_PLAYING_ID));
+        assert!(supported_kind(WALLPAPER_ID));
+        assert!(!supported_kind("future"));
+    }
+
+    #[test]
+    fn a_wallpaper_filter_from_the_webview_is_normalised() {
+        for filter in ["none", "print", "frosted", "noir"] {
+            assert_eq!(wallpaper_filter(filter), filter);
+        }
+        assert_eq!(wallpaper_filter("../../etc/passwd"), "none");
+        assert_eq!(wallpaper_filter(""), "none");
+    }
+
+    #[test]
     fn invoke_drains_bounded_output_and_cleans_up_process_failures() {
         let root = tempfile::tempdir().expect("temp folder should exist");
         let fixture = compile_process_fixture(root.path());
 
         let normal = fixture_plugin(root.path(), &fixture, "normal");
-        let view = invoke(&normal, PluginRequest::Get).expect("small response should parse");
+        let view = invoke::<NowPlayingView>(&normal, PluginRequest::Get)
+            .expect("small response should parse");
         assert_eq!(view.status, "playing");
         assert_eq!(view.title.as_deref(), Some("Fixture"));
 
         let large = fixture_plugin(root.path(), &fixture, "large");
-        let view = invoke(&large, PluginRequest::Get)
+        let view = invoke::<NowPlayingView>(&large, PluginRequest::Get)
             .expect("a response at the output limit should parse");
         assert_eq!(view.title.as_deref(), Some("Fixture"));
 
         let oversized = fixture_plugin(root.path(), &fixture, "oversized");
         assert_eq!(
-            invoke(&oversized, PluginRequest::Get).unwrap_err(),
+            invoke::<NowPlayingView>(&oversized, PluginRequest::Get).unwrap_err(),
             "The add-on returned an invalid response."
         );
 
         let nonzero = fixture_plugin(root.path(), &fixture, "nonzero");
         assert_eq!(
-            invoke(&nonzero, PluginRequest::Get).unwrap_err(),
+            invoke::<NowPlayingView>(&nonzero, PluginRequest::Get).unwrap_err(),
             "The add-on returned an invalid response."
         );
 
         let timeout = fixture_plugin(root.path(), &fixture, "timeout");
         assert_eq!(
-            invoke(&timeout, PluginRequest::Get).unwrap_err(),
+            invoke::<NowPlayingView>(&timeout, PluginRequest::Get).unwrap_err(),
             "The add-on took too long."
         );
     }
