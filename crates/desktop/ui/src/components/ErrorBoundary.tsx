@@ -22,15 +22,15 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div className="flex h-full items-center justify-center bg-[#0f1012] px-6 text-[#f7f8f8]">
-          <div className="max-w-md rounded-xl border border-[#2a2c31] bg-[#141516] p-5">
+        <div className="flex h-full items-center justify-center bg-background px-6 text-foreground">
+          <div className="max-w-md rounded-xl border border-border bg-card p-5">
             <h1 className="m-0 mb-2 text-lg font-semibold">Something broke</h1>
-            <p className="m-0 mb-4 text-sm text-[#8a8f98]">
+            <p className="m-0 mb-4 text-sm text-muted-foreground">
               Zest could not display this screen. Try again or restart the app.
             </p>
             <button
               type="button"
-              className="rounded-md bg-[#5e6ad2] px-3 py-1.5 text-sm font-medium text-white"
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
               onClick={() => this.setState({ error: null })}
             >
               Try again

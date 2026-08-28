@@ -1,0 +1,9 @@
+{
+  "protocol": 1,
+  "id": "wallpaper",
+  "name": "Wallpaper",
+  "description": "Use an image as the app background.",
+  "version": "0.1.0",
+  "executable": "zest-wallpaper.exe",
+  "kind": "wallpaper"
+}

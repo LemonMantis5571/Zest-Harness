@@ -8,6 +8,22 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const NOW_PLAYING_ID: &str = "now-playing";
+pub const WALLPAPER_ID: &str = "wallpaper";
+
+/// Background looks the wallpaper add-on can render, `none` first.
+pub const WALLPAPER_FILTERS: [&str; 4] = ["none", "print", "frosted", "noir"];
+
+/// The matching filter id, or `none` for anything unrecognised.
+///
+/// Both sides normalise: the host refuses to forward a filter it does not know,
+/// and a plugin built against a newer list still has a defined behaviour when an
+/// older host asks for one it has never heard of.
+pub fn wallpaper_filter(value: &str) -> &'static str {
+    WALLPAPER_FILTERS
+        .into_iter()
+        .find(|filter| *filter == value)
+        .unwrap_or("none")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,8 +50,21 @@ pub enum MediaCommand {
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum PluginRequest {
     Get,
-    Control { command: MediaCommand },
-    SetVolume { volume_percent: f64 },
+    Control {
+        command: MediaCommand,
+    },
+    SetVolume {
+        volume_percent: f64,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetWallpaper {
+        image_path: String,
+        filter: String,
+    },
+    SetWallpaperFilter {
+        filter: String,
+    },
+    ClearWallpaper,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,16 +89,31 @@ pub struct NowPlayingView {
     pub observed_at: u64,
 }
 
+/// Wallpaper plugin payload. The processed image stays on disk in the plugin
+/// folder; `image_file` is a relative name such as `wallpaper.png`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginResponse {
+pub struct WallpaperView {
+    pub status: String,
+    pub source_name: Option<String>,
+    #[serde(default)]
+    pub filter: String,
+    #[serde(default)]
+    pub image_file: Option<String>,
+    pub detail: String,
+    pub observed_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginResponse<T> {
     pub ok: bool,
-    pub data: Option<NowPlayingView>,
+    pub data: Option<T>,
     pub error: Option<String>,
 }
 
-impl PluginResponse {
-    pub fn success(data: NowPlayingView) -> Self {
+impl<T> PluginResponse<T> {
+    pub fn success(data: T) -> Self {
         Self {
             ok: true,
             data: Some(data),

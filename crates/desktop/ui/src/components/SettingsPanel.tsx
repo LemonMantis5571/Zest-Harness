@@ -4,14 +4,15 @@ import {
   ChartColumnIcon,
   ChevronRightIcon,
   type LucideIcon,
+  PaletteIcon,
   ServerIcon,
-  SlidersHorizontalIcon,
   TypeIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
 
 import { FontPicker } from "@/components/FontPicker";
+import { ThemePicker } from "@/components/ThemePicker";
 import { Button } from "@/components/ui/button";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import {
@@ -50,8 +51,6 @@ type Props = {
   onReconnect: () => void;
   onProviderKeyRemoved?: (providerId: string) => void;
   onOpenFolder: () => void;
-  /** Leave Settings for the Customize panel (MCPs, skills, extras, rules). */
-  onOpenCustomize: () => void;
   onProfileChange: (profile: UserProfile) => void;
 };
 
@@ -159,7 +158,6 @@ export function SettingsPanel({
   onReconnect,
   onProviderKeyRemoved,
   onOpenFolder,
-  onOpenCustomize,
   onProfileChange,
 }: Props) {
   const supportsEffort = effortsForModel(session.models, model).length > 0;
@@ -514,9 +512,17 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
+            title="Appearance"
+            icon={PaletteIcon}
+            hint="Colour theme"
+          >
+            <ThemePicker />
+          </SettingsSection>
+
+          <SettingsSection
             title="Typography"
             icon={TypeIcon}
-            hint="Font family & appearance"
+            hint="Font family"
           >
             <FontPicker />
           </SettingsSection>
@@ -832,22 +838,6 @@ export function SettingsPanel({
               </p>
             )}
           </SettingsSection>
-
-          <SettingsSection
-            title="Customize"
-            icon={SlidersHorizontalIcon}
-            hint="MCP servers, skills, extras, rules"
-          >
-            <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              MCP servers, skills, extras, this project&apos;s instructions, and keyboard
-              shortcuts all live in Customize, where each one has room for its own list.
-            </p>
-            <Button type="button" size="sm" onClick={onOpenCustomize}>
-              <SlidersHorizontalIcon data-icon="inline-start" aria-hidden="true" />
-              Open Customize
-            </Button>
-          </SettingsSection>
-
 
           {error ? (
             <p className="px-4 py-3 text-xs text-destructive">{error}</p>

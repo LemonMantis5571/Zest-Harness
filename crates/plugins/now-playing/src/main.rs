@@ -42,6 +42,9 @@ fn handle(request: PluginRequest) -> Result<NowPlayingView, String> {
         PluginRequest::Get => read_now_playing(),
         PluginRequest::Control { command } => control(command),
         PluginRequest::SetVolume { volume_percent } => set_volume(volume_percent),
+        PluginRequest::SetWallpaper { .. }
+        | PluginRequest::SetWallpaperFilter { .. }
+        | PluginRequest::ClearWallpaper => Err("This add-on does not support that.".into()),
     }
 }
 

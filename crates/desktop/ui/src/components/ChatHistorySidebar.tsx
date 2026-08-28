@@ -18,30 +18,23 @@ import {
   SlidersHorizontalIcon,
   SquarePenIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
 
+import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { UserAvatar, UserAvatarButton } from "@/components/UserAvatarButton";
 import { Button } from "@/components/ui/button";
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
-import { Input } from "@/components/ui/input";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { isBooleanRecord, parseJson } from "@/lib/json";
+import { formatChord } from "@/lib/keybindings";
 import {
   elapsedLabel,
   type ThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
-import type { ProjectChats, ThreadSummary, UserProfile } from "@/lib/types";
+import type { ProjectChats, ProviderRow, ThreadSummary, UserProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -79,6 +72,12 @@ type Props = {
   onOpenProfile?: () => void;
   /** The profile screen is showing. */
   profileActive?: boolean;
+  providers: ProviderRow[];
+  quotaRefreshKey: string | number;
+  /** Open the command palette (Search in the sidebar). */
+  onSearch: () => void;
+  /** Show the transcript when a shell panel is covering the active chat. */
+  onRevealTranscript: () => void;
   canNavigateBack: boolean;
   canNavigateForward: boolean;
   onNavigateBack: () => void;
@@ -112,7 +111,6 @@ function formatAge(epochSecs: number) {
 
 const STORAGE_KEY = "zest.sidebarOpen";
 const EXPANDED_KEY = "zest.sidebarProjectsExpanded";
-const GIT_METADATA_POLL_MS = 30_000;
 const MAX_CHAT_TITLE_CHARS = 200;
 
 export function readSidebarOpen(): boolean {
@@ -150,17 +148,6 @@ function writeExpandedMap(map: Record<string, boolean>) {
   } catch {
     /* ignore */
   }
-}
-
-function matchesQuery(project: ProjectChats, thread: ThreadSummary, query: string) {
-  if (!query) return true;
-  if (project.path === null) {
-    return threadTitle(thread).toLowerCase().includes(query);
-  }
-  return (
-    project.name.toLowerCase().includes(query) ||
-    threadTitle(thread).toLowerCase().includes(query)
-  );
 }
 
 function navItemClass(active = false) {
@@ -213,6 +200,10 @@ export function ChatHistorySidebar({
   providerLabel,
   onOpenProfile,
   profileActive = false,
+  providers,
+  quotaRefreshKey,
+  onSearch,
+  onRevealTranscript,
   canNavigateBack,
   canNavigateForward,
   onNavigateBack,
@@ -223,9 +214,6 @@ export function ChatHistorySidebar({
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>(readExpandedMap);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const [pendingDelete, setPendingDelete] = useState<{
     thread: ThreadSummary;
     projectPath: string | null;
@@ -278,8 +266,9 @@ export function ChatHistorySidebar({
 
   useEffect(() => {
     if (!open) return;
-    const interval = window.setInterval(() => setTick((value) => value + 1), GIT_METADATA_POLL_MS);
-    return () => window.clearInterval(interval);
+    const onFocus = () => setTick((value) => value + 1);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [open]);
 
   const wasSending = useRef(false);
@@ -294,10 +283,6 @@ export function ChatHistorySidebar({
     }
   }, [open, sending]);
 
-  useEffect(() => {
-    if (open && searchOpen) searchInputRef.current?.focus();
-  }, [open, searchOpen]);
-
   const editingKey = editingThread?.key;
   useEffect(() => {
     if (!editingKey) return;
@@ -308,7 +293,6 @@ export function ChatHistorySidebar({
     return () => window.cancelAnimationFrame(frame);
   }, [editingKey]);
 
-  const query = searchQuery.trim().toLowerCase();
   const freeChatProject = useMemo(
     () => projects.find((project) => project.path === null) ?? null,
     [projects]
@@ -317,40 +301,23 @@ export function ChatHistorySidebar({
     () =>
       freeChatProject
         ? freeChatProject.threads
-            .filter((thread) => matchesQuery(freeChatProject, thread, query))
             .map((thread) => ({ project: freeChatProject, thread }))
-        .sort((a, b) => b.thread.updatedAt - a.thread.updatedAt)
+            .sort((a, b) => b.thread.updatedAt - a.thread.updatedAt)
         : [],
-    [freeChatProject, query]
+    [freeChatProject]
   );
 
   const visibleProjects = useMemo(
     () =>
-      projects
-        .filter(
-          (project): project is ProjectChats & { path: string } =>
-            project.path !== null
-        )
-        .map((project) => ({
-          ...project,
-          threads: project.threads.filter((thread) =>
-            matchesQuery(project, thread, query)
-          ),
-        }))
-        .filter((project) => !query || project.threads.length > 0),
-    [projects, query]
+      projects.filter(
+        (project): project is ProjectChats & { path: string } =>
+          project.path !== null
+      ),
+    [projects]
   );
-  const searchResultCount = useMemo(
-    () =>
-      recentThreads.length +
-      visibleProjects.reduce((count, project) => count + project.threads.length, 0),
-    [recentThreads, visibleProjects]
-  );
-  const searchEmpty = query.length > 0 && searchResultCount === 0;
 
   function isExpanded(project: ProjectChats) {
     if (project.path === null) return false;
-    if (query) return true;
     if (project.path in expanded) return expanded[project.path];
     // Default: open active project and any project that already has chats.
     return project.active || project.threads.length > 0;
@@ -561,7 +528,10 @@ export function ChatHistorySidebar({
         <button
           type="button"
           onClick={() => {
-            if (active) return;
+            if (active) {
+              onRevealTranscript();
+              return;
+            }
             void openThread(project, thread).catch((error) =>
               ignoreExpectedFailure(error, "open chat from history")
             );
@@ -794,6 +764,16 @@ export function ChatHistorySidebar({
             type="button"
             variant="ghost"
             size="icon-sm"
+            title={`Search (${formatChord("Mod+K")})`}
+            aria-label="Search"
+            onClick={onSearch}
+          >
+            <SearchIcon />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
             title="Open project folder"
             onClick={onOpenFolder}
           >
@@ -818,15 +798,12 @@ export function ChatHistorySidebar({
             </button>
             <button
               type="button"
-              aria-expanded={searchOpen}
-              onClick={() => {
-                if (searchOpen) setSearchQuery("");
-                setSearchOpen((value) => !value);
-              }}
-              className={navItemClass(searchOpen)}
+              title={`Search (${formatChord("Mod+K")})`}
+              onClick={onSearch}
+              className={navItemClass()}
             >
               <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
-              <span>Search chats</span>
+              <span>Search</span>
             </button>
             {onOpenCustomize ? (
               <button
@@ -840,64 +817,6 @@ export function ChatHistorySidebar({
               </button>
             ) : null}
           </nav>
-
-          {searchOpen ? (
-            <div
-              role="search"
-              className="mt-1.5 overflow-hidden rounded-lg border border-border/80 bg-card/70 shadow-sm transition-colors focus-within:border-ring/70 focus-within:ring-2 focus-within:ring-ring/30"
-            >
-              <div className="flex h-9 items-center gap-2 border-b border-border/60 px-2.5">
-                <SearchIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                <Input
-                  ref={searchInputRef}
-                  value={searchQuery}
-                  aria-label="Search chats"
-                  placeholder="Search chats..."
-                  className="h-8 min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 text-xs shadow-none focus-visible:border-0 focus-visible:ring-0"
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      event.preventDefault();
-                      setSearchQuery("");
-                      setSearchOpen(false);
-                    }
-                  }}
-                />
-                {searchQuery ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    title="Clear search"
-                    aria-label="Clear search"
-                    className="shrink-0 text-muted-foreground"
-                    onClick={() => {
-                      setSearchQuery("");
-                      searchInputRef.current?.focus();
-                    }}
-                  >
-                    <XIcon />
-                  </Button>
-                ) : (
-                  <kbd className="shrink-0 rounded border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    Esc
-                  </kbd>
-                )}
-              </div>
-              {query ? (
-                <div className="flex items-center justify-between gap-2 bg-muted/30 px-2.5 py-1 text-[10px] text-muted-foreground">
-                  <span>
-                    {searchEmpty
-                      ? "No matches"
-                      : `${searchResultCount} ${searchResultCount === 1 ? "chat" : "chats"}`}
-                  </span>
-                  <span className="truncate text-muted-foreground/60">
-                    {searchEmpty ? "Try another name" : "Live results"}
-                  </span>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
 
           <div className="my-2 border-t border-border/40" />
 
@@ -938,23 +857,10 @@ export function ChatHistorySidebar({
                 {renameError ? (
                   <p className="px-2 pb-1 text-[11px] text-destructive">{renameError}</p>
                 ) : null}
-                {!query && visibleProjects.length === 0 ? (
+                {visibleProjects.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">
                     Open a project folder to get started.
                   </p>
-                ) : null}
-                {searchEmpty ? (
-                  <Empty className="min-h-32 rounded-lg border border-dashed border-border/60 bg-card/40 px-3 py-6">
-                    <EmptyHeader className="gap-1.5">
-                      <EmptyMedia variant="icon">
-                        <SearchIcon className="text-muted-foreground" />
-                      </EmptyMedia>
-                      <EmptyTitle>No chats found</EmptyTitle>
-                      <EmptyDescription>
-                        Try another name or clear your search.
-                      </EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
                 ) : (
                   <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
                     {visibleProjects.map((project) => {
@@ -1114,42 +1020,54 @@ export function ChatHistorySidebar({
        * first thing in the chat header, where it competed with the project and
        * branch the header is actually for.
        */}
-      <div className="mt-auto shrink-0 border-t border-border/60 p-1.5">
+      <div className="relative z-20 mt-auto shrink-0 border-t border-border/60 p-1.5">
         {open ? (
-          <button
-            type="button"
-            onClick={onOpenProfile}
-            aria-current={profileActive ? "page" : undefined}
-            title="Your profile"
-            className={cn(
-              "flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors",
-              "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
-              profileActive && "bg-[var(--sidebar-accent)]"
-            )}
-          >
-            <UserAvatar
-              avatarDataUrl={profile.avatarDataUrl}
-              displayName={profile.displayName}
-              className="shrink-0"
-            />
-            <span className="min-w-0 flex-1 leading-tight">
-              <span className="block truncate text-[13px] font-medium text-foreground">
-                {profile.displayName.trim() || "Zest"}
-              </span>
-              {providerLabel ? (
-                <span className="block truncate text-[11px] text-muted-foreground">
-                  {providerLabel}
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onOpenProfile}
+              aria-current={profileActive ? "page" : undefined}
+              title="Your profile"
+              className={cn(
+                "flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors",
+                "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
+                profileActive && "bg-[var(--sidebar-accent)]"
+              )}
+            >
+              <UserAvatar
+                avatarDataUrl={profile.avatarDataUrl}
+                displayName={profile.displayName}
+                className="shrink-0"
+              />
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate text-[13px] font-medium text-foreground">
+                  {profile.displayName.trim() || "Zest"}
                 </span>
-              ) : null}
-            </span>
-          </button>
+                {providerLabel ? (
+                  <span className="block truncate text-[11px] text-muted-foreground">
+                    {providerLabel}
+                  </span>
+                ) : null}
+              </span>
+            </button>
+            <AgentQuotaButton
+              providers={providers}
+              refreshKey={quotaRefreshKey}
+              placement="above"
+            />
+          </div>
         ) : (
-          <div className="flex justify-center">
+          <div className="flex flex-col items-center gap-1">
             <UserAvatarButton
               avatarDataUrl={profile.avatarDataUrl}
               displayName={profile.displayName}
               title="Your profile"
               onClick={() => onOpenProfile?.()}
+            />
+            <AgentQuotaButton
+              providers={providers}
+              refreshKey={quotaRefreshKey}
+              placement="above"
             />
           </div>
         )}

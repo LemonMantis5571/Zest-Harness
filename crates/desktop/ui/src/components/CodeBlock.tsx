@@ -15,6 +15,7 @@ type Props = {
   className?: string;
   /** Show language chip in the header (default true). */
   showLang?: boolean;
+  streaming?: boolean;
 };
 
 /**
@@ -27,6 +28,7 @@ export function CodeBlock({
   title,
   className,
   showLang = true,
+  streaming = false,
 }: Props) {
   const lang = normalizeLang(language);
   const label = languageLabel(lang);
@@ -37,6 +39,7 @@ export function CodeBlock({
       code={code}
       language={lang}
       label={`${label} code`}
+      streaming={streaming}
       className={cn("my-3 overflow-hidden last:mb-0", className)}
     >
       {hasHeader ? (

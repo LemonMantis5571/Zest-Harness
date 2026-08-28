@@ -244,6 +244,16 @@ export type ProjectChats = {
   threads: ThreadSummary[];
 };
 
+/** Palette row for a chat that matched a keyword in its title or transcript. */
+export type ChatSearchHit = {
+  id: string;
+  title: string;
+  projectName: string;
+  projectPath: string | null;
+  updatedAt: number;
+  snippet?: string | null;
+};
+
 export type PreparedAttachment = {
   id: string;
   name: string;
@@ -278,6 +288,18 @@ export type NowPlayingView = {
   canPrevious?: boolean | null;
   canToggle?: boolean | null;
   canNext?: boolean | null;
+  detail: string;
+  observedAt: number;
+};
+
+/** Background looks the wallpaper add-on can render. Mirrors WALLPAPER_FILTERS. */
+export type WallpaperFilterId = "none" | "print" | "frosted" | "noir";
+
+export type WallpaperView = {
+  status: "disabled" | "unavailable" | "empty" | "ready";
+  sourceName?: string | null;
+  filter: WallpaperFilterId;
+  imageDataUrl?: string | null;
   detail: string;
   observedAt: number;
 };

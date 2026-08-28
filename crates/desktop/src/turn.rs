@@ -695,10 +695,9 @@ async fn run_with_sink_internal<S: EventSink>(
             } else {
                 match live_thread.lock() {
                     Ok(mut thread) => {
-                        let priority = event_priority(&event);
                         record_ledger_event(&mut thread, &event);
                         apply_event_to_thread(&mut thread, &event);
-                        Some(priority)
+                        event_mutates_thread(&event).then(|| event_priority(&event))
                     }
                     Err(_) => None,
                 }

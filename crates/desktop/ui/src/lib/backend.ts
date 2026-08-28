@@ -32,6 +32,7 @@ import type {
   PluginView,
   ProfileStats,
   ProjectChats,
+  ChatSearchHit,
   ProviderRow,
   RatesStatus,
   SessionInfo,
@@ -41,6 +42,8 @@ import type {
   UsageSnapshot,
   ProviderQuotaSnapshot,
   UserProfile,
+  WallpaperFilterId,
+  WallpaperView,
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspacePickResult,
@@ -102,6 +105,10 @@ export type DesktopBackend = {
   nowPlaying(): Promise<NowPlayingView>;
   controlNowPlaying(action: "previous" | "toggle" | "next"): Promise<NowPlayingView>;
   setNowPlayingVolume(volumePercent: number): Promise<NowPlayingView>;
+  wallpaper(): Promise<WallpaperView>;
+  pickWallpaper(): Promise<WallpaperView>;
+  setWallpaperFilter(filter: WallpaperFilterId): Promise<WallpaperView>;
+  clearWallpaper(): Promise<WallpaperView>;
   usageReport(days: number): Promise<UsageReport>;
   /** Open the price book in the OS editor so rates can be corrected. */
   openPricesFile(): Promise<void>;
@@ -132,6 +139,7 @@ export type DesktopBackend = {
   listThreads(): Promise<ThreadSummary[]>;
   forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
+  searchChats(query: string): Promise<ChatSearchHit[]>;
   openProjectChat(options: {
     /** `null` opens a chat without a workspace. */
     root: string | null;
@@ -271,6 +279,10 @@ export function createTauriBackend(): DesktopBackend {
     nowPlaying: () => tauriApi.nowPlaying(),
     controlNowPlaying: (action) => tauriApi.controlNowPlaying(action),
     setNowPlayingVolume: (volumePercent) => tauriApi.setNowPlayingVolume(volumePercent),
+    wallpaper: () => tauriApi.wallpaper(),
+    pickWallpaper: () => tauriApi.pickWallpaper(),
+    setWallpaperFilter: (filter) => tauriApi.setWallpaperFilter(filter),
+    clearWallpaper: () => tauriApi.clearWallpaper(),
     usageReport: (days) => tauriApi.usageReport(days),
     openPricesFile: () => tauriApi.openPricesFile(),
     refreshRates: (force) => tauriApi.refreshRates(force),
@@ -286,6 +298,7 @@ export function createTauriBackend(): DesktopBackend {
     listThreads: () => tauriApi.listThreads(),
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
+    searchChats: (query) => tauriApi.searchChats(query),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadThread: (id) => tauriApi.loadThread(id),
     newThread: () => tauriApi.newThread(),

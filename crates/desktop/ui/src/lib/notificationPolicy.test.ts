@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   isLongTurn,
   LONG_TURN_NOTIFICATION_MS,
+  mergeToastDescription,
   notificationFingerprint,
 } from "./notificationPolicy.ts";
 
@@ -31,6 +32,33 @@ describe("notification policy", () => {
     assert.notEqual(
       notificationFingerprint("error", "Could not allow tool", "Try again."),
       first
+    );
+  });
+
+  it("groups success toasts by title so extra copy does not stack a second card", () => {
+    const deleted = notificationFingerprint("success", "Chat deleted", "");
+    assert.equal(
+      notificationFingerprint(
+        "success",
+        "Chat deleted",
+        "Type to start a new chat"
+      ),
+      deleted
+    );
+    assert.notEqual(
+      notificationFingerprint("success", "Fork created", ""),
+      deleted
+    );
+  });
+
+  it("keeps a hint when collapsing success toasts", () => {
+    assert.equal(
+      mergeToastDescription("", "Type to start a new chat"),
+      "Type to start a new chat"
+    );
+    assert.equal(
+      mergeToastDescription("Type to start a new chat", ""),
+      "Type to start a new chat"
     );
   });
 });

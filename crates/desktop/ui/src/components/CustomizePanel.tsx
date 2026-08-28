@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { NowPlayingCard } from "@/components/NowPlayingCard";
+import { WallpaperCard } from "@/components/WallpaperCard";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getBackend, type SkillSummary, type SystemPromptInfo } from "@/lib/backend";
@@ -27,7 +28,11 @@ import type {
   McpServerRow,
   NowPlayingView,
   PluginView,
+  WallpaperFilterId,
+  WallpaperView,
 } from "@/lib/types";
+import { notifyWallpaperChanged } from "@/lib/wallpaperSync";
+import { notifyPluginsChanged } from "@/lib/pluginSync";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -660,6 +665,7 @@ function Field({
 function PluginsPanel() {
   const [plugins, setPlugins] = useState<PluginView[]>([]);
   const [nowPlaying, setNowPlaying] = useState<NowPlayingView | null>(null);
+  const [wallpaper, setWallpaper] = useState<WallpaperView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -667,10 +673,16 @@ function PluginsPanel() {
   const load = useCallback(async () => {
     const backend = getBackend();
     try {
-      const [rows, music] = await Promise.all([backend.listPlugins(), backend.nowPlaying()]);
+      const [rows, music, paper] = await Promise.all([
+        backend.listPlugins(),
+        backend.nowPlaying(),
+        backend.wallpaper(),
+      ]);
       setPlugins(rows);
       setNowPlaying(music);
+      setWallpaper(paper);
       setError(null);
+      notifyPluginsChanged();
     } catch {
       setError("Could not read your extras. Try again.");
     }
@@ -698,9 +710,53 @@ function PluginsPanel() {
     try {
       setPlugins(await getBackend().setPluginEnabled(plugin.id, !plugin.enabled));
       setNowPlaying(await getBackend().nowPlaying());
+      notifyPluginsChanged();
+      if (plugin.id === "wallpaper") {
+        setWallpaper(await getBackend().wallpaper());
+        notifyWallpaperChanged();
+      }
       setError(null);
     } catch (err) {
       setError(messageFromError(err, "Could not change this extra."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function chooseWallpaper() {
+    setBusy("wallpaper");
+    try {
+      setWallpaper(await getBackend().pickWallpaper());
+      notifyWallpaperChanged();
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err, "Could not use that image."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function clearWallpaper() {
+    setBusy("wallpaper");
+    try {
+      setWallpaper(await getBackend().clearWallpaper());
+      notifyWallpaperChanged();
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err, "Could not clear the wallpaper."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setWallpaperFilter(filter: WallpaperFilterId) {
+    setBusy("wallpaper");
+    try {
+      setWallpaper(await getBackend().setWallpaperFilter(filter));
+      notifyWallpaperChanged();
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err, "Could not update the wallpaper."));
     } finally {
       setBusy(null);
     }
@@ -777,6 +833,15 @@ function PluginsPanel() {
               ) : null}
               {plugin.id === "now-playing" && plugin.enabled ? (
                 <NowPlayingCard value={nowPlaying} />
+              ) : null}
+              {plugin.id === "wallpaper" && plugin.enabled ? (
+                <WallpaperCard
+                  value={wallpaper}
+                  busy={busy === "wallpaper"}
+                  onChoose={() => void chooseWallpaper()}
+                  onClear={() => void clearWallpaper()}
+                  onFilterChange={(filter) => void setWallpaperFilter(filter)}
+                />
               ) : null}
             </div>
           ))}

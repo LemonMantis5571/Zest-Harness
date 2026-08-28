@@ -2,7 +2,6 @@
 @import "tw-animate-css";
 @import "./shadcn-tailwind.css";
 @import "@fontsource-variable/geist";
-@import "@fontsource-variable/jetbrains-mono";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -57,10 +56,19 @@
   --color-success-foreground: var(--success-foreground);
   --color-success: var(--success);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-link: var(--link);
+  --color-heatmap-0: var(--heatmap-0);
+  --color-heatmap-1: var(--heatmap-1);
+  --color-heatmap-2: var(--heatmap-2);
+  --color-heatmap-3: var(--heatmap-3);
+  --color-heatmap-4: var(--heatmap-4);
+  --color-heatmap-5: var(--heatmap-5);
 }
 
-/* Linear DESIGN.md — always-dark Zest canvas (not pure black) */
-:root {
+/* Linear DESIGN.md — Zest default (dark canvas, not pure black) */
+:root,
+html[data-theme="zest"] {
+  color-scheme: dark;
   --radius: 0.5rem;
   --background: #0c0c0e;
   --foreground: #f7f8f8;
@@ -95,9 +103,14 @@
   --sidebar-ring: #5e6ad2;
   --primary-hover: #828fff;
   --chat-max: 45rem;
-  --chat-canvas: #0f1012;
-  --chat-header: color-mix(in srgb, #121314 92%, transparent);
+  --canvas-solid: #0f1012;
+  --header-solid: #121314;
+  --sidebar-solid: #121314;
+  --wallpaper-ink: #0c0c0e;
+  --chat-canvas: var(--canvas-solid);
+  --chat-header: color-mix(in srgb, var(--header-solid) 92%, transparent);
   --user-bubble: #1c1e24;
+  --link: #82a0ff;
   --destructive-foreground: var(--color-red-800);
   --success: var(--color-emerald-500);
   --success-foreground: var(--color-emerald-900);
@@ -107,6 +120,121 @@
   --warning-foreground: var(--color-yellow-900);
   --invert: var(--color-zinc-900);
   --invert-foreground: var(--color-zinc-50);
+}
+
+/*
+ * Oceanic — inspired by oceanic-ui (Ocean / Swing Metal grammar):
+ * cool near-white surfaces, sky blues, aqua glow on focus, opaque chrome.
+ */
+html[data-theme="oceanic"] {
+  color-scheme: light;
+  --radius: 0.375rem;
+  --background: #eaf6ff;
+  --foreground: #0d3151;
+  --card: #f7fcff;
+  --card-foreground: #0d3151;
+  --popover: #fbfdff;
+  --popover-foreground: #0d3151;
+  --primary: #1367c7;
+  --primary-foreground: #ffffff;
+  --secondary: #dbeeff;
+  --secondary-foreground: #0d3151;
+  --muted: #e4eaf1;
+  --muted-foreground: #4c6b89;
+  --accent: #dbeeff;
+  --accent-foreground: #0d3151;
+  --destructive: #d43d5c;
+  --border: #c9d3dd;
+  --input: #9dc3ea;
+  --ring: #12b8c4;
+  --chart-1: #1e85f0;
+  --chart-2: #33d6e0;
+  --chart-3: #4c6b89;
+  --chart-4: #b3ddff;
+  --chart-5: #eef8ff;
+  --sidebar: #eef8ff;
+  --sidebar-foreground: #0d3151;
+  --sidebar-primary: #1367c7;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #dbeeff;
+  --sidebar-accent-foreground: #0d3151;
+  --sidebar-border: #c9d3dd;
+  --sidebar-ring: #12b8c4;
+  --primary-hover: #1e85f0;
+  --canvas-solid: #f7fcff;
+  --header-solid: #eef8ff;
+  --sidebar-solid: #eef8ff;
+  --wallpaper-ink: #eaf6ff;
+  --chat-canvas: var(--canvas-solid);
+  --chat-header: color-mix(in srgb, var(--header-solid) 92%, transparent);
+  --user-bubble: #dbeeff;
+  --link: #1367c7;
+  --destructive-foreground: #c22a49;
+}
+
+/*
+ * Nights — midnight purple chrome, magenta actions, cyan focus.
+ * Gold stays on charts and warnings so buttons do not shout.
+ */
+html[data-theme="nights"] {
+  color-scheme: dark;
+  --radius: 0.5rem;
+  --background: #12081c;
+  --foreground: #f3eef8;
+  --card: #1b102c;
+  --card-foreground: #f3eef8;
+  --popover: #221436;
+  --popover-foreground: #f3eef8;
+  --primary: #e4458c;
+  --primary-foreground: #ffffff;
+  --secondary: #2a1844;
+  --secondary-foreground: #e8dcf4;
+  --muted: #2a1844;
+  --muted-foreground: #c0a8d4;
+  --accent: #2e1a4c;
+  --accent-foreground: #f3eef8;
+  --destructive: #e85a7a;
+  --border: #4a3270;
+  --input: #4a3270;
+  --ring: #4ae0e8;
+  --chart-1: #e4458c;
+  --chart-2: #4ae0e8;
+  --chart-3: #e8c44a;
+  --chart-4: #5a3a88;
+  --chart-5: #1b102c;
+  --sidebar: #160c28;
+  --sidebar-foreground: #f3eef8;
+  --sidebar-primary: #e4458c;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #2a1844;
+  --sidebar-accent-foreground: #f3eef8;
+  --sidebar-border: #4a3270;
+  --sidebar-ring: #4ae0e8;
+  --primary-hover: #f05aa0;
+  --canvas-solid: #1b102c;
+  --header-solid: #160c28;
+  --sidebar-solid: #160c28;
+  --wallpaper-ink: #12081c;
+  --chat-canvas: var(--canvas-solid);
+  --chat-header: color-mix(in srgb, var(--header-solid) 92%, transparent);
+  --user-bubble: #2e1648;
+  --link: #7ec8f8;
+  --destructive-foreground: #ff8aa4;
+}
+
+/*
+ * Activity heatmap. `bg-muted/25` vanished on every palette because muted is
+ * already a near-canvas wash. These mix foreground and primary into the
+ * opaque canvas so empty cells stay a grid and busy days still climb.
+ */
+html {
+  --heatmap-0: color-mix(in srgb, var(--foreground) 28%, var(--canvas-solid));
+  --heatmap-1: color-mix(in srgb, var(--foreground) 40%, var(--canvas-solid));
+  --heatmap-2: color-mix(in srgb, var(--primary) 48%, var(--canvas-solid));
+  --heatmap-3: color-mix(in srgb, var(--primary) 68%, var(--canvas-solid));
+  --heatmap-4: color-mix(in srgb, var(--primary) 86%, var(--canvas-solid));
+  --heatmap-5: var(--primary);
+  --heatmap-edge: color-mix(in srgb, var(--foreground) 22%, transparent);
 }
 
 @layer base {
@@ -208,6 +336,139 @@
   background-clip: text;
   color: transparent;
   animation: zest-shimmer 1.4s ease-in-out infinite;
+}
+
+.image-pixelated {
+  image-rendering: pixelated;
+}
+
+.zest-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.zest-wallpaper[data-filter="print"] {
+  image-rendering: pixelated;
+}
+
+/*
+ * The scrim between the photo and the app, weighted per look. Print keeps the
+ * most local contrast of the three — dots of full black beside dots of full
+ * colour — so it needs the most cover; frosted has already thrown its detail
+ * away and needs the least.
+ */
+.zest-wallpaper::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--wallpaper-ink) 52%, transparent);
+}
+
+.zest-wallpaper[data-filter="print"]::after {
+  background: color-mix(in srgb, var(--wallpaper-ink) 58%, transparent);
+}
+
+.zest-wallpaper[data-filter="frosted"]::after {
+  background: color-mix(in srgb, var(--wallpaper-ink) 44%, transparent);
+}
+
+/*
+ * How much photo survives is (1 - surface) * (1 - scrim), so these numbers
+ * multiply with the scrim above and get small fast — at 82% behind a 62% scrim
+ * only 7% of the photo was left, which reads as the wallpaper being broken
+ * rather than as a subtle wallpaper. These are the values the wallpaper
+ * shipped with; treat them as the look and tune the scrim instead.
+ *
+ * Legibility comes from the text rather than from cover. The near-white
+ * foreground already clears any backdrop, and body copy sits on opaque cards;
+ * it was only the thin muted greys — hints and section subtitles, which sit
+ * directly on the canvas — that the photo was eating, so those and the borders
+ * lift and the photo stays visible.
+ */
+html.has-wallpaper {
+  --chat-canvas: color-mix(in srgb, var(--canvas-solid) 58%, transparent);
+  --chat-header: color-mix(in srgb, var(--header-solid) 55%, transparent);
+  --sidebar: color-mix(in srgb, var(--sidebar-solid) 64%, transparent);
+  --background: color-mix(in srgb, var(--wallpaper-ink) 42%, transparent);
+  --muted-foreground: #b7bcc5;
+  --border: #383b42;
+  --sidebar-border: #383b42;
+}
+
+/* Frosted has no fine detail left to read through, so it may show more. */
+html.has-wallpaper[data-wallpaper-filter="frosted"] {
+  --chat-canvas: color-mix(in srgb, var(--canvas-solid) 50%, transparent);
+  --chat-header: color-mix(in srgb, var(--header-solid) 48%, transparent);
+  --sidebar: color-mix(in srgb, var(--sidebar-solid) 58%, transparent);
+  --background: color-mix(in srgb, var(--wallpaper-ink) 34%, transparent);
+}
+
+html[data-theme="oceanic"].has-wallpaper {
+  --muted-foreground: #2a4a68;
+  --border: #9dc3ea;
+  --sidebar-border: #9dc3ea;
+}
+
+html[data-theme="nights"].has-wallpaper {
+  --muted-foreground: #d4c0e4;
+  --border: #6a4a90;
+  --sidebar-border: #6a4a90;
+}
+
+/*
+ * Only `prefers-contrast: more` pulls the app back to near-opaque, because only
+ * that is a request for contrast.
+ *
+ * `prefers-reduced-transparency: reduce` deliberately is not: on Windows it is
+ * the same Personalization checkbox that turns off the taskbar tint, so it is
+ * off on a great many ordinary desktops. Grouping it here meant the wallpaper
+ * was being discarded for people who had merely disabled a cosmetic effect,
+ * seconds after they picked the photo.
+ */
+@media (prefers-contrast: more) {
+  html {
+    --heatmap-0: color-mix(in srgb, var(--foreground) 36%, var(--canvas-solid));
+    --heatmap-1: color-mix(in srgb, var(--foreground) 48%, var(--canvas-solid));
+    --heatmap-edge: color-mix(in srgb, var(--foreground) 32%, transparent);
+  }
+
+  html.has-wallpaper,
+  html.has-wallpaper[data-wallpaper-filter="frosted"] {
+    --chat-canvas: color-mix(in srgb, var(--canvas-solid) 88%, transparent);
+    --chat-header: color-mix(in srgb, var(--header-solid) 90%, transparent);
+    --sidebar: color-mix(in srgb, var(--sidebar-solid) 92%, transparent);
+    --background: color-mix(in srgb, var(--wallpaper-ink) 76%, transparent);
+    --muted-foreground: #d4d8de;
+  }
+
+  html[data-theme="oceanic"].has-wallpaper,
+  html[data-theme="oceanic"].has-wallpaper[data-wallpaper-filter="frosted"] {
+    --muted-foreground: #0d3151;
+    --border: #0f4f9c;
+    --sidebar-border: #0f4f9c;
+  }
+
+  html[data-theme="nights"].has-wallpaper,
+  html[data-theme="nights"].has-wallpaper[data-wallpaper-filter="frosted"] {
+    --muted-foreground: #f3eef8;
+    --border: #e4458c;
+    --sidebar-border: #e4458c;
+  }
+
+  .zest-wallpaper::after,
+  .zest-wallpaper[data-filter="print"]::after,
+  .zest-wallpaper[data-filter="frosted"]::after {
+    background: color-mix(in srgb, var(--wallpaper-ink) 72%, transparent);
+  }
+}
+
+html.has-wallpaper body {
+  background-color: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

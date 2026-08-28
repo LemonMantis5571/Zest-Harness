@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark" data-theme="zest">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/zest-favicon.png" />
@@ -21,6 +21,27 @@
         background: #0c0c0e;
       }
     </style>
+    <script>
+      (function () {
+        try {
+          var palettes = {
+            oceanic: { dark: false, bg: "#eaf6ff" },
+            nights: { dark: true, bg: "#12081c" },
+          };
+          var id = localStorage.getItem("zest.selected_theme");
+          var palette = palettes[id];
+          if (!palette) return;
+          var root = document.documentElement;
+          root.classList.toggle("dark", palette.dark);
+          root.dataset.theme = id;
+          var scheme = palette.dark ? "dark" : "light";
+          root.style.colorScheme = scheme;
+          root.style.background = palette.bg;
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          if (meta) meta.setAttribute("content", scheme);
+        } catch (e) {}
+      })();
+    </script>
     <title>Zest</title>
   </head>
   <body>

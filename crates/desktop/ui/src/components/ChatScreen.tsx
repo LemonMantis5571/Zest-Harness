@@ -1,5 +1,7 @@
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -29,14 +31,12 @@ import {
   writeSidebarOpen,
 } from "@/components/ChatHistorySidebar";
 import { CommandOutputCard } from "@/components/CommandOutputCard";
-import { CustomizePanel } from "@/components/CustomizePanel";
 import { CheckpointRail } from "@/components/CheckpointRail";
-import { ConversationTurnHistory } from "@/components/ConversationTurnHistory";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
-import { AgentQuotaButton } from "@/components/AgentQuotaButton";
+import { SettingsPanel } from "@/components/SettingsPanel";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
 import { Composer } from "@/components/Composer";
-import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
+import type { DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
 import { NeedsInputCard } from "@/components/NeedsInputCard";
 import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
@@ -44,15 +44,10 @@ import { looksLikeDocument } from "@/lib/documentShape";
 import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
 import { Markdown } from "@/components/Markdown";
-import { NowPlayingButton } from "@/components/NowPlayingButton";
-import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
-import { SettingsPanel } from "@/components/SettingsPanel";
 import { ToolCallRow } from "@/components/ToolCallRow";
-import { UsageScreen } from "@/components/UsageScreen";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { ThinkingReasoning } from "@/components/ThinkingReasoning";
-import { WorkbenchPanel } from "@/components/WorkbenchPanel";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
 import {
   Attachment,
@@ -78,12 +73,14 @@ import { toast } from "@/components/ui/toast";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { buildConversationTurns } from "@/lib/conversationTurns";
+import { ensureFontLoaded } from "@/lib/fonts";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
+import { formatChord, loadBindings, type CommandId } from "@/lib/keybindings";
 import { useKeybindings } from "@/lib/useKeybindings";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import type {
@@ -103,6 +100,29 @@ import type {
   WorkspaceReview,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { markStartup, measureStartup } from "@/lib/startupPerf";
+
+markStartup("chat-chunk");
+measureStartup("chat-chunk", "boot-effect");
+
+const CustomizePanel = lazy(() =>
+  import("@/components/CustomizePanel").then((m) => ({ default: m.CustomizePanel }))
+);
+const ProfileScreen = lazy(() =>
+  import("@/components/ProfileScreen").then((m) => ({ default: m.ProfileScreen }))
+);
+const UsageScreen = lazy(() =>
+  import("@/components/UsageScreen").then((m) => ({ default: m.UsageScreen }))
+);
+const DiffViewer = lazy(() =>
+  import("@/components/DiffViewer").then((m) => ({ default: m.DiffViewer }))
+);
+const WorkbenchPanel = lazy(() =>
+  import("@/components/WorkbenchPanel").then((m) => ({ default: m.WorkbenchPanel }))
+);
+const NowPlayingButton = lazy(() =>
+  import("@/components/NowPlayingButton").then((m) => ({ default: m.NowPlayingButton }))
+);
 
 function shortRoot(root: string): string {
   const cleaned = root.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
@@ -181,6 +201,8 @@ type Props = {
   onCustomizeTabChange?: (tab: CustomizeTab) => void;
   /** Leave the open panel for wherever the user was before it. */
   onClosePanel?: () => void;
+  /** Show the transcript again, keeping panel visits in Back history. */
+  onRevealTranscript?: () => void;
   /** Record and open the Settings view in the app navigation history. */
   onOpenSettings?: () => void;
   /** Remove Settings from the app navigation history when it closes. */
@@ -698,6 +720,7 @@ export function ChatScreen({
   shellPanel = null,
   onCustomizeTabChange,
   onClosePanel,
+  onRevealTranscript,
   onOpenSettings,
   onCloseSettings,
   canNavigateBack,
@@ -778,9 +801,20 @@ export function ChatScreen({
    */
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    void ensureFontLoaded("jetbrains-mono");
+  }, []);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [editingMessageBusy, setEditingMessageBusy] = useState(false);
+  const sendingRef = useRef(sending);
+  sendingRef.current = sending;
+  const editingMessageIdRef = useRef(editingMessageId);
+  editingMessageIdRef.current = editingMessageId;
+  const editingMessageTextRef = useRef(editingMessageText);
+  editingMessageTextRef.current = editingMessageText;
+  const editingMessageBusyRef = useRef(editingMessageBusy);
+  editingMessageBusyRef.current = editingMessageBusy;
   const scrollToTranscriptMessageRef =
     useRef<ScrollToTranscriptMessage | null>(null);
   const conversationTurns = useMemo(
@@ -1065,20 +1099,17 @@ export function ChatScreen({
     ? Math.max(needsInputCardHeight, 160) + 152
     : undefined;
 
-  const startEditingMessage = useCallback(
-    (messageId: string, text: string) => {
-      if (sending || editingMessageBusy) return;
-      setEditingMessageId(messageId);
-      setEditingMessageText(text);
-    },
-    [editingMessageBusy, sending]
-  );
+  const startEditingMessage = useCallback((messageId: string, text: string) => {
+    if (sendingRef.current || editingMessageBusyRef.current) return;
+    setEditingMessageId(messageId);
+    setEditingMessageText(text);
+  }, []);
 
   const cancelEditingMessage = useCallback(() => {
-    if (editingMessageBusy) return;
+    if (editingMessageBusyRef.current) return;
     setEditingMessageId(null);
     setEditingMessageText("");
-  }, [editingMessageBusy]);
+  }, []);
 
   const revealProjectFolder = useCallback(async () => {
     try {
@@ -1102,10 +1133,28 @@ export function ChatScreen({
     [onOpenSettings]
   );
 
+  const openPalette = useCallback(() => {
+    setPaletteOpen(true);
+  }, []);
+
+  const openCustomize = useCallback(() => {
+    onOpenCustomize?.();
+  }, [onOpenCustomize]);
+
+  const openProfile = useCallback(() => {
+    onOpenProfile?.();
+  }, [onOpenProfile]);
+
+  const openUsage = useCallback(() => {
+    onOpenUsage?.();
+  }, [onOpenUsage]);
+
   const submitEditingMessage = useCallback(async () => {
-    const messageId = editingMessageId;
-    const text = editingMessageText.trim();
-    if (!messageId || !text || sending || editingMessageBusy) return;
+    const messageId = editingMessageIdRef.current;
+    const text = editingMessageTextRef.current.trim();
+    if (!messageId || !text || sendingRef.current || editingMessageBusyRef.current) {
+      return;
+    }
 
     setEditingMessageBusy(true);
     try {
@@ -1117,7 +1166,7 @@ export function ChatScreen({
     } finally {
       setEditingMessageBusy(false);
     }
-  }, [editingMessageBusy, editingMessageId, editingMessageText, onEditMessage, sending]);
+  }, [onEditMessage]);
 
   /**
    * Hand focus back to the toggle when the Workbench closes.
@@ -1147,13 +1196,30 @@ export function ChatScreen({
     [messages, scrollToTranscriptMessage]
   );
 
-  const paletteActions = useMemo<PaletteAction[]>(
-    () => [
+  const paletteActions = useMemo<PaletteAction[]>(() => {
+    const chords = loadBindings();
+    const shortcutFor = (id: CommandId) => {
+      const chord = chords[id];
+      return chord ? formatChord(chord) : undefined;
+    };
+    return [
+      {
+        id: "go-back",
+        label: "Go back",
+        description: "Open the previous chat or panel",
+        run: onNavigateBack,
+      },
+      {
+        id: "go-forward",
+        label: "Go forward",
+        description: "Open the next chat or panel",
+        run: onNavigateForward,
+      },
       {
         id: "new-chat",
         label: "New chat",
         description: "Start a fresh conversation without a workspace",
-        shortcut: "Ctrl+N",
+        shortcut: shortcutFor("chat.new"),
         run: onNewChat,
       },
       ...(session.isFreeChat
@@ -1170,7 +1236,7 @@ export function ChatScreen({
         id: "open-provider",
         label: "Switch provider",
         description: "Choose a configured model provider",
-        shortcut: "Ctrl+Shift+M",
+        shortcut: shortcutFor("view.provider"),
         run: () => setProviderSwitchOpen(true),
       },
       ...(onOpenCustomize
@@ -1179,8 +1245,9 @@ export function ChatScreen({
               id: "open-customize",
               label: "Open Customize",
               description: "MCP servers, skills, and project instructions",
-              shortcut: "Ctrl+Shift+,",
-              run: onOpenCustomize,
+              shortcut: shortcutFor("view.customize"),
+              group: "settings" as const,
+              run: openCustomize,
             },
           ]
         : []),
@@ -1188,7 +1255,8 @@ export function ChatScreen({
         id: "open-settings",
         label: "Open settings",
         description: "Configure Zest and keyboard shortcuts",
-        shortcut: "Ctrl+,",
+        shortcut: shortcutFor("view.settings"),
+        group: "settings" as const,
         run: openSettings,
       },
       ...(onOpenProfile
@@ -1197,7 +1265,9 @@ export function ChatScreen({
               id: "open-profile",
               label: "Open profile",
               description: "View your profile and account details",
-              run: onOpenProfile,
+              shortcut: shortcutFor("view.profile"),
+              group: "settings" as const,
+              run: openProfile,
             },
           ]
         : []),
@@ -1207,22 +1277,28 @@ export function ChatScreen({
               id: "open-usage",
               label: "Open usage",
               description: "Review model usage and estimated cost",
-              run: onOpenUsage,
+              shortcut: shortcutFor("view.usage"),
+              group: "settings" as const,
+              run: openUsage,
             },
           ]
         : []),
-    ],
-    [
-      onNewChat,
-      onOpenCustomize,
-      onOpenProfile,
-      onOpenUsage,
-      openSettings,
-      session.isFreeChat,
-      toggleWorkbench,
-      workbenchOpen,
-    ]
-  );
+    ];
+  }, [
+    onNavigateBack,
+    onNavigateForward,
+    onNewChat,
+    onOpenCustomize,
+    onOpenProfile,
+    onOpenUsage,
+    openCustomize,
+    openProfile,
+    openUsage,
+    openSettings,
+    session.isFreeChat,
+    toggleWorkbench,
+    workbenchOpen,
+  ]);
 
   // A bump means "open the User section". Zero is the initial value, so the
   // panel does not fly open on mount.
@@ -1308,12 +1384,14 @@ export function ChatScreen({
     "view.settings": () => {
       openSettings();
     },
-    "view.shortcuts": () => onCustomizeTabChange?.("shortcuts"),
-    "view.profile": () => onOpenProfile?.(),
-    "view.usage": () => onOpenUsage?.(),
-    "view.customize": () => onOpenCustomize?.(),
+    "view.shortcuts": () => {
+      onCustomizeTabChange?.("shortcuts");
+    },
+    "view.profile": openProfile,
+    "view.usage": openUsage,
+    "view.customize": openCustomize,
     "view.provider": () => setProviderSwitchOpen(true),
-    "view.palette": () => setPaletteOpen(true),
+    "view.palette": openPalette,
   });
 
   return (
@@ -1331,12 +1409,16 @@ export function ChatScreen({
         onForkThread={onForkThread}
         onDeleteThread={onDeleteThread}
         onOpenFolder={onOpenFolder}
-        onOpenCustomize={onOpenCustomize}
+        onOpenCustomize={openCustomize}
         customizeActive={shellPanel?.kind === "customize"}
         profileActive={shellPanel?.kind === "profile"}
         profile={profile}
         providerLabel={providerLabel}
-        onOpenProfile={onOpenProfile}
+        onOpenProfile={openProfile}
+        providers={providers}
+        quotaRefreshKey={`${session.threadId}:${messages.length}`}
+        onSearch={openPalette}
+        onRevealTranscript={() => onRevealTranscript?.()}
         canNavigateBack={canNavigateBack}
         canNavigateForward={canNavigateForward}
         onNavigateBack={onNavigateBack}
@@ -1372,13 +1454,9 @@ export function ChatScreen({
             {/* Branch changes moved out of this row and into BranchChangesBar
                 below the header, where the counts can say which project and
                 branch they belong to. */}
-            <ConversationTurnHistory
-              turns={conversationTurns}
-              messageCount={messages.length}
-              onJump={jumpToMessage}
-            />
-            <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
-            <NowPlayingButton />
+            <Suspense fallback={null}>
+              <NowPlayingButton />
+            </Suspense>
             {/* Only with a project: a projectless chat has no folder to show,
                 and the backend refuses to reveal Zest's own free-chat store. */}
             {!session.isFreeChat ? (
@@ -1400,7 +1478,7 @@ export function ChatScreen({
               title="Command palette (Ctrl+K)"
               aria-label="Open command palette"
               aria-expanded={paletteOpen}
-              onClick={() => setPaletteOpen(true)}
+              onClick={openPalette}
             >
               <CommandIcon />
             </Button>
@@ -1468,7 +1546,8 @@ export function ChatScreen({
          * indentation so wrapping it stays a two-line diff.
          */}
         {shellPanel ? (
-          shellPanel.kind === "customize" ? (
+          <Suspense fallback={null}>
+          {shellPanel.kind === "customize" ? (
             <CustomizePanel
               tab={shellPanel.tab}
               sending={sending}
@@ -1489,13 +1568,14 @@ export function ChatScreen({
                   // Editing name and avatar stays in Settings; the profile
                   // page reports, it does not duplicate the form.
                   onEditProfile={() => openSettings(true)}
-                  onOpenUsage={() => onOpenUsage?.()}
+                  onOpenUsage={openUsage}
                 />
               ) : (
                 <UsageScreen onBack={() => onClosePanel?.()} />
               )}
             </div>
-          )
+          )}
+          </Suspense>
         ) : (
         <div className="relative min-h-0 flex-1">
           {/* The rail needs a gutter of its own; a narrow window has none to
@@ -1613,12 +1693,14 @@ export function ChatScreen({
                       onOpenProviderSwitch={refreshAndOpenProviderSwitch}
                       onSend={onSend}
                       editing={editingMessageId === msg.id}
-                      editingText={editingMessageText}
+                      editingText={
+                        editingMessageId === msg.id ? editingMessageText : ""
+                      }
                       editingBusy={editingMessageBusy}
                       onStartEdit={startEditingMessage}
                       onChangeEdit={setEditingMessageText}
                       onCancelEdit={cancelEditingMessage}
-                      onSubmitEdit={() => void submitEditingMessage()}
+                      onSubmitEdit={submitEditingMessage}
                       onResolveQuestion={onResolveQuestion}
                       pinQuestion={
                         pendingApprovals.length === 0 &&
@@ -1754,38 +1836,36 @@ export function ChatScreen({
         )}
       </div>
 
-      <SettingsPanel
-        open={settingsOpen}
-        session={session}
-        model={model}
-        effort={effort}
-        sending={sending}
-        profile={profile}
-        focusUser={focusUser}
-        onClose={closeSettings}
-        onChangeProvider={() => {
-          closeSettings();
-          setProviderSwitchOpen(true);
-        }}
-        onReloadSession={onReloadSession}
-        onReconnect={() => {
-          closeSettings();
-          onReconnect();
-        }}
-        onProviderKeyRemoved={() => {
-          closeSettings();
-          refreshAndOpenProviderSwitch();
-        }}
-        onOpenFolder={() => {
-          closeSettings();
-          onOpenFolder();
-        }}
-        onOpenCustomize={() => {
-          closeSettings();
-          onOpenCustomize?.();
-        }}
-        onProfileChange={onProfileChange}
-      />
+      {settingsOpen ? (
+        <SettingsPanel
+          open={settingsOpen}
+          session={session}
+          model={model}
+          effort={effort}
+          sending={sending}
+          profile={profile}
+          focusUser={focusUser}
+          onClose={closeSettings}
+          onChangeProvider={() => {
+            closeSettings();
+            setProviderSwitchOpen(true);
+          }}
+          onReloadSession={onReloadSession}
+          onReconnect={() => {
+            closeSettings();
+            onReconnect();
+          }}
+          onProviderKeyRemoved={() => {
+            closeSettings();
+            refreshAndOpenProviderSwitch();
+          }}
+          onOpenFolder={() => {
+            closeSettings();
+            onOpenFolder();
+          }}
+          onProfileChange={onProfileChange}
+        />
+      ) : null}
 
       <ProviderSwitchSheet
         open={providerSwitchOpen}
@@ -1815,46 +1895,61 @@ export function ChatScreen({
         onRefresh={onRefreshProviders}
       />
 
-      <WorkbenchPanel
-        open={workbenchOpen}
-        session={session}
-        messages={messages}
-        sending={sending}
-        compacting={compacting}
-        review={workspaceReview}
-        onClose={closeWorkbench}
-        onVerify={onVerifyWorkspace}
-        onRewind={onRewindThread}
-        onJump={jumpToMessage}
-        delegationJobs={delegationJobs}
-        onCreateDelegation={onCreateDelegation}
-        onApproveDelegation={onApproveDelegation}
-        onCancelDelegation={onCancelDelegation}
-        onRetryDelegation={onRetryDelegation}
-        onApplyDelegation={onApplyDelegation}
-        onReconnectProvider={onReconnectProvider}
-      />
+      {workbenchOpen ? (
+        <Suspense fallback={null}>
+          <WorkbenchPanel
+            open={workbenchOpen}
+            session={session}
+            messages={messages}
+            sending={sending}
+            compacting={compacting}
+            review={workspaceReview}
+            onClose={closeWorkbench}
+            onVerify={onVerifyWorkspace}
+            onRewind={onRewindThread}
+            onJump={jumpToMessage}
+            delegationJobs={delegationJobs}
+            onCreateDelegation={onCreateDelegation}
+            onApproveDelegation={onApproveDelegation}
+            onCancelDelegation={onCancelDelegation}
+            onRetryDelegation={onRetryDelegation}
+            onApplyDelegation={onApplyDelegation}
+            onReconnectProvider={onReconnectProvider}
+          />
+        </Suspense>
+      ) : null}
 
-      <CommandPalette
-        open={paletteOpen}
-        actions={paletteActions}
-        onClose={() => setPaletteOpen(false)}
-        onCommand={(name) => {
-          setPaletteOpen(false);
-          onDraftChange(`/${name} `);
-          requestAnimationFrame(() => focusComposer());
-        }}
-      />
+      {paletteOpen ? (
+        <CommandPalette
+          open={paletteOpen}
+          actions={paletteActions}
+          onClose={() => setPaletteOpen(false)}
+          onOpenChat={(options) => {
+            void onOpenProjectChat(options).catch((error) =>
+              ignoreExpectedFailure(error, "open chat from search")
+            );
+          }}
+          onCommand={(name) => {
+            setPaletteOpen(false);
+            onDraftChange(`/${name} `);
+            requestAnimationFrame(() => focusComposer());
+          }}
+        />
+      ) : null}
 
-      <DiffViewer
-        target={diffTarget}
-        branch={gitContext?.branch ?? branch}
-        baseBranch={gitContext?.baseBranch}
-        width={diffWidth}
-        onResize={resizeDiff}
-        storageKey={`zest:diff-view:${session.threadId}`}
-        onClose={closeDiff}
-      />
+      {diffTarget ? (
+        <Suspense fallback={null}>
+          <DiffViewer
+            target={diffTarget}
+            branch={gitContext?.branch ?? branch}
+            baseBranch={gitContext?.baseBranch}
+            width={diffWidth}
+            onResize={resizeDiff}
+            storageKey={`zest:diff-view:${session.threadId}`}
+            onClose={closeDiff}
+          />
+        </Suspense>
+      ) : null}
     </section>
   );
 }

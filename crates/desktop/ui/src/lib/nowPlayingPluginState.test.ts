@@ -49,18 +49,18 @@ describe("now playing button visibility", () => {
     assert.equal(nowPlayingButtonVisible(nowPlayingPluginState(false, null)), false);
   });
 
-  it("appears once an install is discovered", () => {
+  it("appears once the add-on is installed and turned on", () => {
     assert.equal(nowPlayingButtonVisible(nowPlayingPluginState(true, plugin)), true);
   });
 
-  it("keeps the button for an installed add-on that is off or broken", () => {
+  it("stays hidden while the add-on is off or broken", () => {
     assert.equal(
       nowPlayingButtonVisible(nowPlayingPluginState(true, { ...plugin, enabled: false })),
-      true
+      false
     );
     assert.equal(
       nowPlayingButtonVisible(nowPlayingPluginState(true, { ...plugin, available: false })),
-      true
+      false
     );
   });
 });

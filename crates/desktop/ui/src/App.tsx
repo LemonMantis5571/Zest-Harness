@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
-import { AuthSuccess } from "@/components/AuthSuccess";
-import { ChatScreen } from "@/components/ChatScreen";
 import { ChatSkeleton } from "@/components/ChatSkeleton";
 import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDialog";
 import { ProviderPicker } from "@/components/ProviderPicker";
@@ -94,15 +92,21 @@ import type {
   UserProfile,
   WorkspaceChange,
   WorkspaceReview,
+  WallpaperView,
 } from "@/lib/types";
 import { applyFont, getSavedFontId } from "@/lib/fonts";
+import { applyTheme, getSavedThemeId } from "@/lib/themes";
+import { WALLPAPER_CHANGED_EVENT } from "@/lib/wallpaperSync";
 import { cn } from "@/lib/utils";
+
+const ChatScreen = lazy(() =>
+  import("@/components/ChatScreen").then((m) => ({ default: m.ChatScreen }))
+);
 
 type Screen =
   | "boot"
   | "picker"
   | "waiting"
-  | "auth-success"
   /** The chat shell. Profile, Usage, and Customize render inside it. */
   | "chat";
 
@@ -114,8 +118,6 @@ const BOOT_TIMEOUT_MS = 15_000;
 const LOGIN_STATUS_FAILURE_LIMIT = 5;
 /** How often to re-read .git/HEAD while a chat is open. */
 const BRANCH_POLL_MS = 2000;
-/** PR metadata is remote-backed and changes much less often than .git/HEAD. */
-const GIT_CONTEXT_POLL_MS = 30_000;
 
 /**
  * Bound the UI wait even when a Tauri command or an embedded runtime never
@@ -473,6 +475,7 @@ export default function App() {
   const [approvalModeState, setApprovalModeState] =
     useState<ApprovalMode>("auto");
   const [optionsUpdating, setOptionsUpdating] = useState(false);
+  const [wallpaper, setWallpaper] = useState<WallpaperView | null>(null);
 
   const commitNavigation = useCallback((next: NavigationHistory) => {
     navigationRef.current = next;
@@ -557,6 +560,18 @@ export default function App() {
       }
     }
   }, [navigateBack, navigateTo]);
+  /**
+   * Bring the transcript back for an action that changes which chat is open.
+   *
+   * Starting, opening, or forking a chat from the sidebar used to leave whatever
+   * panel was showing in place, so from Customize or Usage "New chat" quietly
+   * swapped the session behind a screen the user could not see it on — the
+   * button read as broken. Recorded as a visit so Back still returns to the
+   * panel.
+   */
+  const showTranscript = useCallback(() => {
+    navigateTo({ kind: "chat" });
+  }, [navigateTo]);
 
   // The first loaded chat establishes the root of the app-view history. Boot,
   // provider selection, and sign-in progress are lifecycle states, not places
@@ -568,7 +583,43 @@ export default function App() {
 
   useEffect(() => {
     applyFont(getSavedFontId());
+    applyTheme(getSavedThemeId());
   }, []);
+
+  useEffect(() => {
+    if (screen !== "chat") return;
+    let cancelled = false;
+    const loadWallpaper = async () => {
+      try {
+        const next = await getBackend().wallpaper();
+        if (!cancelled) setWallpaper(next);
+      } catch (error) {
+        ignoreExpectedFailure(error, "read wallpaper");
+        if (!cancelled) setWallpaper(null);
+      }
+    };
+    void loadWallpaper();
+    const onChange = () => void loadWallpaper();
+    window.addEventListener(WALLPAPER_CHANGED_EVENT, onChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(WALLPAPER_CHANGED_EVENT, onChange);
+    };
+  }, [screen]);
+
+  useEffect(() => {
+    const ready = wallpaper?.status === "ready" && Boolean(wallpaper.imageDataUrl);
+    document.documentElement.classList.toggle("has-wallpaper", Boolean(ready));
+    if (ready) {
+      document.documentElement.dataset.wallpaperFilter = wallpaper?.filter ?? "none";
+    } else {
+      delete document.documentElement.dataset.wallpaperFilter;
+    }
+    return () => {
+      document.documentElement.classList.remove("has-wallpaper");
+      delete document.documentElement.dataset.wallpaperFilter;
+    };
+  }, [wallpaper]);
   /**
    * The mode Plan mode interrupted, restored by Build.
    *
@@ -609,6 +660,10 @@ export default function App() {
   draftRef.current = draft;
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
+  const compactingRef = useRef(compacting);
+  compactingRef.current = compacting;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const optionsUpdatingRef = useRef(false);
   const modelRef = useRef(model);
   modelRef.current = model;
@@ -1191,6 +1246,7 @@ export default function App() {
     setMessages(currentState.messages);
   }, []);
 
+  const flushDeltaQueueRef = useRef<(drainAll?: boolean) => void>(() => {});
   const flushDeltaQueue = useCallback(
     (drainAll = false) => {
       deltaRafRef.current = null;
@@ -1222,12 +1278,13 @@ export default function App() {
 
       if (deltaQueueRef.current.length > 0 && deltaRafRef.current == null) {
         deltaRafRef.current = window.requestAnimationFrame(() =>
-          flushDeltaQueue()
+          flushDeltaQueueRef.current()
         );
       }
     },
     [applyChatDeltasNow]
   );
+  flushDeltaQueueRef.current = flushDeltaQueue;
 
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
@@ -1307,12 +1364,13 @@ export default function App() {
       }
     };
     void tick();
-    const id = window.setInterval(tick, GIT_CONTEXT_POLL_MS);
+    const onFocus = () => void tick();
+    window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
     };
-  }, [activeThreadId]);
+  }, [activeThreadId, branch]);
 
   const applySession = useCallback((info: SessionInfo, opts?: { clearDraft?: boolean }) => {
     const prevThread = threadIdRef.current;
@@ -1326,7 +1384,6 @@ export default function App() {
     setWorkspaceChange(workspaceChangesRef.current.get(info.threadId) ?? null);
     setGitContext(null);
     void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
-    void backend.gitContext().then(setGitContext).catch(() => setGitContext(null));
     setSelectedId(info.provider);
     setModel(info.model);
     setEffort(effortFromSession(info.effort, DEFAULT_EFFORT));
@@ -1692,66 +1749,78 @@ export default function App() {
     });
   }
 
-  async function switchProvider(providerId: string) {
-    if (!providerId) return;
-    if (session?.threadId) {
-      saveDraft(session.threadId, draftRef.current);
-    }
-    setSelectedId(providerId);
-    try {
-      await enterChat(providerId);
-    } catch (err) {
-      setPickerError(pickerErrorFrom(err));
-      toast.add({
-        type: "error",
-        title: "Could not switch provider",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
+  const switchProvider = useCallback(
+    async (providerId: string) => {
+      if (!providerId) return;
+      const current = sessionRef.current;
+      if (current?.threadId) {
+        saveDraft(current.threadId, draftRef.current);
+      }
+      setSelectedId(providerId);
+      try {
+        await enterChat(providerId);
+      } catch (err) {
+        setPickerError(pickerErrorFrom(err));
+        toast.add({
+          type: "error",
+          title: "Could not switch provider",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [enterChat]
+  );
 
   /** `only` targets a specific provider — used by the Reconnect on an auth
    *  failure, which knows exactly which account the gateway rejected. */
-  async function reconnectProvider(only?: string) {
-    const providerId = only ?? session?.provider ?? selectedId;
-    if (!providerId || backend.mode === "fixture" || loginStartingRef.current) return;
-    loginStartingRef.current = true;
-    setPickerError(null);
-    try {
-      const started = await withTimeout(
-        backend.startLogin(providerId),
-        "sign-in start"
-      );
-      setSelectedId(providerId);
-      setWaitingTitle(started.browserTitle);
-      setWaitingBody(started.browserBody);
-      setScreen("waiting");
-      startWaitingPoll();
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not start sign-in",
-        description: startupPickerErrorFrom(err).message,
-      });
-    } finally {
-      loginStartingRef.current = false;
-    }
-  }
+  const reconnectProvider = useCallback(
+    async (only?: string) => {
+      const current = sessionRef.current;
+      const providerId = only ?? current?.provider ?? selectedIdRef.current;
+      if (!providerId || backend.mode === "fixture" || loginStartingRef.current) {
+        return;
+      }
+      loginStartingRef.current = true;
+      setPickerError(null);
+      try {
+        const started = await withTimeout(
+          backend.startLogin(providerId),
+          "sign-in start"
+        );
+        setSelectedId(providerId);
+        setWaitingTitle(started.browserTitle);
+        setWaitingBody(started.browserBody);
+        setScreen("waiting");
+        startWaitingPoll();
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not start sign-in",
+          description: startupPickerErrorFrom(err).message,
+        });
+      } finally {
+        loginStartingRef.current = false;
+      }
+    },
+    [startWaitingPoll]
+  );
 
-  async function onNewChat() {
+  const onNewChat = useCallback(async () => {
     try {
-      if (session?.threadId) {
-        saveDraft(session.threadId, draftRef.current);
+      const current = sessionRef.current;
+      if (current?.threadId) {
+        saveDraft(current.threadId, draftRef.current);
       }
       const info = await backend.openProjectChat({
         // The main New chat action creates a free chat. A project's + button
         // remains the explicit way to start one inside that project.
         root: null,
         newThread: true,
-        providerId: session?.provider ?? selectedId ?? undefined,
+        providerId: current?.provider ?? selectedIdRef.current ?? undefined,
       });
       applySession(info, { clearDraft: true });
+      showTranscript();
     } catch (err) {
       const recovery = conversationRecovery(err);
       if (recovery) {
@@ -1764,9 +1833,9 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, [applySession, showTranscript]);
 
-  async function onForkThread() {
+  const onForkThread = useCallback(async () => {
     if (sendingRef.current) {
       toast.add({
         type: "warning",
@@ -1778,6 +1847,7 @@ export default function App() {
     try {
       const info = await backend.forkThread();
       applySession(info, { clearDraft: true });
+      showTranscript();
       toast.add({
         type: "success",
         title: "Fork created",
@@ -1790,7 +1860,7 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, [applySession, showTranscript]);
 
   const refreshWorkspaceChanges = useCallback(async () => {
     const requestedThreadId = threadIdRef.current;
@@ -1821,7 +1891,7 @@ export default function App() {
   }, [activeThreadId, activeIsFreeChat, refreshWorkspaceChanges]);
 
 
-  async function onVerifyWorkspace() {
+  const onVerifyWorkspace = useCallback(async () => {
     try {
       const review = await backend.verifyWorkspace();
       setWorkspaceReview(review);
@@ -1837,122 +1907,232 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, []);
 
-  async function onRewindThread(checkpointId: string) {
-    if (sendingRef.current) {
-      toast.add({
-        type: "warning",
-        title: "Finish this turn first",
-        description: "Stop the current turn before rewinding.",
-      });
-      return;
-    }
-    try {
-      const info = await backend.rewindThread(checkpointId);
-      applySession(info, { clearDraft: true });
-      toast.add({
-        type: "success",
-        title: "Conversation rewound",
-        description: "Conversation restored. Your files were not changed.",
-      });
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not rewind conversation",
-        description: formatInvokeError(err),
-      });
-    }
-  }
-
-  async function onEditMessage(messageId: string, text: string) {
-    if (sendingRef.current || compactionInFlightRef.current) return;
-    const editedText = text.trim();
-    if (!editedText) return;
-
-    try {
-      const info = await backend.editMessage(messageId);
-      applySession(info, { clearDraft: true });
-      await submitTurn(editedText, [], { restoreDraftOnFailure: true });
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not edit message",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
-
-  async function onDeleteThread(
-    id: string,
-    projectPath: string | null,
-    freeChat: boolean
-  ) {
-    try {
-      const deletedActive = session?.threadId === id;
-      const info = await backend.deleteThread(id, projectPath, freeChat);
-      saveDraft(id, "");
-      // Only the deleted open chat should replace the transcript. Applying a
-      // busy-route snapshot here would wipe the waiting chat's live messages.
-      if (deletedActive) {
+  const onRewindThread = useCallback(
+    async (checkpointId: string) => {
+      if (sendingRef.current) {
+        toast.add({
+          type: "warning",
+          title: "Finish this turn first",
+          description: "Stop the current turn before rewinding.",
+        });
+        return;
+      }
+      try {
+        const info = await backend.rewindThread(checkpointId);
         applySession(info, { clearDraft: true });
+        toast.add({
+          type: "success",
+          title: "Conversation rewound",
+          description: "Conversation restored. Your files were not changed.",
+        });
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not rewind conversation",
+          description: formatInvokeError(err),
+        });
       }
-      setWorkspacePath(info.isFreeChat ? null : info.root);
-      void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
-      toast.add({
-        type: "success",
-        title: "Chat deleted",
-        description: deletedActive
-          ? "No new chat saved — type to start one"
-          : undefined,
-      });
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not delete chat",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
+    },
+    [applySession]
+  );
 
-  async function onOpenProjectChat(options: {
-    root: string | null;
-    threadId?: string;
-    newThread?: boolean;
-    providerId?: string;
-    copyThread?: boolean;
-  }): Promise<boolean> {
-    try {
-      if (session?.threadId) {
-        saveDraft(session.threadId, draftRef.current);
+  /**
+   * Send one turn. Split out of `onSend` so a button can start a turn without
+   * going through the composer — the composer owns the draft and attachments,
+   * and a turn does not have to come from either.
+   */
+  const submitTurn = useCallback(
+    async (
+      text: string,
+      pending: PreparedAttachment[],
+      { restoreDraftOnFailure }: { restoreDraftOnFailure: boolean }
+    ): Promise<{ accepted: boolean; retryable: boolean }> => {
+      if (compactionInFlightRef.current) {
+        return { accepted: false, retryable: false };
       }
-      const info = await backend.openProjectChat(options);
-      setPendingConversationRecovery(null);
-      applySession(info, { clearDraft: Boolean(options.newThread) });
-      // Refresh the picker catalogue so the model list and key status match the
-      // project we actually opened instead of the project we just left.
-      void loadProviders(info.provider).catch((error) =>
-        ignoreExpectedFailure(error, "refresh providers after opening chat")
-      );
-      setWorkspacePath(info.isFreeChat ? null : info.root);
-      void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
-      return true;
-    } catch (err) {
-      const recovery = conversationRecovery(err);
-      if (recovery) {
-        setPendingConversationRecovery({ recovery, root: options.root });
-        return false;
+      const turnThreadId = threadIdRef.current;
+      const chips: UserAttachmentChip[] = pending
+        .filter((a) => a.status === "done")
+        .map((a) => ({ name: a.name, kind: a.kind }));
+      if (turnThreadId && chips.length > 0) {
+        pendingUserAttachmentsRef.current.set(turnThreadId, chips);
       }
-      toast.add({
-        type: "error",
-        title: "Could not open project chat",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
+      // Stay busy until an authoritative done/cancelled/error chat-event arrives.
+      setSending(true);
+      sendingRef.current = true;
+      activeAssistantId.current = null;
+      if (turnThreadId) {
+        const current = chatStatesRef.current.get(turnThreadId);
+        if (current) {
+          chatStatesRef.current.set(turnThreadId, {
+            ...current,
+            activeAssistantId: null,
+            sending: true,
+          });
+        }
+      }
+      try {
+        await backend.sendMessage(
+          text,
+          pending.map((a) => ({
+            name: a.name,
+            detail: a.detail,
+            content: a.content,
+            status: a.status,
+            kind: a.kind,
+            mediaType: a.mediaType,
+            dataBase64: a.dataBase64,
+          }))
+        );
+        return { accepted: true, retryable: false };
+      } catch (err) {
+        if (turnThreadId) {
+          pendingUserAttachmentsRef.current.delete(turnThreadId);
+        }
+        if (turnThreadId === threadIdRef.current) {
+          setSending(false);
+          sendingRef.current = false;
+          const current = turnThreadId
+            ? chatStatesRef.current.get(turnThreadId)
+            : undefined;
+          if (current && turnThreadId) {
+            chatStatesRef.current.set(turnThreadId, {
+              ...current,
+              sending: false,
+            });
+          }
+        }
+        // Only text the user typed goes back in the composer. Putting a
+        // button's prompt there would leave them holding words they never wrote.
+        if (restoreDraftOnFailure) {
+          if (turnThreadId === threadIdRef.current) {
+            setDraft(text);
+            setAttachments(pending);
+          }
+          if (turnThreadId) {
+            saveDraft(turnThreadId, text);
+          }
+        }
+        const message = formatInvokeError(err);
+        const retryable =
+          message.toLowerCase().includes("busy") ||
+          message.includes("already in progress");
+        if (!message.includes("already in progress") && !message.includes('"busy"')) {
+          toast.add({
+            type: "error",
+            title: "Could not send",
+            description: message,
+          });
+        } else {
+          toast.add({
+            type: "error",
+            title: "Busy",
+            description: message,
+          });
+        }
+        return { accepted: false, retryable };
+      }
+    },
+    []
+  );
+
+  const onEditMessage = useCallback(
+    async (messageId: string, text: string) => {
+      if (sendingRef.current || compactionInFlightRef.current) return;
+      const editedText = text.trim();
+      if (!editedText) return;
+
+      try {
+        const info = await backend.editMessage(messageId);
+        applySession(info, { clearDraft: true });
+        await submitTurn(editedText, [], { restoreDraftOnFailure: true });
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not edit message",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [applySession, submitTurn]
+  );
+
+  const onDeleteThread = useCallback(
+    async (id: string, projectPath: string | null, freeChat: boolean) => {
+      try {
+        const deletedActive = sessionRef.current?.threadId === id;
+        const info = await backend.deleteThread(id, projectPath, freeChat);
+        saveDraft(id, "");
+        // Only the deleted open chat should replace the transcript. Applying a
+        // busy-route snapshot here would wipe the waiting chat's live messages.
+        if (deletedActive) {
+          applySession(info, { clearDraft: true });
+        }
+        setWorkspacePath(info.isFreeChat ? null : info.root);
+        void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+        toast.add({
+          type: "success",
+          title: "Chat deleted",
+          description: deletedActive
+            ? "Type to start a new chat"
+            : undefined,
+        });
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not delete chat",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [applySession]
+  );
+
+  const onOpenProjectChat = useCallback(
+    async (options: {
+      root: string | null;
+      threadId?: string;
+      newThread?: boolean;
+      providerId?: string;
+      copyThread?: boolean;
+    }): Promise<boolean> => {
+      try {
+        const current = sessionRef.current;
+        if (current?.threadId) {
+          saveDraft(current.threadId, draftRef.current);
+        }
+        const info = await backend.openProjectChat(options);
+        setPendingConversationRecovery(null);
+        applySession(info, { clearDraft: Boolean(options.newThread) });
+        showTranscript();
+        // Refresh the picker catalogue so the model list and key status match
+        // the project we actually opened instead of the project we just left.
+        void loadProviders(info.provider).catch((error) =>
+          ignoreExpectedFailure(error, "refresh providers after opening chat")
+        );
+        setWorkspacePath(info.isFreeChat ? null : info.root);
+        void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+        return true;
+      } catch (err) {
+        const recovery = conversationRecovery(err);
+        if (recovery) {
+          setPendingConversationRecovery({ recovery, root: options.root });
+          return false;
+        }
+        toast.add({
+          type: "error",
+          title: "Could not open project chat",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [applySession, loadProviders, showTranscript]
+  );
 
   async function chooseConversationProvider(providerId: string) {
     const pending = pendingConversationRecovery;
@@ -1970,6 +2150,7 @@ export default function App() {
       const provider = pending.recovery.providers.find((item) => item.id === providerId);
       setPendingConversationRecovery(null);
       applySession(info);
+      showTranscript();
       void loadProviders(info.provider).catch((error) =>
         ignoreExpectedFailure(error, "refresh providers after switching chat")
       );
@@ -2054,11 +2235,11 @@ export default function App() {
     }
   }
 
-  function mergeAttachments(files: PreparedAttachment[]) {
+  const mergeAttachments = useCallback((files: PreparedAttachment[]) => {
     // Rust caps each batch, which is all it can see. The ceiling that matters
     // is across batches — ten single-file picks are ten batches — and the list
     // only exists here.
-    const { accepted, rejected } = admitAttachments(attachments, files);
+    const { accepted, rejected } = admitAttachments(attachmentsRef.current, files);
     for (const refusal of rejected) {
       toast.add({
         type: "error",
@@ -2083,9 +2264,9 @@ export default function App() {
         });
       }
     }
-  }
+  }, []);
 
-  async function onAttachFiles() {
+  const onAttachFiles = useCallback(async () => {
     try {
       const files = await backend.pickFiles();
       if (!files.length) return;
@@ -2097,45 +2278,49 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, [mergeAttachments]);
 
-  async function onPasteImages(files: File[]) {
-    try {
-      const prepared: PreparedAttachment[] = [];
-      for (const file of files) {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () =>
-            resolve(typeof reader.result === "string" ? reader.result : "");
-          reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-          reader.readAsDataURL(file);
+  const onPasteImages = useCallback(
+    async (files: File[]) => {
+      try {
+        const prepared: PreparedAttachment[] = [];
+        for (const file of files) {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () =>
+              resolve(typeof reader.result === "string" ? reader.result : "");
+            reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+            reader.readAsDataURL(file);
+          });
+          const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop()! : dataUrl;
+          const att = await backend.preparePastedImage({
+            dataBase64: base64,
+            mediaType: file.type || "image/png",
+            name: file.name || undefined,
+          });
+          prepared.push(att);
+        }
+        if (prepared.length) mergeAttachments(prepared);
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not paste image",
+          description: formatInvokeError(err),
         });
-        const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop()! : dataUrl;
-        const att = await backend.preparePastedImage({
-          dataBase64: base64,
-          mediaType: file.type || "image/png",
-          name: file.name || undefined,
-        });
-        prepared.push(att);
       }
-      if (prepared.length) mergeAttachments(prepared);
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not paste image",
-        description: formatInvokeError(err),
-      });
-    }
-  }
+    },
+    [mergeAttachments]
+  );
 
-  async function onOpenFolder() {
+  const onOpenFolder = useCallback(async () => {
     try {
       const result = await backend.pickWorkspaceFolder();
       if (!result) return;
       setWorkspacePath(result.path);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
-      if (result.sessionEnded || session) {
-        const providerId = session?.provider ?? selectedId;
+      const current = sessionRef.current;
+      if (result.sessionEnded || current) {
+        const providerId = current?.provider ?? selectedIdRef.current;
         if (providerId) await loadProviders(providerId);
         setSession(null);
         sessionIdRef.current = null;
@@ -2160,162 +2345,73 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, [enterChat, loadProviders]);
 
-  async function onSend(textOverride?: string) {
-    const directAnswer = textOverride !== undefined;
-    const text = (textOverride ?? draft).trim();
-    const pending = directAnswer ? [] : attachmentsRef.current;
-    const hasOk = pending.some(
-      (a) =>
-        a.status === "done" &&
-        (Boolean(a.content?.trim()) || (a.kind === "image" && Boolean(a.dataBase64)))
-    );
-    if ((!text && !hasOk) || compacting || compactionInFlightRef.current) {
-      return;
-    }
-    const queueThreadId = threadIdRef.current;
-    const shouldQueue =
-      queueThreadId !== null &&
-      (sendingRef.current ||
-        (threadQueuesRef.current[queueThreadId]?.length ?? 0) > 0);
-
-    if (shouldQueue && queueThreadId) {
-      try {
-        await backend.sendMessage(
-          text,
-          pending.map((a) => ({
-            name: a.name,
-            detail: a.detail,
-            content: a.content,
-            status: a.status,
-            kind: a.kind,
-            mediaType: a.mediaType,
-            dataBase64: a.dataBase64,
-          })),
-          "followup"
-        );
-        if (!directAnswer) {
-          setDraft("");
-          setAttachments([]);
-          saveDraft(queueThreadId, "");
-        }
-      } catch (error) {
-        toast.add({
-          type: "error",
-          title: "Could not queue message",
-          description: formatInvokeError(error),
-        });
-      }
-      return;
-    }
-
-    if (!directAnswer) {
-      setDraft("");
-      setAttachments([]);
-      if (session?.threadId) {
-        saveDraft(session.threadId, "");
-      }
-    }
-    await submitTurn(text, pending, { restoreDraftOnFailure: !directAnswer });
-  }
-
-  /**
-   * Send one turn. Split out of `onSend` so a button can start a turn without
-   * going through the composer — the composer owns the draft and attachments,
-   * and a turn does not have to come from either.
-   */
-  async function submitTurn(
-    text: string,
-    pending: PreparedAttachment[],
-    { restoreDraftOnFailure }: { restoreDraftOnFailure: boolean }
-  ): Promise<{ accepted: boolean; retryable: boolean }> {
-    if (compactionInFlightRef.current) {
-      return { accepted: false, retryable: false };
-    }
-    const turnThreadId = threadIdRef.current;
-    const chips: UserAttachmentChip[] = pending
-      .filter((a) => a.status === "done")
-      .map((a) => ({ name: a.name, kind: a.kind }));
-    if (turnThreadId && chips.length > 0) {
-      pendingUserAttachmentsRef.current.set(turnThreadId, chips);
-    }
-    // Stay busy until an authoritative done/cancelled/error chat-event arrives.
-    setSending(true);
-    sendingRef.current = true;
-    activeAssistantId.current = null;
-    if (turnThreadId) {
-      const current = chatStatesRef.current.get(turnThreadId);
-      if (current) {
-        chatStatesRef.current.set(turnThreadId, {
-          ...current,
-          activeAssistantId: null,
-          sending: true,
-        });
-      }
-    }
-    try {
-      await backend.sendMessage(
-        text,
-        pending.map((a) => ({
-          name: a.name,
-          detail: a.detail,
-          content: a.content,
-          status: a.status,
-          kind: a.kind,
-          mediaType: a.mediaType,
-          dataBase64: a.dataBase64,
-        }))
+  const onSend = useCallback(
+    async (textOverride?: string) => {
+      const directAnswer = textOverride !== undefined;
+      const text = (textOverride ?? draftRef.current).trim();
+      const pending = directAnswer ? [] : attachmentsRef.current;
+      const hasOk = pending.some(
+        (a) =>
+          a.status === "done" &&
+          (Boolean(a.content?.trim()) || (a.kind === "image" && Boolean(a.dataBase64)))
       );
-      return { accepted: true, retryable: false };
-    } catch (err) {
-      if (turnThreadId) {
-        pendingUserAttachmentsRef.current.delete(turnThreadId);
+      if (
+        (!text && !hasOk) ||
+        compactingRef.current ||
+        compactionInFlightRef.current
+      ) {
+        return;
       }
-      if (turnThreadId === threadIdRef.current) {
-        setSending(false);
-        sendingRef.current = false;
-        const current = turnThreadId
-          ? chatStatesRef.current.get(turnThreadId)
-          : undefined;
-        if (current && turnThreadId) {
-          chatStatesRef.current.set(turnThreadId, {
-            ...current,
-            sending: false,
+      const queueThreadId = threadIdRef.current;
+      const shouldQueue =
+        queueThreadId !== null &&
+        (sendingRef.current ||
+          (threadQueuesRef.current[queueThreadId]?.length ?? 0) > 0);
+
+      if (shouldQueue && queueThreadId) {
+        try {
+          await backend.sendMessage(
+            text,
+            pending.map((a) => ({
+              name: a.name,
+              detail: a.detail,
+              content: a.content,
+              status: a.status,
+              kind: a.kind,
+              mediaType: a.mediaType,
+              dataBase64: a.dataBase64,
+            })),
+            "followup"
+          );
+          if (!directAnswer) {
+            setDraft("");
+            setAttachments([]);
+            saveDraft(queueThreadId, "");
+          }
+        } catch (error) {
+          toast.add({
+            type: "error",
+            title: "Could not queue message",
+            description: formatInvokeError(error),
           });
         }
+        return;
       }
-      // Only text the user typed goes back in the composer. Putting a
-      // button's prompt there would leave them holding words they never wrote.
-      if (restoreDraftOnFailure) {
-        if (turnThreadId === threadIdRef.current) {
-          setDraft(text);
-          setAttachments(pending);
+
+      if (!directAnswer) {
+        setDraft("");
+        setAttachments([]);
+        const threadId = threadIdRef.current;
+        if (threadId) {
+          saveDraft(threadId, "");
         }
-        if (turnThreadId) {
-          saveDraft(turnThreadId, text);
-        }
       }
-      const message = formatInvokeError(err);
-      const retryable =
-        message.toLowerCase().includes("busy") ||
-        message.includes("already in progress");
-      if (!message.includes("already in progress") && !message.includes('"busy"')) {
-        toast.add({
-          type: "error",
-          title: "Could not send",
-          description: message,
-        });
-      } else {
-        toast.add({
-          type: "error",
-          title: "Busy",
-          description: message,
-        });
-      }
-      return { accepted: false, retryable };
-    }
-  }
+      await submitTurn(text, pending, { restoreDraftOnFailure: !directAnswer });
+    },
+    [submitTurn]
+  );
 
   /**
    * Leave Plan mode and tell the model to build what it just planned.
@@ -2325,7 +2421,7 @@ export default function App() {
    * conversation. The plan already names which steps suit another worker, so
    * the prompt only has to say "use it where you marked it".
    */
-  async function onBuildPlan() {
+  const onBuildPlan = useCallback(async () => {
     if (sendingRef.current) return;
 
     if (approvalModeState === "plan") {
@@ -2350,9 +2446,9 @@ export default function App() {
     }
 
     await submitTurn(BUILD_PLAN_PROMPT, [], { restoreDraftOnFailure: false });
-  }
+  }, [approvalModeState, submitTurn]);
 
-  async function onStop() {
+  const onStop = useCallback(async () => {
     if (!sendingRef.current) return;
     try {
       await backend.cancelTurn(threadIdRef.current ?? undefined);
@@ -2364,83 +2460,91 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, []);
 
-  async function onResolveApproval(
-    approvalId: string,
-    decision: ApprovalChoice
-  ) {
-    const resolving = resolvingApprovalIdsRef.current;
-    if (resolving.has(approvalId)) return;
+  const onResolveApproval = useCallback(
+    async (approvalId: string, decision: ApprovalChoice) => {
+      const resolving = resolvingApprovalIdsRef.current;
+      if (resolving.has(approvalId)) return;
 
-    const allow = decision !== "deny";
-    const snapshot = findApprovalTool(messagesRef.current, approvalId);
-    if (!snapshot || snapshot.status !== "awaiting_approval") return;
-    resolving.add(approvalId);
-    const threadId = threadIdRef.current;
-    if (allow) {
-      const next = markApprovalRunning(messagesRef.current, approvalId);
-      messagesRef.current = next;
-      setMessages(next);
-    }
-    try {
-      await backend.resolveApproval(
-        approvalId,
-        decision,
-        threadId ?? undefined
-      );
-    } catch (err) {
-      // A dropped waiter is permanent: putting the card back would leave a
-      // button that can only fail, and because the approval queue is ordered by
-      // transcript position it would keep shadowing the live card behind it.
-      // Retire it instead so the queue advances.
-      if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) {
-        const retired = retireApprovalCard(messagesRef.current, approvalId, snapshot.id);
-        messagesRef.current = retired;
-        setMessages(retired);
-        return;
-      } else if (allow && snapshot) {
-        const restored = restoreApprovalCard(messagesRef.current, snapshot);
-        messagesRef.current = restored;
-        setMessages(restored);
+      const allow = decision !== "deny";
+      const snapshot = findApprovalTool(messagesRef.current, approvalId);
+      if (!snapshot || snapshot.status !== "awaiting_approval") return;
+      resolving.add(approvalId);
+      const threadId = threadIdRef.current;
+      if (allow) {
+        const next = markApprovalRunning(messagesRef.current, approvalId);
+        messagesRef.current = next;
+        setMessages(next);
       }
-      toast.add({
-        type: "error",
-        title: allow ? "Could not allow tool" : "Could not deny tool",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    } finally {
-      resolving.delete(approvalId);
-    }
-  }
+      try {
+        await backend.resolveApproval(
+          approvalId,
+          decision,
+          threadId ?? undefined
+        );
+      } catch (err) {
+        // A dropped waiter is permanent: putting the card back would leave a
+        // button that can only fail, and because the approval queue is ordered
+        // by transcript position it would keep shadowing the live card behind
+        // it. Retire it instead so the queue advances.
+        if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) {
+          const retired = retireApprovalCard(
+            messagesRef.current,
+            approvalId,
+            snapshot.id
+          );
+          messagesRef.current = retired;
+          setMessages(retired);
+          return;
+        } else if (allow && snapshot) {
+          const restored = restoreApprovalCard(messagesRef.current, snapshot);
+          messagesRef.current = restored;
+          setMessages(restored);
+        }
+        toast.add({
+          type: "error",
+          title: allow ? "Could not allow tool" : "Could not deny tool",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      } finally {
+        resolving.delete(approvalId);
+      }
+    },
+    []
+  );
 
-  async function onResolveQuestion(questionId: string, answer: string) {
-    const resolving = resolvingQuestionIdsRef.current;
-    if (resolving.has(questionId)) return;
-    const isPending = messagesRef.current.some(
-      (message) =>
-        message.role === "assistant" && message.question?.questionId === questionId
-    );
-    if (!isPending) return;
-    resolving.add(questionId);
-    const threadId = threadIdRef.current;
-    try {
-      await backend.resolveQuestion(questionId, answer, threadId ?? undefined);
-    } catch (err) {
-      if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) return;
-      toast.add({
-        type: "error",
-        title: "Could not send answer",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    } finally {
-      resolving.delete(questionId);
-    }
-  }
+  const onResolveQuestion = useCallback(
+    async (questionId: string, answer: string) => {
+      const resolving = resolvingQuestionIdsRef.current;
+      if (resolving.has(questionId)) return;
+      const isPending = messagesRef.current.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.question?.questionId === questionId
+      );
+      if (!isPending) return;
+      resolving.add(questionId);
+      const threadId = threadIdRef.current;
+      try {
+        await backend.resolveQuestion(questionId, answer, threadId ?? undefined);
+      } catch (err) {
+        if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) return;
+        toast.add({
+          type: "error",
+          title: "Could not send answer",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      } finally {
+        resolving.delete(questionId);
+      }
+    },
+    []
+  );
 
-  async function onApprovalModeChange(next: ApprovalMode) {
+  const onApprovalModeChange = useCallback(async (next: ApprovalMode) => {
     const previous = approvalModeState;
     // Remember what planning interrupted, so Build can put it back rather than
     // picking a permission level on the user's behalf.
@@ -2459,164 +2563,199 @@ export default function App() {
         description: formatInvokeError(err),
       });
     }
-  }
+  }, [approvalModeState]);
 
-  async function commitSessionOptions(
-    next: { model?: string; effort?: EffortId },
-    request: () => Promise<SessionMeta>,
-    errorTitle: string
-  ) {
-    if (optionsUpdatingRef.current) return;
-    if (screen !== "chat") {
-      if (next.model) setModel(next.model);
-      if (next.effort) setEffort(next.effort);
-      return;
-    }
-    const snapshot = { model: modelRef.current, effort: effortRef.current };
-    const optimisticModel = next.model ?? snapshot.model;
-    const optimisticEffort = next.effort ?? snapshot.effort;
-    optionsUpdatingRef.current = true;
-    setOptionsUpdating(true);
-    setModel(optimisticModel);
-    setEffort(optimisticEffort);
-    setSession((prev) =>
-      prev
-        ? { ...prev, model: optimisticModel, effort: optimisticEffort }
-        : prev
-    );
-    try {
-      const info = await request();
-      setSession((prev) => mergeSessionOptions(prev, info));
-      setModel(info.model);
-      setEffort(effortFromSession(info.effort, optimisticEffort));
-    } catch (err) {
-      setSession((prev) => rollbackSessionOptions(prev, snapshot));
-      setModel(snapshot.model);
-      setEffort(snapshot.effort);
-      toast.add({
-        type: "error",
-        title: errorTitle,
-        description: formatInvokeError(err),
-      });
-    } finally {
-      optionsUpdatingRef.current = false;
-      setOptionsUpdating(false);
-    }
-  }
+  const commitSessionOptions = useCallback(
+    async (
+      next: { model?: string; effort?: EffortId },
+      request: () => Promise<SessionMeta>,
+      errorTitle: string
+    ) => {
+      if (optionsUpdatingRef.current) return;
+      if (screen !== "chat") {
+        if (next.model) setModel(next.model);
+        if (next.effort) setEffort(next.effort);
+        return;
+      }
+      const snapshot = { model: modelRef.current, effort: effortRef.current };
+      const optimisticModel = next.model ?? snapshot.model;
+      const optimisticEffort = next.effort ?? snapshot.effort;
+      optionsUpdatingRef.current = true;
+      setOptionsUpdating(true);
+      setModel(optimisticModel);
+      setEffort(optimisticEffort);
+      setSession((prev) =>
+        prev
+          ? { ...prev, model: optimisticModel, effort: optimisticEffort }
+          : prev
+      );
+      try {
+        const info = await request();
+        setSession((prev) => mergeSessionOptions(prev, info));
+        setModel(info.model);
+        setEffort(effortFromSession(info.effort, optimisticEffort));
+      } catch (err) {
+        setSession((prev) => rollbackSessionOptions(prev, snapshot));
+        setModel(snapshot.model);
+        setEffort(snapshot.effort);
+        toast.add({
+          type: "error",
+          title: errorTitle,
+          description: formatInvokeError(err),
+        });
+      } finally {
+        optionsUpdatingRef.current = false;
+        setOptionsUpdating(false);
+      }
+    },
+    [screen]
+  );
 
-  async function onModelChange(next: string) {
-    if (typeof next !== "string" || !next.trim()) return;
-    await commitSessionOptions(
-      { model: next },
-      () => backend.updateSessionOptions({ model: next }),
-      "Could not update model"
-    );
-  }
+  const onModelChange = useCallback(
+    async (next: string) => {
+      if (typeof next !== "string" || !next.trim()) return;
+      await commitSessionOptions(
+        { model: next },
+        () => backend.updateSessionOptions({ model: next }),
+        "Could not update model"
+      );
+    },
+    [commitSessionOptions]
+  );
 
-  async function onEffortChange(next: EffortId) {
-    await commitSessionOptions(
-      { effort: next },
-      () => backend.updateSessionOptions({ effort: next }),
-      "Could not update effort"
-    );
-  }
+  const onEffortChange = useCallback(
+    async (next: EffortId) => {
+      await commitSessionOptions(
+        { effort: next },
+        () => backend.updateSessionOptions({ effort: next }),
+        "Could not update effort"
+      );
+    },
+    [commitSessionOptions]
+  );
 
-  async function onResetOptions() {
-    const resetModel = session?.defaultModel ?? DEFAULT_CODEX_MODEL;
+  const onResetOptions = useCallback(async () => {
+    const resetModel = sessionRef.current?.defaultModel ?? DEFAULT_CODEX_MODEL;
     await commitSessionOptions(
       { model: resetModel, effort: DEFAULT_EFFORT },
       () => backend.resetSessionOptions(),
       "Could not reset model and effort"
     );
-  }
+  }, [commitSessionOptions]);
 
-  async function onApproveDelegation(jobId: string) {
-    try {
-      const job = await backend.approveDelegationJob(jobId);
-      replaceDelegationJob(job);
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not start feature card",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
-
-  async function onCreateDelegation(request: DelegationCreateInput) {
-    try {
-      const job = await backend.createDelegationJob(request);
-      replaceDelegationJob(job);
-      return job;
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not create feature card",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
-
-  async function onCancelDelegation(jobId: string) {
-    try {
-      const job = await backend.cancelDelegationJob(jobId);
-      replaceDelegationJob(job);
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not cancel feature card",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
-
-  async function onRetryDelegation(jobId: string) {
-    try {
-      const job = await backend.retryDelegationJob(jobId);
-      replaceDelegationJob(job);
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not retry feature card",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
-
-  async function onApplyDelegation(jobId: string) {
-    try {
-      const job = await backend.applyDelegationJob(jobId);
-      replaceDelegationJob(job);
-      if (job.status === "accepted") {
+  const onApproveDelegation = useCallback(
+    async (jobId: string) => {
+      try {
+        const job = await backend.approveDelegationJob(jobId);
+        replaceDelegationJob(job);
+      } catch (err) {
         toast.add({
-          type: "success",
-          title: "Accepted changes applied",
-          description: `${job.title} is now in the active workspace.`,
+          type: "error",
+          title: "Could not start feature card",
+          description: formatInvokeError(err),
         });
-      } else if (job.status === "apply_conflict") {
-        toast.add({
-          type: "warning",
-          title: "Apply conflict",
-          description: "The workspace changed. Review the conflicting card before retrying.",
-        });
+        throw err;
       }
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not apply accepted changes",
-        description: formatInvokeError(err),
-      });
-      throw err;
-    }
-  }
+    },
+    [replaceDelegationJob]
+  );
+
+  const onCreateDelegation = useCallback(
+    async (request: DelegationCreateInput) => {
+      try {
+        const job = await backend.createDelegationJob(request);
+        replaceDelegationJob(job);
+        return job;
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not create feature card",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [replaceDelegationJob]
+  );
+
+  const onCancelDelegation = useCallback(
+    async (jobId: string) => {
+      try {
+        const job = await backend.cancelDelegationJob(jobId);
+        replaceDelegationJob(job);
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not cancel feature card",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [replaceDelegationJob]
+  );
+
+  const onRetryDelegation = useCallback(
+    async (jobId: string) => {
+      try {
+        const job = await backend.retryDelegationJob(jobId);
+        replaceDelegationJob(job);
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not retry feature card",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [replaceDelegationJob]
+  );
+
+  const onApplyDelegation = useCallback(
+    async (jobId: string) => {
+      try {
+        const job = await backend.applyDelegationJob(jobId);
+        replaceDelegationJob(job);
+        if (job.status === "accepted") {
+          toast.add({
+            type: "success",
+            title: "Accepted changes applied",
+            description: `${job.title} is now in the active workspace.`,
+          });
+        } else if (job.status === "apply_conflict") {
+          toast.add({
+            type: "warning",
+            title: "Apply conflict",
+            description:
+              "The workspace changed. Review the conflicting card before retrying.",
+          });
+        }
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not apply accepted changes",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [replaceDelegationJob]
+  );
 
   const authMode = screen !== "chat";
 
   return (
+    <>
+      {wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+        <div
+          aria-hidden
+          className="zest-wallpaper"
+          data-filter={wallpaper.filter}
+          style={{ backgroundImage: `url("${wallpaper.imageDataUrl}")` }}
+        />
+      ) : null}
+      <div className="relative z-10 h-full min-h-0 w-full min-w-0">
     <Toaster>
       <div
         className={cn(
@@ -2665,11 +2804,8 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "auth-success" ? (
-          <AuthSuccess onContinue={goContinue} continuing={continuing} />
-        ) : null}
-
         {screen === "chat" && session ? (
+          <Suspense fallback={<ChatSkeleton />}>
           <ChatScreen
             session={session}
             messages={messages}
@@ -2724,11 +2860,7 @@ export default function App() {
             onResetOptions={onResetOptions}
             onResolveApproval={onResolveApproval}
             onResolveQuestion={onResolveQuestion}
-            onReconnectProvider={(providerId) => {
-              // Same path as the picker Connect: spawns the vendor/gateway
-              // login and shows the waiting screen until it resolves.
-              void reconnectProvider(providerId);
-            }}
+            onReconnectProvider={reconnectProvider}
             onReloadSession={async () => {
               // Rebuilds the runtime so a replaced provider key or ACP worker
               // change takes effect. The sticky thread is reloaded, so the
@@ -2744,7 +2876,7 @@ export default function App() {
             }}
             approvalMode={approvalModeState}
             onApprovalModeChange={onApprovalModeChange}
-            onBuildPlan={() => void onBuildPlan()}
+            onBuildPlan={onBuildPlan}
             onOpenProfile={() => navigateTo({ kind: "profile" })}
             onOpenUsage={() => navigateTo({ kind: "usage" })}
             onOpenCustomize={() =>
@@ -2756,6 +2888,7 @@ export default function App() {
             shellPanel={shellPanel}
             onCustomizeTabChange={(tab) => navigateTo({ kind: "customize", tab })}
             onClosePanel={closeShellPanel}
+            onRevealTranscript={showTranscript}
             onOpenSettings={() => navigateTo({ kind: "settings", focusUser: false })}
             onCloseSettings={closeSettingsFromHistory}
             canNavigateBack={navigation.back.length > 0}
@@ -2774,6 +2907,7 @@ export default function App() {
             sessionWarning={sessionWarning}
             onDismissWarning={() => setSessionWarning(null)}
           />
+          </Suspense>
         ) : null}
 
       </div>
@@ -2788,5 +2922,7 @@ export default function App() {
         onChooseProvider={(providerId) => void chooseConversationProvider(providerId)}
       />
     </Toaster>
+      </div>
+    </>
   );
 }

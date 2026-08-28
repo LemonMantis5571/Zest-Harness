@@ -4,7 +4,7 @@ import * as React from "react"
 import { Toast as ToastPrimitive } from "@base-ui/react/toast"
 
 import { cn } from "@/lib/utils"
-import { notificationFingerprint } from "@/lib/notificationPolicy"
+import { notificationFingerprint, mergeToastDescription } from "@/lib/notificationPolicy"
 import { Button } from "@/components/ui/button"
 import { XIcon, CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
@@ -14,6 +14,7 @@ type ToastAddOptions = Parameters<typeof baseToast.add>[0]
 type GroupedToast = {
   id: string
   count: number
+  description: string
   onClose: () => void
   onRemove: () => void
 }
@@ -48,8 +49,10 @@ const toast = {
     const existing = groupedToasts.get(fingerprint)
     if (existing) {
       existing.count += 1
+      existing.description = mergeToastDescription(existing.description, description)
       baseToast.update(existing.id, {
         ...options,
+        description: existing.description || undefined,
         data: toastData(options.data, existing.count),
         onClose: existing.onClose,
         onRemove: existing.onRemove,
@@ -78,7 +81,13 @@ const toast = {
       options.onRemove?.()
     }
 
-    groupedToasts.set(fingerprint, { id, count: 1, onClose, onRemove })
+    groupedToasts.set(fingerprint, {
+      id,
+      count: 1,
+      description,
+      onClose,
+      onRemove,
+    })
     return baseToast.add({
       ...options,
       id,

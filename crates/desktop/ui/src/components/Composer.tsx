@@ -428,7 +428,7 @@ export function Composer({
                   onClick={() => applyCommand(cmd.name)}
                   className={cn(
                     "flex w-full items-baseline gap-2 px-3 py-1.5 text-left transition-colors",
-                    index === commandIndex ? "bg-white/[0.06]" : "hover:bg-white/[0.03]"
+                    index === commandIndex ? "bg-foreground/10" : "hover:bg-foreground/5"
                   )}
                 >
                   <span className="shrink-0 font-mono text-[12px] text-foreground">

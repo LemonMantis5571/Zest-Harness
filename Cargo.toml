@@ -6,6 +6,7 @@ members = [
     "crates/desktop",
     "crates/plugin-api",
     "crates/plugins/now-playing",
+    "crates/plugins/wallpaper",
 ]
 
 [workspace.package]

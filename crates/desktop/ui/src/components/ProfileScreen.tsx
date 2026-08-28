@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { cacheMetrics, cacheVerdict, type CacheMetrics } from "@/lib/cacheMetrics";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
 import { getBackend } from "@/lib/backend";
+import { HEATMAP_TONE_CLASS, heatmapTone } from "@/lib/heatmap";
 import { cn } from "@/lib/utils";
 import type { DayPoint, ProfileStats, UsageSnapshot, UserProfile } from "@/lib/types";
 
@@ -337,8 +338,8 @@ function Heatmap({ cells, metric }: { cells: Cell[]; metric: Metric }) {
             key={cell.date}
             title={describe(cell, metric)}
             className={cn(
-              "size-[11px] rounded-[2px] transition-colors",
-              levelClass(valueOf(cell.point, metric), peak)
+              "size-[11px] rounded-[2px] shadow-[inset_0_0_0_1px_var(--heatmap-edge)] transition-colors",
+              HEATMAP_TONE_CLASS[heatmapTone(valueOf(cell.point, metric), peak)]
             )}
           />
         ))}
@@ -383,20 +384,6 @@ function valueOf(point: DayPoint | null, metric: Metric): number | null {
   if (!point) return null;
   if (metric === "tokens") return point.tokens ?? null;
   return point.chats;
-}
-
-/**
- * Five steps against the busiest day. Relative rather than absolute because a
- * scale that suits one person's usage is meaningless for another's.
- */
-function levelClass(value: number | null, peak: number): string {
-  if (value === null) return "bg-muted/25";
-  if (value <= 0 || peak <= 0) return "bg-muted/40";
-  const ratio = value / peak;
-  if (ratio > 0.75) return "bg-primary";
-  if (ratio > 0.5) return "bg-primary/75";
-  if (ratio > 0.25) return "bg-primary/50";
-  return "bg-primary/30";
 }
 
 function describe(cell: Cell, metric: Metric): string {

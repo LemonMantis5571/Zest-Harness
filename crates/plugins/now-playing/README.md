@@ -6,25 +6,26 @@ The full plugin standard is in
 
 ## Build and install
 
-From the workspace root, the easiest install is:
+From the workspace root:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-now-playing-plugin.ps1
+```sh
+npm run plugin:install -- now-playing
 ```
 
-The script builds `zest-now-playing.exe`, copies it with `plugin.json` to:
+That builds the add-on and copies it to the Zest plugin folder. On Windows:
 
 ```text
 %LOCALAPPDATA%\Zest\plugins\now-playing
 ```
 
-Open Settings > Extras, press Refresh, and turn it on.
+Open Customize > Extras, press Refresh, and turn it on. Music controls use the
+Windows media session, so this add-on is Windows-only.
 
 To build without copying files:
 
-```powershell
+```sh
 cargo build -p zest-now-playing-plugin --release
 ```
 
 To remove it from Zest, turn it off and move the `now-playing` folder outside
-`%LOCALAPPDATA%\Zest\plugins`. Zest does not delete plugin files.
+the Zest plugin directory. Zest does not delete plugin files.

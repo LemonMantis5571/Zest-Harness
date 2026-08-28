@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::de::{Deserializer, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -187,6 +188,54 @@ impl StoredMessage {
             Self::User { id, .. } | Self::Assistant { id, .. } => id,
         }
     }
+
+    /// Visible transcript text used by chat search.
+    pub fn searchable_text(&self) -> &str {
+        match self {
+            Self::User { text, .. } | Self::Assistant { text, .. } => text,
+        }
+    }
+}
+
+/// First matching window around `query`, collapsed to one line for palette rows.
+pub fn match_excerpt(text: &str, query: &str) -> Option<String> {
+    const RADIUS: usize = 42;
+    let needle = query.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    let haystack = text.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let byte_at = haystack.find(&needle)?;
+    let match_end = byte_at + needle.len();
+    if !text.is_char_boundary(byte_at) || !text.is_char_boundary(match_end) {
+        return None;
+    }
+    let char_start = text[..byte_at].chars().count();
+    let match_chars = text[byte_at..match_end].chars().count();
+    let chars: Vec<char> = text.chars().collect();
+    let start = char_start.saturating_sub(RADIUS);
+    let end = (char_start + match_chars + RADIUS).min(chars.len());
+    let mut snippet: String = chars[start..end].iter().collect();
+    snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+    if snippet.is_empty() {
+        return None;
+    }
+    if start > 0 {
+        snippet.insert(0, '…');
+    }
+    if end < chars.len() {
+        snippet.push('…');
+    }
+    Some(snippet)
+}
+
+pub fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    !needle.is_empty()
+        && haystack
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase())
 }
 
 #[allow(clippy::type_complexity)]
@@ -260,6 +309,106 @@ pub struct ThreadSummary {
     pub pending_input_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_context: Option<ThreadGitContext>,
+}
+
+/// JSON array whose elements are discarded; only the length is kept.
+#[derive(Default)]
+struct CountedSeq(usize);
+
+impl<'de> Deserialize<'de> for CountedSeq {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct CountingVisitor;
+        impl<'de> Visitor<'de> for CountingVisitor {
+            type Value = CountedSeq;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON array")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<CountedSeq, A::Error> {
+                let mut n = 0usize;
+                while seq.next_element::<IgnoredAny>()?.is_some() {
+                    n += 1;
+                }
+                Ok(CountedSeq(n))
+            }
+        }
+        deserializer.deserialize_seq(CountingVisitor)
+    }
+}
+
+/// Named field skipped without allocating. Implements Default so missing
+/// `skip_serializing_if` fields still deserialize.
+#[derive(Default)]
+struct IgnoredField;
+
+impl<'de> Deserialize<'de> for IgnoredField {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        IgnoredAny::deserialize(deserializer)?;
+        Ok(IgnoredField)
+    }
+}
+
+/// Sidebar listing projection: count messages, skip wire history and ledger.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListing {
+    #[serde(default)]
+    version: u32,
+    id: String,
+    created_at: u64,
+    updated_at: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    git_context: Option<ThreadGitContext>,
+    #[serde(default)]
+    messages: CountedSeq,
+    #[serde(default)]
+    pending_inputs: CountedSeq,
+    #[serde(default)]
+    #[allow(dead_code)]
+    agent_messages: IgnoredField,
+    #[serde(default)]
+    #[allow(dead_code)]
+    events: IgnoredField,
+    #[serde(default)]
+    #[allow(dead_code)]
+    checkpoints: IgnoredField,
+    #[serde(default)]
+    #[allow(dead_code)]
+    provider_session: IgnoredField,
+}
+
+impl ThreadListing {
+    fn into_summary(self) -> Option<ThreadSummary> {
+        if self.version > THREAD_FORMAT_VERSION {
+            return None;
+        }
+        Some(ThreadSummary {
+            id: self.id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            title: self.title,
+            pinned: self.pinned,
+            provider_id: self.provider_id,
+            message_count: self.messages.0,
+            pending_input_count: self.pending_inputs.0,
+            git_context: self.git_context,
+        })
+    }
+}
+
+/// Parse sidebar metadata without allocating transcript or wire-history Vecs.
+pub fn thread_summary_from_json(body: &str) -> Option<ThreadSummary> {
+    serde_json::from_str::<ThreadListing>(body)
+        .ok()
+        .and_then(ThreadListing::into_summary)
 }
 
 /// Where a user or the runtime wants an input delivered.
@@ -785,6 +934,13 @@ impl Thread {
             pending_input_count: self.pending_inputs.len(),
             git_context: self.git_context.clone(),
         }
+    }
+
+    /// Snippet from the first user or assistant message that contains `query`.
+    pub fn search_excerpt(&self, query: &str) -> Option<String> {
+        self.messages
+            .iter()
+            .find_map(|msg| match_excerpt(msg.searchable_text(), query))
     }
 
     /// Append one lifecycle record and return its durable identity.
@@ -1725,20 +1881,16 @@ impl ThreadStore {
             let Ok(body) = fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(thread) = serde_json::from_str::<Thread>(&body) else {
+            let Some(summary) = thread_summary_from_json(&body) else {
                 continue;
             };
-            // Skip unsupported newer versions rather than rewriting them.
-            if thread.version > THREAD_FORMAT_VERSION {
-                continue;
-            }
             if let Some(want) = provider_id {
-                match thread.provider_id.as_deref() {
+                match summary.provider_id.as_deref() {
                     Some(id) if id == want => {}
                     _ => continue,
                 }
             }
-            out.push(thread.summary());
+            out.push(summary);
         }
         out.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         Ok(out)
@@ -1838,6 +1990,54 @@ mod characterization {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, thread.id);
         assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn listing_counts_messages_without_loading_agent_history() {
+        let root = scratch("listing-skip-agent");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = Thread::new().with_provider("codex");
+        let path = store.dir().join(format!("{}.json", thread.id));
+        let agent_messages: Vec<serde_json::Value> = (0..40)
+            .map(|i| serde_json::json!({"role": "assistant", "content": format!("blob-{i}")}))
+            .collect();
+        let body = serde_json::json!({
+            "version": THREAD_FORMAT_VERSION,
+            "id": thread.id,
+            "createdAt": thread.created_at,
+            "updatedAt": thread.updated_at,
+            "providerId": "codex",
+            "messages": [
+                {"role": "user", "id": "u1", "text": "hello"}
+            ],
+            "pendingInputs": [
+                {
+                    "id": "p1",
+                    "target": "followup",
+                    "text": "later",
+                    "createdAt": 1
+                }
+            ],
+            "agentMessages": agent_messages,
+            "events": [{"sequence": 1, "event": {"type": "turn_started", "turnId": "t1"}}],
+            "checkpoints": [{"id": "c1"}],
+            "gitContext": {"branch": "main"}
+        });
+        fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, thread.id);
+        assert_eq!(listed[0].message_count, 1);
+        assert_eq!(listed[0].pending_input_count, 1);
+        assert_eq!(
+            listed[0].git_context.as_ref().unwrap().branch.as_deref(),
+            Some("main")
+        );
+
+        let summary = thread_summary_from_json(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.pending_input_count, 1);
     }
 
     #[test]
@@ -2341,6 +2541,24 @@ mod characterization {
         }
         // First user text still owns the title.
         assert_eq!(thread.title.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn match_excerpt_windows_around_the_query() {
+        let text = "Please git pull the latest OceanicUI component branch and open a pull request.";
+        let snippet = match_excerpt(text, "git pu").expect("match");
+        assert!(
+            snippet.to_ascii_lowercase().contains("git pull"),
+            "{snippet}"
+        );
+        assert!(snippet.contains('…'), "{snippet}");
+
+        let mut thread = Thread::new();
+        thread.apply_user("u1", text);
+        let body = thread.search_excerpt("OceanicUI").expect("body");
+        assert!(body.contains("OceanicUI"), "{body}");
+        assert!(contains_ignore_ascii_case(text, "GIT PU"));
+        assert!(!contains_ignore_ascii_case(text, "harness"));
     }
 
     #[test]

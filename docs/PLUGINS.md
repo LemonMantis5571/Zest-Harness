@@ -22,10 +22,10 @@ The current desktop accepts only plugins that:
 - contain a valid `plugin.json` and an executable in one plugin folder; and
 - implement the JSON request/response contract in this document.
 
-The only supported behavior kind today is `now-playing`. The manifest's
-`kind` field is reserved for future behavior types. A new kind is not accepted
-just because its manifest is valid; it also needs matching host commands, UI,
-tests, and a reviewed protocol change.
+The current desktop accepts `now-playing` and `wallpaper` kinds. The
+manifest's `kind` field is reserved for those behavior types. A new kind is
+not accepted just because its manifest is valid; it also needs matching host
+commands, UI, tests, and a reviewed protocol change.
 
 Zest does not currently accept in-process DLLs, webview code injection,
 background services, installers, auto-updaters, or plugins that modify Zest's
@@ -86,46 +86,46 @@ Zest\plugins\
   now-playing\
     plugin.json
     zest-now-playing.exe
+  wallpaper\
+    plugin.json
+    zest-wallpaper.exe
 ```
 
 Zest checks the folder every time you press **Refresh**. The top-bar button
 also appears after the add-on is found; restarting Zest is not required.
 
-### Install the included Now Playing add-on
+### Install an included add-on
 
-From the repository root on Windows:
+From the repository root, with Node and Cargo on PATH:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-now-playing-plugin.ps1
+```sh
+npm run plugin:install -- wallpaper
+npm run plugin:install -- now-playing
+npm run plugin:install -- --all
 ```
 
-The script builds the add-on in release mode and copies these files to
-`%LOCALAPPDATA%\Zest\plugins\now-playing`:
+The installer builds the add-on in release mode and copies `plugin.json` plus
+the binary into the Zest plugin folder for this OS. Then open **Customize >
+Extras**, press **Refresh**, and press **Turn on**.
 
-```text
-plugin.json
-zest-now-playing.exe
-```
+Now Playing reads the Windows media session, so that add-on is Windows-only.
+Wallpaper can be installed on Windows, Linux, or macOS. It starts on the
+original image; Print, Frosted, and Noir are opt-in looks.
 
-Then open **Customize > Extras**, press **Refresh**, and press **Turn on**.
-The sample reads and controls the Windows media session, so its music
-features are Windows-only.
+`npm run dev` starts the desktop app. It does not build or install a plugin.
 
-### Build and copy it yourself
+### Build without installing
 
-To build without installing:
-
-```powershell
+```sh
+cargo build -p zest-wallpaper-plugin --release
 cargo build -p zest-now-playing-plugin --release
 ```
 
-The executable is written to:
+On Windows the binaries land at `target/release/zest-wallpaper.exe` and
+`target/release/zest-now-playing.exe`. On Linux and macOS they are the same
+names without `.exe`.
 
-```text
-target\release\zest-now-playing.exe
-```
-
-To install that build manually:
+To copy a Now Playing build by hand on Windows:
 
 ```powershell
 $pluginDir = Join-Path $env:LOCALAPPDATA 'Zest\plugins\now-playing'
@@ -133,10 +133,6 @@ New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
 Copy-Item .\target\release\zest-now-playing.exe $pluginDir -Force
 Copy-Item .\crates\plugins\now-playing\plugin.json $pluginDir -Force
 ```
-
-`npm run dev` starts the Zest desktop app. It does not build or install a
-plugin. Use Cargo for Rust plugins, then copy the executable and manifest into
-the plugin folder.
 
 ### Remove a plugin from Zest
 
@@ -250,6 +246,22 @@ Set the system volume:
 {"action":"setVolume","volumePercent":50}
 ```
 
+Wallpaper actions (the `wallpaper` kind only):
+
+```json
+{"action":"setWallpaper","imagePath":"C:/Users/me/Pictures/bg.jpg","filter":"none"}
+{"action":"setWallpaperFilter","filter":"frosted"}
+{"action":"clearWallpaper"}
+```
+
+`filter` is one of `none`, `print`, `frosted`, or `noir`. Zest normalises the
+value before it sends the request, and a plugin should treat anything it does
+not recognise as `none` rather than failing.
+
+`get` is shared. A wallpaper plugin returns wallpaper data, not music data.
+The processed image is a file in the plugin folder named `wallpaper.png` or
+`wallpaper.jpg`. Do not send image bytes in the JSON response.
+
 ### Successful response
 
 ```json
@@ -282,6 +294,27 @@ data URL such as `data:image/jpeg;base64,...`.
 The `canPrevious`, `canToggle`, and `canNext` fields tell Zest which buttons
 the current player supports. Use `null` when the capability is unknown; Zest
 will keep the button available for older plugins that omit these fields.
+
+A wallpaper `get` / `setWallpaper` success looks like:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "ready",
+    "sourceName": "bg.jpg",
+    "filter": "print",
+    "imageFile": "wallpaper.png",
+    "detail": "Ready",
+    "observedAt": 1735689600
+  },
+  "error": null
+}
+```
+
+Wallpaper `status` should be one of `empty` or `ready`. `imageFile` must be a
+relative name inside the plugin folder (`wallpaper.png` or `wallpaper.jpg`).
+Zest reads that file itself and never asks the plugin to print the image.
 
 ### Error response
 
@@ -325,11 +358,12 @@ a security sandbox. A plugin still runs with the user's operating-system
 permissions and can access the machine through its own code. Install only
 plugins you trust.
 
-The current protocol response is `NowPlayingView`, so the active desktop UI
-currently supports the `now-playing` behavior. Its optional metadata may be
-passed to the current agent turn as untrusted context; titles and artists are
-never instructions. A future plugin that contributes agent context must use
-the same untrusted, bounded, clearly delimited approach and needs a separate
+The current protocol response for music is `NowPlayingView`. Wallpaper uses
+the same envelope with `WallpaperView` data. Optional metadata from Now
+Playing may be passed to the current agent turn as untrusted context; titles
+and artists are never instructions. Wallpaper is visual only and is not sent
+to the agent. A future plugin that contributes agent context must use the
+same untrusted, bounded, clearly delimited approach and needs a separate
 review.
 
 ## Test the sample directly
@@ -361,7 +395,7 @@ protocol types are in [`crates/plugin-api`](../crates/plugin-api).
 The manifest is invalid, the executable is missing, the executable path is
 outside the plugin folder, or the `kind` is not supported by this Zest build.
 Check the manifest and copy both files again. The current desktop supports
-only `now-playing`.
+`now-playing` and `wallpaper`.
 
 ### The music add-on is listed but shows no song
 
@@ -374,6 +408,12 @@ music service or fetch music data from the internet.
 Some players do not expose every media button. The sample reports supported
 buttons and Zest disables unavailable ones. If a player changes state outside
 Zest, wait briefly for the next refresh.
+
+### The wallpaper did not change
+
+Turn the add-on on, choose an image from Customize > Extras, and wait for the
+preview. Large images are resized; the processed file stays in the plugin
+folder. The look starts at Original, and changing it re-renders that file.
 
 ## Checklist for a new plugin
 

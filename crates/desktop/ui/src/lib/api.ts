@@ -35,10 +35,13 @@ import type {
   SessionInfo,
   SessionMeta,
   ProjectChats,
+  ChatSearchHit,
   ThreadSummary,
   UsageReport,
   UsageSnapshot,
   UserProfile,
+  WallpaperFilterId,
+  WallpaperView,
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspacePickResult,
@@ -189,6 +192,22 @@ export function setNowPlayingVolume(volumePercent: number) {
   return invoke<NowPlayingView>("set_now_playing_volume", { volumePercent });
 }
 
+export function wallpaper() {
+  return invoke<WallpaperView>("wallpaper");
+}
+
+export function pickWallpaper() {
+  return invoke<WallpaperView>("pick_wallpaper");
+}
+
+export function setWallpaperFilter(filter: WallpaperFilterId) {
+  return invoke<WallpaperView>("set_wallpaper_filter", { filter });
+}
+
+export function clearWallpaper() {
+  return invoke<WallpaperView>("clear_wallpaper");
+}
+
 export function usageReport(days: number) {
   return invoke<UsageReport>("usage_report", { days });
 }
@@ -267,6 +286,10 @@ export function forgetWorkspace(projectPath: string) {
 
 export function listChatProjects() {
   return invoke<ProjectChats[]>("list_chat_projects");
+}
+
+export function searchChats(query: string) {
+  return invoke<ChatSearchHit[]>("search_chats", { query });
 }
 
 export function openProjectChat(options: {

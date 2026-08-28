@@ -25,6 +25,11 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { Button } from "@/components/ui/button";
 import { OrchestrationStatus } from "@/components/OrchestrationStatus";
 import { getBackend } from "@/lib/backend";
+import {
+  blobatarToneFor,
+  getSavedTheme,
+  subscribeThemeChange,
+} from "@/lib/themes";
 import { cn } from "@/lib/utils";
 import type {
   ChatMessage,
@@ -79,26 +84,18 @@ function statusIcon(status: string) {
 }
 
 /**
- * Blobatars render backdrop-less, on a pinned light tone.
+ * Blobatars render backdrop-less, on a pinned tone for the current canvas.
  *
  * The default backdrop is a near-white `#f4f4ed` tile, which is a white patch
- * in a dark row — the app is dark-only (`--card: #141516`, no `.dark` block,
- * `color-scheme: dark` in the document), so there is no light mode this pays
- * off in. Dropping it is not free: the library guarantees contrast *against
- * that backdrop*, and on the seeds this app actually uses, hashed tone put
- * three of twenty heads at ~1.6:1 against the card — invisible.
- *
- * Pinning the tone is what makes transparency safe. Tone is the only trait that
- * moves head lightness, so fixing it at the light end floors head-vs-card at
- * 12.5:1 across 500 seeds while hue stays seed-driven, which is the part that
- * tells two subagents apart. Eyes are enforced against the head, not the
- * backdrop, so they stay legible either way (worst measured 13.2:1).
+ * in a dark row. Tone is the only trait that moves head lightness, so we pin
+ * it to the light end on the dark theme (head-vs-card ~12.5:1) and the dark
+ * end on Oceanic. Hue stays seed-driven, which is the part that tells two
+ * subagents apart. Eyes are enforced against the head, not the backdrop.
  *
  * Overriding `palette.bg` instead does not work: an overridden color bypasses
  * the contrast pass rather than being enforced against, so the heads come back
  * tuned for the light backdrop they no longer sit on.
  */
-const BLOBATAR_TONE = 0.2;
 
 /**
  * Status as a dot on the corner of a subagent's blobatar.
@@ -402,6 +399,9 @@ function WorkbenchBody({
   onReconnectProvider,
 }: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
+  const [blobatarTone, setBlobatarTone] = useState(
+    () => blobatarToneFor(getSavedTheme().appearance)
+  );
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [workUnitsOpen, setWorkUnitsOpen] = useState(true);
   const [expandedDelegation, setExpandedDelegation] = useState<{
@@ -426,6 +426,14 @@ function WorkbenchBody({
   const panelRef = useRef<HTMLElement>(null);
   const titleId = useId();
   const workUnitsId = useId();
+
+  useEffect(
+    () =>
+      subscribeThemeChange(() => {
+        setBlobatarTone(blobatarToneFor(getSavedTheme().appearance));
+      }),
+    []
+  );
 
   useEffect(() => {
     if (tab !== "delegation") return;
@@ -763,7 +771,7 @@ function WorkbenchBody({
                           name={subagent.id}
                           size={28}
                           background={false}
-                          tone={BLOBATAR_TONE}
+                          tone={blobatarTone}
                           className="block"
                         />
                         <span
@@ -1086,7 +1094,7 @@ function WorkbenchBody({
                                 name={job.agent}
                                 size={12}
                                 background={false}
-                                tone={BLOBATAR_TONE}
+                                tone={blobatarTone}
                                 className="block"
                               />
                               {job.agent}
@@ -1096,7 +1104,7 @@ function WorkbenchBody({
                                 name={job.reviewerAgent}
                                 size={12}
                                 background={false}
-                                tone={BLOBATAR_TONE}
+                                tone={blobatarTone}
                                 className="block"
                               />
                               {job.reviewerAgent}

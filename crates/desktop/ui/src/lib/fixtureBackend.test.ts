@@ -48,6 +48,21 @@ describe("fixture free chats", () => {
   });
 });
 
+describe("fixture chat keyword search", () => {
+  it("finds a chat by words in the transcript, not only the title", async () => {
+    const backend = createFixtureBackend();
+    const hits = await backend.searchChats("git pu");
+    const local = hits.find((hit) => hit.id === "fixture-local");
+    assert.ok(local, `expected fixture-local in ${hits.map((hit) => hit.id).join(",")}`);
+    assert.match(local.snippet ?? "", /git pull/i);
+  });
+
+  it("returns nothing for an empty query", async () => {
+    const backend = createFixtureBackend();
+    assert.deepEqual(await backend.searchChats("   "), []);
+  });
+});
+
 describe("fixture delegation lifecycle", () => {
   it("keeps a newly created job awaiting explicit approval", async () => {
     const backend = createFixtureBackend();
@@ -148,6 +163,23 @@ describe("fixture plugins and workspace files", () => {
     const paused = await backend.controlNowPlaying("toggle");
     assert.equal(paused.status, "paused");
     assert.equal((await backend.setNowPlayingVolume(42)).volumePercent, 42);
+
+    assert.equal((await backend.wallpaper()).status, "disabled");
+    await backend.setPluginEnabled("wallpaper", true);
+    assert.equal((await backend.wallpaper()).status, "empty");
+    const paper = await backend.pickWallpaper();
+    assert.equal(paper.status, "ready");
+    assert.equal(paper.sourceName, "fixture.png");
+    assert.equal(paper.filter, "none");
+    assert.equal(paper.imageDataUrl?.startsWith("data:image/"), true);
+    // Each look is its own preview, so switching is visible in the fixture UI.
+    for (const filter of ["print", "frosted", "noir"] as const) {
+      const filtered = await backend.setWallpaperFilter(filter);
+      assert.equal(filtered.filter, filter);
+      assert.notEqual(filtered.imageDataUrl, paper.imageDataUrl);
+    }
+    assert.equal((await backend.clearWallpaper()).filter, "none");
+    assert.equal((await backend.wallpaper()).status, "empty");
 
     const root = await backend.listWorkspaceFiles();
     assert.deepEqual(root.map((entry) => entry.name), ["src", "README.md", "Cargo.toml"]);
