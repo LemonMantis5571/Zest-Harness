@@ -32,6 +32,7 @@ import type {
   WallpaperView,
 } from "@/lib/types";
 import { notifyWallpaperChanged } from "@/lib/wallpaperSync";
+import { notifyPluginsChanged } from "@/lib/pluginSync";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -681,6 +682,7 @@ function PluginsPanel() {
       setNowPlaying(music);
       setWallpaper(paper);
       setError(null);
+      notifyPluginsChanged();
     } catch {
       setError("Could not read your extras. Try again.");
     }
@@ -708,6 +710,7 @@ function PluginsPanel() {
     try {
       setPlugins(await getBackend().setPluginEnabled(plugin.id, !plugin.enabled));
       setNowPlaying(await getBackend().nowPlaying());
+      notifyPluginsChanged();
       if (plugin.id === "wallpaper") {
         setWallpaper(await getBackend().wallpaper());
         notifyWallpaperChanged();

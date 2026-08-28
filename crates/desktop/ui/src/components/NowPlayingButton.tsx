@@ -7,6 +7,7 @@ import { TopbarPanel } from "@/components/TopbarPanel";
 import { getBackend } from "@/lib/backend";
 import { createNowPlayingCoordinator } from "@/lib/nowPlayingCoordinator";
 import { nowPlayingButtonVisible, nowPlayingPluginState } from "@/lib/nowPlayingPluginState";
+import { PLUGINS_CHANGED_EVENT } from "@/lib/pluginSync";
 import type { NowPlayingView, PluginView } from "@/lib/types";
 
 type MediaAction = "previous" | "toggle" | "next";
@@ -90,6 +91,14 @@ export function NowPlayingButton() {
   }, [loadPlugin]);
 
   useEffect(() => {
+    const onChange = () => void loadPlugin();
+    window.addEventListener(PLUGINS_CHANGED_EVENT, onChange);
+    return () => window.removeEventListener(PLUGINS_CHANGED_EVENT, onChange);
+  }, [loadPlugin]);
+
+  const pluginState = nowPlayingPluginState(checked, plugin);
+
+  useEffect(() => {
     if (!plugin?.enabled || !plugin.available) return;
     const timer = window.setInterval(() => {
       void readFreshNowPlaying();
@@ -98,12 +107,12 @@ export function NowPlayingButton() {
   }, [plugin?.available, plugin?.enabled, readFreshNowPlaying]);
 
   useEffect(() => {
-    if (!checked || plugin?.available) return;
+    if (!checked || pluginState === "ready") return;
     const timer = window.setInterval(() => {
       void loadPlugin();
     }, 5_000);
     return () => window.clearInterval(timer);
-  }, [checked, loadPlugin, plugin?.available]);
+  }, [checked, loadPlugin, pluginState]);
 
   useEffect(() => {
     return () => {
@@ -207,9 +216,8 @@ export function NowPlayingButton() {
   const title = hasTrack ? value?.title?.trim() || "Music" : "Music";
   const artist = hasTrack ? value?.artist?.trim() : undefined;
   const trackLabel = artist ? `${title} · ${artist}` : title;
-  const pluginState = nowPlayingPluginState(checked, plugin);
   // Every hook above still runs, so the poll that watches for a later install
-  // keeps going and the button appears on its own once the add-on is there.
+  // keeps going and the button appears on its own once the add-on is on.
   if (!nowPlayingButtonVisible(pluginState)) return null;
 
   const pluginMessage =

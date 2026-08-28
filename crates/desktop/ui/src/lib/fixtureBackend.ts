@@ -13,6 +13,7 @@
 import { runFixtureStream } from "./fixture.ts";
 import { safeMarkdownFilename } from "./markdownExport.ts";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT } from "./models.ts";
+import { matchExcerpt } from "./commandPaletteSearch.ts";
 import type { DesktopBackend } from "./backend";
 import type {
   ApprovalMode,
@@ -30,6 +31,7 @@ import type {
   McpServerRow,
   SessionInfo,
   ThreadSummary,
+  ChatSearchHit,
   WallpaperFilterId,
   WorkspaceChange,
 } from "./types";
@@ -114,6 +116,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     ["fixture", "Fixture"],
     ["fixture-local", "Local model chat"],
     ["fixture-free", "Free chat"],
+  ]);
+  const fixtureThreadBodies = new Map<string, string>([
+    [
+      "fixture-local",
+      "Please git pull the latest OceanicUI component branch and open a pull request.",
+    ],
+    ["fixture-free", "Hi — can you sketch a webring homepage?"],
   ]);
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
@@ -1122,6 +1131,36 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
               ],
         },
       ];
+    },
+    async searchChats(query) {
+      const needle = query.trim();
+      if (!needle) return [];
+      const projects = await this.listChatProjects();
+      const hits: ChatSearchHit[] = [];
+      for (const project of projects) {
+        for (const thread of project.threads) {
+          const title = thread.title?.trim() || "Untitled chat";
+          const liveText =
+            thread.id === session.threadId
+              ? session.messages.map((message) => message.text).join("\n")
+              : "";
+          const transcript = [liveText, fixtureThreadBodies.get(thread.id) ?? ""]
+            .filter(Boolean)
+            .join("\n");
+          const snippet = matchExcerpt(transcript, needle);
+          const titleHit = title.toLowerCase().includes(needle.toLowerCase());
+          if (!snippet && !titleHit) continue;
+          hits.push({
+            id: thread.id,
+            title,
+            projectName: project.path === null ? "No workspace" : project.name,
+            projectPath: project.path,
+            updatedAt: thread.updatedAt,
+            snippet,
+          });
+        }
+      }
+      return hits.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 24);
     },
     async openProjectChat(options) {
       const targetRoot = options.root;

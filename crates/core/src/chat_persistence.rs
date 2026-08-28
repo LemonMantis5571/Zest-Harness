@@ -758,22 +758,32 @@ impl ChatPersistence {
         thread_id: &str,
     ) -> Result<ReconstructedChat> {
         let loaded = thread_store.load_with_recovery(thread_id)?;
+        self.reconstruct_chat_from_thread(loaded.thread, loaded.warning)
+    }
+
+    /// Same as [`Self::reconstruct_chat`] when the caller already holds the
+    /// transcript, so opening a chat does not parse the JSON twice.
+    pub fn reconstruct_chat_from_thread(
+        &self,
+        thread: Thread,
+        thread_warning: Option<String>,
+    ) -> Result<ReconstructedChat> {
+        let thread_id = thread.id.clone();
         let recoverable_run = self
             .runs
-            .find_recoverable_run(thread_id)?
+            .find_recoverable_run(&thread_id)?
             .filter(|candidate| {
-                loaded
-                    .thread
+                thread
                     .messages
                     .iter()
                     .any(|message| message.id() == candidate.user_message_id)
             });
         Ok(ReconstructedChat {
-            thread: loaded.thread,
-            thread_warning: loaded.warning,
-            active_run: self.runs.find_active_run(thread_id)?,
+            thread,
+            thread_warning,
+            active_run: self.runs.find_active_run(&thread_id)?,
             recoverable_run,
-            pending_interrupts: self.interrupts.list_pending(thread_id)?,
+            pending_interrupts: self.interrupts.list_pending(&thread_id)?,
         })
     }
 
@@ -1118,5 +1128,31 @@ mod tests {
             .unwrap();
         assert!(reconstructed.active_run.is_none());
         assert!(reconstructed.pending_interrupts.is_empty());
+    }
+
+    #[test]
+    fn reconstruct_from_preloaded_thread_does_not_reload_json() {
+        let root = scratch("reconstruct-preloaded");
+        let thread_store = ThreadStore::open(&root).unwrap();
+        let thread = thread_store.create_for_provider("codex").unwrap();
+        let persistence = ChatPersistence::open(&root).unwrap();
+        persistence
+            .runs
+            .create_or_resume("run-preloaded", &thread.id)
+            .unwrap();
+
+        thread_store.delete(&thread.id).unwrap();
+        let reconstructed = persistence
+            .reconstruct_chat_from_thread(thread.clone(), None)
+            .unwrap();
+        assert_eq!(reconstructed.thread.id, thread.id);
+        assert_eq!(
+            reconstructed
+                .active_run
+                .as_ref()
+                .map(|run| run.run_id.as_str()),
+            Some("run-preloaded")
+        );
+        assert!(thread_store.load(&thread.id).is_err());
     }
 }

@@ -32,6 +32,7 @@ import type {
   PluginView,
   ProfileStats,
   ProjectChats,
+  ChatSearchHit,
   ProviderRow,
   RatesStatus,
   SessionInfo,
@@ -138,6 +139,7 @@ export type DesktopBackend = {
   listThreads(): Promise<ThreadSummary[]>;
   forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
+  searchChats(query: string): Promise<ChatSearchHit[]>;
   openProjectChat(options: {
     /** `null` opens a chat without a workspace. */
     root: string | null;
@@ -296,6 +298,7 @@ export function createTauriBackend(): DesktopBackend {
     listThreads: () => tauriApi.listThreads(),
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
+    searchChats: (query) => tauriApi.searchChats(query),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadThread: (id) => tauriApi.loadThread(id),
     newThread: () => tauriApi.newThread(),

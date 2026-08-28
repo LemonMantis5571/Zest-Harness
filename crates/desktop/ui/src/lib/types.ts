@@ -244,6 +244,16 @@ export type ProjectChats = {
   threads: ThreadSummary[];
 };
 
+/** Palette row for a chat that matched a keyword in its title or transcript. */
+export type ChatSearchHit = {
+  id: string;
+  title: string;
+  projectName: string;
+  projectPath: string | null;
+  updatedAt: number;
+  snippet?: string | null;
+};
+
 export type PreparedAttachment = {
   id: string;
   name: string;

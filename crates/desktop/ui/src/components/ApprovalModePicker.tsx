@@ -70,13 +70,13 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
         onClick={() => setOpen((v) => !v)}
         className={cn(
           "flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] transition-colors",
-          "hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+          "hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
           disabled && "cursor-not-allowed opacity-50",
           // Bypass is the one mode worth noticing from across the room.
           mode === "bypass"
             ? "text-[var(--destructive,#e5484d)]"
             : mode === "plan"
-              ? "text-[#6b86d4]"
+              ? "text-primary"
               : "text-muted-foreground"
         )}
         title={current.hint}
@@ -110,7 +110,7 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
                 }}
                 className={cn(
                   "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-                  "hover:bg-white/[0.05] focus-visible:outline-none focus-visible:bg-white/[0.05]"
+                  "hover:bg-foreground/5 focus-visible:outline-none focus-visible:bg-foreground/5"
                 )}
               >
                 <span className="mt-0.5 grid size-3.5 shrink-0 place-items-center">

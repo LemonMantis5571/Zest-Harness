@@ -15,7 +15,7 @@ Keep the parent session on one provider. Hand bounded work to a worker. Review t
 
 [Install the beta](https://github.com/LemonMantis5571/Zest-Harness/releases) · [Build from source](#build-from-source) · [Docs](#docs)
 
-<img src="./crates/desktop/ui/src/assets/hero.png" alt="" width="320" />
+<img src="./crates/desktop/ui/src/assets/hero.png" alt="Zest desktop with project sidebar, composer, and parent session" width="880" />
 
 </div>
 

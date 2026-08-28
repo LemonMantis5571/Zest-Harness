@@ -70,7 +70,7 @@ export const COMMANDS: CommandDef[] = [
     label: "Command palette",
     section: "Navigation",
     defaultChord: "Mod+K",
-    hint: "Search actions and backend commands",
+    hint: "Search chats, commands, and actions",
   },
   {
     id: "view.shortcuts",

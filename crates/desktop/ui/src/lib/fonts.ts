@@ -72,10 +72,11 @@ const OPTIONAL_FONT_LOADERS: Partial<Record<string, FontLoader>> = {
   "abc-arizona": () => import("../fonts/arizona.css"),
   inter: () => import("@fontsource-variable/inter"),
   "plus-jakarta": () => import("@fontsource-variable/plus-jakarta-sans"),
+  "jetbrains-mono": () => import("@fontsource-variable/jetbrains-mono"),
   "fira-code": () => import("@fontsource-variable/fira-code"),
 };
 
-const loadedFonts = new Set(["geist", "jetbrains-mono", "system"]);
+const loadedFonts = new Set(["geist", "system"]);
 const loadingFonts = new Map<string, Promise<boolean>>();
 
 export function getFontById(id: string): AppFont {

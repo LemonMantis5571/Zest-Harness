@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { CodeBlock } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
 import { markTrustedHtml } from "@/lib/safeHtml";
+import { getSavedTheme, subscribeThemeChange } from "@/lib/themes";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -46,9 +47,12 @@ export function MermaidBlock({ code, streaming = false }: Props) {
   const [state, setState] = useState<RenderState>({ status: "idle" });
   const [expanded, setExpanded] = useState(false);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [appearance, setAppearance] = useState(() => getSavedTheme().appearance);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
+
+  useEffect(() => subscribeThemeChange(() => setAppearance(getSavedTheme().appearance)), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,13 +66,14 @@ export function MermaidBlock({ code, streaming = false }: Props) {
 
     setState({ status: "loading" });
     const id = `zest-mermaid-${nextDiagramId++}`;
+    const mermaidTheme = appearance === "dark" ? "dark" : "default";
 
     void loadMermaid()
       .then(({ default: mermaid }) => {
         mermaid.initialize({
           startOnLoad: false,
           securityLevel: "strict",
-          theme: "dark",
+          theme: mermaidTheme,
           fontFamily: "inherit",
         });
         return mermaid.render(id, code);
@@ -83,7 +88,7 @@ export function MermaidBlock({ code, streaming = false }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [code, streaming]);
+  }, [appearance, code, streaming]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -128,7 +133,7 @@ export function MermaidBlock({ code, streaming = false }: Props) {
 
   return (
     <>
-      <div className="group/diagram relative my-3 overflow-hidden rounded-xl border border-border/70 bg-[#0d1117] last:mb-0">
+      <div className="group/diagram relative my-3 overflow-hidden rounded-xl border border-border/70 bg-card last:mb-0">
         <button
           ref={triggerRef}
           type="button"
@@ -140,7 +145,7 @@ export function MermaidBlock({ code, streaming = false }: Props) {
             setExpanded(true);
           }}
         >
-          <span className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-[#0d1117]/90 px-2 py-1 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover/diagram:opacity-100 group-focus-within/diagram:opacity-100">
+          <span className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-card/90 px-2 py-1 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover/diagram:opacity-100 group-focus-within/diagram:opacity-100">
             <Maximize2Icon className="size-3.5" aria-hidden="true" />
             <span>Expand</span>
           </span>
@@ -161,7 +166,7 @@ export function MermaidBlock({ code, streaming = false }: Props) {
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby={titleId}
-                className="relative z-10 flex h-full w-full flex-col overflow-hidden rounded-xl border border-border bg-[#0d1117] shadow-2xl animate-in zoom-in-95 fade-in duration-150"
+                className="relative z-10 flex h-full w-full flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-in zoom-in-95 fade-in duration-150"
               >
                 <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
                   <div className="min-w-0">

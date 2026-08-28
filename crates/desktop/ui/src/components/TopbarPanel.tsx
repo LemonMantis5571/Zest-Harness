@@ -17,6 +17,8 @@ type Props = {
   children: ReactNode;
   trigger?: ReactNode;
   triggerClassName?: string;
+  /** Footer chrome opens upward so the panel stays on screen. */
+  placement?: "below" | "above";
   onOpenChange?: (open: boolean) => void;
 };
 
@@ -33,6 +35,7 @@ export function TopbarPanel({
   children,
   trigger,
   triggerClassName,
+  placement = "below",
   onOpenChange,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -126,7 +129,12 @@ export function TopbarPanel({
           id={panelId}
           role="dialog"
           aria-label={label}
-          className="absolute top-[calc(100%+0.5rem)] right-0 z-50 max-h-[min(70vh,480px)] w-[330px] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-2xl"
+          className={cn(
+            "absolute right-0 z-50 max-h-[min(70vh,480px)] w-[330px] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-2xl",
+            placement === "above"
+              ? "bottom-[calc(100%+0.5rem)]"
+              : "top-[calc(100%+0.5rem)]"
+          )}
         >
           {children}
         </div>

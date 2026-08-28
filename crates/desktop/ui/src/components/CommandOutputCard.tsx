@@ -68,7 +68,7 @@ export function CommandOutputCard({
         <button
           type="button"
           onClick={() => setCollapsed(false)}
-          className="w-full px-3 py-2 text-left text-[11px] text-muted-foreground outline-none hover:bg-white/[0.03] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
+          className="w-full px-3 py-2 text-left text-[11px] text-muted-foreground outline-none hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
         >
           {text.split("\n").length} lines - click to expand
         </button>

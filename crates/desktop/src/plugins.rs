@@ -570,7 +570,10 @@ fn to_ui(plugin: &InstalledPlugin, data: PluginWallpaper) -> WallpaperView {
     // An oversized file and an absent one need different fixes, so they do not
     // get to share a message. Reporting "missing" for a file sitting right
     // there sent a real diagnosis the wrong way.
-    if canonical.metadata().is_ok_and(|meta| meta.len() > MAX_WALLPAPER_BYTES) {
+    if canonical
+        .metadata()
+        .is_ok_and(|meta| meta.len() > MAX_WALLPAPER_BYTES)
+    {
         view.status = "unavailable".into();
         view.detail = "Wallpaper file is too large.".into();
         return view;

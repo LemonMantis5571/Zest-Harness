@@ -35,6 +35,7 @@ import type {
   SessionInfo,
   SessionMeta,
   ProjectChats,
+  ChatSearchHit,
   ThreadSummary,
   UsageReport,
   UsageSnapshot,
@@ -285,6 +286,10 @@ export function forgetWorkspace(projectPath: string) {
 
 export function listChatProjects() {
   return invoke<ProjectChats[]>("list_chat_projects");
+}
+
+export function searchChats(query: string) {
+  return invoke<ChatSearchHit[]>("search_chats", { query });
 }
 
 export function openProjectChat(options: {

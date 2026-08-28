@@ -32,25 +32,26 @@ use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    can_start_login, codex_cli_on_path, compose_system_with_docs, derive_profile_stats,
-    descriptor_for_picker_id, descriptor_from_config, detect_all, detect_claude_code,
-    detect_codex_cli, detect_codex_oauth, display_path, driver_for, env_context,
-    load_custom_system, load_project_docs, new_id, probe, save_custom_system,
+    can_start_login, codex_cli_on_path, compose_system_with_docs, contains_ignore_ascii_case,
+    derive_profile_stats, descriptor_for_picker_id, descriptor_from_config, detect_all,
+    detect_claude_code, detect_codex_cli, detect_codex_oauth, display_path, driver_for,
+    env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
     start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
-    truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
-    AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config, CredentialPolicy,
-    ExternalAgentMode, ExternalWorkspace, HarnessError, JobEvent, JobRegistry, JobSnapshot,
-    JobStatus, Ledger, LoginPoll, LoginProcess, McpCatalog, PersistPriority, PersistSnapshot,
-    PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderCommandRequest,
-    ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
-    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
-    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
-    StreamEvent, SystemPrompt, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadEventKind,
-    ThreadGitContext, ThreadInput, ThreadInputAttachment, ThreadInputTarget, ThreadLoadError,
-    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport, UsageSnapshot,
-    DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    thread_summary_from_json, truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy,
+    ApprovalRequest, Approver, AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config,
+    CredentialPolicy, ExternalAgentMode, ExternalWorkspace, HarnessError, JobEvent, JobRegistry,
+    JobSnapshot, JobStatus, Ledger, LoginPoll, LoginProcess, McpCatalog, PersistPriority,
+    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
+    ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
+    ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
+    PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
+    SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread, ThreadCheckpoint,
+    ThreadCheckpointKind, ThreadEventKind, ThreadGitContext, ThreadInput, ThreadInputAttachment,
+    ThreadInputTarget, ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk,
+    UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -379,7 +380,7 @@ const DESKTOP_DEFAULT_MODE: ApprovalMode = ApprovalMode::Auto;
 const PLAN_SKILL: &str = "plan";
 
 struct AppState {
-    sessions: SessionController,
+    sessions: Arc<SessionController>,
     browser: Arc<BrowserHost>,
     login: Mutex<Option<LoginProcess>>,
     /// One coalescing transcript worker per open project. A background turn
@@ -3429,19 +3430,18 @@ fn open_store(root: &std::path::Path) -> Result<ThreadStore, String> {
 /// details to the UI.
 fn recover_chat_on_load(
     root: &std::path::Path,
-    store: &ThreadStore,
-    thread_id: &str,
+    thread: Thread,
     warning_already_present: bool,
 ) -> Result<(Thread, Option<String>, Option<RecoverableRun>), String> {
     let persistence = ChatPersistence::open(root).map_err(|error| error.to_string())?;
     let reconstructed = persistence
-        .reconstruct_chat(store, thread_id)
+        .reconstruct_chat_from_thread(thread, None)
         .map_err(|error| error.to_string())?;
     let recoverable_run = reconstructed.recoverable_run.clone();
     let had_unfinished_state =
         reconstructed.active_run.is_some() || !reconstructed.pending_interrupts.is_empty();
     let reconciliation = persistence
-        .reconcile_after_restart(thread_id)
+        .reconcile_after_restart(&reconstructed.thread.id)
         .map_err(|error| error.to_string())?;
     let recovery_warning = if !(warning_already_present || reconstructed.thread_warning.is_some())
         && (had_unfinished_state
@@ -3878,6 +3878,21 @@ fn event_priority(event: &ChatEvent) -> PersistPriority {
     }
 }
 
+fn event_mutates_thread(event: &ChatEvent) -> bool {
+    !matches!(
+        event,
+        ChatEvent::ProviderActivity { .. }
+            | ChatEvent::ToolCallUpdate { .. }
+            | ChatEvent::QuestionNeeded { .. }
+            | ChatEvent::WorkspaceChanged { .. }
+            | ChatEvent::InputQueued { .. }
+            | ChatEvent::InputUpdated { .. }
+            | ChatEvent::InputRemoved { .. }
+            | ChatEvent::JobCompleted { .. }
+            | ChatEvent::Warning { .. }
+    )
+}
+
 #[tauri::command]
 async fn start_session(
     state: State<'_, AppState>,
@@ -3959,7 +3974,7 @@ async fn start_session_inner(
     let (recovery_warning, recovery) = if live_turn || thread_is_draft {
         (None, None)
     } else {
-        match recover_chat_on_load(&root, &store, &thread.id, load_warning.is_some()) {
+        match recover_chat_on_load(&root, thread.clone(), load_warning.is_some()) {
             Ok((recovered_thread, warning, recovery)) => {
                 thread = recovered_thread;
                 (warning, recovery)
@@ -3975,9 +3990,11 @@ async fn start_session_inner(
     };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
     let initial_branch = read_git_branch(&root);
-    let mut thread_metadata_changed =
-        thread.ensure_git_context(initial_branch.clone(), read_git_head(&root).await);
-    thread_metadata_changed |= thread.record_git_branch(initial_branch);
+    // Branch comes from `.git/HEAD` (a small file). `git rev-parse` for the
+    // start commit is deferred until after the session is live so a slow git
+    // cannot hold the boot skeleton.
+    let mut thread_metadata_changed = thread.ensure_git_context(initial_branch.clone(), None);
+    thread_metadata_changed |= thread.record_git_branch(initial_branch.clone());
 
     let approval_hub = Arc::new(ApprovalHub::new());
     let question_hub = Arc::new(QuestionHub::new());
@@ -4071,6 +4088,7 @@ async fn start_session_inner(
     }
 
     let thread_id = thread.id.clone();
+    let git_root = root.clone();
     let session = Session {
         session_id: String::new(),
         agent,
@@ -4109,6 +4127,14 @@ async fn start_session_inner(
         .session_info_snapshot(|s| session_info_from(s, warning.clone()))
         .map_err(map_session_err)?
         .ok_or_else(|| map_session_err(SessionError::NoSession))?;
+
+    let sessions = state.sessions.clone();
+    let git_thread_id = thread_id;
+    let fill_start_commit = !thread_is_draft;
+    tauri::async_runtime::spawn(async move {
+        fill_start_commit_after_open(sessions, git_root, git_thread_id, fill_start_commit).await;
+    });
+
     Ok(info)
 }
 
@@ -4118,6 +4144,29 @@ fn merge_warnings(load_warning: Option<String>, runtime: Vec<String>) -> Option<
     let mut all: Vec<String> = load_warning.into_iter().collect();
     all.extend(runtime);
     (!all.is_empty()).then(|| all.join("; "))
+}
+
+async fn fill_start_commit_after_open(
+    sessions: Arc<SessionController>,
+    root: PathBuf,
+    thread_id: String,
+    persist: bool,
+) {
+    let Some(commit) = read_git_head(&root).await else {
+        return;
+    };
+    let _ = sessions.with_session_if_idle(|session| {
+        if session.thread_id != thread_id {
+            return;
+        }
+        if session.thread.ensure_git_context(None, Some(commit)) && persist {
+            if let Ok(store) = open_store(&session.root) {
+                if store.exists(&session.thread.id) {
+                    let _ = store.save(&session.thread);
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -4260,11 +4309,7 @@ fn list_cached_threads(
             .map(|cached| cached.summary.clone())
             .or_else(|| {
                 let body = std::fs::read_to_string(&path).ok()?;
-                let thread = serde_json::from_str::<Thread>(&body).ok()?;
-                if thread.version > THREAD_FORMAT_VERSION {
-                    return None;
-                }
-                let summary = thread.summary();
+                let summary = thread_summary_from_json(&body)?;
                 cache.files.insert(
                     name.to_string(),
                     CachedThreadSummary {
@@ -4370,6 +4415,133 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
     cache.projects.retain(|root, _| cache_roots.contains(root));
 
     Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatSearchHit {
+    id: String,
+    title: String,
+    project_name: String,
+    project_path: Option<String>,
+    updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
+}
+
+const CHAT_SEARCH_LIMIT: usize = 24;
+const CHAT_SEARCH_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Scan known project chats and the free-chat bucket for a keyword in titles
+/// or transcript text. Used by the command palette; empty queries return
+/// nothing so the UI can show recents from `list_chat_projects` instead.
+#[tauri::command]
+fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSearchHit>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
+    let active_root = project_root_for_session(
+        active_session_root.as_deref(),
+        active_session_root
+            .is_none()
+            .then(|| resolve_workspace_root(&state).ok())
+            .flatten(),
+    );
+    let mut roots = load_known_workspaces();
+    if let Some(active_root) = active_root.as_ref() {
+        append_known_workspace(&mut roots, active_root.clone());
+    }
+    let free_root = free_chats_root()?;
+
+    let mut hits = Vec::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let Ok(store) = open_store(&root) else {
+            continue;
+        };
+        hits.extend(search_threads_in_store(
+            &store,
+            &project_display_name(&root),
+            Some(display_path(&root)),
+            query,
+        ));
+    }
+    if let Ok(store) = open_store(&free_root) {
+        hits.extend(search_threads_in_store(&store, "No workspace", None, query));
+    }
+
+    hits.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    hits.truncate(CHAT_SEARCH_LIMIT);
+    Ok(hits)
+}
+
+fn search_threads_in_store(
+    store: &ThreadStore,
+    project_name: &str,
+    project_path: Option<String>,
+    query: &str,
+) -> Vec<ChatSearchHit> {
+    let mut hits = Vec::new();
+    let Ok(entries) = std::fs::read_dir(store.dir()) else {
+        return hits;
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".json") || name.contains(".corrupt") {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() > CHAT_SEARCH_MAX_BYTES {
+            continue;
+        }
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        files.push((modified, path));
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_mtime, path) in files {
+        if hits.len() >= CHAT_SEARCH_LIMIT {
+            break;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !contains_ignore_ascii_case(&body, query) {
+            continue;
+        }
+        let Ok(thread) = serde_json::from_str::<Thread>(&body) else {
+            continue;
+        };
+        if thread.version > THREAD_FORMAT_VERSION {
+            continue;
+        }
+        let snippet = thread.search_excerpt(query);
+        hits.push(ChatSearchHit {
+            id: thread.id,
+            title: thread
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Untitled chat")
+                .to_string(),
+            project_name: project_name.to_string(),
+            project_path: project_path.clone(),
+            updated_at: thread.updated_at,
+            snippet,
+        });
+    }
+    hits
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4935,7 +5107,7 @@ mod chat_recovery_tests {
             .unwrap();
 
         let (recovered, warning, retry) =
-            recover_chat_on_load(&root, &store, &thread.id, false).unwrap();
+            recover_chat_on_load(&root, thread.clone(), false).unwrap();
         assert_eq!(recovered.id, thread.id);
         assert_eq!(
             warning.as_deref(),
@@ -5260,8 +5432,7 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
             let load_warning = loaded.warning;
             let recovery_warning = match recover_chat_on_load(
                 &session.root,
-                &store,
-                &loaded_thread.id,
+                loaded_thread.clone(),
                 load_warning.is_some(),
             ) {
                 Ok((recovered_thread, warning, recovery)) => {
@@ -7215,7 +7386,7 @@ async fn read_git_head(root: &Path) -> Option<String> {
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(root)
         .kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
         .await
         .ok()?
         .ok()?;
@@ -7286,10 +7457,41 @@ struct GitHubPullRequest {
     changed_files: u64,
 }
 
+#[derive(Clone)]
 enum PullRequestLookup {
     Found(PullRequestLink),
     NotFound,
     Unavailable,
+}
+
+struct CachedPullRequest {
+    root: PathBuf,
+    branch: String,
+    lookup: PullRequestLookup,
+}
+
+static PULL_REQUEST_CACHE: Mutex<Option<CachedPullRequest>> = Mutex::new(None);
+
+async fn lookup_pull_request_cached(root: &Path, branch: Option<&str>) -> PullRequestLookup {
+    if let Some(branch) = branch.filter(|name| !name.is_empty()) {
+        if let Ok(guard) = PULL_REQUEST_CACHE.lock() {
+            if let Some(cached) = guard.as_ref() {
+                if cached.root == root && cached.branch == branch {
+                    return cached.lookup.clone();
+                }
+            }
+        }
+        let lookup = lookup_pull_request(root).await;
+        if let Ok(mut guard) = PULL_REQUEST_CACHE.lock() {
+            *guard = Some(CachedPullRequest {
+                root: root.to_path_buf(),
+                branch: branch.to_string(),
+                lookup: lookup.clone(),
+            });
+        }
+        return lookup;
+    }
+    lookup_pull_request(root).await
 }
 
 async fn lookup_pull_request(root: &Path) -> PullRequestLookup {
@@ -7357,7 +7559,9 @@ async fn inspect_git_context(
     let local_stats = read_git_diff_stats(root, thread_context.start_commit.as_deref()).await;
     let mut pull_request = thread_context.pull_request.clone();
     if current_branch.is_some() {
-        if let PullRequestLookup::Found(found) = lookup_pull_request(root).await {
+        if let PullRequestLookup::Found(found) =
+            lookup_pull_request_cached(root, current_branch.as_deref()).await
+        {
             pull_request = Some(found);
         }
     }
@@ -8051,7 +8255,7 @@ pub fn run() {
             let ledger = Arc::new(Mutex::new(Ledger::load()));
             let jobs = Arc::new(JobRegistry::new());
             AppState {
-                sessions: SessionController::new(),
+                sessions: Arc::new(SessionController::new()),
                 browser: Arc::new(BrowserHost::new()),
                 login: Mutex::new(None),
                 persist: Mutex::new(HashMap::new()),
@@ -8127,6 +8331,7 @@ pub fn run() {
             list_threads,
             forget_workspace,
             list_chat_projects,
+            search_chats,
             open_project_chat,
             load_thread,
             new_thread,
@@ -8186,6 +8391,169 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Zest desktop")
         .run(|_app_handle, _event| {});
+}
+
+#[cfg(test)]
+mod persist_event_tests {
+    use super::*;
+
+    fn warning() -> ChatEvent {
+        ChatEvent::Warning {
+            session_id: "s".into(),
+            thread_id: "t".into(),
+            turn_id: None,
+            message: "x".into(),
+        }
+    }
+
+    fn tool_result() -> ChatEvent {
+        ChatEvent::ToolCallResult {
+            session_id: "s".into(),
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            message_id: "m".into(),
+            name: "read_file".into(),
+            id: "call".into(),
+            summary: "done".into(),
+            is_error: false,
+            path: None,
+            diff: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn warning_and_tool_progress_do_not_mutate_the_thread() {
+        assert!(!event_mutates_thread(&warning()));
+        assert!(!event_mutates_thread(&ChatEvent::ToolCallUpdate {
+            session_id: "s".into(),
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            message_id: "m".into(),
+            id: "call".into(),
+            metadata: ToolMetaView::Delegation {
+                provider_id: "codex".into(),
+                model: "gpt".into(),
+                diff: None,
+                job_id: None,
+                stage: None,
+                attempt: None,
+                review_status: None,
+            },
+        }));
+        assert!(!event_mutates_thread(&ChatEvent::QuestionNeeded {
+            session_id: "s".into(),
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            message_id: "m".into(),
+            question_id: "q".into(),
+            tool_call_id: "call".into(),
+            prompt: "ok?".into(),
+            choices: Vec::new(),
+            multiple: false,
+            placeholder: None,
+        }));
+    }
+
+    #[test]
+    fn tool_result_still_persists_immediately() {
+        assert!(event_mutates_thread(&tool_result()));
+        assert!(matches!(
+            event_priority(&tool_result()),
+            PersistPriority::Immediate
+        ));
+        assert!(matches!(
+            event_priority(&ChatEvent::TextDelta {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "m".into(),
+                text: "hi".into(),
+            }),
+            PersistPriority::Delta
+        ));
+    }
+}
+
+#[cfg(test)]
+mod chat_search_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zest-chat-search-{name}-{}", new_id("test")));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn search_finds_keyword_in_message_body() {
+        let root = scratch("body");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = Thread::new();
+        thread.apply_user(
+            "u1",
+            "Please git pull the latest OceanicUI component branch.",
+        );
+        store.save(&thread).unwrap();
+
+        let hits = search_threads_in_store(&store, "zest", Some("/code/zest".into()), "git pu");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, thread.id);
+        let snippet = hits[0].snippet.as_deref().expect("snippet");
+        assert!(
+            snippet.to_ascii_lowercase().contains("git pull"),
+            "{snippet}"
+        );
+    }
+
+    #[test]
+    fn search_skips_chats_without_the_keyword() {
+        let root = scratch("miss");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = Thread::new();
+        thread.apply_user("u1", "Hello from a webring sketch.");
+        store.save(&thread).unwrap();
+
+        let hits = search_threads_in_store(&store, "zest", None, "git pu");
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn search_stops_after_limit_when_newer_files_match() {
+        let root = scratch("newest-first");
+        let store = ThreadStore::open(&root).unwrap();
+
+        let mut old = Thread::new();
+        old.apply_user("u1", "git pull this older matching chat");
+        store.save(&old).unwrap();
+        let old_path = store.dir().join(format!("{}.json", old.id));
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&old_path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let mut newer_ids = Vec::new();
+        for i in 0..CHAT_SEARCH_LIMIT {
+            let mut thread = Thread::new();
+            thread.apply_user("u1", &format!("git pull newer matching chat {i}"));
+            store.save(&thread).unwrap();
+            newer_ids.push(thread.id);
+        }
+
+        let hits = search_threads_in_store(&store, "zest", None, "git pu");
+        assert_eq!(hits.len(), CHAT_SEARCH_LIMIT);
+        assert!(
+            !hits.iter().any(|hit| hit.id == old.id),
+            "older matching file should be skipped once {CHAT_SEARCH_LIMIT} newer hits exist"
+        );
+        for id in &newer_ids {
+            assert!(hits.iter().any(|hit| hit.id == *id), "missing {id}");
+        }
+    }
 }
 
 /// The bug these guard: a packaged install starts with its own program folder

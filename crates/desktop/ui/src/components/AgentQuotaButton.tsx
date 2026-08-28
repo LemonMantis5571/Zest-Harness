@@ -13,9 +13,14 @@ import { cn } from "@/lib/utils";
 type Props = {
   providers: ProviderRow[];
   refreshKey: string | number;
+  placement?: "below" | "above";
 };
 
-export function AgentQuotaButton({ providers, refreshKey }: Props) {
+export function AgentQuotaButton({
+  providers,
+  refreshKey,
+  placement = "below",
+}: Props) {
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   const [liveQuota, setLiveQuota] = useState<ProviderQuotaSnapshot | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
@@ -85,6 +90,7 @@ export function AgentQuotaButton({ providers, refreshKey }: Props) {
     <TopbarPanel
       icon={GaugeIcon}
       label="Agent quota"
+      placement={placement}
       onOpenChange={(open) => {
         if (open) void loadQuota();
       }}

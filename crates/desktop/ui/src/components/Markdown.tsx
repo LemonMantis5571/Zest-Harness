@@ -152,7 +152,7 @@ function componentsFor(streaming: boolean): Components {
     return language.toLowerCase() === "mermaid" ? (
       <MermaidBlock code={code} streaming={streaming} />
     ) : (
-      <CodeBlock code={code} language={language} />
+      <CodeBlock code={code} language={language} streaming={streaming} />
     );
   },
   hr: () => <hr className="my-4 border-border/70" />,

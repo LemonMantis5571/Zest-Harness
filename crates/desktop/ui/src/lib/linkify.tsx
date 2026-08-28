@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
-/** Bright link blue on dark canvas (readable, clearly “a link”). */
+/** Link colour follows `--link` so it stays readable on both palettes. */
 export const linkClassName =
-  "cursor-pointer text-[#82a0ff] underline-offset-2 hover:underline";
+  "cursor-pointer text-link underline-offset-2 hover:underline";
 
 /** Match http(s) URLs; trim trailing punctuation commonly stuck to pasted links. */
 const URL_RE = /(https?:\/\/[^\s<>"']+)/gi;

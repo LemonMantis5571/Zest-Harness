@@ -48,6 +48,21 @@ describe("fixture free chats", () => {
   });
 });
 
+describe("fixture chat keyword search", () => {
+  it("finds a chat by words in the transcript, not only the title", async () => {
+    const backend = createFixtureBackend();
+    const hits = await backend.searchChats("git pu");
+    const local = hits.find((hit) => hit.id === "fixture-local");
+    assert.ok(local, `expected fixture-local in ${hits.map((hit) => hit.id).join(",")}`);
+    assert.match(local.snippet ?? "", /git pull/i);
+  });
+
+  it("returns nothing for an empty query", async () => {
+    const backend = createFixtureBackend();
+    assert.deepEqual(await backend.searchChats("   "), []);
+  });
+});
+
 describe("fixture delegation lifecycle", () => {
   it("keeps a newly created job awaiting explicit approval", async () => {
     const backend = createFixtureBackend();
