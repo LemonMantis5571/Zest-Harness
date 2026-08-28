@@ -475,9 +475,12 @@ mod tests {
             .pixels()
             .filter(|pixel| pixel[2] >= pixel[0] && pixel[2] >= pixel[1])
             .count();
-        let not_one_bit = image
-            .pixels()
-            .any(|pixel| pixel.0.iter().any(|channel| *channel != 0 && *channel != 255));
+        let not_one_bit = image.pixels().any(|pixel| {
+            pixel
+                .0
+                .iter()
+                .any(|channel| *channel != 0 && *channel != 255)
+        });
         assert!(unequal > 50);
         assert!(blue_strongest > 100);
         assert!(not_one_bit);

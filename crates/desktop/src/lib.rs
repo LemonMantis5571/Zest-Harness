@@ -4475,7 +4475,7 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
         hits.extend(search_threads_in_store(&store, "No workspace", None, query));
     }
 
-    hits.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    hits.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     hits.truncate(CHAT_SEARCH_LIMIT);
     Ok(hits)
 }
@@ -4508,7 +4508,7 @@ fn search_threads_in_store(
         let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         files.push((modified, path));
     }
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (_mtime, path) in files {
         if hits.len() >= CHAT_SEARCH_LIMIT {
             break;
