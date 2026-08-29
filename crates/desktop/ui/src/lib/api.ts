@@ -89,17 +89,7 @@ export function saveMcpServer(input: {
   enabled: boolean;
   timeoutSecs?: number | null;
 }) {
-  return invoke<McpServerRow[]>("save_mcp_server", {
-    id: input.id,
-    command: input.command,
-    args: input.args,
-    url: input.url ?? "",
-    headers: input.headers ?? {},
-    headerSecrets: input.headerSecrets ?? {},
-    envVars: input.envVars,
-    enabled: input.enabled,
-    timeoutSecs: input.timeoutSecs ?? null,
-  });
+  return invoke<McpServerRow[]>("save_mcp_server", { input });
 }
 
 export function setMcpServerEnabled(id: string, enabled: boolean) {

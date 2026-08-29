@@ -2096,6 +2096,20 @@ struct McpCheckView {
     tools: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveMcpServerInput {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    url: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+    header_secrets: Option<BTreeMap<String, String>>,
+    env_vars: Vec<String>,
+    enabled: bool,
+    timeout_secs: Option<u64>,
+}
+
 #[tauri::command]
 fn list_mcp_servers(state: State<'_, AppState>) -> Vec<McpServerView> {
     let _read_guard = state.config_edit.lock().ok();
@@ -2196,35 +2210,23 @@ fn mcp_header_names_equal(left: &str, right: &str) -> bool {
 }
 
 fn mcp_server_input(
-    id: &str,
-    command: &str,
-    args: Vec<String>,
-    url: String,
-    headers: BTreeMap<String, String>,
-    header_credentials: BTreeMap<String, String>,
-    env_vars: Vec<String>,
-    enabled: bool,
-    timeout_secs: Option<u64>,
+    mut input: zest_core::config_edit::McpServerInput,
 ) -> zest_core::config_edit::McpServerInput {
-    zest_core::config_edit::McpServerInput {
-        id: id.to_string(),
-        command: command.trim().to_string(),
-        args: args
-            .into_iter()
-            .map(|arg| arg.trim().to_string())
-            .filter(|arg| !arg.is_empty())
-            .collect(),
-        url: url.trim().to_string(),
-        headers,
-        header_credentials,
-        env_vars: env_vars
-            .into_iter()
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty())
-            .collect(),
-        enabled,
-        timeout_secs: timeout_secs.unwrap_or(120),
-    }
+    input.command = input.command.trim().to_string();
+    input.args = input
+        .args
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    input.url = input.url.trim().to_string();
+    input.env_vars = input
+        .env_vars
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    input
 }
 
 fn mcp_config_from_input(
@@ -2277,17 +2279,9 @@ fn write_mcp_server(
 #[tauri::command]
 async fn save_mcp_server(
     state: State<'_, AppState>,
-    id: String,
-    command: String,
-    args: Vec<String>,
-    url: Option<String>,
-    headers: Option<BTreeMap<String, String>>,
-    header_secrets: Option<BTreeMap<String, String>>,
-    env_vars: Vec<String>,
-    enabled: bool,
-    timeout_secs: Option<u64>,
+    input: SaveMcpServerInput,
 ) -> Result<Vec<McpServerView>, String> {
-    let id = id.trim().to_string();
+    let id = input.id.trim().to_string();
     let existing = load_workspace_config(&state).mcp.get(&id).cloned();
     let previous_accounts = existing
         .as_ref()
@@ -2299,25 +2293,21 @@ async fn save_mcp_server(
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
-    let mut input = mcp_server_input(
-        &id,
-        &command,
-        args,
-        url.unwrap_or_default(),
-        headers.unwrap_or_default(),
-        if existing.is_some() {
-            existing
-                .as_ref()
-                .map(|server| server.header_credentials.clone())
-                .unwrap_or_default()
-        } else {
-            BTreeMap::new()
-        },
-        env_vars,
-        enabled,
-        timeout_secs,
-    );
-    let header_secrets = header_secrets.unwrap_or_default();
+    let header_secrets = input.header_secrets.unwrap_or_default();
+    let mut input = mcp_server_input(zest_core::config_edit::McpServerInput {
+        id,
+        command: input.command,
+        args: input.args,
+        url: input.url.unwrap_or_default(),
+        headers: input.headers.unwrap_or_default(),
+        header_credentials: existing
+            .as_ref()
+            .map(|server| server.header_credentials.clone())
+            .unwrap_or_default(),
+        env_vars: input.env_vars,
+        enabled: input.enabled,
+        timeout_secs: input.timeout_secs.unwrap_or(120),
+    });
     if !header_secrets.is_empty() && input.url.trim().is_empty() {
         return Err("saved MCP header values are only used with an HTTP URL".into());
     }
@@ -2394,17 +2384,17 @@ async fn set_mcp_server_enabled(
         .ok_or_else(|| format!("{id} is not configured."))?;
     let input = write_mcp_server(
         &state,
-        mcp_server_input(
-            &id,
-            &existing.command,
-            existing.args.clone(),
-            existing.http_url().unwrap_or("").to_string(),
-            existing.headers.clone(),
-            existing.header_credentials.clone(),
-            existing.env_vars.clone(),
+        mcp_server_input(zest_core::config_edit::McpServerInput {
+            id,
+            command: existing.command.clone(),
+            args: existing.args.clone(),
+            url: existing.http_url().unwrap_or("").to_string(),
+            headers: existing.headers.clone(),
+            header_credentials: existing.header_credentials.clone(),
+            env_vars: existing.env_vars.clone(),
             enabled,
-            Some(existing.timeout_secs),
-        ),
+            timeout_secs: existing.timeout_secs,
+        }),
     )?;
     // Turning a server on is the moment its tools have to exist, and a server
     // switched off since before the catalogue was written would otherwise
