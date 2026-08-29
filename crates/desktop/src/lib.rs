@@ -5135,7 +5135,8 @@ mod chat_summary_tests {
         store.save(&empty).unwrap();
         store.save(&started).unwrap();
 
-        let listed = list_cached_threads(&store, Some("codex"), &mut ProjectSummaryCache::default());
+        let listed =
+            list_cached_threads(&store, Some("codex"), &mut ProjectSummaryCache::default());
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, started.id);
 
