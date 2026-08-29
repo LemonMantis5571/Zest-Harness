@@ -10,7 +10,7 @@
 //!    some providers are available and some are not. One missing key must not
 //!    stop the others from loading — it becomes a warning the picker can show.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -363,16 +363,30 @@ fn default_external_timeout_secs() -> u64 {
 
 /// One MCP server Zest starts and calls itself.
 ///
-/// `command` and `args` go straight to the operating system process API; no
-/// shell is involved, and there is no placeholder expansion — an MCP server is
-/// a long-lived stdio process, not a per-prompt invocation.
+/// A local server is a long-lived stdio process: `command` and `args` go
+/// straight to the operating system process API, with no shell and no
+/// placeholder expansion. A remote server is a Streamable HTTP URL. Exactly
+/// one of those two shapes is valid.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
-    /// Executable name or absolute path.
+    /// Executable name or absolute path. Empty when `url` is set.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Streamable HTTP endpoint, for example `https://example.com/mcp`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Extra HTTP headers. Keys are header names; values are environment
+    /// variable names whose current values are sent. Never write the secret
+    /// into `zest.toml`.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// HTTP header names to references in Zest's credential manager. The
+    /// referenced values are never serialized into `zest.toml`.
+    #[serde(default)]
+    pub header_credentials: BTreeMap<String, String>,
     /// Secret-looking host environment variables this server may keep, by
     /// name.
     ///
@@ -390,6 +404,142 @@ pub struct McpServerConfig {
     /// a turn wait indefinitely.
     #[serde(default = "default_mcp_timeout_secs")]
     pub timeout_secs: u64,
+}
+
+impl McpServerConfig {
+    pub fn http_url(&self) -> Option<&str> {
+        self.url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    }
+
+    pub fn is_http(&self) -> bool {
+        self.http_url().is_some()
+    }
+
+    /// Problems that would fail a connect, in the same words the write path uses.
+    pub fn validate(&self, id: &str) -> std::result::Result<(), String> {
+        let command = self.command.trim();
+        let url = self.http_url();
+        match (command.is_empty(), url) {
+            (true, None) => {
+                return Err(format!("MCP server `{id}` needs a command or a url"));
+            }
+            (false, Some(_)) => {
+                return Err(format!(
+                    "MCP server `{id}` cannot have both a command and a url"
+                ));
+            }
+            (true, Some(url)) => validate_mcp_url(id, url)?,
+            (false, None) => {}
+        }
+        if (!self.headers.is_empty() || !self.header_credentials.is_empty()) && url.is_none() {
+            return Err(format!(
+                "MCP server `{id}` headers are only used with a url"
+            ));
+        }
+        let mut header_names = HashSet::new();
+        for (name, env_name) in &self.headers {
+            validate_mcp_header_name(id, name)?;
+            validate_mcp_env_name(id, env_name)?;
+            if !header_names.insert(name.to_ascii_lowercase()) {
+                return Err(format!(
+                    "MCP server `{id}` declares the HTTP header `{name}` more than once"
+                ));
+            }
+        }
+        for (name, account) in &self.header_credentials {
+            validate_mcp_header_name(id, name)?;
+            validate_mcp_credential_account(id, account)?;
+            if !header_names.insert(name.to_ascii_lowercase()) {
+                return Err(format!(
+                    "MCP server `{id}` declares the HTTP header `{name}` more than once"
+                ));
+            }
+        }
+        for name in &self.env_vars {
+            if name.contains('=') {
+                return Err(format!(
+                    "`{name}` looks like a value. List environment variable names only — the value stays in your environment."
+                ));
+            }
+        }
+        if self.timeout_secs == 0 || self.timeout_secs > 600 {
+            return Err("MCP timeout must be between 1 and 600 seconds".into());
+        }
+        Ok(())
+    }
+}
+
+fn validate_mcp_url(id: &str, url: &str) -> std::result::Result<(), String> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| format!("MCP server `{id}` url is not a valid URL"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!("MCP server `{id}` url must be http or https"));
+    }
+    if parsed.host_str().is_none() {
+        return Err(format!("MCP server `{id}` url is missing a host"));
+    }
+    Ok(())
+}
+
+fn validate_mcp_header_name(id: &str, name: &str) -> std::result::Result<(), String> {
+    if name.is_empty()
+        || !name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+    {
+        return Err(format!(
+            "MCP server `{id}` has an invalid HTTP header name `{name}`"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mcp_env_name(id: &str, name: &str) -> std::result::Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('=')
+        || !trimmed
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(format!(
+            "MCP server `{id}` header `{trimmed}` must name an environment variable, not a value"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mcp_credential_account(id: &str, account: &str) -> std::result::Result<(), String> {
+    if account.trim().is_empty() || account.contains(['\r', '\n']) {
+        return Err(format!(
+            "MCP server `{id}` has an invalid saved credential reference"
+        ));
+    }
+    Ok(())
 }
 
 fn default_mcp_timeout_secs() -> u64 {
@@ -702,6 +852,11 @@ impl Config {
                 "[tools] max_result_bytes = {} is too small to leave room for a preview; use 0 to keep results inline or at least 4096",
                 self.tools.max_result_bytes
             ));
+        }
+        for (id, server) in &self.mcp {
+            if let Err(error) = server.validate(id) {
+                issues.push(error);
+            }
         }
         for (id, agent) in &self.agents {
             if agent.command.trim().is_empty() {
@@ -1411,6 +1566,85 @@ timeout_ms = 5000
             .contains("[providers.codex]"));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_http_mcp_server_parses_without_a_command() {
+        let config = Config::parse(
+            r#"
+[mcp.remote]
+url = "https://example.com/mcp"
+timeout_secs = 60
+
+[mcp.remote.headers]
+Authorization = "MCP_AUTHORIZATION"
+"#,
+        )
+        .expect("url-only MCP config must parse");
+        let server = &config.mcp["remote"];
+        assert!(server.command.is_empty());
+        assert_eq!(server.http_url(), Some("https://example.com/mcp"));
+        assert_eq!(
+            server.headers.get("Authorization").map(String::as_str),
+            Some("MCP_AUTHORIZATION")
+        );
+        assert!(server.validate("remote").is_ok());
+    }
+
+    #[test]
+    fn an_http_mcp_server_parses_a_credential_manager_reference() {
+        let config = Config::parse(
+            r#"
+[mcp.remote]
+url = "https://example.com/mcp"
+
+[mcp.remote.header_credentials]
+Authorization = "mcp-header:opaque-account"
+"#,
+        )
+        .expect("credential references must parse");
+        let server = &config.mcp["remote"];
+        assert_eq!(
+            server
+                .header_credentials
+                .get("Authorization")
+                .map(String::as_str),
+            Some("mcp-header:opaque-account")
+        );
+        assert!(server.validate("remote").is_ok());
+    }
+
+    #[test]
+    fn an_mcp_server_rejects_duplicate_case_insensitive_header_sources() {
+        let config = Config::parse(
+            r#"
+[mcp.remote]
+url = "https://example.com/mcp"
+
+[mcp.remote.headers]
+authorization = "MCP_AUTHORIZATION"
+
+[mcp.remote.header_credentials]
+Authorization = "mcp-header:opaque-account"
+"#,
+        )
+        .expect("the document is syntactically valid");
+        let error = config.mcp["remote"].validate("remote").unwrap_err();
+        assert!(error.contains("more than once"), "{error}");
+    }
+
+    #[test]
+    fn an_mcp_server_cannot_have_both_a_command_and_a_url() {
+        let config = Config::parse(
+            r#"
+[mcp.mixed]
+command = "npx"
+url = "https://example.com/mcp"
+"#,
+        )
+        .expect("the document is syntactically valid");
+        let error = config.mcp["mixed"].validate("mixed").unwrap_err();
+        assert!(error.contains("both"), "{error}");
     }
 
     #[test]

@@ -777,6 +777,7 @@ impl Ledger {
         let mut series = Vec::with_capacity(span as usize);
         let mut model_totals: BTreeMap<String, ModelReportTotals> = BTreeMap::new();
         let mut totals = TokenCounts::default();
+        let mut zest_totals = TokenCounts::default();
         let mut unattributed_tokens = 0u64;
         let mut active_days = 0u32;
         let mut cost_usd = 0.0;
@@ -809,6 +810,9 @@ impl Ledger {
             let reported_today = scan.and_then(|s| s.reported_cost.get(&date));
 
             totals.merge(&usage.totals());
+            if let Some(ledger) = self.daily.get(&date) {
+                zest_totals.merge(&ledger.totals());
+            }
             unattributed_tokens = unattributed_tokens.saturating_add(usage.unattributed_tokens());
             if usage.requests > 0 {
                 active_days = active_days.saturating_add(1);
@@ -994,6 +998,7 @@ impl Ledger {
                     .then(|| totals.cache_read_tokens as f64 / totals.cache_write_tokens as f64),
                 cache_hit_percent: served_from_cache_percent,
                 unattributed_tokens,
+                zest: cache_shares(&zest_totals),
             },
             series,
             providers,
@@ -1179,6 +1184,42 @@ pub struct RangeTotals {
     /// Metered before per-model attribution existed, so unpriceable. Real
     /// tokens, and visible as such rather than dropped from the totals.
     pub unattributed_tokens: u64,
+    /// Prompt-cache shares for traffic Zest itself sent in this window.
+    ///
+    /// The three shares above include scanned Claude Code / Codex CLI
+    /// transcripts. Those rows are usually most of the volume, so a harness
+    /// that is actually caching can print as a single-digit hit rate. This
+    /// field is the same arithmetic on the ledger alone. Absent when Zest
+    /// sent no prompt tokens in the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zest: Option<PromptCacheShares>,
+}
+
+/// The three prompt-cache shares, plus the token columns they were built from.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCacheShares {
+    pub served_from_cache_percent: f64,
+    pub written_to_cache_percent: f64,
+    pub read_fresh_percent: f64,
+    pub cached_input_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub uncached_input_tokens: u64,
+}
+
+fn cache_shares(counts: &TokenCounts) -> Option<PromptCacheShares> {
+    let prompt = counts.prompt_tokens();
+    if prompt == 0 {
+        return None;
+    }
+    Some(PromptCacheShares {
+        served_from_cache_percent: percent_of(counts.cache_read_tokens as f64, prompt as f64),
+        written_to_cache_percent: percent_of(counts.cache_write_tokens as f64, prompt as f64),
+        read_fresh_percent: percent_of(counts.input_tokens as f64, prompt as f64),
+        cached_input_tokens: counts.cache_read_tokens,
+        cache_write_tokens: counts.cache_write_tokens,
+        uncached_input_tokens: counts.input_tokens,
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2028,6 +2069,82 @@ mod daily_tests {
         assert_eq!(totals.uncached_input_tokens, 2_000);
         assert_eq!(totals.cached_input_tokens, 8_000);
         assert!((totals.served_from_cache_percent - 80.0).abs() < 1e-9);
+    }
+
+    /// The usage screen's headline cache % is a window total: Zest's ledger
+    /// plus whatever Claude Code / Codex CLI transcripts were scanned. A
+    /// session that is actually caching at 90% can print as ~7% once a larger
+    /// CLI history — filed as fresh input — is folded in. That number is not
+    /// a measurement of this harness's prompt cache.
+    #[test]
+    fn scanned_cli_history_dilutes_zest_cache_hits_in_the_window_total() {
+        let mut ledger = Ledger::default();
+        ledger.record(
+            "deepseek",
+            "deepseek-v4-flash",
+            &Completion {
+                content: vec![],
+                stop_reason: None,
+                usage: crate::anthropic::types::Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 50,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 9_000,
+                },
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            },
+        );
+
+        let zest_only = ledger.report(7, &Prices::default(), None).totals;
+        assert!(
+            (zest_only.served_from_cache_percent - 90.0).abs() < 1e-9,
+            "Zest-only hit rate should be 9k / 10k, got {}",
+            zest_only.served_from_cache_percent
+        );
+        let zest_shares = zest_only.zest.expect("Zest sent prompt tokens");
+        assert!((zest_shares.served_from_cache_percent - 90.0).abs() < 1e-9);
+
+        let today = local_day_number(now_secs());
+        let model = model_key("codex-cli", "gpt-5.6-sol");
+        let mut scan = crate::transcripts::ScanResult::default();
+        scan.daily
+            .entry(day_key_from_number(today))
+            .or_default()
+            .merge_counts(
+                &model,
+                &TokenCounts {
+                    requests: 40,
+                    input_tokens: 120_000,
+                    output_tokens: 10_000,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                },
+            );
+
+        let mixed = ledger.report(7, &Prices::default(), Some(&scan)).totals;
+        // 9k cached out of 1k + 9k + 120k prompt tokens ≈ 6.9%.
+        let expected = 9_000.0 / 130_000.0 * 100.0;
+        assert!(
+            (mixed.served_from_cache_percent - expected).abs() < 1e-6,
+            "merged hit rate should be {expected}, got {}",
+            mixed.served_from_cache_percent
+        );
+        assert!(
+            mixed.served_from_cache_percent < 10.0,
+            "CLI history must be able to pull a 90% Zest session under 10%, got {}",
+            mixed.served_from_cache_percent
+        );
+        let zest = mixed.zest.expect("Zest sent prompt tokens");
+        assert!(
+            (zest.served_from_cache_percent - 90.0).abs() < 1e-9,
+            "the Zest-only share must stay 90% after the CLI merge, got {}",
+            zest.served_from_cache_percent
+        );
+        assert_eq!(zest.cached_input_tokens, 9_000);
+        assert_eq!(zest.uncached_input_tokens, 1_000);
     }
 
     #[test]

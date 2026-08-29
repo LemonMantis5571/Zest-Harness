@@ -131,11 +131,30 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
    *  render offline, including the never-checked state. */
   const fixtureMcpServers = new Map<string, McpServerRow>([
     [
+      "Haiku",
+      {
+        id: "Haiku",
+        command: "npx",
+        args: ["-y", "haiku-mcp"],
+        url: "",
+        headers: {},
+        envVars: [],
+        enabled: true,
+        timeoutSecs: 120,
+        scope: "the fixture config",
+        tools: ["manifest"],
+        statusLabel: "Ready",
+        detail: "1 tool · checked just now",
+      },
+    ],
+    [
       "github",
       {
         id: "github",
         command: "npx",
         args: ["-y", "@modelcontextprotocol/server-github"],
+        url: "",
+        headers: {},
         envVars: ["GITHUB_TOKEN"],
         enabled: true,
         timeoutSecs: 120,
@@ -398,11 +417,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     chatHandler({ kind: "user", ...id, message_id: userId, text: display });
     chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
     const toolId = `tool-${crypto.randomUUID()}`;
+    const toolName =
+      scenario === "approval" ? "mcp__Haiku__manifest" : "fixture_tool";
     chatHandler({
       kind: "tool_call_start",
       ...id,
       message_id: assistantId,
-      name: "fixture_tool",
+      name: toolName,
       id: toolId,
     });
 
@@ -440,12 +461,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         ...id,
         message_id: assistantId,
         approval_id: approvalId,
-        tool_name: "fixture_tool",
+        tool_name: "mcp__Haiku__manifest",
         tool_call_id: toolId,
         risk: "exec",
-        path: "fixture://scenario",
-        summary: "Run the deterministic fixture tool.",
-        diff: "fixture scenario only",
+        path: "Haiku · manifest",
+        summary: "Run manifest on the Haiku MCP server",
+        diff: "{}",
       });
       return;
     }
@@ -551,6 +572,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         id,
         command: input.command.trim(),
         args: input.args.filter((arg) => arg.trim().length > 0),
+        url: (input.url ?? "").trim(),
+        headers: input.headers ?? {},
         envVars: input.envVars.filter((name) => name.trim().length > 0),
         enabled: input.enabled,
         timeoutSecs: input.timeoutSecs ?? 120,
@@ -1074,8 +1097,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return meta;
     },
     async listThreads() {
-      const threads: ThreadSummary[] = [
-        {
+      const threads: ThreadSummary[] = [];
+      // Seeded rows stay visible. A freshly opened empty draft does not — the
+      // desktop store also waits for the first user message before writing one.
+      if (
+        session.messages.length > 0 ||
+        fixtureThreadTitles.has(session.threadId)
+      ) {
+        threads.push({
           id: session.threadId,
           createdAt: 0,
           updatedAt: Math.floor(Date.now() / 1000),
@@ -1083,20 +1112,22 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           pinned: fixturePinned,
           providerId: "codex",
           messageCount: session.messages.length,
-        },
-        // A provider Zest has no mark for, so the generic fallback is visible
-        // offline. This is the ordinary case for a local model, and it is the
-        // half of the mapping most likely to regress unnoticed.
-        {
+        });
+      }
+      // A provider Zest has no mark for, so the generic fallback is visible
+      // offline. This is the ordinary case for a local model, and it is the
+      // half of the mapping most likely to regress unnoticed.
+      if (session.threadId !== "fixture-local") {
+        threads.push({
           id: "fixture-local",
           createdAt: Math.floor(Date.now() / 1000) - 3600,
           updatedAt: Math.floor(Date.now() / 1000) - 3600,
           title: fixtureThreadTitles.get("fixture-local") || "Local model chat",
           pinned: false,
           providerId: "ollama",
-          messageCount: 0,
-        },
-      ];
+          messageCount: 1,
+        });
+      }
       return threads;
     },
     async forgetWorkspace(projectPath) {
@@ -1126,7 +1157,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
                   title: fixtureThreadTitles.get("fixture-free") || "Free chat",
                   pinned: false,
                   providerId: "codex",
-                  messageCount: 0,
+                  messageCount: 1,
                 },
               ],
         },
@@ -1430,7 +1461,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       /* fixture: nothing to verify */
     },
     async listCommands() {
-      return [];
+      return [...fixtureMcpServers.values()]
+        .filter((server) => server.enabled)
+        .map((server) => ({
+          name: server.id,
+          description: `Use the ${server.id} MCP server`,
+          kind: "mcp" as const,
+        }));
     },
     async endSession() {
       /* no-op */

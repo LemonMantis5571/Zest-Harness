@@ -27,7 +27,8 @@ Instructions for the agent go here.
 ```
 
 The folder name does not have to match `name`, but names must be unique. A
-skill can be used as `/my-skill` in chat. Small skill bodies may be included in
+skill can be used as `/my-skill` in chat. Enabled MCP servers share that `/`
+list; a skill of the same name wins. Small skill bodies may be included in
 the system prompt; larger bodies are read only when needed.
 
 ## Install

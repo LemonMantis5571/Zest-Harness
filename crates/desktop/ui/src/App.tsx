@@ -31,6 +31,7 @@ import {
   workspaceProblemMessage,
   type ConversationRecovery,
 } from "@/lib/invokeErrors";
+import { approvalNotice } from "@/lib/mcpDisplay";
 import { isLongTurn } from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
 import { revealCount } from "@/lib/reveal";
@@ -1168,10 +1169,12 @@ export default function App() {
       notifiedApprovalIdsByThreadRef.current.set(threadKey, notified);
       if (!notified.has(event.approval_id)) {
         notified.add(event.approval_id);
-        const description = event.summary
-          ? `${event.tool_name}: ${event.summary}`
-          : `${event.tool_name} is waiting for your approval.`;
-        void showAttention("Approval needed", description, "warning");
+        const description = approvalNotice(event.tool_name, event.summary);
+        if (isCurrent) {
+          void notifyWhenAway("Approval needed", description);
+        } else {
+          void showAttention("Approval needed", description, "warning");
+        }
       }
     }
 

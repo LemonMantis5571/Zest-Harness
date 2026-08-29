@@ -1,4 +1,5 @@
 import type { ChatEvent } from "./types";
+import { mcpToolLabel } from "./mcpDisplay.ts";
 
 /**
  * What each chat is doing right now, including the ones you are not looking at.
@@ -31,16 +32,22 @@ export type ThreadActivityMap = Readonly<Record<string, ThreadActivity>>;
 /** A turn is over; keep the thread known but stop claiming it is busy. */
 const IDLE: ThreadActivity = { state: "idle" };
 
+function toolActionName(name: string): string {
+  return mcpToolLabel(name) ?? name;
+}
+
 function describe(event: ChatEvent): string | undefined {
   switch (event.kind) {
     case "tool_call_start":
-      return event.name;
+      return toolActionName(event.name);
     case "tool_call_result":
-      return event.isError ? `${event.name} failed` : event.name;
+      return event.isError
+        ? `${toolActionName(event.name)} failed`
+        : toolActionName(event.name);
     case "provider_activity":
       return event.title;
     case "approval_needed":
-      return `${event.tool_name} needs approval`;
+      return `${toolActionName(event.tool_name)} needs approval`;
     default:
       return undefined;
   }
@@ -138,7 +145,7 @@ export function activeThreadIds(map: ThreadActivityMap): string[] {
 
 /** Human label for a tool or activity name (`web_search` → `web search`). */
 export function formatActivityAction(value: string): string {
-  return value.replaceAll("_", " ");
+  return mcpToolLabel(value) ?? value.replaceAll("_", " ");
 }
 
 /**

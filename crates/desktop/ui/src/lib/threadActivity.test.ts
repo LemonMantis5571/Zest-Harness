@@ -185,6 +185,7 @@ describe("currentTurnAction", () => {
 describe("formatActivityAction", () => {
   it("turns tool ids into readable labels", () => {
     assert.equal(formatActivityAction("web_search"), "web search");
+    assert.equal(formatActivityAction("mcp__Haiku__manifest"), "Haiku · manifest");
   });
 });
 

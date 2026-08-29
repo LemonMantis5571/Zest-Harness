@@ -82,6 +82,9 @@ export function saveMcpServer(input: {
   id: string;
   command: string;
   args: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  headerSecrets?: Record<string, string>;
   envVars: string[];
   enabled: boolean;
   timeoutSecs?: number | null;
@@ -90,6 +93,9 @@ export function saveMcpServer(input: {
     id: input.id,
     command: input.command,
     args: input.args,
+    url: input.url ?? "",
+    headers: input.headers ?? {},
+    headerSecrets: input.headerSecrets ?? {},
     envVars: input.envVars,
     enabled: input.enabled,
     timeoutSecs: input.timeoutSecs ?? null,

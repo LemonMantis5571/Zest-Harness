@@ -68,6 +68,9 @@ export type DesktopBackend = {
     id: string;
     command: string;
     args: string[];
+    url?: string;
+    headers?: Record<string, string>;
+    headerSecrets?: Record<string, string>;
     envVars: string[];
     enabled: boolean;
     timeoutSecs?: number | null;

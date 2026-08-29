@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getBackend, type SkillSummary, type SystemPromptInfo } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
-import { messageFromError, validateMcpServerDraft } from "@/lib/mcpServerForm";
+import { formatHeaders, messageFromError, validateMcpServerDraft } from "@/lib/mcpServerForm";
 import type { CustomizeTab } from "@/lib/navigationHistory";
 import type {
   ExternalAgentRow,
@@ -60,9 +60,13 @@ const DEFAULT_TIMEOUT_SECS = 120;
  *  holds raw text — arguments as one line — that only becomes a row on save. */
 type ServerDraft = {
   id: string;
+  kind: "stdio" | "http";
   command: string;
   args: string;
   envVars: string;
+  url: string;
+  headers: string;
+  authorizationValue: string;
   timeoutSecs: string;
   /** Set when editing, so the id field can stay locked. */
   editing: boolean;
@@ -71,20 +75,29 @@ type ServerDraft = {
 function emptyDraft(): ServerDraft {
   return {
     id: "",
+    kind: "stdio",
     command: "",
     args: "",
     envVars: "",
+    url: "",
+    headers: "",
+    authorizationValue: "",
     timeoutSecs: String(DEFAULT_TIMEOUT_SECS),
     editing: false,
   };
 }
 
 function draftFrom(server: McpServerRow): ServerDraft {
+  const http = server.url.trim().length > 0;
   return {
     id: server.id,
+    kind: http ? "http" : "stdio",
     command: server.command,
     args: server.args.join(" "),
     envVars: server.envVars.join(", "),
+    url: server.url,
+    headers: formatHeaders(server.headers ?? {}),
+    authorizationValue: "",
     timeoutSecs: String(server.timeoutSecs),
     editing: true,
   };
@@ -330,8 +343,8 @@ function McpPanel({
       <section className="flex flex-col gap-3">
         <div className="flex items-start justify-between gap-3">
           <SectionHeading
-            title="Zest's MCP servers"
-            hint="Tools your chat provider can call directly. Every call still asks for your approval before it runs."
+            title="MCP connections"
+            hint="Connections your chats can use. Type /name in chat to point a turn at one. Each tool call still asks for your approval."
           />
           <Button
             type="button"
@@ -377,8 +390,7 @@ function McpPanel({
           </p>
         ) : servers.length === 0 ? (
           <p className="m-0 rounded-lg border border-border/70 bg-card/50 px-3 py-4 text-[11px] leading-relaxed text-muted-foreground">
-            No MCP servers yet. Add one to give this chat tools Zest does not ship with — a
-            command like <span className="font-mono">npx -y @modelcontextprotocol/server-github</span>.
+            No MCP connections yet. Add a local process or a web service.
           </p>
         ) : (
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
@@ -397,7 +409,9 @@ function McpPanel({
                         {server.statusLabel}
                       </div>
                       <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                        {[server.command, ...server.args].join(" ")}
+                        {server.url.trim()
+                          ? server.url
+                          : [server.command, ...server.args].join(" ")}
                       </div>
                     </div>
                     <Button
@@ -424,6 +438,11 @@ function McpPanel({
                   {server.envVars.length ? (
                     <p className="m-0 mt-1 text-[10px] leading-relaxed text-muted-foreground/80">
                       Keeps {server.envVars.join(", ")} from your environment.
+                    </p>
+                  ) : null}
+                  {Object.keys(server.headers ?? {}).length ? (
+                    <p className="m-0 mt-1 text-[10px] leading-relaxed text-muted-foreground/80">
+                      Sends {Object.keys(server.headers).join(", ")} from your environment.
                     </p>
                   ) : null}
                   {result ? (
@@ -481,7 +500,8 @@ function McpPanel({
 
         {servers[0] ? (
           <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-            Saved in {servers[0].scope}. A server starts only when a chat calls one of its tools.
+            Saved in {servers[0].scope}. Local connections start when needed; web connections are
+            contacted when a chat uses them.
           </p>
         ) : null}
         {error ? (
@@ -555,6 +575,10 @@ function ServerForm({
   onCancel: () => void;
   onSave: (draft: ServerDraft) => void;
 }) {
+  const [showAdvancedHeaders, setShowAdvancedHeaders] = useState(
+    () => draft.headers.trim().length > 0
+  );
+
   return (
     <form
       className="flex flex-col gap-2.5 rounded-lg border border-border/80 bg-card/80 px-3 py-3"
@@ -565,7 +589,7 @@ function ServerForm({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          {draft.editing ? `Edit ${draft.id}` : "New MCP server"}
+          {draft.editing ? `Edit ${draft.id}` : "New connection"}
         </span>
         <Button
           type="button"
@@ -579,7 +603,7 @@ function ServerForm({
         </Button>
       </div>
 
-      <Field label="Name" hint="Used in the tool names the model sees.">
+      <Field label="Name" hint="A short name for this connection.">
         <Input
           value={draft.id}
           disabled={draft.editing || busy}
@@ -588,36 +612,124 @@ function ServerForm({
           onChange={(event) => onChange({ ...draft, id: event.target.value })}
         />
       </Field>
-      <Field label="Command" hint="Run directly, without a shell.">
-        <Input
-          value={draft.command}
+      <div className="flex flex-wrap gap-1.5">
+        <Button
+          type="button"
+          size="xs"
+          variant={draft.kind === "stdio" ? "secondary" : "outline"}
           disabled={busy}
-          spellCheck={false}
-          placeholder="npx"
-          onChange={(event) => onChange({ ...draft, command: event.target.value })}
-        />
-      </Field>
-      <Field label="Arguments" hint="Separated by spaces. Quote anything containing one.">
-        <Input
-          value={draft.args}
+          aria-pressed={draft.kind === "stdio"}
+          onClick={() => onChange({ ...draft, kind: "stdio" })}
+        >
+          Local process
+        </Button>
+        <Button
+          type="button"
+          size="xs"
+          variant={draft.kind === "http" ? "secondary" : "outline"}
           disabled={busy}
-          spellCheck={false}
-          placeholder="-y @modelcontextprotocol/server-github"
-          onChange={(event) => onChange({ ...draft, args: event.target.value })}
-        />
-      </Field>
-      <Field
-        label="Environment variables"
-        hint="Names only. The values stay in your environment — never write a token here."
-      >
-        <Input
-          value={draft.envVars}
-          disabled={busy}
-          spellCheck={false}
-          placeholder="GITHUB_TOKEN"
-          onChange={(event) => onChange({ ...draft, envVars: event.target.value })}
-        />
-      </Field>
+          aria-pressed={draft.kind === "http"}
+          onClick={() => onChange({ ...draft, kind: "http" })}
+        >
+          Web service
+        </Button>
+      </div>
+      {draft.kind === "http" ? (
+        <>
+          <Field label="Web address" hint="The address of the service.">
+            <Input
+              value={draft.url}
+              disabled={busy}
+              spellCheck={false}
+              placeholder="https://service.example/mcp"
+              onChange={(event) => onChange({ ...draft, url: event.target.value })}
+            />
+          </Field>
+          <div className="border-t border-border/60 pt-1">
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 py-1 text-left text-[11px] font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+              aria-expanded={showAdvancedHeaders}
+              onClick={() => setShowAdvancedHeaders((value) => !value)}
+            >
+              <ChevronRightIcon
+                className={cn("size-3 transition-transform", showAdvancedHeaders && "rotate-90")}
+                aria-hidden="true"
+              />
+              Additional headers (advanced)
+            </button>
+            {showAdvancedHeaders ? (
+              <div className="mt-1">
+                <Field
+                  label="Extra headers"
+                  hint="Only use these when the service asks for more than an access token."
+                >
+                  <textarea
+                    value={draft.headers}
+                    disabled={busy}
+                    spellCheck={false}
+                    rows={3}
+                    placeholder="X-Example-Header = EXAMPLE_VALUE"
+                    onChange={(event) => onChange({ ...draft, headers: event.target.value })}
+                    className="min-h-[4.5rem] w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-base outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30"
+                  />
+                </Field>
+              </div>
+            ) : null}
+          </div>
+          <Field
+            label="Access token"
+            hint="Optional. Paste the value supplied by the service. It is stored securely on this computer."
+          >
+            <Input
+              type="password"
+              value={draft.authorizationValue}
+              disabled={busy}
+              spellCheck={false}
+              autoComplete="new-password"
+              placeholder={
+                draft.editing ? "Leave blank to keep the saved token" : "Paste your access token"
+              }
+              onChange={(event) =>
+                onChange({ ...draft, authorizationValue: event.target.value })
+              }
+            />
+          </Field>
+        </>
+      ) : (
+        <>
+          <Field label="Command" hint="Run directly, without a shell.">
+            <Input
+              value={draft.command}
+              disabled={busy}
+              spellCheck={false}
+              placeholder="npx"
+              onChange={(event) => onChange({ ...draft, command: event.target.value })}
+            />
+          </Field>
+          <Field label="Arguments" hint="Separated by spaces. Quote anything containing one.">
+            <Input
+              value={draft.args}
+              disabled={busy}
+              spellCheck={false}
+              placeholder="-y @modelcontextprotocol/server-github"
+              onChange={(event) => onChange({ ...draft, args: event.target.value })}
+            />
+          </Field>
+          <Field
+            label="Environment variables"
+            hint="Names only. The values stay in your environment — never write a token here."
+          >
+            <Input
+              value={draft.envVars}
+              disabled={busy}
+              spellCheck={false}
+              placeholder="GITHUB_TOKEN"
+              onChange={(event) => onChange({ ...draft, envVars: event.target.value })}
+            />
+          </Field>
+        </>
+      )}
       <Field label="Timeout (seconds)" hint="How long one tool call may take.">
         <Input
           value={draft.timeoutSecs}

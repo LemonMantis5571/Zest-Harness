@@ -703,6 +703,16 @@ fn print_recent_cost(ledger: &Ledger, catalog: &zest_core::RateCatalog) {
         report.totals.written_to_cache_percent,
         report.totals.read_fresh_percent,
     );
+    if let Some(zest) = report.totals.zest {
+        if (zest.served_from_cache_percent - report.totals.served_from_cache_percent).abs() >= 0.5 {
+            println!(
+                "    zest       {:.0}% from cache · {:.0}% cached for later · {:.0}% read fresh",
+                zest.served_from_cache_percent,
+                zest.written_to_cache_percent,
+                zest.read_fresh_percent,
+            );
+        }
+    }
     println!(
         "    cache      {} read{}  \x1b[90m(saved ~${:.2} at list rates)\x1b[0m",
         compact(report.totals.cached_input_tokens),

@@ -8,7 +8,7 @@
  * are Zest's, and a native provider with no CLI behind it is the only way to
  * reach an MCP server at all.
  */
-export type McpServerView = { id: string, command: string, args: Array<string>, envVars: Array<string>, enabled: boolean,
+export type McpServerView = { id: string, command: string, args: Array<string>, url: string, headers: { [key in string]?: string }, envVars: Array<string>, enabled: boolean,
 /**
  * Clamped to 600 by the config edit, so a 32-bit view is lossless — and
  * `u64` would reach the webview as a `bigint`.

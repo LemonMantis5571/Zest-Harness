@@ -1,4 +1,4 @@
-import type { MeasuredUsage } from "./types.ts";
+import type { MeasuredUsage, RangeTotals } from "./types.ts";
 
 type CacheProviderUsage = {
   measured: Pick<MeasuredUsage, "inputTokens" | "cacheReadTokens" | "cacheWriteTokens">;
@@ -86,4 +86,22 @@ export function cacheVerdict(metrics: CacheMetrics | null): string {
     return "Caching is costing more than it saves — prompts are changing before they get reused";
   }
   return `Each cached token was reused ${metrics.reuseRatio.toFixed(1)}x before expiring`;
+}
+
+/**
+ * One line under the usage-screen cache tile.
+ *
+ * The window total folds in Claude Code / Codex CLI transcripts. When that
+ * mix would hide what Zest itself cached, say so in the same sentence.
+ */
+export function cacheWindowHint(totals: RangeTotals): string {
+  const merged = `${totals.servedFromCachePercent.toFixed(1)}%`;
+  const zest = totals.zest;
+  if (
+    zest &&
+    Math.abs(zest.servedFromCachePercent - totals.servedFromCachePercent) >= 0.5
+  ) {
+    return `${zest.servedFromCachePercent.toFixed(1)}% of Zest prompts · ${merged} including CLI transcripts`;
+  }
+  return `${merged} of prompt, at a tenth of the price`;
 }

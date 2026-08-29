@@ -14,7 +14,7 @@ mod session;
 mod turn;
 mod workspace_files;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(any(unix, target_os = "macos"))]
 use std::process::Command as StdCommand;
@@ -2068,6 +2068,8 @@ struct McpServerView {
     id: String,
     command: String,
     args: Vec<String>,
+    url: String,
+    headers: BTreeMap<String, String>,
     env_vars: Vec<String>,
     enabled: bool,
     /// Clamped to 600 by the config edit, so a 32-bit view is lossless — and
@@ -2113,6 +2115,8 @@ fn list_mcp_servers(state: State<'_, AppState>) -> Vec<McpServerView> {
                 id: id.clone(),
                 command: server.command.clone(),
                 args: server.args.clone(),
+                url: server.http_url().unwrap_or("").to_string(),
+                headers: server.headers.clone(),
                 env_vars: server.env_vars.clone(),
                 enabled: server.enabled,
                 timeout_secs: u32::try_from(server.timeout_secs).unwrap_or(u32::MAX),
@@ -2174,10 +2178,30 @@ fn mcp_age_label(fetched_at: u64) -> String {
     }
 }
 
+/// Stable, non-secret account id for one HTTP header in one config file.
+/// Keeping the project path in the material prevents two workspaces that use
+/// the same server id from sharing a credential accidentally.
+fn mcp_header_credential_account(path: &Path, id: &str, header: &str) -> String {
+    let material = format!(
+        "{}\0{}\0{}",
+        path.to_string_lossy(),
+        id,
+        header.to_ascii_lowercase()
+    );
+    format!("mcp-header:{}", blake3::hash(material.as_bytes()).to_hex())
+}
+
+fn mcp_header_names_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
 fn mcp_server_input(
     id: &str,
     command: &str,
     args: Vec<String>,
+    url: String,
+    headers: BTreeMap<String, String>,
+    header_credentials: BTreeMap<String, String>,
     env_vars: Vec<String>,
     enabled: bool,
     timeout_secs: Option<u64>,
@@ -2190,6 +2214,9 @@ fn mcp_server_input(
             .map(|arg| arg.trim().to_string())
             .filter(|arg| !arg.is_empty())
             .collect(),
+        url: url.trim().to_string(),
+        headers,
+        header_credentials,
         env_vars: env_vars
             .into_iter()
             .map(|name| name.trim().to_string())
@@ -2197,6 +2224,28 @@ fn mcp_server_input(
             .collect(),
         enabled,
         timeout_secs: timeout_secs.unwrap_or(120),
+    }
+}
+
+fn mcp_config_from_input(
+    input: &zest_core::config_edit::McpServerInput,
+) -> zest_core::McpServerConfig {
+    zest_core::McpServerConfig {
+        command: input.command.clone(),
+        args: input.args.clone(),
+        url: {
+            let url = input.url.trim();
+            if url.is_empty() {
+                None
+            } else {
+                Some(url.to_string())
+            }
+        },
+        headers: input.headers.clone(),
+        header_credentials: input.header_credentials.clone(),
+        env_vars: input.env_vars.clone(),
+        enabled: input.enabled,
+        timeout_secs: input.timeout_secs,
     }
 }
 
@@ -2231,14 +2280,98 @@ async fn save_mcp_server(
     id: String,
     command: String,
     args: Vec<String>,
+    url: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+    header_secrets: Option<BTreeMap<String, String>>,
     env_vars: Vec<String>,
     enabled: bool,
     timeout_secs: Option<u64>,
 ) -> Result<Vec<McpServerView>, String> {
-    let input = write_mcp_server(
-        &state,
-        mcp_server_input(id.trim(), &command, args, env_vars, enabled, timeout_secs),
-    )?;
+    let id = id.trim().to_string();
+    let existing = load_workspace_config(&state).mcp.get(&id).cloned();
+    let previous_accounts = existing
+        .as_ref()
+        .map(|server| {
+            server
+                .header_credentials
+                .values()
+                .cloned()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut input = mcp_server_input(
+        &id,
+        &command,
+        args,
+        url.unwrap_or_default(),
+        headers.unwrap_or_default(),
+        if existing.is_some() {
+            existing
+                .as_ref()
+                .map(|server| server.header_credentials.clone())
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        },
+        env_vars,
+        enabled,
+        timeout_secs,
+    );
+    let header_secrets = header_secrets.unwrap_or_default();
+    if !header_secrets.is_empty() && input.url.trim().is_empty() {
+        return Err("saved MCP header values are only used with an HTTP URL".into());
+    }
+    if input.url.trim().is_empty() {
+        input.header_credentials.clear();
+    }
+
+    let path = editable_config_path(&state)?;
+    // A value typed in the UI wins over an environment-backed header with the
+    // same case-insensitive name. Blank values mean "keep the saved value".
+    let mut secrets_to_store = Vec::new();
+    for (name, secret) in header_secrets {
+        let name = name.trim().to_string();
+        let secret = secret.trim();
+        if secret.is_empty() {
+            continue;
+        }
+        input
+            .headers
+            .retain(|header, _| !mcp_header_names_equal(header, &name));
+        input
+            .header_credentials
+            .retain(|header, _| !mcp_header_names_equal(header, &name));
+        let account = mcp_header_credential_account(&path, &input.id, &name);
+        input
+            .header_credentials
+            .insert(name.clone(), account.clone());
+        secrets_to_store.push((account, secret.to_string()));
+    }
+    // A hand-edited config may contain both sources for one header. Keep the
+    // explicit env mapping if the UI did not replace it with a saved value.
+    input.header_credentials.retain(|header, _| {
+        !input
+            .headers
+            .keys()
+            .any(|env_header| mcp_header_names_equal(env_header, header))
+    });
+    mcp_config_from_input(&input).validate(&input.id)?;
+
+    for (account, secret) in secrets_to_store {
+        zest_core::credentials::set(&account, &secret)?;
+    }
+
+    let input = write_mcp_server(&state, input)?;
+    let current_accounts = input
+        .header_credentials
+        .values()
+        .cloned()
+        .collect::<HashSet<_>>();
+    for account in previous_accounts {
+        if !current_accounts.contains(&account) {
+            let _ = zest_core::credentials::delete(&account);
+        }
+    }
     // A saved command whose tools were never listed contributes nothing to a
     // chat, so a save is also a check. A failed probe is not a failed save —
     // the entry is on disk either way — so it shows up as an unchecked row
@@ -2265,6 +2398,9 @@ async fn set_mcp_server_enabled(
             &id,
             &existing.command,
             existing.args.clone(),
+            existing.http_url().unwrap_or("").to_string(),
+            existing.headers.clone(),
+            existing.header_credentials.clone(),
             existing.env_vars.clone(),
             enabled,
             Some(existing.timeout_secs),
@@ -2280,11 +2416,28 @@ async fn set_mcp_server_enabled(
 #[tauri::command]
 fn remove_mcp_server(state: State<'_, AppState>, id: String) -> Result<Vec<McpServerView>, String> {
     let id = id.trim().to_string();
+    let credential_accounts = load_workspace_config(&state)
+        .mcp
+        .get(&id)
+        .map(|server| {
+            server
+                .header_credentials
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     {
         let _edit_guard = lock_config_edit(&state);
         let path = editable_config_path(&state)?;
         zest_core::config_edit::remove_mcp_server(&path, &id)?;
         clear_workspace_config_cache(&state);
+    }
+    // Config removal is authoritative. Keyring cleanup is best effort: a
+    // stale reference is harmless and must not make a successful removal look
+    // like a failure in the UI.
+    for account in credential_accounts {
+        let _ = zest_core::credentials::delete(&account);
     }
     // The cached tool list would otherwise outlive the server and be
     // registered again if an unrelated entry later reused the id.
@@ -2319,7 +2472,7 @@ async fn check_mcp_server(state: State<'_, AppState>, id: String) -> Result<McpC
             Ok(McpCheckView {
                 ok: true,
                 detail: if count == 0 {
-                    "Server started but offered no tools.".to_string()
+                    "Server answered but offered no tools.".to_string()
                 } else {
                     format!("Ready — {count} tool{}.", if count == 1 { "" } else { "s" })
                 },
@@ -2349,13 +2502,7 @@ async fn refresh_mcp_catalog(
     let Ok(root) = active_or_free_chat_root(state) else {
         return;
     };
-    let server = zest_core::McpServerConfig {
-        command: input.command.clone(),
-        args: input.args.clone(),
-        env_vars: input.env_vars.clone(),
-        enabled: input.enabled,
-        timeout_secs: input.timeout_secs,
-    };
+    let server = mcp_config_from_input(input);
     if let Ok(tools) = zest_core::probe_mcp_server(&input.id, &server, &root).await {
         let mut catalog = McpCatalog::load();
         catalog.set(&input.id, tools);
@@ -3586,20 +3733,26 @@ fn resolve_thread(
             }
             Err(ThreadLoadError::ProviderMismatch { .. })
             | Err(ThreadLoadError::UnsupportedVersion { .. }) => {
-                // Fall through to a fresh provider-owned thread.
+                // Fall through to an unsaved draft. A replacement row here
+                // would be another chat the user never started.
             }
             Err(e) => return Err(e.to_string()),
         }
     }
-    let thread = store
-        .create_for_provider_kind(provider_id, kind)
-        .map_err(|e| e.to_string())?;
+    let draft = unsaved_draft(provider_id, config)?;
     Ok(ResolvedThread {
-        thread,
+        thread: draft,
         warning: None,
-        created: true,
-        draft: false,
+        created: false,
+        draft: true,
     })
+}
+
+/// In-memory chat with no history row until the user sends something.
+fn unsaved_draft(provider_id: &str, config: &Config) -> Result<Thread, String> {
+    let mut draft = Thread::new().with_provider(provider_id);
+    stamp_thread_kind(&mut draft, config, provider_id)?;
+    Ok(draft)
 }
 
 /// Whether opening a thread should write it back to the store.
@@ -4234,6 +4387,12 @@ fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadSummary>, String
         .with_session_mut(|session| {
             open_store(&session.root)?
                 .list_for_provider(&session.provider_id)
+                .map(|threads| {
+                    threads
+                        .into_iter()
+                        .filter(|thread| thread.message_count > 0)
+                        .collect()
+                })
                 .map_err(|e| e.to_string())
         })
         .map_err(map_session_err)
@@ -4322,6 +4481,9 @@ fn list_cached_threads(
             });
 
         if let Some(summary) = summary {
+            if summary.message_count == 0 {
+                continue;
+            }
             if let Some(wanted) = provider_id {
                 if summary.provider_id.as_deref() != Some(wanted) {
                     continue;
@@ -4919,6 +5081,7 @@ mod chat_summary_tests {
         let mut first = Thread::new().with_provider("codex");
         let mut second = Thread::new().with_provider("codex");
         first.apply_user("user-1", "hello");
+        second.apply_user("user-s", "other");
         store.save(&first).unwrap();
         store.save(&second).unwrap();
 
@@ -4936,7 +5099,8 @@ mod chat_summary_tests {
         );
         assert!(pinned_first.first().is_some_and(|summary| summary.pinned));
 
-        let other_provider = Thread::new().with_provider("claude");
+        let mut other_provider = Thread::new().with_provider("claude");
+        other_provider.apply_user("user-c", "claude chat");
         store.save(&other_provider).unwrap();
         let all_providers = list_cached_threads(&store, None, &mut cache);
         assert_eq!(all_providers.len(), 3);
@@ -4957,6 +5121,23 @@ mod chat_summary_tests {
         let remaining = list_cached_threads(&store, Some("codex"), &mut cache);
         assert_eq!(remaining.len(), 1);
         assert_eq!(cache.files.len(), 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_chats_do_not_appear_in_the_sidebar() {
+        let root = std::env::temp_dir().join(format!("zest-empty-sidebar-{}", new_id("test")));
+        let store = ThreadStore::open(&root).unwrap();
+        let empty = Thread::new().with_provider("codex");
+        let mut started = Thread::new().with_provider("codex");
+        started.apply_user("user-1", "hello");
+        store.save(&empty).unwrap();
+        store.save(&started).unwrap();
+
+        let listed = list_cached_threads(&store, Some("codex"), &mut ProjectSummaryCache::default());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, started.id);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5061,14 +5242,16 @@ mod chat_summary_tests {
         assert!(!should_persist_on_open(true, true, true));
     }
 
-    /// The other half: a project with no pointer at all still gets a chat.
+    /// A project with no pointer still opens a chat, but that chat stays off
+    /// disk until the user sends something.
     #[test]
     fn a_project_with_no_pointer_still_resolves_to_a_new_chat() {
         let root = std::env::temp_dir().join(format!("zest-fresh-project-{}", new_id("test")));
         let store = ThreadStore::open(&root).unwrap();
         let resolved = resolve_thread(&root, &store, "codex", &Config::default(), false).unwrap();
-        assert!(resolved.created);
-        assert_eq!(store.list().unwrap().len(), 1);
+        assert!(!resolved.created);
+        assert!(resolved.draft);
+        assert_eq!(store.list().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -5338,11 +5521,8 @@ async fn open_project_chat(
     let previous_last_provider = snapshot_last_provider();
     let mut created_thread_id: Option<String> = None;
     let target_thread = if new_thread {
-        let thread = target_store
-            .create_for_provider(&provider_id)
-            .map_err(|e| e.to_string())?;
-        created_thread_id = Some(thread.id.clone());
-        Some((thread, None, false))
+        let draft = unsaved_draft(&provider_id, &config)?;
+        Some((draft, None, true))
     } else if let Some(loaded) = loaded_target {
         let warning = loaded.warning;
         let source = loaded.thread;
@@ -5471,18 +5651,7 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
 
     state
         .sessions
-        .with_session_mut(|session| -> Result<SessionInfo, String> {
-            let store = open_store(&session.root)?;
-            let thread = store
-                .create_for_provider(&session.provider_id)
-                .map_err(|e| e.to_string())?;
-            session.agent.clear_messages();
-            session.thread_id = thread.id.clone();
-            session.thread = thread;
-            session.recovery = None;
-            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
-            Ok(session_info_from(session, None))
-        })
+        .with_session_mut(reset_session_to_draft)
         .map_err(map_session_err)
         .and_then(|r| r)
 }
@@ -6955,17 +7124,30 @@ fn set_system_prompt(
 pub struct CommandView {
     pub name: String,
     pub description: String,
+    /// `"skill"` or `"mcp"`.
+    pub kind: String,
 }
 
-/// Slash commands available here — one per discovered skill.
+/// Slash commands available here — skills plus enabled MCP servers.
 ///
 /// Disk-based so commands remain readable while a turn is streaming.
 #[tauri::command]
-fn list_commands(_state: State<'_, AppState>) -> Result<Vec<CommandView>, String> {
-    Ok(SkillSet::discover()
-        .command_names()
+fn list_commands(state: State<'_, AppState>) -> Result<Vec<CommandView>, String> {
+    let _read_guard = state.config_edit.lock().ok();
+    let skills = SkillSet::discover();
+    let config = load_workspace_config(&state);
+    let catalog = McpCatalog::load();
+    let mcp = zest_core::mcp_slashes(&config.mcp, &catalog);
+    Ok(zest_core::list_slash_commands(&skills, &mcp)
         .into_iter()
-        .map(|(name, description)| CommandView { name, description })
+        .map(|command| CommandView {
+            name: command.name,
+            description: command.description,
+            kind: match command.kind {
+                zest_core::SlashKind::Skill => "skill".into(),
+                zest_core::SlashKind::Mcp => "mcp".into(),
+            },
+        })
         .collect())
 }
 

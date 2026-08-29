@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   ChevronRightIcon,
   FilePenLineIcon,
@@ -10,10 +10,16 @@ import {
   SparklesIcon,
   TerminalIcon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 
 import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
+import {
+  approvalTitle,
+  isEmptyArgsPreview,
+  parseMcpToolName,
+} from "@/lib/mcpDisplay";
 import type { ApprovalChoice, ToolPart } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -44,7 +50,8 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   const awaiting = tool.status === "awaiting_approval";
   const [busy, setBusy] = useState<ApprovalChoice | null>(null);
   const [open, setOpen] = useState(false);
-  const hasDiff = Boolean(tool.diff?.trim());
+  const mcp = parseMcpToolName(tool.name);
+  const hasDiff = Boolean(tool.diff?.trim()) && !isEmptyArgsPreview(tool.diff);
 
   async function resolve(decision: ApprovalChoice) {
     if (!tool.approvalId || busy !== null) return;
@@ -65,6 +72,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   // file; for it, `path` carries the command line verbatim.
   const isCommand = tool.name === "bash";
   const isDelegation = tool.name === "delegate_external";
+  const showArgs = hasDiff;
 
   if (awaiting && !asCard) {
     return (
@@ -73,7 +81,9 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
         className="flex min-h-8 w-full max-w-full items-center gap-2 rounded-lg px-2 py-1 text-left"
       >
         <span className="grid size-5 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-400/90">
-          {isCommand || isDelegation ? (
+          {mcp ? (
+            <ZapIcon className="size-3" />
+          ) : isCommand || isDelegation ? (
             <TerminalIcon className="size-3" />
           ) : (
             <FilePenLineIcon className="size-3" />
@@ -89,14 +99,24 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   }
 
   if (awaiting) {
+    const subtitle =
+      (isDelegation && tool.summary) ||
+      tool.path ||
+      tool.summary ||
+      (isCommand
+        ? "Run a command"
+        : isDelegation
+          ? "Run an external worker"
+          : mcp
+            ? `Run ${mcp.tool} on the ${mcp.server} MCP server`
+            : "Write to project file");
     return (
-      <div
-        data-tool-id={tool.id}
-        className="w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-card/60"
-      >
-        <div className="flex items-start gap-2.5 px-3 py-2.5">
+      <div data-tool-id={tool.id} className="w-full max-w-full overflow-visible">
+        <div className="flex items-start gap-2.5 px-1 py-1">
           <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
-            {isCommand || isDelegation ? (
+            {mcp ? (
+              <ZapIcon className="size-3.5 text-emerald-400" />
+            ) : isCommand || isDelegation ? (
               <TerminalIcon className="size-3.5" />
             ) : (
               <FilePenLineIcon className="size-3.5" />
@@ -104,27 +124,15 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium text-foreground">
-              {isDelegation
-                ? "Delegate this task?"
-                : isCommand
-                  ? "Run this command?"
-                  : `Allow ${tool.name}?`}
+              {approvalTitle(tool.name)}
             </div>
             <TruncateWithHover
-              text={
-                (isDelegation && tool.summary) ||
-                tool.path ||
-                tool.summary ||
-                (isCommand
-                  ? "Run a command"
-                  : isDelegation
-                    ? "Run an external worker"
-                    : "Write to project file")
-              }
-              className="mt-0.5 font-mono text-[11px] text-muted-foreground"
+              text={subtitle}
+              side="below"
+              className="mt-0.5 text-[11px] text-muted-foreground"
             />
           </div>
-          {hasDiff && onOpenDiff ? (
+          {hasDiff && !mcp && onOpenDiff ? (
             <Button
               type="button"
               variant="ghost"
@@ -137,7 +145,11 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
             </Button>
           ) : null}
         </div>
-        {tool.diff ? (
+        {showArgs && mcp && tool.diff ? (
+          <pre className="mx-1 mb-1 max-h-40 overflow-auto rounded-md bg-muted/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            {tool.diff}
+          </pre>
+        ) : showArgs && tool.diff && !mcp ? (
           <button
             type="button"
             title="Open full diff"
@@ -147,7 +159,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
             <DiffPreview diff={tool.diff} />
           </button>
         ) : null}
-        <div className="flex flex-wrap items-center justify-end gap-2 px-3 py-2">
+        <div className="flex flex-wrap items-center justify-end gap-2 px-1 py-1.5">
           <Button
             type="button"
             variant="ghost"
@@ -199,7 +211,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   const label = delegation ? "Delegate" : toolLabel(tool.name);
   const target = toolTarget(tool, delegation);
   const hasBody = Boolean(tool.summary?.trim()) || hasDiff;
-  const canOpenDiff = hasDiff && Boolean(onOpenDiff);
+  const canOpenDiff = hasDiff && Boolean(onOpenDiff) && !mcp;
 
   return (
     <div
@@ -291,6 +303,8 @@ function toolLabel(name: string): string {
     web_search: "Search web",
     write_file: "Write",
   };
+  const mcp = parseMcpToolName(name);
+  if (mcp) return mcp.server;
   return labels[name] ?? name.replaceAll("_", " ");
 }
 
@@ -302,6 +316,14 @@ function toolTarget(
   > | null
 ): string {
   if (delegation) return `${delegation.provider_id} · ${delegation.model}`;
+  const mcp = parseMcpToolName(tool.name);
+  if (mcp) {
+    const path = tool.path?.trim() ?? "";
+    const sep = " · ";
+    const at = path.indexOf(sep);
+    if (at >= 0) return path.slice(at + sep.length);
+    return mcp.tool;
+  }
   if (tool.path?.trim()) return tool.path;
   if (tool.summary?.trim()) return tool.summary;
 
@@ -345,7 +367,11 @@ function ToolActionIcon({ tool }: { tool: ToolPart }) {
       case "web_search":
         return <GlobeIcon className="size-3.5" aria-hidden />;
       case "read_file":
+        return <FileTextIcon className="size-3.5" aria-hidden />;
       default:
+        if (parseMcpToolName(tool.name)) {
+          return <ZapIcon className="size-3.5 text-emerald-400" aria-hidden />;
+        }
         return <FileTextIcon className="size-3.5" aria-hidden />;
     }
   })();
@@ -361,24 +387,49 @@ function ToolActionIcon({ tool }: { tool: ToolPart }) {
 function TruncateWithHover({
   text,
   className,
+  side = "above",
 }: {
   text: string;
   className?: string;
+  side?: "above" | "below";
 }) {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflows, setOverflows] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    const measure = () => {
+      setOverflows(el.scrollWidth > el.clientWidth + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text]);
+
   return (
     <span className={cn("group/trunc relative min-w-0", className)}>
-      <span className="block truncate">{text}</span>
-      <span
-        role="tooltip"
-        className={cn(
-          "pointer-events-none absolute bottom-[calc(100%+6px)] left-0 z-30 hidden w-max max-w-[min(22rem,70vw)]",
-          "rounded-md border border-border/80 bg-popover px-2.5 py-1.5 text-left text-[11px] leading-snug text-popover-foreground shadow-lg",
-          "whitespace-pre-wrap break-words",
-          "group-hover/trunc:block"
-        )}
-      >
+      <span ref={textRef} className="block truncate">
         {text}
       </span>
+      {overflows ? (
+        <span
+          role="tooltip"
+          className={cn(
+            "pointer-events-none absolute left-0 z-50 hidden w-max max-w-[min(22rem,70vw)]",
+            side === "below"
+              ? "top-[calc(100%+6px)]"
+              : "bottom-[calc(100%+6px)]",
+            "rounded-md border border-border/80 bg-popover px-2.5 py-1.5 text-left text-[11px] leading-snug text-popover-foreground shadow-lg",
+            "whitespace-pre-wrap break-words",
+            "group-hover/trunc:block"
+          )}
+        >
+          {text}
+        </span>
+      ) : null}
     </span>
   );
 }

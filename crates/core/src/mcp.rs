@@ -20,6 +20,16 @@
 //! a handshake with every configured server, so the desktop refreshes the
 //! catalogue when a server is saved or checked and the runtime registers from
 //! it. A stale entry costs one clear error from the server, not a wrong answer.
+//!
+//! Connect is dual-era. Zest probes `server/discover` first. A 2026 server
+//! stays on per-request `_meta`. A 2025 server is restarted and given the
+//! `initialize` handshake. The tool names and approval rules do not change.
+//!
+//! A `url` uses Streamable HTTP instead of a child process. The same era
+//! probe applies; a 400 without a modern JSON-RPC error falls back to
+//! `initialize` on that URL.
+
+mod http;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,10 +53,16 @@ use crate::tools::outcome::ToolOutcome;
 use crate::tools::prepared::PreparedToolCall;
 use crate::tools::{Tool, ToolRegistry};
 
-/// Wire version Zest speaks. A server that negotiates a different one is still
-/// used: the fields this client touches have not moved across revisions, and
-/// refusing to talk to a newer server would be worse than tolerating it.
-const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Per-request version for servers that answered `server/discover`.
+pub(super) const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+/// Handshake version for servers that still require `initialize`.
+pub(super) const LEGACY_PROTOCOL_VERSION: &str = "2025-06-18";
+/// JSON-RPC code for `UnsupportedProtocolVersionError`.
+pub(super) const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+/// `HeaderMismatchError`. HTTP-only, but still a modern-era signal.
+const HEADER_MISMATCH: i64 = -32020;
+/// `MissingRequiredClientCapabilityError`.
+const MISSING_REQUIRED_CLIENT_CAPABILITY: i64 = -32021;
 /// Prefix on every registered tool name, so a server can never shadow a Zest
 /// tool and the transcript always says which server ran.
 pub const MCP_TOOL_PREFIX: &str = "mcp";
@@ -58,14 +74,21 @@ pub const MAX_TOOLS_PER_SERVER: usize = 48;
 /// Ceiling on one tool result before it is clipped. The spill policy handles
 /// context pressure above this; this is only protection against a server that
 /// answers with an unbounded stream.
-const MAX_RESULT_BYTES: usize = 256 * 1024;
-const MAX_ERROR_CHARS: usize = 2_000;
+pub(super) const MAX_RESULT_BYTES: usize = 256 * 1024;
+pub(super) const MAX_ERROR_CHARS: usize = 2_000;
 /// Upper bound on a configured `timeout_secs`, so a config typo cannot make a
 /// turn wait indefinitely.
 const MAX_TIMEOUT_SECS: u64 = 600;
-/// Handshake budget. Separate from the call timeout because a server that never
-/// completes `initialize` is broken, not slow.
-const CONNECT_TIMEOUT_SECS: u64 = 20;
+/// Handshake budget for the legacy `initialize` path. Separate from the call
+/// timeout because a server that never completes `initialize` is broken, not
+/// slow.
+pub(super) const CONNECT_TIMEOUT_SECS: u64 = 20;
+/// How long to wait for `server/discover` before treating the process as a
+/// 2025 server. The spec forbids keying fallback to one error code: many
+/// legacy servers stay silent on an unknown first method. Five seconds is
+/// long enough for a process that will answer, and short enough that a silent
+/// one does not eat the whole connect budget.
+pub(super) const DISCOVER_PROBE_TIMEOUT_SECS: u64 = 5;
 
 /// One tool as the server described it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -208,12 +231,34 @@ pub struct McpServer {
     conn: AsyncMutex<Option<Connection>>,
 }
 
-struct Connection {
+enum Connection {
+    Stdio(Box<StdioConnection>),
+    Http(Box<http::HttpConnection>),
+}
+
+struct StdioConnection {
     /// Held so the process is killed when the connection is dropped.
     _child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     next_id: u64,
+    /// Pinned for this process. A reconnect starts a new child and probes again.
+    era: ProtocolEra,
+}
+
+/// Which MCP dialect this child speaks. Decided once, at connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ProtocolEra {
+    Legacy,
+    Modern { version: String },
+}
+
+/// Outcome of the `server/discover` probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum EraDecision {
+    Modern(String),
+    Legacy,
+    Fail(String),
 }
 
 impl McpServer {
@@ -236,7 +281,7 @@ impl McpServer {
 
     /// Ask the server for its tool list, starting it if needed.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, String> {
-        let result = self.request("tools/list", json!({})).await?;
+        let result = self.request("tools/list", json!({}), &[]).await?;
         let mut tools = Vec::new();
         for entry in result
             .get("tools")
@@ -266,21 +311,35 @@ impl McpServer {
                 break;
             }
         }
+        if self.config.is_http() {
+            tools.retain(|tool| http::http_tool_definition_ok(&tool.input_schema).is_ok());
+        }
         Ok(tools)
     }
 
     /// Run one tool. The `Err` string goes back to the model verbatim, so it
     /// says which server failed and why.
-    pub async fn call_tool(&self, tool: &str, arguments: Value) -> Result<String, String> {
+    pub async fn call_tool(
+        &self,
+        tool: &str,
+        arguments: Value,
+        input_schema: &Value,
+    ) -> Result<String, String> {
         let arguments = if arguments.is_object() {
             arguments
         } else {
             json!({})
         };
+        let extra_headers = if self.config.is_http() {
+            http::param_headers(input_schema, &arguments)?
+        } else {
+            Vec::new()
+        };
         let result = self
             .request(
                 "tools/call",
                 json!({ "name": tool, "arguments": arguments }),
+                &extra_headers,
             )
             .await?;
         let body = text_from_content(&result);
@@ -303,12 +362,20 @@ impl McpServer {
     /// One retry, not a loop: a server that closed its stdout because it
     /// crashed will do it again, and a retry loop would turn that into a
     /// process-spawning loop inside a single tool call.
-    async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        match self.request_once(method, params.clone()).await {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        extra_headers: &[(String, String)],
+    ) -> Result<Value, String> {
+        match self
+            .request_once(method, params.clone(), extra_headers)
+            .await
+        {
             Ok(value) => Ok(value),
             Err(error) if error.transport => {
                 self.conn.lock().await.take();
-                self.request_once(method, params)
+                self.request_once(method, params, extra_headers)
                     .await
                     .map_err(|error| error.message)
             }
@@ -316,55 +383,129 @@ impl McpServer {
         }
     }
 
-    async fn request_once(&self, method: &str, params: Value) -> Result<Value, RequestError> {
+    async fn request_once(
+        &self,
+        method: &str,
+        params: Value,
+        extra_headers: &[(String, String)],
+    ) -> Result<Value, RequestError> {
         let mut guard = self.conn.lock().await;
         if guard.is_none() {
             *guard = Some(self.connect().await.map_err(RequestError::fatal)?);
         }
-        let conn = guard.as_mut().expect("connection was just established");
-        let id = conn.next_id;
-        conn.next_id += 1;
-
-        let outcome = tokio::time::timeout(self.timeout(), async {
-            send_message(
-                &mut conn.stdin,
-                &json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "method": method,
-                    "params": params,
-                }),
-            )
-            .await?;
-            read_response(&mut conn.reader, &mut conn.stdin, id).await
-        })
-        .await;
-
-        match outcome {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => {
-                // A protocol-level error leaves the stream usable; a transport
-                // error does not, so drop the connection with it.
-                if error.transport {
-                    *guard = None;
+        match guard.as_mut().expect("connection was just established") {
+            Connection::Http(conn) => {
+                let outcome = tokio::time::timeout(
+                    self.timeout(),
+                    http::request(conn, method, params, extra_headers),
+                )
+                .await;
+                match outcome {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => {
+                        if error.transport {
+                            *guard = None;
+                        }
+                        Err(error)
+                    }
+                    Err(_) => {
+                        *guard = None;
+                        Err(RequestError::fatal(format!(
+                            "{} did not answer {method} within {}s",
+                            self.id,
+                            self.timeout().as_secs()
+                        )))
+                    }
                 }
-                Err(error)
             }
-            Err(_) => {
-                // A timed-out request leaves an unread reply in the stream,
-                // which would be read as the answer to the *next* call. The
-                // process goes with it.
-                *guard = None;
-                Err(RequestError::fatal(format!(
-                    "{} did not answer {method} within {}s",
-                    self.id,
-                    self.timeout().as_secs()
-                )))
+            Connection::Stdio(conn) => {
+                let id = conn.next_id;
+                conn.next_id += 1;
+                let params = match &conn.era {
+                    ProtocolEra::Legacy => params,
+                    ProtocolEra::Modern { version } => with_request_meta(params, version),
+                };
+
+                let outcome = tokio::time::timeout(self.timeout(), async {
+                    send_message(
+                        &mut conn.stdin,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "method": method,
+                            "params": params,
+                        }),
+                    )
+                    .await?;
+                    read_response(&mut conn.reader, &mut conn.stdin, id).await
+                })
+                .await;
+
+                match outcome {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => {
+                        // A protocol-level error leaves the stream usable; a transport
+                        // error does not, so drop the connection with it.
+                        if error.transport {
+                            *guard = None;
+                        }
+                        Err(error)
+                    }
+                    Err(_) => {
+                        // A timed-out request leaves an unread reply in the stream,
+                        // which would be read as the answer to the *next* call. The
+                        // process goes with it.
+                        *guard = None;
+                        Err(RequestError::fatal(format!(
+                            "{} did not answer {method} within {}s",
+                            self.id,
+                            self.timeout().as_secs()
+                        )))
+                    }
+                }
             }
         }
     }
 
     async fn connect(&self) -> Result<Connection, String> {
+        if self.config.is_http() {
+            return http::connect(&self.id, &self.config)
+                .await
+                .map(|conn| Connection::Http(Box::new(conn)));
+        }
+        let mut conn = self.spawn_process().await?;
+        match decide_era(&mut conn).await {
+            EraDecision::Modern(version) => {
+                conn.era = ProtocolEra::Modern { version };
+                Ok(Connection::Stdio(Box::new(conn)))
+            }
+            EraDecision::Fail(message) => Err(format!("{}: {message}", self.id)),
+            EraDecision::Legacy => {
+                // A 2025 server that saw `server/discover` may be in a bad
+                // state. The spec requires a fresh process before `initialize`.
+                drop(conn);
+                let mut conn = self.spawn_process().await?;
+                let handshake = tokio::time::timeout(
+                    Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                    initialize(&mut conn),
+                )
+                .await;
+                match handshake {
+                    Ok(Ok(())) => {
+                        conn.era = ProtocolEra::Legacy;
+                        Ok(Connection::Stdio(Box::new(conn)))
+                    }
+                    Ok(Err(error)) => Err(error.message),
+                    Err(_) => Err(format!(
+                        "{} did not complete the MCP handshake within {CONNECT_TIMEOUT_SECS}s",
+                        self.id
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn spawn_process(&self) -> Result<StdioConnection, String> {
         let mut command = Command::new(resolve_program(&self.config.command));
         command
             .args(&self.config.args)
@@ -393,30 +534,132 @@ impl McpServer {
             .stdout
             .take()
             .ok_or_else(|| format!("{} stdout was not piped", self.id))?;
-        let mut conn = Connection {
+        Ok(StdioConnection {
             _child: child,
             stdin,
             reader: BufReader::new(stdout),
             next_id: 1,
-        };
-
-        let handshake = tokio::time::timeout(
-            Duration::from_secs(CONNECT_TIMEOUT_SECS),
-            initialize(&mut conn),
-        )
-        .await;
-        match handshake {
-            Ok(Ok(())) => Ok(conn),
-            Ok(Err(error)) => Err(error.message),
-            Err(_) => Err(format!(
-                "{} did not complete the MCP handshake within {CONNECT_TIMEOUT_SECS}s",
-                self.id
-            )),
-        }
+            era: ProtocolEra::Legacy,
+        })
     }
 }
 
-async fn initialize(conn: &mut Connection) -> Result<(), RequestError> {
+/// Probe `server/discover`. A modern result pins that era. Anything else that
+/// is not a recognized 2026 error means the child is a 2025 server.
+async fn decide_era(conn: &mut StdioConnection) -> EraDecision {
+    let probe = tokio::time::timeout(
+        Duration::from_secs(DISCOVER_PROBE_TIMEOUT_SECS),
+        discover(conn),
+    )
+    .await;
+    match probe {
+        Ok(outcome) => classify_discover(outcome),
+        Err(_) => EraDecision::Legacy,
+    }
+}
+
+pub(super) fn classify_discover(outcome: Result<Value, RequestError>) -> EraDecision {
+    match outcome {
+        Ok(result) => {
+            let supported = version_strings(&result, "supportedVersions");
+            // A DiscoverResult with no version list still identifies a modern
+            // server. Zest only speaks one modern revision.
+            if supported.is_empty() {
+                EraDecision::Modern(MODERN_PROTOCOL_VERSION.to_string())
+            } else {
+                match pick_modern_version(&supported) {
+                    Some(version) => EraDecision::Modern(version),
+                    None => EraDecision::Fail(format!(
+                        "does not support a protocol version Zest can use (server offered: {})",
+                        offered_from_list(&supported)
+                    )),
+                }
+            }
+        }
+        Err(error) if error.transport => EraDecision::Legacy,
+        Err(error) if error.is_modern_protocol_error() => {
+            if error.rpc_code == Some(UNSUPPORTED_PROTOCOL_VERSION) {
+                match pick_modern_version(&error.supported_versions()) {
+                    Some(version) => EraDecision::Modern(version),
+                    None => EraDecision::Fail(format!(
+                        "does not support a protocol version Zest can use (server offered: {})",
+                        offered_from_list(&error.supported_versions())
+                    )),
+                }
+            } else {
+                EraDecision::Fail(error.message)
+            }
+        }
+        Err(_) => EraDecision::Legacy,
+    }
+}
+
+pub(super) fn request_meta(version: &str) -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": version,
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "zest",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "io.modelcontextprotocol/clientCapabilities": {},
+    })
+}
+
+pub(super) fn with_request_meta(params: Value, version: &str) -> Value {
+    let mut object = match params {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    object.insert("_meta".into(), request_meta(version));
+    Value::Object(object)
+}
+
+fn version_strings(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pick_modern_version(supported: &[String]) -> Option<String> {
+    supported
+        .iter()
+        .any(|version| version == MODERN_PROTOCOL_VERSION)
+        .then(|| MODERN_PROTOCOL_VERSION.to_string())
+}
+
+fn offered_from_list(supported: &[String]) -> String {
+    if supported.is_empty() {
+        "none".into()
+    } else {
+        supported.join(", ")
+    }
+}
+
+async fn discover(conn: &mut StdioConnection) -> Result<Value, RequestError> {
+    let id = conn.next_id;
+    conn.next_id += 1;
+    send_message(
+        &mut conn.stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "server/discover",
+            "params": { "_meta": request_meta(MODERN_PROTOCOL_VERSION) },
+        }),
+    )
+    .await?;
+    read_response(&mut conn.reader, &mut conn.stdin, id).await
+}
+
+async fn initialize(conn: &mut StdioConnection) -> Result<(), RequestError> {
     let id = conn.next_id;
     conn.next_id += 1;
     send_message(
@@ -426,7 +669,7 @@ async fn initialize(conn: &mut Connection) -> Result<(), RequestError> {
             "id": id,
             "method": "initialize",
             "params": {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": LEGACY_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": { "name": "zest", "version": env!("CARGO_PKG_VERSION") },
             },
@@ -443,27 +686,59 @@ async fn initialize(conn: &mut Connection) -> Result<(), RequestError> {
 }
 
 /// A failed request, and whether the stream survived it.
-struct RequestError {
-    message: String,
+#[derive(Debug)]
+pub(super) struct RequestError {
+    pub(super) message: String,
     transport: bool,
+    pub(super) rpc_code: Option<i64>,
+    rpc_data: Option<Value>,
 }
 
 impl RequestError {
     /// The request failed but the connection is still usable — a JSON-RPC
     /// error reply, or a server that answered nonsense.
-    fn fatal(message: impl Into<String>) -> Self {
+    pub(super) fn fatal(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             transport: false,
+            rpc_code: None,
+            rpc_data: None,
         }
     }
 
     /// The pipe is gone. The caller may reconnect and try once more.
-    fn transport(message: impl Into<String>) -> Self {
+    pub(super) fn transport(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             transport: true,
+            rpc_code: None,
+            rpc_data: None,
         }
+    }
+
+    pub(super) fn rpc(code: i64, message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            message: message.into(),
+            transport: false,
+            rpc_code: Some(code),
+            rpc_data: data,
+        }
+    }
+
+    pub(super) fn is_modern_protocol_error(&self) -> bool {
+        matches!(
+            self.rpc_code,
+            Some(
+                HEADER_MISMATCH | MISSING_REQUIRED_CLIENT_CAPABILITY | UNSUPPORTED_PROTOCOL_VERSION
+            )
+        )
+    }
+
+    fn supported_versions(&self) -> Vec<String> {
+        self.rpc_data
+            .as_ref()
+            .map(|data| version_strings(data, "supported"))
+            .unwrap_or_default()
     }
 }
 
@@ -540,7 +815,11 @@ async fn read_response(
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("the MCP server rejected the request");
-            return Err(RequestError::fatal(clip(message, MAX_ERROR_CHARS)));
+            return Err(RequestError::rpc(
+                error.get("code").and_then(Value::as_i64).unwrap_or(0),
+                clip(message, MAX_ERROR_CHARS),
+                error.get("data").cloned(),
+            ));
         }
         return Ok(value.get("result").cloned().unwrap_or(Value::Null));
     }
@@ -599,7 +878,7 @@ fn scrub_environment(command: &mut Command, allowed: &[String]) {
     command.env_remove(SESSION_ENV);
 }
 
-fn clip(text: &str, limit: usize) -> String {
+pub(super) fn clip(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }
@@ -608,6 +887,18 @@ fn clip(text: &str, limit: usize) -> String {
         end -= 1;
     }
     format!("{}\n… clipped", &text[..end])
+}
+
+/// Empty `{}` is not worth a preview pane. Anything with fields is pretty
+/// JSON, clipped so a huge argument object cannot fill the approval card.
+fn argument_preview(input: &Value) -> String {
+    if input.as_object().is_some_and(|object| object.is_empty()) {
+        return String::new();
+    }
+    clip(
+        &serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()),
+        4_000,
+    )
 }
 
 /// One tool on one server, as the model sees it.
@@ -658,7 +949,7 @@ impl Tool for McpTool {
     }
 
     fn prepare(&self, input: Value) -> Result<PreparedToolCall, String> {
-        let arguments = serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string());
+        let arguments = argument_preview(&input);
         Ok(PreparedToolCall::plain_with_preview(
             self.name(),
             self.risk(),
@@ -670,13 +961,16 @@ impl Tool for McpTool {
                     self.remote_name,
                     self.server.id()
                 ),
-                diff: clip(&arguments, 4_000),
+                diff: arguments,
             },
         ))
     }
 
     async fn run(&self, input: Value) -> Result<ToolOutcome, String> {
-        let body = self.server.call_tool(&self.remote_name, input).await?;
+        let body = self
+            .server
+            .call_tool(&self.remote_name, input, &self.input_schema)
+            .await?;
         Ok(ToolOutcome::text(if body.trim().is_empty() {
             format!("{} returned no content.", self.remote_name)
         } else {
@@ -747,9 +1041,120 @@ mod tests {
         McpServerConfig {
             command: "node".into(),
             args: Vec::new(),
+            url: None,
+            headers: BTreeMap::new(),
+            header_credentials: BTreeMap::new(),
             env_vars: Vec::new(),
             enabled: true,
             timeout_secs: 30,
+        }
+    }
+
+    fn node_available() -> bool {
+        std::process::Command::new(resolve_program("node"))
+            .arg("--version")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn write_fixture(body: &str) -> tempfile::NamedTempFile {
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        script.as_file_mut().write_all(body.as_bytes()).unwrap();
+        script
+    }
+
+    #[test]
+    fn a_discover_result_pins_the_modern_era() {
+        let result = json!({
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {}
+        });
+        assert_eq!(
+            classify_discover(Ok(result)),
+            EraDecision::Modern(MODERN_PROTOCOL_VERSION.into())
+        );
+    }
+
+    #[test]
+    fn a_discover_result_without_versions_still_pins_modern() {
+        assert_eq!(
+            classify_discover(Ok(json!({ "resultType": "complete" }))),
+            EraDecision::Modern(MODERN_PROTOCOL_VERSION.into())
+        );
+    }
+
+    #[test]
+    fn method_not_found_on_discover_is_legacy() {
+        assert_eq!(
+            classify_discover(Err(RequestError::rpc(-32601, "Method not found", None))),
+            EraDecision::Legacy
+        );
+    }
+
+    #[test]
+    fn invalid_params_on_discover_is_legacy() {
+        assert_eq!(
+            classify_discover(Err(RequestError::rpc(-32602, "Invalid params", None))),
+            EraDecision::Legacy
+        );
+    }
+
+    #[test]
+    fn a_transport_error_on_discover_is_legacy() {
+        assert_eq!(
+            classify_discover(Err(RequestError::transport("closed"))),
+            EraDecision::Legacy
+        );
+    }
+
+    #[test]
+    fn unsupported_protocol_version_stays_modern() {
+        let data = json!({
+            "supported": ["2026-07-28"],
+            "requested": "1900-01-01"
+        });
+        assert_eq!(
+            classify_discover(Err(RequestError::rpc(
+                UNSUPPORTED_PROTOCOL_VERSION,
+                "Unsupported protocol version",
+                Some(data)
+            ))),
+            EraDecision::Modern(MODERN_PROTOCOL_VERSION.into())
+        );
+    }
+
+    #[test]
+    fn unsupported_modern_only_versions_do_not_fall_back() {
+        match classify_discover(Ok(json!({ "supportedVersions": ["2099-01-01"] }))) {
+            EraDecision::Fail(message) => assert!(message.contains("2099"), "{message}"),
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_protocol_version_without_overlap_does_not_fall_back() {
+        let data = json!({ "supported": ["2025-11-25"], "requested": "2026-07-28" });
+        match classify_discover(Err(RequestError::rpc(
+            UNSUPPORTED_PROTOCOL_VERSION,
+            "Unsupported protocol version",
+            Some(data),
+        ))) {
+            EraDecision::Fail(message) => assert!(message.contains("2025-11-25"), "{message}"),
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn another_modern_protocol_error_does_not_fall_back() {
+        match classify_discover(Err(RequestError::rpc(
+            -32021,
+            "Server requires the elicitation capability",
+            None,
+        ))) {
+            EraDecision::Fail(message) => assert!(message.contains("elicitation"), "{message}"),
+            other => panic!("expected Fail, got {other:?}"),
         }
     }
 
@@ -828,6 +1233,23 @@ mod tests {
             registry.risk("mcp__github__search_issues"),
             Some(ToolRisk::Exec)
         );
+        let empty = registry
+            .prepare("mcp__github__search_issues", json!({}))
+            .unwrap();
+        assert!(
+            empty.preview.diff.is_empty(),
+            "empty arguments must not render as {{}}: {}",
+            empty.preview.diff
+        );
+        let with_args = registry
+            .prepare("mcp__github__search_issues", json!({ "q": "bug" }))
+            .unwrap();
+        assert!(
+            with_args.preview.diff.contains("bug"),
+            "{}",
+            with_args.preview.diff
+        );
+        assert_eq!(with_args.preview.path, "github · search_issues");
     }
 
     #[test]
@@ -886,24 +1308,22 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_fixture_covers_handshake_call_denial_timeout_and_malformed_output() {
-        let node_available = std::process::Command::new(resolve_program("node"))
-            .arg("--version")
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !node_available {
+        if !node_available() {
             // The desktop verification job provisions Node; keep this unit
             // test harmless for minimal Rust-only environments.
             return;
         }
 
-        let script = tempfile::NamedTempFile::new().unwrap();
-        let body = r#"
+        let script = write_fixture(
+            r#"
 const mode = process.argv[2];
 const readline = require("readline");
 const rl = readline.createInterface({ input: process.stdin });
 function reply(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+}
+function reject(id, code, message) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\n");
 }
 rl.on("line", (line) => {
   const request = JSON.parse(line);
@@ -926,10 +1346,12 @@ rl.on("line", (line) => {
     if (mode === "malformed") process.stdout.write("this is not JSON-RPC\n");
     const text = mode === "large" ? "x".repeat(300000) : "fixture success";
     reply(request.id, { content: [{ type: "text", text }] });
+  } else if (request.id != null) {
+    reject(request.id, -32601, "Method not found");
   }
 });
-"#;
-        script.as_file().write_all(body.as_bytes()).unwrap();
+"#,
+        );
         std::env::set_var("ZEST_MCP_FIXTURE_KEY", "fixture");
         std::env::set_var(crate::codex_oauth::SESSION_ENV, "fixture-session");
 
@@ -943,14 +1365,20 @@ rl.on("line", (line) => {
         assert!(tools[0].description.contains("env-session=false"));
         assert!(tools[0].description.contains("env-key=false"));
         assert_eq!(
-            success.call_tool("echo", json!({})).await.unwrap(),
+            success
+                .call_tool("echo", json!({}), &json!({}))
+                .await
+                .unwrap(),
             "fixture success"
         );
 
         let mut large_config = config();
         large_config.args = vec![script.path().display().to_string(), "large".into()];
         let large = McpServer::new("large", large_config, ".");
-        let clipped = large.call_tool("echo", json!({})).await.unwrap();
+        let clipped = large
+            .call_tool("echo", json!({}), &json!({}))
+            .await
+            .unwrap();
         assert!(clipped.ends_with("clipped"));
         assert!(clipped.len() <= MAX_RESULT_BYTES + 32);
 
@@ -958,7 +1386,7 @@ rl.on("line", (line) => {
         denied_config.args = vec![script.path().display().to_string(), "deny".into()];
         let denied = McpServer::new("denied", denied_config, ".");
         assert!(denied
-            .call_tool("echo", json!({}))
+            .call_tool("echo", json!({}), &json!({}))
             .await
             .unwrap_err()
             .contains("fixture denied"));
@@ -967,7 +1395,10 @@ rl.on("line", (line) => {
         malformed_config.args = vec![script.path().display().to_string(), "malformed".into()];
         let malformed = McpServer::new("malformed", malformed_config, ".");
         assert_eq!(
-            malformed.call_tool("echo", json!({})).await.unwrap(),
+            malformed
+                .call_tool("echo", json!({}), &json!({}))
+                .await
+                .unwrap(),
             "fixture success"
         );
 
@@ -975,10 +1406,111 @@ rl.on("line", (line) => {
         timeout_config.args = vec![script.path().display().to_string(), "timeout".into()];
         timeout_config.timeout_secs = 1;
         let timeout = McpServer::new("timeout", timeout_config, ".");
-        let error = timeout.call_tool("echo", json!({})).await.unwrap_err();
+        let error = timeout
+            .call_tool("echo", json!({}), &json!({}))
+            .await
+            .unwrap_err();
         assert!(error.contains("did not answer"), "{error}");
 
         std::env::remove_var("ZEST_MCP_FIXTURE_KEY");
         std::env::remove_var(crate::codex_oauth::SESSION_ENV);
+    }
+
+    #[tokio::test]
+    async fn a_modern_server_skips_initialize_and_requires_meta() {
+        if !node_available() {
+            return;
+        }
+
+        let script = write_fixture(
+            r#"
+const mode = process.argv[2];
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function reply(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+}
+function reject(id, code, message, data) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message, data } }) + "\n");
+}
+function metaVersion(request) {
+  return request.params && request.params._meta && request.params._meta["io.modelcontextprotocol/protocolVersion"];
+}
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    process.exit(2);
+  }
+  if (request.method === "server/discover") {
+    if (mode === "version-error") {
+      reject(request.id, -32022, "Unsupported protocol version", {
+        supported: ["2026-07-28"],
+        requested: "2026-07-28"
+      });
+      return;
+    }
+    if (mode === "unsupported") {
+      reply(request.id, { resultType: "complete", supportedVersions: ["2099-01-01"], capabilities: {} });
+      return;
+    }
+    reply(request.id, { resultType: "complete", supportedVersions: ["2026-07-28"], capabilities: { tools: {} } });
+    return;
+  }
+  if (metaVersion(request) !== "2026-07-28") {
+    reject(request.id, -32602, "missing modern _meta");
+    return;
+  }
+  if (request.method === "tools/list") {
+    reply(request.id, {
+      resultType: "complete",
+      tools: [{ name: "echo", description: "modern", inputSchema: { type: "object" } }]
+    });
+    return;
+  }
+  if (request.method === "tools/call") {
+    reply(request.id, { resultType: "complete", content: [{ type: "text", text: "modern success" }] });
+  }
+});
+"#,
+        );
+
+        let mut modern_config = config();
+        modern_config.args = vec![script.path().display().to_string(), "modern".into()];
+        modern_config.timeout_secs = 2;
+        let modern = McpServer::new("modern", modern_config, ".");
+        let tools = modern.list_tools().await.unwrap();
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tools[0].description, "modern");
+        assert_eq!(
+            modern
+                .call_tool("echo", json!({}), &json!({}))
+                .await
+                .unwrap(),
+            "modern success"
+        );
+
+        let mut version_error_config = config();
+        version_error_config.args =
+            vec![script.path().display().to_string(), "version-error".into()];
+        version_error_config.timeout_secs = 2;
+        let version_error = McpServer::new("modern-err", version_error_config, ".");
+        assert_eq!(
+            version_error
+                .call_tool("echo", json!({}), &json!({}))
+                .await
+                .unwrap(),
+            "modern success"
+        );
+
+        let mut unsupported_config = config();
+        unsupported_config.args = vec![script.path().display().to_string(), "unsupported".into()];
+        unsupported_config.timeout_secs = 2;
+        let unsupported = McpServer::new("future", unsupported_config, ".");
+        let error = unsupported
+            .list_tools()
+            .await
+            .expect_err("no shared version");
+        assert!(error.contains("2099"), "{error}");
+        assert!(!error.contains("handshake"), "{error}");
     }
 }

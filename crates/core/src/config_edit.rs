@@ -1,5 +1,6 @@
 //! Small, comment-preserving edits to the user/project `zest.toml`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
@@ -559,6 +560,9 @@ pub struct McpServerInput {
     pub id: String,
     pub command: String,
     pub args: Vec<String>,
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub header_credentials: BTreeMap<String, String>,
     pub env_vars: Vec<String>,
     pub enabled: bool,
     pub timeout_secs: u64,
@@ -566,23 +570,26 @@ pub struct McpServerInput {
 
 pub fn upsert_mcp_server(path: &Path, input: &McpServerInput) -> Result<(), String> {
     let id = input.id.trim();
-    let command = input.command.trim();
-
     validate_id(id, "MCP server")?;
-    if command.is_empty() {
-        return Err("MCP server command is required".into());
-    }
-    if input.timeout_secs == 0 || input.timeout_secs > 600 {
-        return Err("MCP timeout must be between 1 and 600 seconds".into());
-    }
-    // Values here would be committed secrets. The check is worth its weight:
-    // `env_vars = ["GITHUB_TOKEN=ghp_…"]` is exactly the mistake this shape
-    // invites, and it must fail loudly rather than write the token to disk.
-    if let Some(bad) = input.env_vars.iter().find(|name| name.contains('=')) {
-        return Err(format!(
-            "`{bad}` looks like a value. List environment variable names only — the value stays in your environment."
-        ));
-    }
+
+    let draft = crate::config::McpServerConfig {
+        command: input.command.clone(),
+        args: input.args.clone(),
+        url: {
+            let url = input.url.trim();
+            if url.is_empty() {
+                None
+            } else {
+                Some(url.to_string())
+            }
+        },
+        headers: input.headers.clone(),
+        header_credentials: input.header_credentials.clone(),
+        env_vars: input.env_vars.clone(),
+        enabled: input.enabled,
+        timeout_secs: input.timeout_secs,
+    };
+    draft.validate(id)?;
 
     let original = read_config(path)?;
     let mut doc: DocumentMut = original
@@ -599,29 +606,57 @@ pub fn upsert_mcp_server(path: &Path, input: &McpServerInput) -> Result<(), Stri
         .as_table_mut()
         .ok_or_else(|| format!("MCP server `{id}` is not a table"))?;
 
-    server["command"] = toml_edit::value(command);
-
-    let mut args = Array::new();
-    for arg in &input.args {
-        args.push(Value::from(arg.as_str()));
-    }
-    if args.is_empty() {
+    if draft.is_http() {
+        server["url"] = toml_edit::value(draft.http_url().unwrap());
+        server.remove("command");
         server.remove("args");
-    } else {
-        server["args"] = toml_edit::value(args);
-    }
-
-    let mut env_vars = Array::new();
-    for name in &input.env_vars {
-        let name = name.trim();
-        if !name.is_empty() {
-            env_vars.push(Value::from(name));
-        }
-    }
-    if env_vars.is_empty() {
         server.remove("env_vars");
+        if draft.headers.is_empty() {
+            server.remove("headers");
+        } else {
+            let mut headers = Table::new();
+            for (name, env_name) in &draft.headers {
+                headers[name.as_str()] = toml_edit::value(env_name.as_str());
+            }
+            server["headers"] = Item::Table(headers);
+        }
+        if draft.header_credentials.is_empty() {
+            server.remove("header_credentials");
+        } else {
+            let mut credentials = Table::new();
+            for (name, account) in &draft.header_credentials {
+                credentials[name.as_str()] = toml_edit::value(account.as_str());
+            }
+            server["header_credentials"] = Item::Table(credentials);
+        }
     } else {
-        server["env_vars"] = toml_edit::value(env_vars);
+        server["command"] = toml_edit::value(input.command.trim());
+        server.remove("url");
+        server.remove("headers");
+        server.remove("header_credentials");
+
+        let mut args = Array::new();
+        for arg in &input.args {
+            args.push(Value::from(arg.as_str()));
+        }
+        if args.is_empty() {
+            server.remove("args");
+        } else {
+            server["args"] = toml_edit::value(args);
+        }
+
+        let mut env_vars = Array::new();
+        for name in &input.env_vars {
+            let name = name.trim();
+            if !name.is_empty() {
+                env_vars.push(Value::from(name));
+            }
+        }
+        if env_vars.is_empty() {
+            server.remove("env_vars");
+        } else {
+            server["env_vars"] = toml_edit::value(env_vars);
+        }
     }
 
     server["enabled"] = toml_edit::value(input.enabled);
@@ -942,6 +977,9 @@ mod tests {
             id: id.into(),
             command: "npx".into(),
             args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+            url: String::new(),
+            headers: BTreeMap::new(),
+            header_credentials: BTreeMap::new(),
             env_vars: vec!["GITHUB_TOKEN".into()],
             enabled: true,
             timeout_secs: 120,
@@ -1015,6 +1053,64 @@ mod tests {
         assert!(!std::fs::read_to_string(&path)
             .unwrap()
             .contains("ghp_secret"));
+    }
+
+    #[test]
+    fn writes_an_http_mcp_server_and_drops_stale_command_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "").unwrap();
+        upsert_mcp_server(&path, &mcp_input("github")).unwrap();
+        upsert_mcp_server(
+            &path,
+            &McpServerInput {
+                command: String::new(),
+                args: Vec::new(),
+                url: "https://example.com/mcp".into(),
+                headers: BTreeMap::from([("Authorization".into(), "MCP_AUTHORIZATION".into())]),
+                header_credentials: BTreeMap::new(),
+                env_vars: Vec::new(),
+                ..mcp_input("github")
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&raw).unwrap();
+        let server = &config.mcp["github"];
+        assert_eq!(server.http_url(), Some("https://example.com/mcp"));
+        assert!(server.command.is_empty());
+        assert!(!raw.contains("command"));
+        assert!(!raw.contains("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn writes_only_a_credential_reference_for_an_http_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "").unwrap();
+
+        upsert_mcp_server(
+            &path,
+            &McpServerInput {
+                command: String::new(),
+                args: Vec::new(),
+                url: "https://example.com/mcp".into(),
+                headers: BTreeMap::new(),
+                header_credentials: BTreeMap::from([(
+                    "Authorization".into(),
+                    "mcp-header:test-account".into(),
+                )]),
+                env_vars: Vec::new(),
+                ..mcp_input("remote")
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("header_credentials"));
+        assert!(raw.contains("mcp-header:test-account"));
+        assert!(!raw.contains("Bearer "));
     }
 
     #[test]

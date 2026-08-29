@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { SearchIcon, XIcon } from "lucide-react";
+import { SearchIcon, XIcon, ZapIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { fallbackOnFailure } from "@/lib/backgroundFailure";
@@ -282,7 +282,7 @@ export function CommandPalette({
                     const selected = itemIndex === index;
                     const label =
                       entry.kind === "command"
-                        ? `/${entry.item.name}`
+                        ? entry.item.name
                         : entry.kind === "chat"
                           ? entry.item.title
                           : entry.item.label;
@@ -301,7 +301,7 @@ export function CommandPalette({
                           role="option"
                           aria-selected={selected}
                           className={cn(
-                            "flex w-full cursor-pointer gap-3 rounded-md px-2.5 text-left outline-none transition-colors",
+                            "flex w-full cursor-pointer gap-2.5 rounded-md px-2.5 text-left outline-none transition-colors",
                             snippet ? "items-start py-1.5" : "h-8 items-center",
                             selected
                               ? "bg-foreground/10 text-foreground"
@@ -310,6 +310,12 @@ export function CommandPalette({
                           onMouseEnter={() => setIndex(itemIndex)}
                           onClick={() => run(entry)}
                         >
+                          {entry.kind === "command" ? (
+                            <ZapIcon
+                              className="size-3.5 shrink-0 text-emerald-400"
+                              aria-hidden
+                            />
+                          ) : null}
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-[13px]">
                               {searchNeedle ? (

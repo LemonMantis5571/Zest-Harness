@@ -153,22 +153,23 @@ describe("groupToolRuns", () => {
     }
   });
 
-  it("never folds in a running or awaiting-approval row", () => {
+  it("never folds an awaiting-approval row into the summary", () => {
     const tools = [
       ...many(6),
       tool({ id: "live", name: "bash", status: "awaiting_approval" }),
       tool({ id: "spin", name: "bash", status: "running" }),
     ];
     const runs = groupToolRuns(tools);
-    assert.equal(runs.length, 3);
+    assert.equal(runs.length, 2);
     assert.equal(runs[0].kind, "group");
     assert.equal(runs[1].kind, "single");
-    assert.equal(runs[2].kind, "single");
     if (runs[1].kind === "single") assert.equal(runs[1].tool.id, "live");
-    if (runs[2].kind === "single") assert.equal(runs[2].tool.id, "spin");
+    if (runs[0].kind === "group") {
+      assert.ok(runs[0].tools.some((item) => item.id === "spin"));
+    }
   });
 
-  it("splits a run around a live row instead of merging across it", () => {
+  it("keeps later finished calls inside the first group", () => {
     const tools = [
       ...many(6).map((t, i) => ({ ...t, id: `a${i}` })),
       tool({ id: "live", status: "running" }),
@@ -177,8 +178,29 @@ describe("groupToolRuns", () => {
     const runs = groupToolRuns(tools);
     assert.deepEqual(
       runs.map((r) => r.kind),
-      ["group", "single", "group"]
+      ["group"]
     );
+    if (runs[0].kind === "group") {
+      assert.equal(runs[0].tools.length, 13);
+      assert.equal(runs[0].summary.label, "Ran 12 lookups");
+    }
+  });
+
+  it("does not open a new card stack under a collapsed group", () => {
+    const tools = [
+      ...many(6),
+      tool({ id: "a", name: "mcp__Haiku__context_shell", status: "done" }),
+      tool({ id: "b", name: "mcp__Haiku__context_shell", status: "done" }),
+      tool({ id: "c", name: "mcp__Haiku__context_shell", status: "done" }),
+      tool({ id: "spin", name: "mcp__Haiku__context_shell", status: "running" }),
+    ];
+    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].kind, "group");
+    if (runs[0].kind === "group") {
+      assert.equal(runs[0].tools.length, 10);
+      assert.equal(runs[0].summary.inspections, 9);
+    }
   });
 
   it("preserves order and loses nothing", () => {

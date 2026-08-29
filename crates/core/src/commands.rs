@@ -1,13 +1,19 @@
-//! Slash commands, backed by skills.
+//! Slash commands, backed by skills and enabled MCP servers.
 //!
-//! A command is not a new concept — it is a skill invoked by name. `/plan`
-//! means "run a personal skill against what I typed next", so a new
-//! command is a markdown file rather than a code change.
+//! A command is not a new concept — it is a named thing invoked from the
+//! composer. `/plan` means "run a personal skill against what I typed next",
+//! so a new skill command is a markdown file rather than a code change.
+//! `/haiku` means "use that MCP server for this request", so a new server
+//! command is an enabled `[mcp.<id>]` entry.
 //!
 //! Parsing is deliberately narrow. Only a token at the very start of the
 //! message counts, and only `[a-z0-9-_]`, because everything else people type
 //! at the start of a line — a path, a regex, a URL — must survive untouched.
 
+use std::collections::BTreeMap;
+
+use crate::config::McpServerConfig;
+use crate::mcp::McpCatalog;
 use crate::skills::SkillSet;
 
 /// A leading `/token` split off the message.
@@ -59,6 +65,99 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// True when `id` can be typed as `/id`.
+pub fn is_command_name(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(is_name_char)
+}
+
+/// An enabled MCP server that can be invoked as `/id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSlash {
+    pub id: String,
+    pub description: String,
+    pub tools: Vec<String>,
+}
+
+/// What the composer lists for one `/` match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashKind {
+    Skill,
+    Mcp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub kind: SlashKind,
+}
+
+/// Enabled MCP servers whose ids are legal slash tokens.
+pub fn mcp_slashes(
+    servers: &BTreeMap<String, McpServerConfig>,
+    catalog: &McpCatalog,
+) -> Vec<McpSlash> {
+    servers
+        .iter()
+        .filter(|(id, config)| config.enabled && is_command_name(id))
+        .map(|(id, _)| {
+            let tools = catalog
+                .servers
+                .get(id)
+                .map(|entry| {
+                    entry
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            McpSlash {
+                id: id.clone(),
+                description: format!("Use the {id} MCP server"),
+                tools,
+            }
+        })
+        .collect()
+}
+
+/// Skills first on a name clash: `/plan` must keep meaning the plan skill.
+pub fn list_slash_commands(skills: &SkillSet, mcp: &[McpSlash]) -> Vec<SlashCommand> {
+    let mut commands: Vec<SlashCommand> = skills
+        .command_names()
+        .into_iter()
+        .map(|(name, description)| SlashCommand {
+            name,
+            description,
+            kind: SlashKind::Skill,
+        })
+        .collect();
+    for server in mcp {
+        let taken = commands
+            .iter()
+            .any(|command| command.name.eq_ignore_ascii_case(&server.id));
+        if taken {
+            continue;
+        }
+        commands.push(SlashCommand {
+            name: server.id.clone(),
+            description: server.description.clone(),
+            kind: SlashKind::Mcp,
+        });
+    }
+    commands.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
+    commands
+}
+
+fn lookup_mcp<'a>(mcp: &'a [McpSlash], typed: &str) -> Option<&'a McpSlash> {
+    mcp.iter()
+        .find(|server| server.id.eq_ignore_ascii_case(typed))
+}
+
 /// What a command expands to, and what the transcript should show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expansion {
@@ -72,12 +171,13 @@ pub struct Expansion {
     pub command: Option<String>,
 }
 
-/// Expand a leading command against the available skills.
+/// Expand a leading command against the available skills and MCP servers.
 ///
 /// An unrecognised `/token` is passed through unchanged rather than rejected: a
 /// typo should not swallow the message, and the model can say it did not
-/// understand far more usefully than an error dialog can.
-pub fn expand(input: &str, skills: &SkillSet) -> Expansion {
+/// understand far more usefully than an error dialog can. A skill with the
+/// same name as an MCP server wins, because `/plan` is already a skill.
+pub fn expand(input: &str, skills: &SkillSet, mcp: &[McpSlash]) -> Expansion {
     let Some(parsed) = parse_command(input) else {
         return Expansion {
             prompt: unescape(input),
@@ -86,18 +186,26 @@ pub fn expand(input: &str, skills: &SkillSet) -> Expansion {
         };
     };
 
-    let Some(skill) = skills.command(parsed.name) else {
+    if let Some(skill) = skills.command(parsed.name) {
         return Expansion {
-            prompt: input.to_string(),
+            prompt: compose(&skill.body, parsed.rest),
             display: input.to_string(),
-            command: None,
+            command: Some(skill.name.clone()),
         };
-    };
+    }
+
+    if let Some(server) = lookup_mcp(mcp, parsed.name) {
+        return Expansion {
+            prompt: compose_mcp(&server.id, &server.tools, parsed.rest),
+            display: input.to_string(),
+            command: Some(server.id.clone()),
+        };
+    }
 
     Expansion {
-        prompt: compose(&skill.body, parsed.rest),
+        prompt: input.to_string(),
         display: input.to_string(),
-        command: Some(skill.name.clone()),
+        command: None,
     }
 }
 
@@ -137,6 +245,22 @@ fn compose(body: &str, rest: &str) -> String {
     } else {
         format!("{body}\n\n---\n\n{rest}")
     }
+}
+
+fn compose_mcp(id: &str, tools: &[String], rest: &str) -> String {
+    let mut body = format!(
+        "Use the `{id}` MCP server for this request. Call its tools rather than guessing or saying you cannot see it."
+    );
+    if !tools.is_empty() {
+        let listed = tools
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        body.push_str("\nTools: ");
+        body.push_str(&listed);
+    }
+    compose(&body, rest)
 }
 
 #[cfg(test)]
@@ -199,7 +323,7 @@ mod tests {
         // The single-slash path case cannot be distinguished from a command by
         // shape, so it resolves by lookup: no such skill, passed through.
         let skills = skills_with("plan", "Make a plan.");
-        let out = expand("/etc/hosts is wrong", &skills);
+        let out = expand("/etc/hosts is wrong", &skills, &[]);
         assert_eq!(out.prompt, "/etc/hosts is wrong");
         assert_eq!(out.command, None);
     }
@@ -207,7 +331,7 @@ mod tests {
     #[test]
     fn expands_a_known_command_into_the_skill_body() {
         let skills = skills_with("plan", "Research first, then write a plan.");
-        let out = expand("/plan add auth", &skills);
+        let out = expand("/plan add auth", &skills, &[]);
         assert_eq!(out.command.as_deref(), Some("plan"));
         assert!(out.prompt.starts_with("Research first, then write a plan."));
         // The user's words come last so they are the freshest instruction.
@@ -223,7 +347,7 @@ mod tests {
     #[test]
     fn a_bare_command_expands_to_just_the_body() {
         let skills = skills_with("plan", "Research first.");
-        let out = expand("/plan", &skills);
+        let out = expand("/plan", &skills, &[]);
         assert_eq!(out.prompt, "Research first.");
         assert!(!out.prompt.contains("---"), "no empty argument separator");
     }
@@ -231,7 +355,7 @@ mod tests {
     #[test]
     fn an_unknown_command_is_sent_as_typed() {
         let skills = skills_with("plan", "body");
-        let out = expand("/paln add auth", &skills);
+        let out = expand("/paln add auth", &skills, &[]);
         assert_eq!(
             out.prompt, "/paln add auth",
             "a typo must not eat the message"
@@ -286,9 +410,96 @@ mod tests {
     #[test]
     fn ordinary_messages_are_untouched() {
         let skills = skills_with("plan", "body");
-        let out = expand("just fix the bug", &skills);
+        let out = expand("just fix the bug", &skills, &[]);
         assert_eq!(out.prompt, "just fix the bug");
         assert_eq!(out.display, "just fix the bug");
         assert_eq!(out.command, None);
+    }
+
+    fn haiku_mcp() -> McpSlash {
+        McpSlash {
+            id: "Haiku".into(),
+            description: "Use the Haiku MCP server".into(),
+            tools: vec!["manifest".into()],
+        }
+    }
+
+    #[test]
+    fn expands_an_mcp_server_into_a_use_this_server_prompt() {
+        let skills = SkillSet::default();
+        let out = expand("/haiku write a verse", &skills, &[haiku_mcp()]);
+        assert_eq!(out.command.as_deref(), Some("Haiku"));
+        assert_eq!(out.display, "/haiku write a verse");
+        assert!(
+            out.prompt.contains("Use the `Haiku` MCP server"),
+            "{}",
+            out.prompt
+        );
+        assert!(out.prompt.contains("`manifest`"), "{}", out.prompt);
+        assert!(
+            out.prompt.trim_end().ends_with("write a verse"),
+            "{}",
+            out.prompt
+        );
+    }
+
+    #[test]
+    fn a_bare_mcp_command_has_no_empty_separator() {
+        let skills = SkillSet::default();
+        let out = expand("/Haiku", &skills, &[haiku_mcp()]);
+        assert_eq!(out.command.as_deref(), Some("Haiku"));
+        assert!(!out.prompt.contains("---"), "{}", out.prompt);
+    }
+
+    #[test]
+    fn a_skill_wins_when_an_mcp_server_shares_its_name() {
+        let skills = skills_with("haiku", "Write a poem.");
+        let out = expand("/haiku now", &skills, &[haiku_mcp()]);
+        assert_eq!(out.command.as_deref(), Some("haiku"));
+        assert!(out.prompt.starts_with("Write a poem."));
+        assert!(!out.prompt.contains("MCP server"), "{}", out.prompt);
+    }
+
+    #[test]
+    fn slash_list_skips_mcp_names_that_collide_with_skills() {
+        let skills = skills_with("haiku", "Write a poem.");
+        let listed = list_slash_commands(&skills, &[haiku_mcp()]);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "haiku");
+        assert_eq!(listed[0].kind, SlashKind::Skill);
+    }
+
+    #[test]
+    fn slash_list_includes_enabled_mcp_servers() {
+        let listed = list_slash_commands(&SkillSet::default(), &[haiku_mcp()]);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Haiku");
+        assert_eq!(listed[0].kind, SlashKind::Mcp);
+    }
+
+    #[test]
+    fn mcp_slashes_skip_disabled_servers() {
+        use crate::config::McpServerConfig;
+        use crate::mcp::McpCatalog;
+
+        fn server(enabled: bool) -> McpServerConfig {
+            McpServerConfig {
+                command: "npx".into(),
+                args: Vec::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                header_credentials: BTreeMap::new(),
+                env_vars: Vec::new(),
+                enabled,
+                timeout_secs: 30,
+            }
+        }
+
+        let mut servers = BTreeMap::new();
+        servers.insert("Haiku".into(), server(true));
+        servers.insert("off".into(), server(false));
+        let listed = mcp_slashes(&servers, &McpCatalog::default());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "Haiku");
     }
 }

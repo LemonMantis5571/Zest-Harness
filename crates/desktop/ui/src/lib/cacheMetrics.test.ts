@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { cacheMetrics, cacheVerdict } from "./cacheMetrics.ts";
+import { cacheMetrics, cacheVerdict, cacheWindowHint } from "./cacheMetrics.ts";
+import type { RangeTotals } from "./types.ts";
 
 describe("cache metrics", () => {
   it("uses the full prompt volume for the hit rate", () => {
@@ -96,6 +97,55 @@ describe("cache metrics", () => {
         { measured: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } },
       ]),
       null
+    );
+  });
+});
+
+function totals(partial: Partial<RangeTotals>): RangeTotals {
+  return {
+    costUsd: 0,
+    requests: 1,
+    processedTokens: 1,
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+    cacheSavingsUsd: 0,
+    activeDays: 1,
+    tokensPerActiveDay: 1,
+    servedFromCachePercent: 0,
+    writtenToCachePercent: 0,
+    readFreshPercent: 100,
+    cacheHitPercent: 0,
+    unattributedTokens: 0,
+    ...partial,
+  };
+}
+
+describe("cache window hint", () => {
+  it("names the Zest rate when CLI transcripts hide it", () => {
+    assert.equal(
+      cacheWindowHint(
+        totals({
+          servedFromCachePercent: 6.9,
+          zest: {
+            servedFromCachePercent: 90,
+            writtenToCachePercent: 0,
+            readFreshPercent: 10,
+            cachedInputTokens: 9_000,
+            cacheWriteTokens: 0,
+            uncachedInputTokens: 1_000,
+          },
+        })
+      ),
+      "90.0% of Zest prompts · 6.9% including CLI transcripts"
+    );
+  });
+
+  it("stays a single figure when the window is Zest-only", () => {
+    assert.equal(
+      cacheWindowHint(totals({ servedFromCachePercent: 71.3 })),
+      "71.3% of prompt, at a tenth of the price"
     );
   });
 });

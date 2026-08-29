@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  formatHeaders,
   messageFromError,
   parseArgs,
   parseEnvVars,
+  parseHeaders,
   validateMcpServerDraft,
   type McpServerDraft,
 } from "./mcpServerForm.ts";
@@ -12,9 +14,13 @@ import {
 function draft(overrides: Partial<McpServerDraft> = {}): McpServerDraft {
   return {
     id: "github",
+    kind: "stdio",
     command: "npx",
     args: "-y @modelcontextprotocol/server-github",
     envVars: "GITHUB_TOKEN",
+    url: "",
+    headers: "",
+    authorizationValue: "",
     timeoutSecs: "120",
     ...overrides,
   };
@@ -38,6 +44,19 @@ describe("MCP argument parsing", () => {
 
   it("is empty for a blank line", () => {
     assert.deepEqual(parseArgs("   "), []);
+  });
+});
+
+describe("MCP header parsing", () => {
+  it("accepts Header = ENV_VAR rows", () => {
+    const parsed = parseHeaders("Authorization = MCP_TOKEN\nX-Api-Key=OTHER");
+    assert.equal(parsed.ok, true);
+    assert.ok(parsed.ok);
+    assert.deepEqual(parsed.value, { Authorization: "MCP_TOKEN", "X-Api-Key": "OTHER" });
+  });
+
+  it("round-trips through formatHeaders", () => {
+    assert.equal(formatHeaders({ Authorization: "MCP_TOKEN" }), "Authorization = MCP_TOKEN");
   });
 });
 
@@ -74,6 +93,51 @@ describe("MCP draft validation", () => {
     const result = validateMcpServerDraft(draft({ command: "  " }));
     assert.ok(!result.ok);
     assert.match(result.error, /command/);
+  });
+
+  it("accepts an HTTP endpoint instead of a command", () => {
+    const result = validateMcpServerDraft(
+      draft({
+        kind: "http",
+        command: "",
+        url: "https://example.com/mcp",
+        headers: "Authorization = MCP_AUTHORIZATION",
+      })
+    );
+    assert.equal(result.ok, true);
+    assert.ok(result.ok);
+    assert.equal(result.value.command, "");
+    assert.equal(result.value.url, "https://example.com/mcp");
+    assert.deepEqual(result.value.headers, { Authorization: "MCP_AUTHORIZATION" });
+    assert.deepEqual(result.value.headerSecrets, {});
+  });
+
+  it("sends an access token separately from environment headers", () => {
+    const result = validateMcpServerDraft(
+      draft({
+        kind: "http",
+        command: "",
+        url: "http://127.0.0.1:8788/mcp",
+        headers: "Authorization = OLD_AUTH\nX-Trace = TRACE_ID",
+        authorizationValue: " Bearer example-token ",
+      })
+    );
+    assert.equal(result.ok, true);
+    assert.ok(result.ok);
+    assert.deepEqual(result.value.headers, { "X-Trace": "TRACE_ID" });
+    assert.deepEqual(result.value.headerSecrets, { Authorization: "Bearer example-token" });
+  });
+
+  it("rejects a header given as a secret", () => {
+    const result = validateMcpServerDraft(
+      draft({
+        kind: "http",
+        url: "https://example.com/mcp",
+        headers: "Authorization = Bearer secret",
+      })
+    );
+    assert.ok(!result.ok);
+    assert.match(result.error, /environment variable/);
   });
 
   /** A pasted token must never reach the config write. */

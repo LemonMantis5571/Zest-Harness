@@ -290,11 +290,13 @@ async fn run_with_sink_internal<S: EventSink>(
         .map(|policy| policy.mode() == ApprovalMode::Plan)
         .unwrap_or(false);
 
-    // Slash commands resolve against the session's skills, so this has to come
-    // after the session is in hand. An unknown command expands to itself.
+    // Slash commands resolve against the session's skills and the workspace
+    // MCP list. An unknown command expands to itself.
     let (prompt, command) = match session.skills.read() {
         Ok(skills) => {
-            let typed = zest_core::expand_command(&text, &skills);
+            let config = load_workspace_config(state);
+            let mcp = zest_core::mcp_slashes(&config.mcp, &zest_core::McpCatalog::load());
+            let typed = zest_core::expand_command(&text, &skills, &mcp);
             // An explicit command outranks the mode: naming a skill is a
             // stronger signal than being in a mode that implies one.
             let expansion = if typed.command.is_none() && plan_mode {

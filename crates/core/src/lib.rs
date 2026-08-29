@@ -64,8 +64,8 @@ pub use chat_persistence::{
     RunUsage,
 };
 pub use commands::{
-    expand as expand_command, expand_as as expand_command_as, parse_command, Expansion,
-    ParsedCommand,
+    expand as expand_command, expand_as as expand_command_as, list_slash_commands, mcp_slashes,
+    parse_command, Expansion, McpSlash, ParsedCommand, SlashCommand, SlashKind,
 };
 pub use config::{
     ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
@@ -175,8 +175,8 @@ pub use tools::{
 pub use transcripts::{CliKind, ScanResult, ScanStatus};
 pub use usage::{
     CostQuality, CostSource, DayCostPoint, ExternalCost, ExternalUsageReport,
-    ExternalWorkerUsageView, HeadroomView, Ledger, MeasuredUsage, ModelCostRow, ProviderCostRow,
-    ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus, TokenCounts,
-    UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
+    ExternalWorkerUsageView, HeadroomView, Ledger, MeasuredUsage, ModelCostRow, PromptCacheShares,
+    ProviderCostRow, ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus,
+    TokenCounts, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
 };
 pub use workspace_changes::{FileChangeSummary, WorkspaceChangeSet};

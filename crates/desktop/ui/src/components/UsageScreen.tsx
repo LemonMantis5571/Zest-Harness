@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
+import { cacheWindowHint } from "@/lib/cacheMetrics";
 import { modelLabel } from "@/lib/models";
 import { cn } from "@/lib/utils";
 import type {
@@ -499,7 +500,7 @@ function StatStrip({ report }: { report: UsageReport }) {
     {
       value: compact(totals.cachedInputTokens),
       label: "Prompt served from cache",
-      hint: `${totals.servedFromCachePercent.toFixed(1)}% of prompt, at a tenth of the price`,
+      hint: cacheWindowHint(totals),
     },
     {
       value: compact(totals.cacheWriteTokens),
@@ -777,7 +778,8 @@ function SourcesCard({ report }: { report: UsageReport }) {
       ) : null}
       <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
         Transcripts are read from disk and never leave the machine. Turns you ran in the CLIs
-        directly are counted here even though Zest did not send them.
+        directly are counted here even though Zest did not send them. The cache tile names
+        Zest's own hit rate when those transcripts would hide it.
       </p>
     </section>
   );

@@ -1,6 +1,6 @@
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
 import type { ModelCapability } from "./generated/ModelCapability.ts";
-import type { CommandView } from "./generated/CommandView.ts";
+import type { CommandView as GeneratedCommandView } from "./generated/CommandView.ts";
 import type { ExternalAgentCheckView } from "./generated/ExternalAgentCheckView.ts";
 import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
 import type { McpCheckView } from "./generated/McpCheckView.ts";
@@ -37,7 +37,11 @@ export type ApprovalMode =
   | "auto"
   | "bypass";
 
-export type { CommandView };
+export type CommandKind = "skill" | "mcp";
+
+export type CommandView = Omit<GeneratedCommandView, "kind"> & {
+  kind: CommandKind;
+};
 
 /** What the user clicked on an approval card. */
 export type ApprovalChoice = "once" | "session" | "deny";
@@ -477,6 +481,20 @@ export type RangeTotals = {
   cacheHitPercent: number;
   /** Metered before per-model attribution existed, so unpriceable. */
   unattributedTokens: number;
+  /**
+   * Prompt-cache shares for traffic Zest itself sent. The three shares above
+   * include scanned CLI transcripts. Absent when Zest sent no prompt tokens.
+   */
+  zest?: PromptCacheShares | null;
+};
+
+export type PromptCacheShares = {
+  servedFromCachePercent: number;
+  writtenToCachePercent: number;
+  readFreshPercent: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  uncachedInputTokens: number;
 };
 
 export type ProviderDayPoint = {

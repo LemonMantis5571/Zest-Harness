@@ -1752,7 +1752,7 @@ export function ChatScreen({
             history stays readable — it just does not ask twice.
           */}
           {hasNeedsInput ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-[8.5rem]">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 overflow-visible px-4 pb-[8.5rem]">
               <NeedsInputCard
                 cardRef={needsInputCardRef}
                 question={pendingApprovals.length === 0 ? pendingQuestion?.question : undefined}

@@ -13,6 +13,7 @@ import {
   SquareIcon,
   Trash2Icon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 
 import { ApprovalModePicker } from "@/components/ApprovalModePicker";
@@ -46,6 +47,7 @@ import type {
   PreparedAttachment,
 } from "@/lib/types";
 import { hasResumableThreadTurn, type QueuedTurn } from "@/lib/threadQueue";
+import { filterSlashCommands, splitSlashMatch } from "@/lib/slashCommands";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -155,21 +157,35 @@ export function Composer({
   // Only a token being typed at the very start opens the palette — the same
   // rule the Rust parser uses, so what you see matches what will run.
   const typedCommand = /^\/([a-z0-9-_]*)$/i.exec(value.trimStart())?.[1];
-  const commandMatches =
-    typedCommand === undefined || commandsDismissed
-      ? []
-      : commands.filter((c) =>
-          c.name.toLowerCase().startsWith(typedCommand.toLowerCase())
-        );
+  const slashOpen = typedCommand !== undefined && !commandsDismissed;
+  const commandMatches = slashOpen
+    ? filterSlashCommands(commands, typedCommand)
+    : [];
 
   useEffect(() => {
     setCommandIndex(0);
   }, [typedCommand]);
 
-  // A fresh `/` should re-open the palette after an earlier Escape.
   useEffect(() => {
     if (typedCommand === undefined) setCommandsDismissed(false);
   }, [typedCommand]);
+
+  // Reload when the palette opens so an MCP added in Customize is in the list.
+  useEffect(() => {
+    if (!slashOpen) return;
+    let cancelled = false;
+    void getBackend()
+      .listCommands()
+      .then((next) => {
+        if (!cancelled) setCommands(next);
+      })
+      .catch((error) => {
+        ignoreExpectedFailure(error, "reload composer commands");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slashOpen]);
 
   function applyCommand(name: string) {
     onChange(`/${name} `);
@@ -419,26 +435,49 @@ export function Composer({
             </AttachmentGroup>
           ) : null}
           {commandMatches.length > 0 ? (
-            <div className="mx-2 mt-2 overflow-hidden rounded-lg border border-border/80 bg-popover shadow-xl">
-              {commandMatches.map((cmd, index) => (
-                <button
-                  key={cmd.name}
-                  type="button"
-                  onMouseEnter={() => setCommandIndex(index)}
-                  onClick={() => applyCommand(cmd.name)}
-                  className={cn(
-                    "flex w-full items-baseline gap-2 px-3 py-1.5 text-left transition-colors",
-                    index === commandIndex ? "bg-foreground/10" : "hover:bg-foreground/5"
-                  )}
-                >
-                  <span className="shrink-0 font-mono text-[12px] text-foreground">
-                    /{cmd.name}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-                    {cmd.description}
-                  </span>
-                </button>
-              ))}
+            <div
+              role="listbox"
+              aria-label="Commands"
+              className="mx-2 mt-2 overflow-hidden rounded-xl border border-white/[0.08] bg-popover/95 shadow-xl"
+            >
+              {commandMatches.map((cmd, index) => {
+                const selected = index === commandIndex;
+                const parts = splitSlashMatch(cmd.name, typedCommand ?? "");
+                return (
+                  <button
+                    key={`${cmd.kind}:${cmd.name}`}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    onMouseEnter={() => setCommandIndex(index)}
+                    onClick={() => applyCommand(cmd.name)}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 px-2.5 py-1.5 text-left transition-colors",
+                      selected ? "bg-foreground/10" : "hover:bg-foreground/5"
+                    )}
+                  >
+                    <ZapIcon
+                      className="size-3.5 shrink-0 text-emerald-400"
+                      aria-hidden
+                    />
+                    <span className="shrink-0 text-[13px] font-medium text-foreground">
+                      {parts.prefix}
+                      {parts.match ? (
+                        <span className="text-sky-300">{parts.match}</span>
+                      ) : null}
+                      {parts.suffix}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
+                      {cmd.description}
+                    </span>
+                    {selected ? (
+                      <span className="shrink-0 text-[11px] text-muted-foreground/80">
+                        Enter
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
             </div>
           ) : null}
           <textarea

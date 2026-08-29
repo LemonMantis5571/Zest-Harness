@@ -5,6 +5,12 @@ a replacement for the commit history.
 
 ## Unreleased
 
+### Added
+
+- Enabled MCP servers are slash commands. `/haiku` (or any server id) tells the
+  model to use that server for the rest of the message, and the composer list
+  matches by prefix the same way skills already did.
+
 ### Removed
 
 - The bundled CLIProxyAPI sidecar, and with it about 349 MiB from the desktop
@@ -28,14 +34,24 @@ a replacement for the commit history.
   prompt, pushing the box you came to type in off the bottom of the page. It is
   now collapsed by default and scrolls when opened.
 - The model picker could offer a different set of models than the provider
-  actually accepted. An `anthropic` entry with `model = "claude-haiku-5"` showed
-  one model in the picker and accepted two at runtime.
+  actually accepted. An Anthropic entry with an explicit model showed one
+  model in the picker and accepted two at runtime.
 - A Codex turn that failed now reports why. "You've hit your usage limit… try
   again at <date>" used to be replaced by "The provider could not complete the
   request. Try again."
+- MCP approval cards showed the model-facing `mcp__Haiku__manifest` name, an
+  empty `{}` body, and a second "needs your approval" banner. They now ask
+  "Run manifest on Haiku?" and skip an empty argument object.
+- After a tool run collapsed to "Ran N lookups", later calls opened a new stack
+  of cards under that line. They now stay inside the same collapsed group.
+  Approvals still break out.
+- Opening a new chat wrote an "Untitled chat" to history before anything was
+  sent. Empty chats stay off the sidebar until you talk to the model.
 
 ### Changed
 
+- MCP connections now use a generic access-token field, with advanced header
+  mappings kept out of the main setup path.
 - Provider construction moved behind a driver per `kind`
   ([ADR 0005](docs/adr/0005-provider-driver-spi.md)). One visible effect: a
   `codex_cli` provider under any id now gets the built-in Codex model list,

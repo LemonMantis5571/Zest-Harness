@@ -44,7 +44,11 @@ describe("fixture free chats", () => {
     const project = afterFree.find((item) => item.path !== null);
     const recent = afterFree.find((item) => item.path === null);
     assert.equal(project?.threads.length, 0);
-    assert.equal(recent?.threads.some((thread) => thread.id === free.threadId), true);
+    assert.equal(
+      recent?.threads.some((thread) => thread.id === free.threadId),
+      false,
+      "an empty new chat must not appear in history"
+    );
   });
 });
 

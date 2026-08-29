@@ -27,12 +27,42 @@ enabled = true
 timeout_secs = 120
 ```
 
+A remote 2026 Streamable HTTP server is a URL instead of a command. Do not set
+both.
+
+```toml
+[mcp.remote]
+url = "https://example.com/mcp"
+timeout_secs = 120
+
+[mcp.remote.headers]
+Authorization = "MCP_AUTHORIZATION"
+```
+
+`MCP_AUTHORIZATION` is an environment variable name. Put the full header value
+there, for example `Bearer …`. The secret never goes in `zest.toml`.
+
+For a remote server that uses `Authorization`, the **Customize > MCPs** form
+also has an **Access token** password field. Paste the value supplied by the
+service. Zest stores that value in the operating system credential manager and
+keeps only a non-secret reference in `zest.toml`. When editing an existing
+server, leaving the field blank keeps its saved value; entering a new value
+replaces it. Removing the server removes its saved credential as well.
+
 - `command` / `args` are passed straight to the operating system. No shell is
   involved, so there is no globbing, piping, or variable expansion.
-- `env_vars` lists variable **names**. Zest keeps credential-looking variables
-  out of the server process unless they are named here; the values stay in your
-  environment, so `zest.toml` remains safe to commit. A value written here is
-  refused rather than saved.
+- `url` is a Streamable HTTP MCP endpoint. Zest POSTs JSON-RPC there, with
+  `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers. JSON and SSE
+  replies both work.
+- `env_vars` lists variable **names** for a local process. Zest keeps
+  credential-looking variables out of the server process unless they are named
+  here; the values stay in your environment, so `zest.toml` remains safe to
+  commit. A value written here is refused rather than saved.
+- `headers` on a URL entry is the same idea: header name to environment
+  variable name.
+- `header_credentials` on a URL entry is managed by the desktop form. Its
+  values are credential-manager references, not token values; do not copy a
+  secret into this table by hand.
 - `enabled = false` keeps the entry and stops the server being used, so turning
   one off does not lose how it was set up.
 - `timeout_secs` bounds one tool call. Between 1 and 600.
@@ -42,12 +72,19 @@ Zest starts at most 12 servers and registers at most 48 tools from each.
 ## How a server is used
 
 A tool appears to the model as `mcp__<server>__<tool>` and always carries exec
-risk: the server is a separate process running code Zest cannot inspect, so
-every call goes through the approval gate and none is ever auto-approved.
+risk. Zest cannot inspect a local process or a remote URL, so every call goes
+through the approval gate and none is ever auto-approved. The desktop shows the
+call as `server · tool`, not the qualified name.
 
-A server process starts the first time a chat calls one of its tools, and stays
-up for the rest of that session. A chat that never calls an MCP tool never
-starts one.
+Type `/<id>` in chat to point the model at that server. `/haiku write a verse`
+is the same idea as a skill command: the transcript keeps what you typed, and
+the model is told to use the Haiku MCP tools for the rest of the message.
+Enabled servers share the `/` list with personal skills. A skill of the same
+name wins.
+
+A local server process starts the first time a chat calls one of its tools, and
+stays up for the rest of that session. A chat that never calls an MCP tool never
+starts one. A URL is called per request and does not spawn a process.
 
 ## Checking a server
 

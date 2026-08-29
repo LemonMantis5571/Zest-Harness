@@ -126,7 +126,10 @@ export function summarizeTools(tools: ToolPart[]): ToolRunSummary {
  * Fold long stretches of finished tool calls into summary rows.
  *
  * Order is preserved exactly — a group only ever replaces a contiguous run, so
- * expanding one puts the rows back where they were.
+ * expanding one puts the rows back where they were. Once a group exists, later
+ * finished calls join it instead of opening a new stack of cards under the
+ * summary. Approvals still break out; a collapsed spinner is a stall the
+ * working line already covers.
  */
 export function groupToolRuns(
   tools: ToolPart[],
@@ -135,9 +138,21 @@ export function groupToolRuns(
   const runs: ToolRun[] = [];
   let pending: ToolPart[] = [];
 
+  const lastGroup = (): Extract<ToolRun, { kind: "group" }> | null => {
+    for (let i = runs.length - 1; i >= 0; i -= 1) {
+      const run = runs[i];
+      if (run.kind === "group") return run;
+    }
+    return null;
+  };
+
   const flush = () => {
     if (pending.length === 0) return;
-    if (pending.length >= threshold) {
+    const group = lastGroup();
+    if (group) {
+      group.tools.push(...pending);
+      group.summary = summarizeTools(group.tools.filter(isSettled));
+    } else if (pending.length >= threshold) {
       runs.push({
         kind: "group",
         tools: pending,
@@ -154,9 +169,13 @@ export function groupToolRuns(
       pending.push(tool);
       continue;
     }
-    // A live row breaks the run so it stays visible on its own.
     flush();
-    runs.push({ kind: "single", tool });
+    if (tool.status === "awaiting_approval" || !lastGroup()) {
+      runs.push({ kind: "single", tool });
+      continue;
+    }
+    const group = lastGroup();
+    if (group) group.tools.push(tool);
   }
   flush();
 

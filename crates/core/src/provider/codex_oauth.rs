@@ -491,18 +491,33 @@ impl ResponsesAccumulator {
         if usage.is_null() {
             return;
         }
-        self.usage.input_tokens = usage
+        // Cached tokens are a subset of `input_tokens` on the Responses wire,
+        // the same way they sit inside `prompt_tokens` on Chat Completions.
+        // Left unsplit, every Codex OAuth cache hit is filed as fresh input
+        // and the Profile tile reads as a lifetime miss.
+        if let Some(prompt) = usage
             .get("input_tokens")
             .or_else(|| usage.get("prompt_tokens"))
             .and_then(Value::as_u64)
-            .map(|value| value as u32)
-            .unwrap_or(self.usage.input_tokens);
-        self.usage.output_tokens = usage
+        {
+            let cached = usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+                .or_else(|| usage.get("cached_tokens"))
+                .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(prompt);
+            self.usage.input_tokens = bounded_u32(prompt - cached);
+            self.usage.cache_read_input_tokens = bounded_u32(cached);
+        }
+        if let Some(output) = usage
             .get("output_tokens")
             .or_else(|| usage.get("completion_tokens"))
             .and_then(Value::as_u64)
-            .map(|value| value as u32)
-            .unwrap_or(self.usage.output_tokens);
+        {
+            self.usage.output_tokens = bounded_u32(output);
+        }
         self.usage_available = true;
     }
 
@@ -535,6 +550,12 @@ impl ResponsesAccumulator {
             provider_session: None,
         }
     }
+}
+
+/// Saturate rather than wrap. A provider that reports a nonsense token count
+/// should show as an implausibly large one, not as a small one.
+fn bounded_u32(value: u64) -> u32 {
+    value.min(u64::from(u32::MAX)) as u32
 }
 
 #[cfg(test)]
@@ -601,5 +622,52 @@ mod tests {
         let (instructions, input) = responses_input(Some(&SystemPrompt::new("base")), &messages);
         assert_eq!(instructions, "base\n\nextra");
         assert!(input.as_array().unwrap().is_empty());
+    }
+
+    fn usage_of(usage: Value) -> crate::anthropic::types::Usage {
+        let mut accumulator = ResponsesAccumulator::default();
+        accumulator.take_usage(&usage);
+        assert!(accumulator.usage_available);
+        accumulator.usage
+    }
+
+    #[test]
+    fn cached_input_tokens_are_split_out_of_the_prompt_total() {
+        let usage = usage_of(json!({
+            "input_tokens": 10_000,
+            "output_tokens": 250,
+            "input_tokens_details": { "cached_tokens": 8_000 },
+        }));
+        assert_eq!(usage.input_tokens, 2_000);
+        assert_eq!(usage.cache_read_input_tokens, 8_000);
+        assert_eq!(usage.output_tokens, 250);
+    }
+
+    #[test]
+    fn nested_prompt_tokens_details_are_accepted_as_a_fallback() {
+        let usage = usage_of(json!({
+            "prompt_tokens": 10_000,
+            "completion_tokens": 40,
+            "prompt_tokens_details": { "cached_tokens": 7_000 },
+        }));
+        assert_eq!(usage.input_tokens, 3_000);
+        assert_eq!(usage.cache_read_input_tokens, 7_000);
+    }
+
+    #[test]
+    fn an_endpoint_that_reports_no_cache_detail_is_all_fresh_input() {
+        let usage = usage_of(json!({ "input_tokens": 900, "output_tokens": 10 }));
+        assert_eq!(usage.input_tokens, 900);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn an_impossible_cached_figure_is_clamped_to_the_prompt() {
+        let usage = usage_of(json!({
+            "input_tokens": 100,
+            "input_tokens_details": { "cached_tokens": 900 },
+        }));
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 100);
     }
 }
