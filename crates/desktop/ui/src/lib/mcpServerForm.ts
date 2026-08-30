@@ -10,6 +10,16 @@ import { isRecord, parseJson } from "./json.ts";
 
 export type McpServerKind = "stdio" | "http";
 
+/** GitHub's official Streamable HTTP MCP. A PAT goes in Access token, not here. */
+export const GITHUB_MCP_ID = "github";
+export const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
+
+const GITHUB_PAT = /^(ghp_|github_pat_|gho_|ghu_|ghs_)/;
+
+export function isGithubMcpId(id: string): boolean {
+  return id.trim().toLowerCase() === GITHUB_MCP_ID;
+}
+
 export type McpServerDraft = {
   id: string;
   kind: McpServerKind;
@@ -119,6 +129,38 @@ export function parseHeaders(
   return { ok: true, value };
 }
 
+/** Prefilled GitHub starter. The token is entered on save, not in this draft. */
+export function githubServerDraft(timeoutSecs = 120): McpServerDraft {
+  return {
+    id: GITHUB_MCP_ID,
+    kind: "http",
+    command: "",
+    args: "",
+    envVars: "",
+    url: GITHUB_MCP_URL,
+    headers: "",
+    authorizationValue: "",
+    timeoutSecs: String(timeoutSecs),
+  };
+}
+
+/**
+ * GitHub's remote MCP wants `Authorization: Bearer <pat>`. A pasted `ghp_…`
+ * or `github_pat_…` is completed; anything else is stored as typed.
+ */
+export function normalizeAuthorization(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^bearer\s+/i.test(trimmed)) {
+    const token = trimmed.replace(/^bearer\s+/i, "").trim();
+    return token ? `Bearer ${token}` : "";
+  }
+  if (GITHUB_PAT.test(trimmed)) {
+    return `Bearer ${trimmed}`;
+  }
+  return trimmed;
+}
+
 export function formatHeaders(headers: Record<string, string | undefined>): string {
   return Object.entries(headers)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
@@ -163,7 +205,7 @@ export function validateMcpServerDraft(
     }
     const headers = parseHeaders(draft.headers);
     if (!headers.ok) return headers;
-    const authorizationValue = draft.authorizationValue.trim();
+    const authorizationValue = normalizeAuthorization(draft.authorizationValue);
     const headerValues = { ...headers.value };
     if (authorizationValue) {
       for (const name of Object.keys(headerValues)) {

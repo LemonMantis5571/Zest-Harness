@@ -12,7 +12,7 @@ import type { TurnRecoveryView } from "./TurnRecovery";
  * the wire shape is what the generated bindings gate protects. The duplicated
  * field list is the cost of both staying legible.
  */
-export type SessionMeta = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, isFreeChat: boolean, threadId: string, defaultModel: string,
+export type SessionMeta = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, isFreeChat: boolean, threadId: string, defaultModel: string, 
 /**
  * See [`SessionInfo::owns_agent_loop`]. Present on both so the UI's
  * `{ ...meta }` merge after a model change cannot drop it.

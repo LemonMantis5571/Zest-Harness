@@ -4,6 +4,9 @@ import { describe, it } from "node:test";
 import {
   effortsForModel,
   formatContextWindow,
+  modelPickerGroups,
+  modelPickerHasChoices,
+  sameModelCatalogue,
   sessionSupportsModelPicker,
   type ModelCapability,
 } from "./models.ts";
@@ -33,6 +36,77 @@ describe("model capability helpers", () => {
         { ...noEffortModel, id: "another-model" },
       ]),
       true
+    );
+  });
+
+  it("lists other selectable providers after the current session", () => {
+    const groups = modelPickerGroups(
+      { providerId: "codex", label: "Codex", models: [noEffortModel] },
+      [
+        {
+          id: "codex",
+          label: "Codex",
+          selectable: true,
+          models: [noEffortModel],
+          defaultModel: "local-model",
+        },
+        {
+          id: "deepseek",
+          label: "DeepSeek",
+          selectable: true,
+          models: [],
+          defaultModel: "deepseek-v4-flash",
+        },
+        {
+          id: "claude",
+          label: "Claude",
+          selectable: false,
+          models: [],
+          defaultModel: "sonnet",
+        },
+      ]
+    );
+    assert.deepEqual(
+      groups.map((group) => group.providerId),
+      ["codex", "deepseek"]
+    );
+    assert.equal(groups[1]?.models[0]?.id, "deepseek-v4-flash");
+    assert.equal(modelPickerHasChoices(groups), true);
+  });
+
+  it("does not list a sibling that advertises the same models", () => {
+    const luna: ModelCapability = { ...noEffortModel, id: "gpt-5.6-luna" };
+    const sol: ModelCapability = { ...noEffortModel, id: "gpt-5.6-sol" };
+    assert.equal(sameModelCatalogue([luna, sol], [sol, luna]), true);
+    const groups = modelPickerGroups(
+      { providerId: "codex", label: "Codex", models: [luna, sol] },
+      [
+        {
+          id: "codex",
+          label: "Codex",
+          selectable: true,
+          models: [luna, sol],
+          defaultModel: "gpt-5.6-sol",
+        },
+        {
+          id: "codex-chatgpt",
+          label: "Codex",
+          selectable: true,
+          models: [sol, luna],
+          defaultModel: "gpt-5.6-sol",
+        },
+        {
+          id: "deepseek",
+          label: "DeepSeek",
+          selectable: true,
+          models: [],
+          defaultModel: "deepseek-v4-flash",
+        },
+      ]
+    );
+    assert.deepEqual(
+      groups.map((group) => group.providerId),
+      ["codex", "deepseek"]
     );
   });
 

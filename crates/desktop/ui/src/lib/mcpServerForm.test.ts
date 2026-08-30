@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  GITHUB_MCP_URL,
   formatHeaders,
+  githubServerDraft,
+  isGithubMcpId,
   messageFromError,
+  normalizeAuthorization,
   parseArgs,
   parseEnvVars,
   parseHeaders,
@@ -112,6 +116,32 @@ describe("MCP draft validation", () => {
     assert.deepEqual(result.value.headerSecrets, {});
   });
 
+  it("recognises the built-in GitHub server id", () => {
+    assert.equal(isGithubMcpId("github"), true);
+    assert.equal(isGithubMcpId(" GitHub "), true);
+    assert.equal(isGithubMcpId("haiku"), false);
+  });
+
+  it("pre-fills GitHub's official remote MCP", () => {
+    const result = validateMcpServerDraft(githubServerDraft());
+    assert.equal(result.ok, true);
+    assert.ok(result.ok);
+    assert.equal(result.value.id, "github");
+    assert.equal(result.value.url, GITHUB_MCP_URL);
+    assert.equal(result.value.command, "");
+    assert.deepEqual(result.value.headerSecrets, {});
+  });
+
+  it("completes a pasted GitHub PAT as Bearer", () => {
+    assert.equal(normalizeAuthorization("  ghp_example  "), "Bearer ghp_example");
+    assert.equal(
+      normalizeAuthorization("github_pat_example"),
+      "Bearer github_pat_example"
+    );
+    assert.equal(normalizeAuthorization("Bearer already"), "Bearer already");
+    assert.equal(normalizeAuthorization("plain-token"), "plain-token");
+  });
+
   it("sends an access token separately from environment headers", () => {
     const result = validateMcpServerDraft(
       draft({
@@ -126,6 +156,16 @@ describe("MCP draft validation", () => {
     assert.ok(result.ok);
     assert.deepEqual(result.value.headers, { "X-Trace": "TRACE_ID" });
     assert.deepEqual(result.value.headerSecrets, { Authorization: "Bearer example-token" });
+  });
+
+  it("stores a GitHub PAT as a Bearer secret", () => {
+    const result = validateMcpServerDraft({
+      ...githubServerDraft(),
+      authorizationValue: "ghp_example",
+    });
+    assert.equal(result.ok, true);
+    assert.ok(result.ok);
+    assert.deepEqual(result.value.headerSecrets, { Authorization: "Bearer ghp_example" });
   });
 
   it("rejects a header given as a secret", () => {

@@ -783,6 +783,39 @@ impl Thread {
         }
     }
 
+    /// Move this chat onto another Zest-loop provider. Drops the native
+    /// continuation cursor so it cannot be sent to the new backend.
+    pub fn reassign_provider(&mut self, provider_id: &str, provider_kind: Option<&str>) {
+        self.provider_id = Some(provider_id.to_string());
+        self.provider_kind = provider_kind.map(str::to_string);
+        self.provider_session = None;
+    }
+
+    /// Copy this transcript into a new thread owned by another provider.
+    ///
+    /// The source is left untouched. The copy drops the native continuation
+    /// cursor, pending inputs, and checkpoints so they cannot run twice.
+    pub fn fork_for_provider(&self, provider_id: &str, provider_kind: Option<&str>) -> Thread {
+        let now = now_secs();
+        let mut fork = self.clone();
+        fork.id = new_id("thread");
+        fork.created_at = now;
+        fork.updated_at = now;
+        fork.pinned = false;
+        fork.pending_inputs.clear();
+        fork.checkpoints.clear();
+        fork.title = self.title.as_ref().map(|title| format!("Copy of {title}"));
+        let kind = match provider_kind {
+            Some(kind) => Some(kind),
+            None if self.provider_id.as_deref() == Some(provider_id) => {
+                self.provider_kind.as_deref()
+            }
+            None => None,
+        };
+        fork.reassign_provider(provider_id, kind);
+        fork
+    }
+
     /// Pin provider once. Never rewrites an existing owner.
     pub fn ensure_provider(
         &mut self,
@@ -2859,5 +2892,45 @@ mod characterization {
             .unwrap_err()
             .to_string()
             .contains("different Codex sign-in"));
+    }
+
+    #[test]
+    fn reassigning_a_chat_clears_the_native_cursor() {
+        let mut thread = Thread::new()
+            .with_provider("codex")
+            .with_provider_kind("codex_oauth");
+        thread.provider_session = Some(crate::ProviderSessionRef::CodexAppServer {
+            thread_id: "native-1".into(),
+        });
+        thread.reassign_provider("deepseek", Some("openai_compatible"));
+        assert_eq!(thread.provider_id.as_deref(), Some("deepseek"));
+        assert_eq!(thread.provider_kind.as_deref(), Some("openai_compatible"));
+        assert_eq!(thread.provider_session, None);
+    }
+
+    #[test]
+    fn fork_for_provider_keeps_the_transcript_and_leaves_the_source() {
+        let mut thread = Thread::new()
+            .with_provider("codex")
+            .with_provider_kind("codex_cli");
+        thread.apply_user("user-1", "hello");
+        thread.title = Some("Native chat".into());
+        thread.provider_session = Some(crate::ProviderSessionRef::CodexAppServer {
+            thread_id: "native-1".into(),
+        });
+        let copy = thread.fork_for_provider("deepseek", Some("openai_compatible"));
+        assert_ne!(copy.id, thread.id);
+        assert_eq!(copy.provider_id.as_deref(), Some("deepseek"));
+        assert_eq!(copy.provider_kind.as_deref(), Some("openai_compatible"));
+        assert_eq!(copy.provider_session, None);
+        assert_eq!(copy.title.as_deref(), Some("Copy of Native chat"));
+        assert_eq!(copy.messages.len(), 1);
+        assert_eq!(thread.provider_id.as_deref(), Some("codex"));
+        assert_eq!(
+            thread.provider_session,
+            Some(crate::ProviderSessionRef::CodexAppServer {
+                thread_id: "native-1".into(),
+            })
+        );
     }
 }

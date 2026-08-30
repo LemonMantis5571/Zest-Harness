@@ -121,10 +121,11 @@ pub use provider::driver::{
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue, context_window_for_model, descriptor_for_picker_id, descriptor_from_config,
-    normalize_effort, probe, Completion, EffortPolicy, ModelSpec, Provider, ProviderCommandRequest,
-    ProviderDescriptor, ProviderFileChangeRequest, ProviderInteractionHost,
-    ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot, ResumeHandle, ResumeSupport,
-    StreamEvent, SystemPrompt, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    normalize_effort, probe, thread_provider_handoff, Completion, EffortPolicy, ModelSpec,
+    Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
+    ProviderInteractionHost, ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot,
+    ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt, ThreadProviderHandoff, TurnRequest,
+    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,

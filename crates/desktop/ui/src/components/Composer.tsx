@@ -45,9 +45,14 @@ import type {
   CommandView,
   GitContext,
   PreparedAttachment,
+  ProviderRow,
 } from "@/lib/types";
 import { hasResumableThreadTurn, type QueuedTurn } from "@/lib/threadQueue";
-import { filterSlashCommands, splitSlashMatch } from "@/lib/slashCommands";
+import {
+  filterSlashCommands,
+  isModelCommandName,
+  splitSlashMatch,
+} from "@/lib/slashCommands";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -68,6 +73,12 @@ type Props = {
   onResumeQueuedMessages?: () => void;
   resumingQueuedMessages?: boolean;
   showModelPicker: boolean;
+  currentProviderId?: string;
+  currentProviderLabel?: string;
+  providers?: ProviderRow[];
+  modelPickerOpen?: boolean;
+  onModelPickerOpenChange?: (open: boolean) => void;
+  onSwitchProvider?: (providerId: string, model: string) => void;
   optionsDisabled?: boolean;
   attachments: PreparedAttachment[];
   onChange: (value: string) => void;
@@ -109,6 +120,12 @@ export function Composer({
   onResumeQueuedMessages,
   resumingQueuedMessages = false,
   showModelPicker,
+  currentProviderId,
+  currentProviderLabel,
+  providers,
+  modelPickerOpen,
+  onModelPickerOpenChange,
+  onSwitchProvider,
   optionsDisabled = false,
   attachments,
   onChange,
@@ -187,8 +204,15 @@ export function Composer({
     };
   }, [slashOpen]);
 
-  function applyCommand(name: string) {
-    onChange(`/${name} `);
+  function applyCommand(command: CommandView) {
+    if (command.kind === "builtin" && isModelCommandName(command.name)) {
+      onChange("");
+      setCommandsDismissed(true);
+      onModelPickerOpenChange?.(true);
+      ref.current?.focus();
+      return;
+    }
+    onChange(`/${command.name} `);
     setCommandsDismissed(true);
     ref.current?.focus();
   }
@@ -450,7 +474,7 @@ export function Composer({
                     role="option"
                     aria-selected={selected}
                     onMouseEnter={() => setCommandIndex(index)}
-                    onClick={() => applyCommand(cmd.name)}
+                    onClick={() => applyCommand(cmd)}
                     className={cn(
                       "flex w-full items-center gap-2.5 px-2.5 py-1.5 text-left transition-colors",
                       selected ? "bg-foreground/10" : "hover:bg-foreground/5"
@@ -514,7 +538,8 @@ export function Composer({
                 }
                 if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
                   e.preventDefault();
-                  applyCommand(commandMatches[commandIndex].name);
+                  const selected = commandMatches[commandIndex];
+                  if (selected) applyCommand(selected);
                   return;
                 }
                 if (e.key === "Escape") {
@@ -587,9 +612,15 @@ export function Composer({
                   effort={effort}
                   models={models}
                   defaultModel={defaultModel}
+                  currentProviderId={currentProviderId}
+                  currentProviderLabel={currentProviderLabel}
+                  providers={providers}
+                  open={modelPickerOpen}
+                  onOpenChange={onModelPickerOpenChange}
                   disabled={sending || compacting || optionsDisabled}
                   onModelChange={onModelChange}
                   onEffortChange={onEffortChange}
+                  onSwitchProvider={onSwitchProvider}
                   onReset={onResetOptions}
                 />
               ) : (

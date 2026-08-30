@@ -21,7 +21,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getBackend, type SkillSummary, type SystemPromptInfo } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
-import { formatHeaders, messageFromError, validateMcpServerDraft } from "@/lib/mcpServerForm";
+import {
+  formatHeaders,
+  githubServerDraft,
+  isGithubMcpId,
+  messageFromError,
+  validateMcpServerDraft,
+} from "@/lib/mcpServerForm";
 import type { CustomizeTab } from "@/lib/navigationHistory";
 import type {
   ExternalAgentRow,
@@ -56,6 +62,20 @@ const TABS: { id: CustomizeTab; label: string; icon: typeof PlugIcon }[] = [
 const CUSTOM_SOFT_LIMIT = 8000;
 const DEFAULT_TIMEOUT_SECS = 120;
 
+/** GitHub's official mark. Lucide dropped brand icons, so this stays local. */
+function GithubMark() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className="mt-0.5 size-4 shrink-0"
+      aria-hidden="true"
+    >
+      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+    </svg>
+  );
+}
+
 /** A server being added or edited. Split from `McpServerRow` because the form
  *  holds raw text — arguments as one line — that only becomes a row on save. */
 type ServerDraft = {
@@ -83,6 +103,13 @@ function emptyDraft(): ServerDraft {
     headers: "",
     authorizationValue: "",
     timeoutSecs: String(DEFAULT_TIMEOUT_SECS),
+    editing: false,
+  };
+}
+
+function githubDraft(): ServerDraft {
+  return {
+    ...githubServerDraft(DEFAULT_TIMEOUT_SECS),
     editing: false,
   };
 }
@@ -237,6 +264,8 @@ function McpPanel({
   const [draft, setDraft] = useState<ServerDraft | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [githubToken, setGithubToken] = useState("");
+  const [githubTokenOpen, setGithubTokenOpen] = useState(false);
 
   const load = useCallback(async () => {
     const backend = getBackend();
@@ -339,6 +368,43 @@ function McpPanel({
   }
 
   const cliRows = useMemo(() => agents.filter((agent) => agent.preset), [agents]);
+  const github = servers.find((server) => isGithubMcpId(server.id));
+  const extraServers = servers.filter((server) => !isGithubMcpId(server.id));
+  const githubBusy = busy === (github?.id ?? "github");
+  const githubHint = github?.enabled
+    ? github.detail
+    : "Issues, pull requests, and repos. Paste a personal access token to turn it on.";
+
+  async function toggleGithub() {
+    setError(null);
+    setDraftError(null);
+    if (github?.enabled) {
+      await toggle(github);
+      setGithubToken("");
+      setGithubTokenOpen(false);
+      return;
+    }
+    if (!githubTokenOpen) {
+      setGithubTokenOpen(true);
+      return;
+    }
+    const token = githubToken.trim();
+    if (github && !token) {
+      await toggle(github);
+      setGithubTokenOpen(false);
+      return;
+    }
+    if (!token) {
+      setDraftError("Paste a GitHub personal access token.");
+      return;
+    }
+    await save(
+      { ...githubDraft(), authorizationValue: token, editing: Boolean(github) },
+      true
+    );
+    setGithubToken("");
+    setGithubTokenOpen(false);
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -390,13 +456,60 @@ function McpPanel({
           <p className="m-0 text-[11px] text-muted-foreground" role="status">
             Loading servers…
           </p>
-        ) : servers.length === 0 ? (
-          <p className="m-0 rounded-lg border border-border/70 bg-card/50 px-3 py-4 text-[11px] leading-relaxed text-muted-foreground">
-            No MCP connections yet. Add a local process or a web service.
-          </p>
         ) : (
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
-            {servers.map((server) => {
+            <li className="rounded-lg border border-border/80 bg-card/70 px-3 py-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <GithubMark />
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">GitHub</div>
+                    <p className="m-0 mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                      {githubHint}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={github?.enabled ? "secondary" : "outline"}
+                  disabled={sending || githubBusy}
+                  aria-pressed={github?.enabled ?? false}
+                  aria-label={`${github?.enabled ? "Turn off" : "Turn on"} the GitHub MCP server`}
+                  onClick={() => void toggleGithub()}
+                >
+                  {githubBusy ? "Saving…" : github?.enabled ? "On" : "Off"}
+                </Button>
+              </div>
+              {githubTokenOpen && !github?.enabled ? (
+                <div className="mt-2.5 flex flex-col gap-2">
+                  <Input
+                    type="password"
+                    value={githubToken}
+                    disabled={sending || githubBusy}
+                    spellCheck={false}
+                    autoComplete="new-password"
+                    autoFocus
+                    placeholder={
+                      github ? "Leave blank to keep the saved token" : "ghp_… or github_pat_…"
+                    }
+                    onChange={(event) => setGithubToken(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void toggleGithub();
+                      }
+                    }}
+                  />
+                  {!draft && draftError ? (
+                    <p className="m-0 text-[11px] text-destructive" role="alert">
+                      {draftError}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </li>
+            {extraServers.map((server) => {
               const result = checked[server.id];
               const rowBusy = busy === server.id;
               return (
@@ -681,7 +794,11 @@ function ServerForm({
           </div>
           <Field
             label="Access token"
-            hint="Optional. Paste the value supplied by the service. It is stored securely on this computer."
+            hint={
+              draft.id.trim().toLowerCase() === "github"
+                ? "Paste a GitHub personal access token. Zest stores it on this computer and sends Bearer automatically."
+                : "Optional. Paste the value supplied by the service. It is stored securely on this computer."
+            }
           >
             <Input
               type="password"
@@ -690,7 +807,11 @@ function ServerForm({
               spellCheck={false}
               autoComplete="new-password"
               placeholder={
-                draft.editing ? "Leave blank to keep the saved token" : "Paste your access token"
+                draft.editing
+                  ? "Leave blank to keep the saved token"
+                  : draft.id.trim().toLowerCase() === "github"
+                    ? "ghp_… or github_pat_…"
+                    : "Paste your access token"
               }
               onChange={(event) =>
                 onChange({ ...draft, authorizationValue: event.target.value })

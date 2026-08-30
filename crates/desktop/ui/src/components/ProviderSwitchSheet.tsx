@@ -125,7 +125,9 @@ export function ProviderSwitchSheet({
           <div>
             <div className="text-sm font-semibold">Change provider</div>
             <div className="text-[11px] text-muted-foreground">
-              Change providers without leaving this conversation
+              {providers.some((row) => row.ownsAgentLoop)
+                ? "API and ChatGPT chats stay here. A CLI switch opens a copy."
+                : "This chat stays on the same thread."}
             </div>
           </div>
           <Button

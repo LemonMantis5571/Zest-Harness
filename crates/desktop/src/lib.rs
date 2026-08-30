@@ -39,18 +39,19 @@ use zest_core::{
     start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
-    thread_summary_from_json, truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy,
-    ApprovalRequest, Approver, AuthStatus, ChatFacts, ChatPersistence, CompactionOutcome, Config,
-    CredentialPolicy, ExternalAgentMode, ExternalWorkspace, HarnessError, JobEvent, JobRegistry,
-    JobSnapshot, JobStatus, Ledger, LoginPoll, LoginProcess, McpCatalog, PersistPriority,
-    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
-    ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
-    ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
-    PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
-    SkillSet, SkillSummary, StoredMessage, StreamEvent, SystemPrompt, Thread, ThreadCheckpoint,
-    ThreadCheckpointKind, ThreadEventKind, ThreadGitContext, ThreadInput, ThreadInputAttachment,
-    ThreadInputTarget, ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk,
-    UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM,
+    thread_provider_handoff, thread_summary_from_json, truncate_chars, ApprovalDecision,
+    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts,
+    ChatPersistence, CompactionOutcome, Config, CredentialPolicy, ExternalAgentMode,
+    ExternalWorkspace, HarnessError, JobEvent, JobRegistry, JobSnapshot, JobStatus, Ledger,
+    LoginPoll, LoginProcess, McpCatalog, PersistPriority, PersistSnapshot, PersistWorker, Prices,
+    ProfileStats, ProjectSessionState, ProviderCommandRequest, ProviderConfig,
+    ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
+    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
+    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
+    StreamEvent, SystemPrompt, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadEventKind,
+    ThreadGitContext, ThreadInput, ThreadInputAttachment, ThreadInputTarget, ThreadLoadError,
+    ThreadProviderHandoff, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
+    UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM,
     THREAD_FORMAT_VERSION,
 };
 
@@ -714,6 +715,8 @@ struct ProviderView {
     can_connect: bool,
     /// Present in `zest.toml` / env fallback — Rust is authoritative for availability.
     configured: bool,
+    /// Vendor CLIs run their own loop. Switching to or from one copies the chat.
+    owns_agent_loop: bool,
     default_model: String,
     models: Vec<ModelCapability>,
 }
@@ -843,6 +846,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         selectable: auth_status.selectable() && configured,
         can_connect: desktop_can_connect(slot.id, config),
         configured,
+        owns_agent_loop: provider_owns_agent_loop(config, slot.id),
         default_model: descriptor.default_model,
         models: descriptor
             .models
@@ -919,6 +923,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         selectable: status_kind == "ready",
         can_connect: desktop_can_connect(id, config),
         configured: true,
+        owns_agent_loop: provider_owns_agent_loop(config, id),
         default_model: descriptor.default_model,
         models: descriptor
             .models
@@ -932,6 +937,13 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
             })
             .collect(),
     }
+}
+
+fn provider_owns_agent_loop(config: &Config, id: &str) -> bool {
+    config
+        .providers
+        .get(id)
+        .is_some_and(ProviderConfig::owns_agent_loop)
 }
 
 /// Where this provider's secret comes from, for the picker row.
@@ -1616,6 +1628,7 @@ fn chatgpt_codex_offer_view() -> ProviderView {
         selectable: false,
         can_connect: true,
         configured: false,
+        owns_agent_loop: false,
         default_model: descriptor.default_model,
         models: descriptor
             .models
@@ -3774,6 +3787,10 @@ fn persist_provider_thread(
     state.save(root).map_err(|e| e.to_string())
 }
 
+fn provider_switch_copy_warning(current_label: &str) -> String {
+    format!("This chat stays on {current_label}. Continuing in a copy.")
+}
+
 fn persist_provider_model_effort(
     root: &std::path::Path,
     provider_id: &str,
@@ -4195,11 +4212,22 @@ async fn start_session_inner(
     // A legacy thread is claimed only after the target provider has built a
     // usable runtime. Git context is persisted at the same point so a failed
     // provider switch cannot leave half-open chat metadata behind.
+    //
+    // An in-place provider handoff also writes here: the new owner lives on
+    // the in-memory thread until this save, so a failed runtime build cannot
+    // rewrite the file first.
+    let owner_changed = !thread_is_draft
+        && store.exists(&thread.id)
+        && store
+            .load(&thread.id)
+            .ok()
+            .is_some_and(|saved| saved.provider_id != thread.provider_id);
     if should_persist_on_open(
         claiming_legacy_thread,
         thread_metadata_changed,
         thread_is_draft,
-    ) {
+    ) || owner_changed
+    {
         if let Err(error) = store.save(&thread) {
             if thread_created {
                 let _ = store.delete(&thread.id);
@@ -4344,6 +4372,109 @@ fn update_session_options(
         })
         .map_err(map_session_err)
         .and_then(|r| r)
+}
+
+/// Move the open chat onto another parent provider.
+///
+/// Zest-loop chats (ChatGPT sign-in, API keys) keep this thread. A vendor CLI
+/// on either side copies the transcript so the original session stays put.
+#[tauri::command]
+async fn switch_session_provider(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model: Option<String>,
+) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    let snapshot = state
+        .sessions
+        .session_info_snapshot(|session| {
+            (
+                session.root.clone(),
+                session.thread.clone(),
+                session.provider_id.clone(),
+                session.provider_label.clone(),
+            )
+        })
+        .map_err(map_session_err)?;
+    let Some((root, thread, current_id, current_label)) = snapshot else {
+        return Err("No active session.".into());
+    };
+
+    let config = if is_free_chat_root(&root) {
+        config_for_free_chat(&state, &root)?
+    } else {
+        config_for_session(&state, &root)?
+    };
+    let target = config.providers.get(&provider_id).ok_or_else(|| {
+        desktop_err(
+            "provider_unavailable",
+            format!("Unknown provider `{provider_id}`"),
+        )
+    })?;
+    let current_cfg = config.providers.get(&current_id);
+    let explicit_model = model.filter(|value| !value.trim().is_empty());
+    let target_kind = target.kind_tag();
+    let handoff =
+        thread_provider_handoff(Some(current_id.as_str()), &provider_id, current_cfg, target);
+
+    match handoff {
+        ThreadProviderHandoff::Stay => {
+            if explicit_model.is_some() {
+                update_session_options(state.clone(), explicit_model, None)?;
+            }
+            session_info(state).ok_or_else(|| "No active session.".into())
+        }
+        ThreadProviderHandoff::InPlace => {
+            let store = open_store(&root)?;
+            let is_draft = !store.exists(&thread.id);
+            let mut next = thread;
+            next.reassign_provider(&provider_id, Some(target_kind));
+            start_session_inner(
+                state,
+                provider_id,
+                explicit_model,
+                None,
+                Some(root),
+                Some((next, None, is_draft)),
+            )
+            .await
+        }
+        ThreadProviderHandoff::Copy => {
+            if thread.messages.is_empty() {
+                let draft = unsaved_draft(&provider_id, &config)?;
+                return start_session_inner(
+                    state,
+                    provider_id,
+                    explicit_model,
+                    None,
+                    Some(root),
+                    Some((draft, None, true)),
+                )
+                .await;
+            }
+            let store = open_store(&root)?;
+            let copy = thread.fork_for_provider(&provider_id, Some(target_kind));
+            store.save(&copy).map_err(|e| e.to_string())?;
+            let copy_id = copy.id.clone();
+            let result = start_session_inner(
+                state,
+                provider_id,
+                explicit_model,
+                None,
+                Some(root),
+                Some((
+                    copy,
+                    Some(provider_switch_copy_warning(&current_label)),
+                    false,
+                )),
+            )
+            .await;
+            if result.is_err() {
+                let _ = store.delete(&copy_id);
+            }
+            result
+        }
+    }
 }
 
 /// Atomically reset sticky model+effort for the active provider (clears prefs).
@@ -4821,14 +4952,10 @@ fn select_project_provider(
     if let Some(Some(owner)) = thread_provider {
         if let Some(chosen) = explicit_provider {
             if chosen != owner {
-                return Err(desktop_err(
-                    "thread_provider_mismatch",
-                    format!(
-                        "This chat belongs to {}, not {}. Open a copy to use another provider.",
-                        provider_label_for_config(config, owner),
-                        provider_label_for_config(config, chosen),
-                    ),
-                ));
+                if config.providers.contains_key(chosen) {
+                    return Ok(chosen.to_string());
+                }
+                return Err(provider_unavailable_error(config, chosen, thread_id));
             }
         }
         if config.providers.contains_key(owner) {
@@ -5003,6 +5130,35 @@ provider = "codex"
         assert_eq!(
             select_project_provider(&config, "deepseek", None, None, None).unwrap(),
             "codex"
+        );
+    }
+
+    #[test]
+    fn explicit_provider_can_leave_a_configured_owner() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "codex_oauth"
+model = "gpt-5.6-luna"
+
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            select_project_provider(
+                &config,
+                "codex",
+                Some(Some("codex")),
+                Some("deepseek"),
+                Some("thread-1"),
+            )
+            .unwrap(),
+            "deepseek"
         );
     }
 
@@ -5517,17 +5673,45 @@ async fn open_project_chat(
     } else if let Some(loaded) = loaded_target {
         let warning = loaded.warning;
         let source = loaded.thread;
-        let thread = if copying_to_another_provider {
-            target_store
-                .fork_for_provider(&source, &provider_id, None)
-                .map_err(|e| e.to_string())?
+        let owner = source.provider_id.clone();
+        let current_cfg = owner.as_deref().and_then(|id| config.providers.get(id));
+        let target_cfg = config.providers.get(&provider_id);
+        let switching = owner.as_deref().is_some_and(|id| id != provider_id);
+        let handoff = if copying_to_another_provider {
+            ThreadProviderHandoff::Copy
+        } else if switching {
+            match target_cfg {
+                Some(target_cfg) => {
+                    thread_provider_handoff(owner.as_deref(), &provider_id, current_cfg, target_cfg)
+                }
+                None => ThreadProviderHandoff::Copy,
+            }
         } else {
-            source
+            ThreadProviderHandoff::Stay
         };
-        if copying_to_another_provider {
-            created_thread_id = Some(thread.id.clone());
+        match handoff {
+            ThreadProviderHandoff::Stay => Some((source, warning, false)),
+            ThreadProviderHandoff::InPlace => {
+                let mut next = source;
+                next.reassign_provider(&provider_id, target_cfg.map(ProviderConfig::kind_tag));
+                Some((next, warning, false))
+            }
+            ThreadProviderHandoff::Copy => {
+                let copy = source
+                    .fork_for_provider(&provider_id, target_cfg.map(ProviderConfig::kind_tag));
+                target_store.save(&copy).map_err(|e| e.to_string())?;
+                created_thread_id = Some(copy.id.clone());
+                let owner_label = owner
+                    .as_deref()
+                    .map(|id| provider_label_for_config(&config, id))
+                    .unwrap_or_else(|| "the previous provider".into());
+                Some((
+                    copy,
+                    merge_warnings(warning, vec![provider_switch_copy_warning(&owner_label)]),
+                    false,
+                ))
+            }
         }
-        Some((thread, warning, false))
     } else {
         let resolved = resolve_thread(
             &root,
@@ -7115,11 +7299,11 @@ fn set_system_prompt(
 pub struct CommandView {
     pub name: String,
     pub description: String,
-    /// `"skill"` or `"mcp"`.
+    /// `"skill"`, `"mcp"`, or `"builtin"`.
     pub kind: String,
 }
 
-/// Slash commands available here — skills plus enabled MCP servers.
+/// Slash commands available here — builtins, skills, and enabled MCP servers.
 ///
 /// Disk-based so commands remain readable while a turn is streaming.
 #[tauri::command]
@@ -7137,6 +7321,7 @@ fn list_commands(state: State<'_, AppState>) -> Result<Vec<CommandView>, String>
             kind: match command.kind {
                 zest_core::SlashKind::Skill => "skill".into(),
                 zest_core::SlashKind::Mcp => "mcp".into(),
+                zest_core::SlashKind::Builtin => "builtin".into(),
             },
         })
         .collect())
@@ -8534,6 +8719,7 @@ pub fn run() {
             cancel_login,
             verify_provider,
             start_session,
+            switch_session_provider,
             update_session_options,
             reset_session_options,
             list_threads,

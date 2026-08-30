@@ -117,6 +117,38 @@ pub struct ProviderDescriptor {
     pub models: Vec<ModelSpec>,
 }
 
+/// How to move a saved chat onto another provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadProviderHandoff {
+    /// Already on the target.
+    Stay,
+    /// Both sides use Zest's loop: keep this thread, rewrite at the wire.
+    InPlace,
+    /// A CLI owns one side: copy the transcript into a new thread.
+    Copy,
+}
+
+/// Decide whether this chat can keep its id when the parent provider changes.
+///
+/// A missing current config is treated as copy: we cannot tell if that owner
+/// was a CLI session, and guessing in-place would strand their cursor.
+pub fn thread_provider_handoff(
+    current_owner: Option<&str>,
+    target: &str,
+    current: Option<&ProviderConfig>,
+    target_config: &ProviderConfig,
+) -> ThreadProviderHandoff {
+    if current_owner == Some(target) {
+        return ThreadProviderHandoff::Stay;
+    }
+    match current {
+        Some(current) if !current.owns_agent_loop() && !target_config.owns_agent_loop() => {
+            ThreadProviderHandoff::InPlace
+        }
+        _ => ThreadProviderHandoff::Copy,
+    }
+}
+
 /// Normalize UI / env effort aliases to the wire form.
 pub fn normalize_effort(effort: &str) -> String {
     match effort.trim().to_ascii_lowercase().as_str() {
@@ -743,6 +775,67 @@ mod tests {
         let cat = catalogue("gpt-5.6-sol", &[], &[], EffortPolicy::Standard(&[]));
         assert_eq!(cat.len(), 1);
         assert_eq!(cat[0].id, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn zest_loop_chats_stay_on_the_same_thread() {
+        let config = crate::config::Config::parse(
+            r#"
+[providers.codex]
+kind = "codex_oauth"
+model = "gpt-5.6-luna"
+
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+"#,
+        )
+        .unwrap();
+        let codex = config.providers.get("codex").unwrap();
+        let deepseek = config.providers.get("deepseek").unwrap();
+        assert!(!codex.owns_agent_loop());
+        assert!(!deepseek.owns_agent_loop());
+        assert_eq!(
+            thread_provider_handoff(Some("codex"), "deepseek", Some(codex), deepseek),
+            ThreadProviderHandoff::InPlace
+        );
+        assert_eq!(
+            thread_provider_handoff(Some("codex"), "codex", Some(codex), codex),
+            ThreadProviderHandoff::Stay
+        );
+    }
+
+    #[test]
+    fn a_cli_chat_is_copied_instead_of_reassigned() {
+        let config = crate::config::Config::parse(
+            r#"
+[providers.codex]
+kind = "codex_cli"
+model = "gpt-5.6-sol"
+
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+"#,
+        )
+        .unwrap();
+        let cli = config.providers.get("codex").unwrap();
+        let deepseek = config.providers.get("deepseek").unwrap();
+        assert!(cli.owns_agent_loop());
+        assert_eq!(
+            thread_provider_handoff(Some("codex"), "deepseek", Some(cli), deepseek),
+            ThreadProviderHandoff::Copy
+        );
+        assert_eq!(
+            thread_provider_handoff(Some("deepseek"), "codex", Some(deepseek), cli),
+            ThreadProviderHandoff::Copy
+        );
+        assert_eq!(
+            thread_provider_handoff(Some("codex"), "deepseek", None, deepseek),
+            ThreadProviderHandoff::Copy
+        );
     }
 
     #[test]

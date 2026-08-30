@@ -134,6 +134,10 @@ export type DesktopBackend = {
     id: string,
     options?: { model?: string; effort?: string }
   ): Promise<SessionInfo>;
+  switchSessionProvider(
+    providerId: string,
+    model?: string
+  ): Promise<SessionInfo>;
   updateSessionOptions(options: {
     model?: string;
     effort?: string;
@@ -296,6 +300,8 @@ export function createTauriBackend(): DesktopBackend {
     loginStatus: () => tauriApi.loginStatus(),
     cancelLogin: () => tauriApi.cancelLogin(),
     startSession: (id, options) => tauriApi.startSession(id, options),
+    switchSessionProvider: (providerId, model) =>
+      tauriApi.switchSessionProvider(providerId, model),
     updateSessionOptions: (options) => tauriApi.updateSessionOptions(options),
     resetSessionOptions: () => tauriApi.resetSessionOptions(),
     listThreads: () => tauriApi.listThreads(),

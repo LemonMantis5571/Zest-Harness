@@ -85,6 +85,86 @@ export function sessionSupportsModelPicker(
   return (models?.length ?? 0) > 1;
 }
 
+export type ModelPickerGroup = {
+  providerId: string;
+  label: string;
+  current: boolean;
+  models: ModelCapability[];
+};
+
+const fallbackCapability = (id: string): ModelCapability => ({
+  id,
+  efforts: [],
+  contextWindow: 0,
+  supportsTools: true,
+  supportsVision: false,
+});
+
+function modelsForRow(row: {
+  models: ModelCapability[];
+  defaultModel: string;
+}): ModelCapability[] {
+  if (row.models.length) return row.models;
+  return row.defaultModel ? [fallbackCapability(row.defaultModel)] : [];
+}
+
+/** True when two catalogues name the same models, ignoring order. */
+export function sameModelCatalogue(
+  left: readonly ModelCapability[],
+  right: readonly ModelCapability[]
+): boolean {
+  if (left.length !== right.length) return false;
+  const ids = new Set(left.map((model) => model.id));
+  return right.every((model) => ids.has(model.id));
+}
+
+/** Current session models first, then every other selectable provider. */
+export function modelPickerGroups(
+  current: {
+    providerId: string;
+    label: string;
+    models: ModelCapability[] | undefined;
+  },
+  providers: ReadonlyArray<{
+    id: string;
+    label: string;
+    selectable: boolean;
+    models: ModelCapability[];
+    defaultModel: string;
+  }>
+): ModelPickerGroup[] {
+  const currentModels = current.models ?? [];
+  const groups: ModelPickerGroup[] = [
+    {
+      providerId: current.providerId,
+      label: current.label,
+      current: true,
+      models: currentModels,
+    },
+  ];
+  for (const row of providers) {
+    if (!row.selectable || row.id === current.providerId) continue;
+    const models = modelsForRow(row);
+    if (models.length === 0) continue;
+    // ChatGPT Codex and Codex CLI advertise the same list. Showing both
+    // stacks the same six models twice; the provider sheet is how you
+    // change the transport.
+    if (sameModelCatalogue(currentModels, models)) continue;
+    groups.push({
+      providerId: row.id,
+      label: row.label,
+      current: false,
+      models,
+    });
+  }
+  return groups;
+}
+
+export function modelPickerHasChoices(groups: ModelPickerGroup[]): boolean {
+  const models = groups.reduce((count, group) => count + group.models.length, 0);
+  return groups.length > 1 || models > 1;
+}
+
 /** Map Rust catalogue + display labels for the picker. */
 export function modelOptionsFromCapabilities(
   models: ModelCapability[] | undefined

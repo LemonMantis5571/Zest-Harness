@@ -620,6 +620,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           selectable: true,
           canConnect: false,
           configured: true,
+          ownsAgentLoop: false,
           defaultModel: DEFAULT_CODEX_MODEL,
           models: FIXTURE_MODELS,
         },
@@ -1076,6 +1077,16 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       session = { ...FIXTURE_SESSION, messages: [] };
       return { ...session };
     },
+    async switchSessionProvider(providerId, model) {
+      session = {
+        ...session,
+        provider: providerId,
+        label: providerId,
+        model: model ?? session.model,
+        warning: undefined,
+      };
+      return { ...session };
+    },
     async updateSessionOptions(options) {
       session = {
         ...session,
@@ -1461,13 +1472,20 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       /* fixture: nothing to verify */
     },
     async listCommands() {
-      return [...fixtureMcpServers.values()]
-        .filter((server) => server.enabled)
-        .map((server) => ({
-          name: server.id,
-          description: `Use the ${server.id} MCP server`,
-          kind: "mcp" as const,
-        }));
+      return [
+        {
+          name: "model",
+          description: "Switch model or provider",
+          kind: "builtin" as const,
+        },
+        ...[...fixtureMcpServers.values()]
+          .filter((server) => server.enabled)
+          .map((server) => ({
+            name: server.id,
+            description: `Use the ${server.id} MCP server`,
+            kind: "mcp" as const,
+          })),
+      ];
     },
     async endSession() {
       /* no-op */

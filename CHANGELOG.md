@@ -10,6 +10,9 @@ a replacement for the commit history.
 - Enabled MCP servers are slash commands. `/haiku` (or any server id) tells the
   model to use that server for the rest of the message, and the composer list
   matches by prefix the same way skills already did.
+- Customize always shows GitHub as the starter MCP. Turn it on and paste a
+  personal access token; fresh installs already have the official remote entry
+  waiting, off.
 
 ### Removed
 
@@ -67,6 +70,11 @@ a replacement for the commit history.
 
 ### Changed
 
+- Release desktop builds use thin LTO and strip symbols, so the shipped binary
+  is smaller without dropping features.
+- Switching ChatGPT sign-in or API-key providers keeps this chat. Switching
+  to or from a vendor CLI copies the transcript so the original session stays
+  put. `/model` opens the model picker, which lists every ready provider.
 - MCP connections now use a generic access-token field, with advanced header
   mappings kept out of the main setup path.
 - Provider construction moved behind a driver per `kind`

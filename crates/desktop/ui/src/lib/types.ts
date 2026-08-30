@@ -37,7 +37,7 @@ export type ApprovalMode =
   | "auto"
   | "bypass";
 
-export type CommandKind = "skill" | "mcp";
+export type CommandKind = "skill" | "mcp" | "builtin";
 
 export type CommandView = Omit<GeneratedCommandView, "kind"> & {
   kind: CommandKind;

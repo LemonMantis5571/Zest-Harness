@@ -26,3 +26,13 @@ export function filterSlashCommands(
   const q = typed.toLowerCase();
   return commands.filter((command) => command.name.toLowerCase().startsWith(q));
 }
+
+/** True when the first token is the built-in `/model` command. */
+export function isModelSlash(input: string): boolean {
+  const name = input.trimStart().match(/^\/([a-z0-9-_]+)/i)?.[1];
+  return name?.toLowerCase() === "model";
+}
+
+export function isModelCommandName(name: string): boolean {
+  return name.toLowerCase() === "model";
+}

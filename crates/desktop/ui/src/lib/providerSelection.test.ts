@@ -22,6 +22,7 @@ function row(
     selectable,
     canConnect: false,
     configured: selectable,
+    ownsAgentLoop: false,
     defaultModel: "model",
     models: [],
   };

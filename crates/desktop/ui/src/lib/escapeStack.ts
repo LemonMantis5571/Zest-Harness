@@ -8,6 +8,7 @@
 export type EscapeAction =
   | "diff"
   | "provider-switch"
+  | "model-picker"
   | "settings"
   | "palette"
   | "editing"
@@ -17,6 +18,7 @@ export type EscapeAction =
 export function escapeAction(open: {
   diff: boolean;
   providerSwitch: boolean;
+  modelPicker: boolean;
   settings: boolean;
   palette: boolean;
   editing: boolean;
@@ -25,6 +27,7 @@ export function escapeAction(open: {
 }): EscapeAction | null {
   if (open.diff) return "diff";
   if (open.providerSwitch) return "provider-switch";
+  if (open.modelPicker) return "model-picker";
   if (open.settings) return "settings";
   if (open.palette) return "palette";
   if (open.editing) return "editing";

@@ -6,6 +6,7 @@ import { escapeAction } from "./escapeStack.ts";
 const none = {
   diff: false,
   providerSwitch: false,
+  modelPicker: false,
   settings: false,
   palette: false,
   editing: false,
@@ -22,6 +23,13 @@ describe("escapeAction", () => {
     assert.equal(
       escapeAction({ ...none, shellPanel: true, sending: true }),
       "shell-panel"
+    );
+  });
+
+  it("closes the model picker before it can cancel a running turn", () => {
+    assert.equal(
+      escapeAction({ ...none, modelPicker: true, sending: true }),
+      "model-picker"
     );
   });
 

@@ -1753,7 +1753,7 @@ export default function App() {
   }
 
   const switchProvider = useCallback(
-    async (providerId: string) => {
+    async (providerId: string, model?: string) => {
       if (!providerId) return;
       const current = sessionRef.current;
       if (current?.threadId) {
@@ -1761,7 +1761,11 @@ export default function App() {
       }
       setSelectedId(providerId);
       try {
-        await enterChat(providerId);
+        const info = await withTimeout(
+          backend.switchSessionProvider(providerId, model),
+          "provider switch"
+        );
+        applySession(info);
       } catch (err) {
         setPickerError(pickerErrorFrom(err));
         toast.add({
@@ -1772,7 +1776,7 @@ export default function App() {
         throw err;
       }
     },
-    [enterChat]
+    [applySession]
   );
 
   /** `only` targets a specific provider — used by the Reconnect on an auth

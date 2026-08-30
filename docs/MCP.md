@@ -18,8 +18,22 @@ reach an MCP server at all.
 
 ## Configuration
 
+Customize always shows GitHub as the starter MCP. It stays off until you turn
+it on and paste a personal access token. Fresh installs already have the
+official remote entry in `zest.toml`; older configs get the same row and write
+it on first use.
+
 ```toml
 [mcp.github]
+url = "https://api.githubcopilot.com/mcp/"
+enabled = false
+timeout_secs = 120
+```
+
+A local process is a command instead of a URL. Do not set both.
+
+```toml
+[mcp.github-local]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env_vars = ["GITHUB_TOKEN"]
@@ -27,8 +41,8 @@ enabled = true
 timeout_secs = 120
 ```
 
-A remote 2026 Streamable HTTP server is a URL instead of a command. Do not set
-both.
+Any other Streamable HTTP server is the same shape as GitHub: a URL, then a
+token in Customize or a header that names an environment variable.
 
 ```toml
 [mcp.remote]

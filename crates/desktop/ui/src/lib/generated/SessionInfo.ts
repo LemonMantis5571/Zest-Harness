@@ -4,18 +4,18 @@ import type { PendingInputView } from "./PendingInput";
 import type { ThreadCheckpointView } from "./ThreadCheckpoint";
 import type { TurnRecoveryView } from "./TurnRecovery";
 
-export type SessionInfo = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, isFreeChat: boolean, threadId: string,
+export type SessionInfo = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, isFreeChat: boolean, threadId: string, 
 /**
  * Rust-authoritative catalogue for the active provider (UI may only add labels).
  */
-defaultModel: string,
+defaultModel: string, 
 /**
  * The provider runs its own agent loop and tool stack — Claude Code or
  * Codex. Zest's tools, including its MCP servers, are not registered on
  * such a chat, and the UI has to say so rather than offer a switch that
  * would do nothing here.
  */
-ownsAgentLoop: boolean, models: Array<ModelCapability>, checkpoints: Array<ThreadCheckpointView>, pendingInputs: Array<PendingInputView>,
+ownsAgentLoop: boolean, models: Array<ModelCapability>, checkpoints: Array<ThreadCheckpointView>, pendingInputs: Array<PendingInputView>, 
 /**
  * UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
  */

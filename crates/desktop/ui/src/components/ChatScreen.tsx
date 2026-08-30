@@ -75,7 +75,12 @@ import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { buildConversationTurns } from "@/lib/conversationTurns";
 import { ensureFontLoaded } from "@/lib/fonts";
 import { LinkifyText } from "@/lib/linkify";
-import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
+import {
+  modelPickerGroups,
+  modelPickerHasChoices,
+  type EffortId,
+} from "@/lib/models";
+import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
@@ -174,7 +179,7 @@ type Props = {
     copyThread?: boolean;
   }) => Promise<boolean>;
   providers: ProviderRow[];
-  onSwitchProvider: (providerId: string) => Promise<void>;
+  onSwitchProvider: (providerId: string, model?: string) => Promise<void>;
   onReloadSession?: () => Promise<void>;
   /** Re-run sign-in for a provider whose credentials the gateway rejected. */
   onReconnectProvider?: (providerId: string) => void;
@@ -776,6 +781,7 @@ export function ChatScreen({
     [diffOpenKey]
   );
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const refreshAndOpenProviderSwitch = useCallback(() => {
     void onRefreshProviders()
@@ -1015,7 +1021,6 @@ export function ChatScreen({
     }
   }, [dismissedDiffKey, workspaceChange]);
 
-  const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = session.isFreeChat ? "No workspace" : shortRoot(session.root);
   /**
    * The provider as a person would name it, falling back to the session's own
@@ -1024,6 +1029,15 @@ export function ChatScreen({
    */
   const providerLabel =
     providers.find((row) => row.id === session.provider)?.label ?? session.label;
+  const pickerGroups = modelPickerGroups(
+    {
+      providerId: session.provider,
+      label: providerLabel,
+      models: session.models,
+    },
+    providers
+  );
+  const showPicker = modelPickerHasChoices(pickerGroups) || modelPickerOpen;
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
   /**
    * Every tool still waiting on a decision, oldest first.
@@ -1342,6 +1356,7 @@ export function ChatScreen({
       const action = escapeAction({
         diff: Boolean(diffTarget),
         providerSwitch: providerSwitchOpen,
+        modelPicker: modelPickerOpen,
         settings: settingsOpen,
         palette: paletteOpen,
         editing: Boolean(editingMessageId),
@@ -1356,6 +1371,9 @@ export function ChatScreen({
           return;
         case "provider-switch":
           if (!providerSwitchBusy) setProviderSwitchOpen(false);
+          return;
+        case "model-picker":
+          setModelPickerOpen(false);
           return;
         case "settings":
           closeSettings();
@@ -1376,7 +1394,7 @@ export function ChatScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancelEditingMessage, closeDiff, closeSettings, diffTarget, editingMessageId, onClosePanel, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen, shellPanel]);
+  }, [cancelEditingMessage, closeDiff, closeSettings, diffTarget, editingMessageId, modelPickerOpen, onClosePanel, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen, shellPanel]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
@@ -1790,10 +1808,25 @@ export function ChatScreen({
             onResumeQueuedMessages={onResumeQueuedMessages}
             resumingQueuedMessages={resumingQueuedMessages}
             showModelPicker={showPicker}
+            currentProviderId={session.provider}
+            currentProviderLabel={providerLabel}
+            providers={providers}
+            modelPickerOpen={modelPickerOpen}
+            onModelPickerOpenChange={setModelPickerOpen}
+            onSwitchProvider={(providerId, model) => {
+              void onSwitchProvider(providerId, model);
+            }}
             optionsDisabled={optionsDisabled}
             attachments={attachments}
             onChange={onDraftChange}
-            onSubmit={onSend}
+            onSubmit={() => {
+              if (isModelSlash(draft)) {
+                onDraftChange("");
+                setModelPickerOpen(true);
+                return;
+              }
+              onSend();
+            }}
             onStop={onStop}
             onModelChange={onModelChange}
             onEffortChange={onEffortChange}
@@ -1937,6 +1970,10 @@ export function ChatScreen({
           }}
           onCommand={(name) => {
             setPaletteOpen(false);
+            if (isModelCommandName(name)) {
+              setModelPickerOpen(true);
+              return;
+            }
             onDraftChange(`/${name} `);
             requestAnimationFrame(() => focusComposer());
           }}

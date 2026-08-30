@@ -2,6 +2,6 @@
 
 export type CommandView = { name: string, description: string, 
 /**
- * `"skill"` or `"mcp"`.
+ * `"skill"`, `"mcp"`, or `"builtin"`.
  */
 kind: string, };

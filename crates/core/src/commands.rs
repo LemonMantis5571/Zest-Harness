@@ -83,6 +83,7 @@ pub struct McpSlash {
 pub enum SlashKind {
     Skill,
     Mcp,
+    Builtin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,18 +122,40 @@ pub fn mcp_slashes(
         .collect()
 }
 
-/// Skills first on a name clash: `/plan` must keep meaning the plan skill.
+/// Built-in names that are not skills or MCP servers. A skill named `model`
+/// would steal `/model` from the picker, so reserved names win here.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[("model", "Switch model or provider")];
+
+fn is_reserved_command(name: &str) -> bool {
+    BUILTIN_COMMANDS
+        .iter()
+        .any(|(reserved, _)| reserved.eq_ignore_ascii_case(name))
+}
+
+/// Skills first on a name clash with MCP. Reserved builtins beat both.
 pub fn list_slash_commands(skills: &SkillSet, mcp: &[McpSlash]) -> Vec<SlashCommand> {
-    let mut commands: Vec<SlashCommand> = skills
-        .command_names()
-        .into_iter()
+    let mut commands: Vec<SlashCommand> = BUILTIN_COMMANDS
+        .iter()
         .map(|(name, description)| SlashCommand {
+            name: (*name).to_string(),
+            description: (*description).to_string(),
+            kind: SlashKind::Builtin,
+        })
+        .collect();
+    for (name, description) in skills.command_names() {
+        if is_reserved_command(&name) {
+            continue;
+        }
+        commands.push(SlashCommand {
             name,
             description,
             kind: SlashKind::Skill,
-        })
-        .collect();
+        });
+    }
     for server in mcp {
+        if is_reserved_command(&server.id) {
+            continue;
+        }
         let taken = commands
             .iter()
             .any(|command| command.name.eq_ignore_ascii_case(&server.id));
@@ -185,6 +208,16 @@ pub fn expand(input: &str, skills: &SkillSet, mcp: &[McpSlash]) -> Expansion {
             command: None,
         };
     };
+
+    // Reserved names are UI actions, not skills. A file named `model`
+    // must not steal `/model` from the picker.
+    if is_reserved_command(parsed.name) {
+        return Expansion {
+            prompt: input.to_string(),
+            display: input.to_string(),
+            command: None,
+        };
+    }
 
     if let Some(skill) = skills.command(parsed.name) {
         return Expansion {
@@ -464,17 +497,36 @@ mod tests {
     fn slash_list_skips_mcp_names_that_collide_with_skills() {
         let skills = skills_with("haiku", "Write a poem.");
         let listed = list_slash_commands(&skills, &[haiku_mcp()]);
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "haiku");
-        assert_eq!(listed[0].kind, SlashKind::Skill);
+        assert!(listed
+            .iter()
+            .any(|command| { command.name == "haiku" && command.kind == SlashKind::Skill }));
+        assert!(!listed.iter().any(|command| command.kind == SlashKind::Mcp));
+    }
+
+    #[test]
+    fn reserved_model_command_beats_a_skill_of_the_same_name() {
+        let skills = skills_with("model", "Pick a model.");
+        let listed = list_slash_commands(&skills, &[]);
+        assert!(listed
+            .iter()
+            .any(|command| { command.name == "model" && command.kind == SlashKind::Builtin }));
+        assert!(!listed
+            .iter()
+            .any(|command| { command.name == "model" && command.kind == SlashKind::Skill }));
+        let out = expand("/model", &skills, &[]);
+        assert_eq!(out.command, None);
+        assert_eq!(out.prompt, "/model");
     }
 
     #[test]
     fn slash_list_includes_enabled_mcp_servers() {
         let listed = list_slash_commands(&SkillSet::default(), &[haiku_mcp()]);
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "Haiku");
-        assert_eq!(listed[0].kind, SlashKind::Mcp);
+        assert!(listed
+            .iter()
+            .any(|command| { command.name == "Haiku" && command.kind == SlashKind::Mcp }));
+        assert!(listed
+            .iter()
+            .any(|command| { command.name == "model" && command.kind == SlashKind::Builtin }));
     }
 
     #[test]

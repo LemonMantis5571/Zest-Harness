@@ -258,6 +258,13 @@ export function startSession(
   });
 }
 
+export function switchSessionProvider(providerId: string, model?: string) {
+  return invoke<SessionInfo>("switch_session_provider", {
+    providerId,
+    model: model ?? null,
+  });
+}
+
 export function updateSessionOptions(options: {
   model?: string;
   effort?: string;

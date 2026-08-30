@@ -78,13 +78,16 @@ enabled = true
 # endpoint such as DeepSeek — has no CLI behind it, and this is the only way
 # such a chat can reach an MCP server.
 #
-# `env_vars` lists variable *names* only. Zest keeps credential-looking
-# variables out of the server process unless they are named here, and the values
-# stay in your environment so this file remains safe to commit. Every MCP tool
-# call is approval-gated, and a server is started only when a chat calls one of
-# its tools.
-#
-# [mcp.github]
+# GitHub is the starter. It stays off until you paste a personal access token
+# in Customize > MCPs. The token is stored in the OS credential manager, not
+# here. Every MCP tool call is still approval-gated.
+[mcp.github]
+url = "https://api.githubcopilot.com/mcp/"
+enabled = false
+timeout_secs = 120
+
+# A local process instead of a URL. `env_vars` lists variable *names* only.
+# [mcp.github-local]
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-github"]
 # env_vars = ["GITHUB_TOKEN"]

@@ -568,6 +568,12 @@ impl ProviderConfig {
             ProviderConfig::OpenaiCompatible { .. } => "openai_compatible",
         }
     }
+
+    /// Whether this kind runs its own agent loop. ChatGPT sign-in and API
+    /// keys use Zest's loop; vendor CLIs do not.
+    pub fn owns_agent_loop(&self) -> bool {
+        matches!(self, Self::CodexCli { .. } | Self::ClaudeCode { .. })
+    }
 }
 
 fn default_anthropic_key_env() -> String {
@@ -1536,6 +1542,15 @@ timeout_ms = 5000
         let config = Config::parse(raw).expect("committed zest.toml.example must parse");
         assert!(config.tools.bash.enabled);
         assert!(config.lint().is_empty(), "{:?}", config.lint());
+        let github = config
+            .mcp
+            .get("github")
+            .expect("fresh installs include the GitHub MCP starter");
+        assert!(!github.enabled);
+        assert_eq!(
+            github.http_url(),
+            Some("https://api.githubcopilot.com/mcp/")
+        );
     }
 
     #[test]
