@@ -294,18 +294,23 @@ impl OpenAiAccumulator {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<()> {
         if let Some(error) = event.get("error") {
-            return Err(HarnessError::Stream {
-                kind: error
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("provider_error")
-                    .to_string(),
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("OpenAI-compatible stream failed")
-                    .to_string(),
-            });
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if message.is_empty() {
+                return Err(HarnessError::Stream {
+                    kind: "openai_stream".into(),
+                    message: "OpenAI-compatible stream failed".into(),
+                });
+            }
+            let kind = error
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("error");
+            return Err(HarnessError::from_provider_stream(kind, message));
         }
         // Every chunk repeats it; the first one that carries it is enough.
         if self.served_model.is_none() {

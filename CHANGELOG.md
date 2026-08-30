@@ -22,6 +22,23 @@ a replacement for the commit history.
 
 ### Fixed
 
+- A failed Sign in with ChatGPT turn said only "The provider could not
+  complete the request. Try again." The chat now shows ChatGPT's own error,
+  or that the stream died, instead of that sentence.
+- After ChatGPT tools ran, the next request could send an empty `call_id`.
+  Argument deltas arrive under an item id; the real call id comes later.
+  Those are now one tool, and a blank id is not sent back.
+- A collapsed tool run no longer swaps in a warning icon or yellow "failed"
+  text. The line stays the same muted summary, with +/− on edits only.
+- Sign in with ChatGPT failed on Windows once the session JSON exceeded
+  Credential Manager's 2560-character UTF-16 password cap. Oversized secrets
+  are now split across entries and read back as one.
+- Escape on Customize, Profile, or Usage cancelled a running turn. It now
+  only closes the panel; Escape from the transcript still stops the turn.
+- Tool rows flashed mid-turn as the list collapsed and then grew new cards
+  under the fold. The group stays folded; later calls join it until you
+  click. A cancelled tool no longer repeats "interrupted" as both the chip
+  and the body.
 - A narrow window squeezed the conversation into a ~300px column: the sidebar
   held its full width and the transcript kept the left gutter that exists only
   to clear the checkpoint rail. Below 768px the sidebar now collapses (restoring

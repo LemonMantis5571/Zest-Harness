@@ -80,6 +80,7 @@ import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
+import { escapeAction } from "@/lib/escapeStack";
 import { formatChord, loadBindings, type CommandId } from "@/lib/keybindings";
 import { useKeybindings } from "@/lib/useKeybindings";
 import { useMediaQuery } from "@/lib/useMediaQuery";
@@ -1338,39 +1339,44 @@ export function ChatScreen({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (diffTarget) {
-        e.preventDefault();
-        closeDiff();
-        return;
-      }
-      if (providerSwitchOpen) {
-        e.preventDefault();
-        if (!providerSwitchBusy) setProviderSwitchOpen(false);
-        return;
-      }
-      if (settingsOpen) {
-        e.preventDefault();
-        closeSettings();
-        return;
-      }
-      if (paletteOpen) {
-        e.preventDefault();
-        setPaletteOpen(false);
-        return;
-      }
-      if (editingMessageId) {
-        e.preventDefault();
-        cancelEditingMessage();
-        return;
-      }
-      if (sending && onStop) {
-        e.preventDefault();
-        onStop();
+      const action = escapeAction({
+        diff: Boolean(diffTarget),
+        providerSwitch: providerSwitchOpen,
+        settings: settingsOpen,
+        palette: paletteOpen,
+        editing: Boolean(editingMessageId),
+        shellPanel: Boolean(shellPanel),
+        sending,
+      });
+      if (!action) return;
+      e.preventDefault();
+      switch (action) {
+        case "diff":
+          closeDiff();
+          return;
+        case "provider-switch":
+          if (!providerSwitchBusy) setProviderSwitchOpen(false);
+          return;
+        case "settings":
+          closeSettings();
+          return;
+        case "palette":
+          setPaletteOpen(false);
+          return;
+        case "editing":
+          cancelEditingMessage();
+          return;
+        case "shell-panel":
+          onClosePanel?.();
+          return;
+        case "stop-turn":
+          onStop?.();
+          return;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancelEditingMessage, closeDiff, closeSettings, diffTarget, editingMessageId, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
+  }, [cancelEditingMessage, closeDiff, closeSettings, diffTarget, editingMessageId, onClosePanel, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen, shellPanel]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.

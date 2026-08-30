@@ -1,11 +1,11 @@
 import type { ToolPart } from "./types";
 
 /**
- * A stretch of finished tool calls that can be shown as one line.
+ * A stretch of tool calls shown as one line.
  *
- * Anything still live — running, or waiting on approval — is never folded in.
- * A collapsed approval card would be a prompt the user cannot see, and a
- * collapsed spinner reads as a stall.
+ * New calls join the existing group so the list does not grow a fresh card
+ * stack under a fold the user already closed. An approval still breaks out:
+ * a collapsed prompt is a prompt the user cannot answer.
  */
 export type ToolRun =
   | { kind: "single"; tool: ToolPart }
@@ -25,33 +25,22 @@ export type ToolRunSummary = {
 };
 
 /**
- * Below this a group costs more attention than the rows it replaces, *while the
- * turn is still working*.
+ * Fold once there is more than one row.
  *
- * Kept high on purpose during a turn: rows folding away underneath you as each
- * call lands makes it hard to follow what the model is doing.
+ * One tool stays a row: "Ran 1 lookup" is longer than the path it would hide.
+ * After that the group stays folded and later calls join it.
  */
-export const COLLAPSE_THRESHOLD = 5;
+export const COLLAPSE_THRESHOLD = 2;
 
-/**
- * The threshold once every tool in the message has finished.
- *
- * A finished turn is something you scroll past, not something you watch, so the
- * bar for folding drops to "more than one row". Two is the floor rather than
- * one because "Ran 1 lookup" is longer than the row it would replace and hides
- * which file was read.
- */
-export const SETTLED_COLLAPSE_THRESHOLD = 2;
+export const SETTLED_COLLAPSE_THRESHOLD = COLLAPSE_THRESHOLD;
 
 /**
  * The threshold to group this message's tools at.
  *
- * Keyed on whether anything is still live rather than on the turn's sending
- * flag: tools routinely finish while the assistant is still writing its reply,
- * and by then the tool list is done and can be folded.
+ * Live and finished turns use the same bar: stay folded, append new calls.
  */
-export function collapseThresholdFor(tools: ToolPart[]): number {
-  return tools.every(isSettled) ? SETTLED_COLLAPSE_THRESHOLD : COLLAPSE_THRESHOLD;
+export function collapseThresholdFor(_tools: ToolPart[]): number {
+  return COLLAPSE_THRESHOLD;
 }
 
 const WRITE_TOOLS = new Set(["write_file", "edit_file"]);
@@ -113,7 +102,7 @@ export function summarizeTools(tools: ToolPart[]): ToolRunSummary {
   if (filesEdited > 0) {
     parts.push(`edited ${filesEdited} file${filesEdited === 1 ? "" : "s"}`);
   }
-  if (inspections > 0 && parts.length === 0) {
+  if (inspections > 0) {
     parts.push(`${inspections} lookup${inspections === 1 ? "" : "s"}`);
   }
 
@@ -123,13 +112,12 @@ export function summarizeTools(tools: ToolPart[]): ToolRunSummary {
 }
 
 /**
- * Fold long stretches of finished tool calls into summary rows.
+ * Fold tool calls into summary rows.
  *
- * Order is preserved exactly — a group only ever replaces a contiguous run, so
- * expanding one puts the rows back where they were. Once a group exists, later
- * finished calls join it instead of opening a new stack of cards under the
- * summary. Approvals still break out; a collapsed spinner is a stall the
- * working line already covers.
+ * A group is a contiguous run. Later calls join the group only when it is
+ * still the last thing on the list — an approval in between starts a new
+ * run so order stays honest. The group itself stays folded; opening it is
+ * a click.
  */
 export function groupToolRuns(
   tools: ToolPart[],
@@ -138,25 +126,19 @@ export function groupToolRuns(
   const runs: ToolRun[] = [];
   let pending: ToolPart[] = [];
 
-  const lastGroup = (): Extract<ToolRun, { kind: "group" }> | null => {
-    for (let i = runs.length - 1; i >= 0; i -= 1) {
-      const run = runs[i];
-      if (run.kind === "group") return run;
-    }
-    return null;
-  };
+  const lastRun = () => runs[runs.length - 1];
 
   const flush = () => {
     if (pending.length === 0) return;
-    const group = lastGroup();
-    if (group) {
-      group.tools.push(...pending);
-      group.summary = summarizeTools(group.tools.filter(isSettled));
+    const tail = lastRun();
+    if (tail?.kind === "group") {
+      tail.tools.push(...pending);
+      tail.summary = summarizeTools(tail.tools.filter(isSettled));
     } else if (pending.length >= threshold) {
       runs.push({
         kind: "group",
         tools: pending,
-        summary: summarizeTools(pending),
+        summary: summarizeTools(pending.filter(isSettled)),
       });
     } else {
       for (const tool of pending) runs.push({ kind: "single", tool });
@@ -165,17 +147,12 @@ export function groupToolRuns(
   };
 
   for (const tool of tools) {
-    if (isSettled(tool)) {
-      pending.push(tool);
-      continue;
-    }
-    flush();
-    if (tool.status === "awaiting_approval" || !lastGroup()) {
+    if (tool.status === "awaiting_approval") {
+      flush();
       runs.push({ kind: "single", tool });
       continue;
     }
-    const group = lastGroup();
-    if (group) group.tools.push(tool);
+    pending.push(tool);
   }
   flush();
 

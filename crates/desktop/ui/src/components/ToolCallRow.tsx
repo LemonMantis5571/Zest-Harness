@@ -20,6 +20,7 @@ import {
   isEmptyArgsPreview,
   parseMcpToolName,
 } from "@/lib/mcpDisplay";
+import { displayToolSummary, wasInterrupted } from "@/lib/toolDisplay";
 import type { ApprovalChoice, ToolPart } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -210,7 +211,9 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
     tool.metadata?.kind === "delegation" ? tool.metadata : null;
   const label = delegation ? "Delegate" : toolLabel(tool.name);
   const target = toolTarget(tool, delegation);
-  const hasBody = Boolean(tool.summary?.trim()) || hasDiff;
+  const summaryText = displayToolSummary(tool.summary);
+  const hasBody =
+    (Boolean(summaryText) && summaryText !== (tool.path?.trim() ?? "")) || hasDiff;
   const canOpenDiff = hasDiff && Boolean(onOpenDiff) && !mcp;
 
   return (
@@ -280,9 +283,9 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
       </button>
       {open && !canOpenDiff ? (
         <div className="mt-0.5 mb-1 ml-2 flex flex-col gap-1 border-l border-border/60 py-0.5 pl-3.5 pr-2">
-          {tool.summary ? (
+          {summaryText ? (
             <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/90">
-              {tool.summary}
+              {summaryText}
             </pre>
           ) : null}
         </div>
@@ -325,7 +328,9 @@ function toolTarget(
     return mcp.tool;
   }
   if (tool.path?.trim()) return tool.path;
-  if (tool.summary?.trim()) return tool.summary;
+  const summaryText = displayToolSummary(tool.summary);
+  if (summaryText) return summaryText;
+  if (wasInterrupted(tool.summary)) return "Interrupted";
 
   if (tool.status === "running") {
     const runningTargets: Record<string, string> = {

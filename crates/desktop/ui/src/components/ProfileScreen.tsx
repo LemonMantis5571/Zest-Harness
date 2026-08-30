@@ -43,7 +43,11 @@ export function ProfileScreen({
   // first, and editing the profile navigates away before opening Settings.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onBack();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onBack();
+      }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);

@@ -64,6 +64,7 @@ describe("summarizeTools", () => {
     assert.equal(summary.added, 3);
     assert.equal(summary.removed, 1);
     assert.equal(summary.label, "Ran 2 commands, edited 2 files");
+    assert.equal(summary.inspections, 0);
   });
 
   it("counts repeated edits to one file once", () => {
@@ -74,6 +75,15 @@ describe("summarizeTools", () => {
     assert.equal(summary.filesEdited, 1, "same path is one file changed");
     assert.equal(summary.added, 2, "but both edits still count lines");
     assert.equal(summary.label, "Ran edited 1 file");
+  });
+
+  it("names lookups even when a command is in the same run", () => {
+    const summary = summarizeTools([
+      tool({ id: "1", name: "bash" }),
+      tool({ id: "2", name: "read_file" }),
+      tool({ id: "3", name: "grep" }),
+    ]);
+    assert.equal(summary.label, "Ran 1 command, 2 lookups");
   });
 
   it("falls back to lookups when nothing was changed", () => {
@@ -97,16 +107,18 @@ describe("summarizeTools", () => {
 });
 
 describe("collapseThresholdFor", () => {
-  it("keeps short runs expanded while anything is still live", () => {
-    // Rows folding away as each call lands makes a working turn hard to follow.
-    const working = [...many(3), tool({ id: "spin", status: "running" })];
+  it("folds a live turn the same way as a finished one", () => {
+    const working = [...many(8), tool({ id: "spin", status: "running" })];
     assert.equal(collapseThresholdFor(working), COLLAPSE_THRESHOLD);
-    assert.equal(groupToolRuns(working, collapseThresholdFor(working)).length, 4);
+    const runs = groupToolRuns(working, collapseThresholdFor(working));
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].kind, "group");
+    if (runs[0].kind === "group") {
+      assert.equal(runs[0].tools.length, 9);
+    }
   });
 
   it("folds a finished message's tools once nothing is live", () => {
-    // The reported case: four reads that stayed as four rows after the turn
-    // ended, because the live-turn threshold is five.
     const finished = many(4);
     assert.equal(collapseThresholdFor(finished), SETTLED_COLLAPSE_THRESHOLD);
 
@@ -127,21 +139,23 @@ describe("collapseThresholdFor", () => {
   });
 
   it("waits for an approval that is still pending", () => {
-    // A settled-looking message with an unanswered prompt in it must not fold
-    // the prompt out of sight.
     const pending = [
       ...many(3),
       tool({ id: "ask", name: "bash", status: "awaiting_approval" }),
     ];
-    assert.equal(collapseThresholdFor(pending), COLLAPSE_THRESHOLD);
+    const runs = groupToolRuns(pending, collapseThresholdFor(pending));
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0].kind, "group");
+    assert.equal(runs[1].kind, "single");
+    if (runs[1].kind === "single") assert.equal(runs[1].tool.id, "ask");
   });
 });
 
 describe("groupToolRuns", () => {
-  it("leaves a short run expanded", () => {
-    const runs = groupToolRuns(many(COLLAPSE_THRESHOLD - 1));
-    assert.equal(runs.length, COLLAPSE_THRESHOLD - 1);
-    assert.ok(runs.every((r) => r.kind === "single"));
+  it("leaves a single call as a row", () => {
+    const runs = groupToolRuns(many(1));
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].kind, "single");
   });
 
   it("collapses once the run reaches the threshold", () => {
@@ -159,23 +173,21 @@ describe("groupToolRuns", () => {
       tool({ id: "live", name: "bash", status: "awaiting_approval" }),
       tool({ id: "spin", name: "bash", status: "running" }),
     ];
-    const runs = groupToolRuns(tools);
-    assert.equal(runs.length, 2);
-    assert.equal(runs[0].kind, "group");
-    assert.equal(runs[1].kind, "single");
+    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    assert.equal(runs[0]?.kind, "group");
+    assert.equal(runs[1]?.kind, "single");
     if (runs[1].kind === "single") assert.equal(runs[1].tool.id, "live");
-    if (runs[0].kind === "group") {
-      assert.ok(runs[0].tools.some((item) => item.id === "spin"));
-    }
+    assert.equal(runs[2]?.kind, "single");
+    if (runs[2].kind === "single") assert.equal(runs[2].tool.id, "spin");
   });
 
-  it("keeps later finished calls inside the first group", () => {
+  it("keeps later calls inside the first group", () => {
     const tools = [
       ...many(6).map((t, i) => ({ ...t, id: `a${i}` })),
       tool({ id: "live", status: "running" }),
       ...many(6).map((t, i) => ({ ...t, id: `b${i}` })),
     ];
-    const runs = groupToolRuns(tools);
+    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
     assert.deepEqual(
       runs.map((r) => r.kind),
       ["group"]
@@ -186,7 +198,7 @@ describe("groupToolRuns", () => {
     }
   });
 
-  it("does not open a new card stack under a collapsed group", () => {
+  it("does not open a new card stack under a folded group", () => {
     const tools = [
       ...many(6),
       tool({ id: "a", name: "mcp__Haiku__context_shell", status: "done" }),
@@ -200,6 +212,26 @@ describe("groupToolRuns", () => {
     if (runs[0].kind === "group") {
       assert.equal(runs[0].tools.length, 10);
       assert.equal(runs[0].summary.inspections, 9);
+    }
+  });
+
+  it("starts a new run after an approval instead of jumping the queue", () => {
+    const tools = [
+      ...many(3),
+      tool({ id: "ask", name: "bash", status: "awaiting_approval" }),
+      tool({ id: "after-1", status: "done" }),
+      tool({ id: "after-2", status: "done" }),
+    ];
+    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    assert.deepEqual(
+      runs.map((r) => r.kind),
+      ["group", "single", "group"]
+    );
+    if (runs[2].kind === "group") {
+      assert.deepEqual(
+        runs[2].tools.map((item) => item.id),
+        ["after-1", "after-2"]
+      );
     }
   });
 

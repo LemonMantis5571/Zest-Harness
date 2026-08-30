@@ -88,6 +88,34 @@ impl HarnessError {
         }
     }
 
+    /// The `error.message` a JSON API body carried, if it is short enough to
+    /// show. ChatGPT's Codex backend and OpenAI-compatible endpoints put the
+    /// real reason here; without this the desktop can only say "try again".
+    pub fn provider_api_message(&self) -> Option<String> {
+        let Self::Api { body, .. } = self.root() else {
+            return None;
+        };
+        extract_api_error_message(body)
+    }
+
+    /// A mid-stream error whose `message` was written by the provider.
+    pub fn from_provider_stream(kind: &str, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return Self::Stream {
+                kind: kind.to_string(),
+                message: "provider stream failed".into(),
+            };
+        }
+        let kind = kind.trim();
+        let kind = if kind.is_empty() { "error" } else { kind };
+        Self::Stream {
+            kind: format!("{PROVIDER_MESSAGE_PREFIX}{kind}"),
+            message: trimmed.to_string(),
+        }
+    }
+
     /// Whether the request never reached a server: DNS, TCP connect, TLS, or a
     /// timeout with no response.
     ///
@@ -173,6 +201,22 @@ impl HarnessError {
     }
 }
 
+fn extract_api_error_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/response/error/message"))
+        .or_else(|| value.pointer("/message"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty())?;
+    if message.chars().count() > 400 {
+        let cut: String = message.chars().take(400).collect();
+        return Some(format!("{cut}…"));
+    }
+    Some(message.to_string())
+}
+
 pub type Result<T> = std::result::Result<T, HarnessError>;
 
 #[cfg(test)]
@@ -248,6 +292,61 @@ mod tests {
             message: "   ".into(),
         };
         assert_eq!(blank.provider_user_message(), None);
+    }
+
+    #[test]
+    fn an_openai_api_body_offers_its_error_message() {
+        let failure = HarnessError::Api {
+            status: 402,
+            body: r#"{"error":{"message":"Insufficient Balance","type":"unknown_error"}}"#.into(),
+        };
+        assert_eq!(
+            failure.provider_api_message().as_deref(),
+            Some("Insufficient Balance")
+        );
+        assert_eq!(extract_api_error_message("not json"), None);
+    }
+
+    #[test]
+    fn a_chatgpt_responses_body_offers_its_error_message() {
+        let failure = HarnessError::Api {
+            status: 429,
+            body: r#"{"error":{"message":"You've hit your usage limit. Try again in 3 hours.","type":"usage_limit_exceeded"}}"#.into(),
+        };
+        assert_eq!(
+            failure.provider_api_message().as_deref(),
+            Some("You've hit your usage limit. Try again in 3 hours.")
+        );
+
+        let nested = HarnessError::Api {
+            status: 400,
+            body:
+                r#"{"response":{"error":{"message":"This model is not available on your plan."}}}"#
+                    .into(),
+        };
+        assert_eq!(
+            nested.provider_api_message().as_deref(),
+            Some("This model is not available on your plan.")
+        );
+    }
+
+    #[test]
+    fn a_provider_stream_error_is_tagged_only_when_the_message_is_theirs() {
+        let tagged = HarnessError::from_provider_stream(
+            "usage_limit_exceeded",
+            "You've hit your usage limit.",
+        );
+        assert_eq!(
+            tagged.provider_user_message(),
+            Some("You've hit your usage limit.")
+        );
+
+        let blank = HarnessError::from_provider_stream("error", "   ");
+        assert_eq!(blank.provider_user_message(), None);
+        assert!(matches!(
+            blank,
+            HarnessError::Stream { kind, .. } if kind == "error"
+        ));
     }
 
     /// Retry must not hide the tag, or a single retried attempt would silently

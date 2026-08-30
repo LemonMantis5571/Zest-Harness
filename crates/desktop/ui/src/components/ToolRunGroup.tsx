@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRightIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { ChevronRightIcon } from "lucide-react";
 
 import { ToolCallRow } from "@/components/ToolCallRow";
 import { countDiffLines, type ToolRunSummary } from "@/lib/toolRuns";
@@ -17,11 +17,10 @@ type Props = {
 };
 
 /**
- * One line standing in for a stretch of finished tool calls.
+ * One line standing in for a stretch of tool calls.
  *
- * Inspection-only runs collapse by default, but edit-containing runs stay open
- * so their diffs remain immediately reviewable. Failures are always stated on
- * the summary line because a fold that hides an error is worse than the rows.
+ * Stays folded until the user opens it. New calls join the same group, so
+ * opening it later still shows everything.
  */
 export function ToolRunGroup({
   tools,
@@ -30,11 +29,7 @@ export function ToolRunGroup({
   onOpenDiff,
 }: Props) {
   const hasChanges = summary.added > 0 || summary.removed > 0;
-  const totalFailure = summary.errors > 0 && summary.errors === tools.length;
-  const partialFailure = summary.errors > 0 && !totalFailure;
-  // Completed edits contain the user's most important review surface. Keep
-  // those cards visible; inspection-only runs can still collapse to one line.
-  const [open, setOpen] = useState(hasChanges);
+  const [open, setOpen] = useState(false);
 
   if (open) {
     return (
@@ -73,15 +68,6 @@ export function ToolRunGroup({
         "hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
       )}
     >
-      <span className="grid size-4 shrink-0 place-items-center">
-        {totalFailure ? (
-          <XIcon className="size-3 text-destructive" />
-        ) : partialFailure ? (
-          <TriangleAlertIcon className="size-3 text-amber-400" />
-        ) : (
-          <ChevronRightIcon className="size-3 text-muted-foreground/60" />
-        )}
-      </span>
       <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">
         {summary.label}
       </span>
@@ -94,16 +80,6 @@ export function ToolRunGroup({
           {summary.removed > 0 ? (
             <span className="text-destructive">-{summary.removed}</span>
           ) : null}
-        </span>
-      ) : null}
-      {summary.errors > 0 ? (
-        <span
-          className={cn(
-            "shrink-0 text-[11px]",
-            totalFailure ? "text-destructive" : "text-amber-400"
-          )}
-        >
-          {summary.errors} failed
         </span>
       ) : null}
       <span className="min-w-0 flex-1" />

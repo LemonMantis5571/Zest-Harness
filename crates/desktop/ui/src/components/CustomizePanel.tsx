@@ -116,9 +116,11 @@ export function CustomizePanel({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      // Escape inside a field belongs to the field. Unlike the read-only
-      // screens, this panel is mostly a form, and dismissing the whole page
-      // while someone is typing a server command would lose their draft.
+      // Always swallow the key while this panel is up. ChatScreen's Escape
+      // handler would otherwise close the panel (or cancel a running turn)
+      // even when the key belonged to a field.
+      event.preventDefault();
+      event.stopPropagation();
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) {

@@ -193,9 +193,12 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
         }
         if !tool_results.is_empty() {
             for result in tool_results {
+                let Some(call_id) = json_str(result, "tool_use_id") else {
+                    continue;
+                };
                 input.push(json!({
                     "type": "function_call_output",
-                    "call_id": result.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
+                    "call_id": call_id,
                     "output": result.get("content").and_then(Value::as_str).unwrap_or(""),
                 }));
             }
@@ -206,6 +209,9 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
                 input.push(message_item("assistant", "output_text", &text));
             }
             for call in tool_calls {
+                let Some(call_id) = json_str(call, "id") else {
+                    continue;
+                };
                 let arguments = call
                     .get("input")
                     .map(|value| {
@@ -218,7 +224,7 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
                     .unwrap_or_else(|| "{}".into());
                 input.push(json!({
                     "type": "function_call",
-                    "call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),
+                    "call_id": call_id,
                     "name": call.get("name").and_then(Value::as_str).unwrap_or(""),
                     "arguments": arguments,
                 }));
@@ -353,6 +359,7 @@ struct ResponsesAccumulator {
 #[derive(Default)]
 struct ToolAccum {
     id: String,
+    item_id: String,
     name: String,
     arguments: String,
     emitted: bool,
@@ -364,19 +371,8 @@ impl ResponsesAccumulator {
         event: &Value,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<()> {
-        if let Some(error) = event.get("error") {
-            return Err(HarnessError::Stream {
-                kind: error
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("provider_error")
-                    .to_string(),
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("ChatGPT Codex stream failed")
-                    .to_string(),
-            });
+        if let Some(error) = event.get("error").filter(|value| !value.is_null()) {
+            return Err(chatgpt_stream_error(error));
         }
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         if self.served_model.is_none() {
@@ -405,14 +401,24 @@ impl ResponsesAccumulator {
             }
             "response.function_call_arguments.delta" => {
                 if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                    let key = event
-                        .get("item_id")
-                        .or_else(|| event.get("call_id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("0")
-                        .to_string();
-                    self.tools.entry(key).or_default().arguments.push_str(delta);
+                    if let Some(tool) =
+                        self.tool_mut(json_str(event, "call_id"), json_str(event, "item_id"))
+                    {
+                        tool.arguments.push_str(delta);
+                    }
                 }
+            }
+            "response.failed" | "response.incomplete" => {
+                if let Some(error) = event.pointer("/response/error") {
+                    return Err(chatgpt_stream_error(error));
+                }
+                if kind == "response.failed" {
+                    return Err(HarnessError::from_provider_stream(
+                        "error",
+                        "ChatGPT stopped the reply before it finished.",
+                    ));
+                }
+                self.done = true;
             }
             "response.completed" | "response.done" => {
                 if let Some(usage) = event
@@ -439,29 +445,22 @@ impl ResponsesAccumulator {
     ) {
         match item.get("type").and_then(Value::as_str) {
             Some("function_call") => {
-                let id = item
-                    .get("call_id")
-                    .or_else(|| item.get("id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
-                let tool = self.tools.entry(id.clone()).or_default();
-                if tool.id.is_empty() {
-                    tool.id = id;
-                }
+                let call_id = json_str(item, "call_id");
+                let Some(tool) = self.tool_mut(call_id, json_str(item, "id")) else {
+                    return;
+                };
                 if tool.name.is_empty() {
-                    tool.name = name;
+                    if let Some(name) = json_str(item, "name") {
+                        tool.name = name.to_string();
+                    }
                 }
+                let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
                 if !arguments.is_empty() && tool.arguments.is_empty() {
                     tool.arguments.push_str(arguments);
                 }
-                if !tool.emitted && !tool.id.is_empty() && !tool.name.is_empty() {
+                // Wait for ChatGPT's call_id so the UI row and the next request
+                // agree. An item id is only a join key.
+                if !tool.emitted && call_id.is_some() && !tool.name.is_empty() {
                     on_event(StreamEvent::ToolCallStart {
                         name: &tool.name,
                         id: &tool.id,
@@ -521,17 +520,61 @@ impl ResponsesAccumulator {
         self.usage_available = true;
     }
 
+    /// ChatGPT keys argument deltas by `item_id` (`fc_…`) and the call itself
+    /// by `call_id`. Those must become one tool; a leftover keyed only by the
+    /// item id is what went back as `call_id: ""`.
+    fn tool_mut(&mut self, call_id: Option<&str>, item_id: Option<&str>) -> Option<&mut ToolAccum> {
+        if call_id.is_none() && item_id.is_none() {
+            return None;
+        }
+        if let (Some(call), Some(item)) = (call_id, item_id) {
+            if call != item {
+                if let Some(orphan) = self.tools.remove(item) {
+                    merge_tool(self.tools.entry(call.to_string()).or_default(), orphan);
+                }
+            }
+        }
+        let key = match (call_id, item_id) {
+            (Some(call), _) => call.to_string(),
+            (None, Some(item)) => self
+                .tools
+                .iter()
+                .find_map(|(key, tool)| {
+                    (tool.item_id == item || tool.id == item || key == item).then(|| key.clone())
+                })
+                .unwrap_or_else(|| item.to_string()),
+            (None, None) => return None,
+        };
+        let tool = self.tools.entry(key).or_default();
+        if let Some(call) = call_id {
+            tool.id = call.to_string();
+        } else if tool.id.is_empty() {
+            tool.id = item_id.unwrap_or("").to_string();
+        }
+        if let Some(item) = item_id {
+            if tool.item_id.is_empty() {
+                tool.item_id = item.to_string();
+            }
+        }
+        Some(tool)
+    }
+
     fn finish(self) -> Completion {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(json!({"type":"text", "text": self.text}));
         }
-        let stop_reason = if self.tools.is_empty() {
+        let tools: Vec<ToolAccum> = self
+            .tools
+            .into_values()
+            .filter(|tool| !tool.id.is_empty() && !tool.name.is_empty())
+            .collect();
+        let stop_reason = if tools.is_empty() {
             Some("end_turn".into())
         } else {
             Some("tool_use".into())
         };
-        for tool in self.tools.into_values() {
+        for tool in tools {
             let input = serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}));
             content.push(json!({
                 "type": "tool_use",
@@ -550,6 +593,62 @@ impl ResponsesAccumulator {
             provider_session: None,
         }
     }
+}
+
+fn json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn merge_tool(dest: &mut ToolAccum, src: ToolAccum) {
+    if dest.id.is_empty() {
+        dest.id = src.id;
+    }
+    if dest.item_id.is_empty() {
+        dest.item_id = src.item_id;
+    }
+    if dest.name.is_empty() {
+        dest.name = src.name;
+    }
+    if dest.arguments.is_empty() {
+        dest.arguments = src.arguments;
+    } else if src.arguments.len() > dest.arguments.len() {
+        dest.arguments = src.arguments;
+    }
+    dest.emitted |= src.emitted;
+}
+
+/// ChatGPT's own stream text, tagged so the desktop can show it. A missing
+/// message stays untagged: that fallback is ours, not theirs.
+fn chatgpt_stream_error(error: &Value) -> HarnessError {
+    if let Some(message) = error
+        .as_str()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+    {
+        return HarnessError::from_provider_stream("error", message);
+    }
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let kind = error
+        .get("type")
+        .or_else(|| error.get("code"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("error");
+    if message.is_empty() {
+        return HarnessError::Stream {
+            kind: kind.to_string(),
+            message: "ChatGPT Codex stream failed".into(),
+        };
+    }
+    HarnessError::from_provider_stream(kind, message)
 }
 
 /// Saturate rather than wrap. A provider that reports a nonsense token count
@@ -669,5 +768,214 @@ mod tests {
         }));
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.cache_read_input_tokens, 100);
+    }
+
+    fn push_event(event: Value) -> crate::error::Result<()> {
+        let mut accumulator = ResponsesAccumulator::default();
+        accumulator.push(&event, &mut |_| {})
+    }
+
+    #[test]
+    fn a_null_error_on_a_completed_event_is_not_a_failure() {
+        push_event(json!({
+            "type": "response.completed",
+            "error": null,
+            "response": { "status": "completed" },
+        }))
+        .expect("ChatGPT puts error:null on successful completions");
+    }
+
+    #[test]
+    fn a_chatgpt_usage_limit_reaches_the_desktop_as_their_words() {
+        let error = push_event(json!({
+            "type": "error",
+            "error": {
+                "type": "usage_limit_exceeded",
+                "message": "You've hit your usage limit. Try again in 3 hours.",
+            },
+        }))
+        .expect_err("usage limit is a stream failure");
+        assert_eq!(
+            error.provider_user_message(),
+            Some("You've hit your usage limit. Try again in 3 hours.")
+        );
+    }
+
+    #[test]
+    fn a_failed_response_with_a_nested_error_is_shown() {
+        let error = push_event(json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "server_error",
+                    "message": "The model provider had an error.",
+                },
+            },
+        }))
+        .expect_err("response.failed is a stream failure");
+        assert_eq!(
+            error.provider_user_message(),
+            Some("The model provider had an error.")
+        );
+    }
+
+    #[test]
+    fn an_empty_stream_error_stays_off_the_chat_bubble() {
+        let error = push_event(json!({
+            "type": "error",
+            "error": { "type": "server_error" },
+        }))
+        .expect_err("empty message is still a failure");
+        assert_eq!(error.provider_user_message(), None);
+    }
+
+    fn complete(events: &[Value]) -> Completion {
+        let mut accumulator = ResponsesAccumulator::default();
+        for event in events {
+            accumulator
+                .push(event, &mut |_| {})
+                .expect("fixture events are valid");
+        }
+        accumulator.finish()
+    }
+
+    fn tool_uses_of(completion: &Completion) -> Vec<&Value> {
+        completion
+            .content
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .collect()
+    }
+
+    #[test]
+    fn argument_deltas_keyed_by_item_id_join_the_call_id() {
+        // ChatGPT streams args under `fc_…` and names the call `call_…` later.
+        // Those used to become two tools; the leftover went back as call_id "".
+        let completion = complete(&[
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": "{\"path\":\"a.rs\"}",
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"a.rs\"}",
+                },
+            }),
+        ]);
+        let tools = tool_uses_of(&completion);
+        assert_eq!(tools.len(), 1, "one streamed call is one tool");
+        assert_eq!(tools[0]["id"], "call_1");
+        assert_eq!(tools[0]["name"], "read_file");
+        assert_eq!(tools[0]["input"]["path"], "a.rs");
+    }
+
+    #[test]
+    fn an_empty_call_id_does_not_hide_the_item_id() {
+        let completion = complete(&[json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "",
+                "name": "read_file",
+                "arguments": "{}",
+            },
+        })]);
+        let tools = tool_uses_of(&completion);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["id"], "fc_1");
+    }
+
+    #[test]
+    fn four_lookups_do_not_leave_an_empty_call_id_on_the_next_request() {
+        let mut events = Vec::new();
+        for (item, call) in [
+            ("fc_1", "call_1"),
+            ("fc_2", "call_2"),
+            ("fc_3", "call_3"),
+            ("fc_4", "call_4"),
+        ] {
+            events.push(json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": item,
+                "delta": "{}",
+            }));
+            events.push(json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": item,
+                    "call_id": call,
+                    "name": "read_file",
+                    "arguments": "{}",
+                },
+            }));
+        }
+        let completion = complete(&events);
+        let tools = tool_uses_of(&completion);
+        assert_eq!(tools.len(), 4);
+        assert!(tools
+            .iter()
+            .all(|tool| tool["id"].as_str().is_some_and(|id| !id.is_empty())));
+
+        let messages = vec![
+            msg("user", vec![json!({"type":"text","text":"look around"})]),
+            Message::assistant(completion.content.clone()),
+            msg(
+                "user",
+                tools
+                    .iter()
+                    .map(|tool| {
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool["id"],
+                            "content": "ok",
+                        })
+                    })
+                    .collect(),
+            ),
+        ];
+        let (_, input) = responses_input(None, &messages);
+        let input = input.as_array().expect("array");
+        assert_eq!(input.len(), 9, "user + 4 calls + 4 outputs");
+        assert_eq!(input[5]["type"], "function_call_output");
+        assert_eq!(input[5]["call_id"], "call_1");
+        assert!(input.iter().all(|item| {
+            item.get("call_id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !id.is_empty())
+        }));
+    }
+
+    #[test]
+    fn responses_input_drops_a_blank_call_id_already_in_history() {
+        let messages = vec![
+            msg("user", vec![json!({"type":"text","text":"hi"})]),
+            msg(
+                "assistant",
+                vec![
+                    json!({"type":"tool_use","id":"","name":"read_file","input":{}}),
+                    json!({"type":"tool_use","id":"call_ok","name":"read_file","input":{}}),
+                ],
+            ),
+            msg(
+                "user",
+                vec![
+                    json!({"type":"tool_result","tool_use_id":"","content":"ghost"}),
+                    json!({"type":"tool_result","tool_use_id":"call_ok","content":"ok"}),
+                ],
+            ),
+        ];
+        let (_, input) = responses_input(None, &messages);
+        let input = input.as_array().expect("array");
+        assert_eq!(input.len(), 3, "user + the real call + its output");
+        assert_eq!(input[1]["call_id"], "call_ok");
+        assert_eq!(input[2]["call_id"], "call_ok");
     }
 }

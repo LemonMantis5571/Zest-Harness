@@ -8146,7 +8146,22 @@ fn format_turn_error(err: &HarnessError) -> String {
     if err.is_auth_problem() {
         return "This provider needs you to sign in again. Reconnect, then send your message again.".into();
     }
-    "The provider could not complete the request. Try again.".into()
+    if let Some(message) = err.provider_api_message() {
+        return message;
+    }
+    match err.root() {
+        HarnessError::PrematureEof => {
+            "The provider stopped sending a reply before it finished.".into()
+        }
+        HarnessError::StreamIdleTimeout => "The provider went quiet. Try again.".into(),
+        HarnessError::StoppedEarly(reason) if reason.contains("max_tokens") => {
+            "The model hit its output limit before it finished.".into()
+        }
+        HarnessError::StoppedEarly(reason) if reason.contains("declined") => {
+            "The model declined this request.".into()
+        }
+        _ => "The provider could not complete the request. Try again.".into(),
+    }
 }
 
 fn format_turn_error_for_provider(err: &HarnessError, provider_id: &str) -> String {
@@ -8346,6 +8361,26 @@ mod tests {
         assert_eq!(
             format_turn_error(&internal),
             "The provider could not complete the request. Try again."
+        );
+    }
+
+    #[test]
+    fn a_chatgpt_usage_limit_is_shown_instead_of_try_again() {
+        let failure = HarnessError::Api {
+            status: 429,
+            body: r#"{"error":{"message":"You've hit your usage limit. Try again in 3 hours.","type":"usage_limit_exceeded"}}"#.into(),
+        };
+        assert_eq!(
+            format_turn_error(&failure),
+            "You've hit your usage limit. Try again in 3 hours."
+        );
+    }
+
+    #[test]
+    fn a_dropped_stream_names_what_happened() {
+        assert_eq!(
+            format_turn_error(&HarnessError::PrematureEof),
+            "The provider stopped sending a reply before it finished."
         );
     }
 

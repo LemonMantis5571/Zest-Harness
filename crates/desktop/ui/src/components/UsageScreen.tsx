@@ -91,7 +91,11 @@ export function UsageScreen({ onBack }: Props) {
   // Escape returns to chat, matching every other dismissable surface.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onBack();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onBack();
+      }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
