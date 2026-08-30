@@ -25,6 +25,9 @@ a replacement for the commit history.
 
 ### Fixed
 
+- A timed-out command on Windows could keep running after Zest stopped
+  waiting. The process is now put in a job object so the whole tree dies.
+
 - A failed Sign in with ChatGPT turn said only "The provider could not
   complete the request. Try again." The chat now shows ChatGPT's own error,
   or that the stream died, instead of that sentence.

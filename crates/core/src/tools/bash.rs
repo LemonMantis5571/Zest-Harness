@@ -482,12 +482,11 @@ impl Tool for Bash {
         #[cfg(not(windows))]
         cmd.process_group(0);
 
-        // No console flash on Windows — this runs inside a GUI app.
+        // No console flash on Windows — this runs inside a GUI app. Suspended
+        // until the process is in a job, so `cmd` cannot start children that
+        // would outlive a timeout.
         #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        cmd.creation_flags(crate::process_job::windows_creation_flags());
 
         // Bash is an execution boundary too. Keep provider credentials,
         // including the name-only OAuth session fallback, out of commands
@@ -497,6 +496,14 @@ impl Tool for Bash {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot run `{command}`: {e}"))?;
+        let job = crate::process_job::ProcessJob::new();
+        if let Some(pid) = child.id() {
+            if let Some(job) = job.as_ref() {
+                let _ = job.assign(pid);
+            }
+            #[cfg(windows)]
+            crate::process_job::resume_process(pid);
+        }
 
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
@@ -525,8 +532,11 @@ impl Tool for Bash {
                 // Dropping the timed-out future only releases the borrow on
                 // `child` — it does not stop the process. Without this kill a
                 // runaway build would keep burning CPU after the turn moved on.
+                if let Some(job) = job.as_ref() {
+                    job.terminate();
+                }
                 if let Some(pid) = child.id() {
-                    terminate_process_tree(pid);
+                    crate::process_job::terminate_process_tree(pid);
                 }
                 let _ = child.start_kill();
                 let _ = child.wait().await;
@@ -699,31 +709,6 @@ async fn probe_ready_url(raw: &str) -> bool {
         }
     }
     false
-}
-
-fn terminate_process_tree(pid: u32) {
-    #[cfg(windows)]
-    {
-        use std::process::Command;
-
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-
-    #[cfg(not(windows))]
-    {
-        let process_group = format!("-{pid}");
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &process_group])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
 }
 
 /// Format a finished command for the model: exit status first, then output with
@@ -901,8 +886,17 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-bash-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        // Unique per call. A shared `zest-bash-kill` folder on Windows keeps a
+        // leftover `marker.txt` when a previous process still has the directory
+        // open, and `remove_dir_all` then fails silently.
+        let dir = std::env::temp_dir().join(format!(
+            "zest-bash-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

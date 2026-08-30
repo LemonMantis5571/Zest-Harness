@@ -139,6 +139,7 @@ struct JobRecord {
     output_notify: Notify,
     done_notify: Notify,
     kill_requested: AtomicBool,
+    job: Mutex<Option<crate::process_job::ProcessJob>>,
 }
 
 struct Inner {
@@ -207,14 +208,19 @@ impl JobRegistry {
         #[cfg(not(windows))]
         process.process_group(0);
         #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            process.creation_flags(CREATE_NO_WINDOW);
-        }
+        process.creation_flags(crate::process_job::windows_creation_flags());
         crate::tools::external_agent::scrub_secret_environment(&mut process, &[]);
         let mut child = process
             .spawn()
             .map_err(|error| format!("cannot start background job `{command}`: {error}"))?;
+        let job = crate::process_job::ProcessJob::new();
+        if let Some(pid) = child.id() {
+            if let Some(job) = job.as_ref() {
+                let _ = job.assign(pid);
+            }
+            #[cfg(windows)]
+            crate::process_job::resume_process(pid);
+        }
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let snapshot = JobSnapshot {
@@ -237,6 +243,7 @@ impl JobRegistry {
             output_notify: Notify::new(),
             done_notify: Notify::new(),
             kill_requested: AtomicBool::new(false),
+            job: Mutex::new(job),
         });
         self.inner
             .jobs
@@ -403,7 +410,12 @@ impl JobRegistry {
                 .ok()
                 .and_then(|snapshot| snapshot.pid);
             if let Some(pid) = pid {
-                terminate_process_tree(pid);
+                if let Ok(job) = record.job.lock() {
+                    if let Some(job) = job.as_ref() {
+                        job.terminate();
+                    }
+                }
+                crate::process_job::terminate_process_tree(pid);
             } else {
                 let mut child = record.child.lock().await;
                 if let Some(child) = child.as_mut() {
@@ -570,21 +582,6 @@ fn shell_command(command: &str) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd
-}
-
-#[cfg(windows)]
-fn terminate_process_tree(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status();
-}
-
-#[cfg(not(windows))]
-fn terminate_process_tree(pid: u32) {
-    let process_group = format!("-{pid}");
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", "--", &process_group])
-        .status();
 }
 
 #[cfg(test)]

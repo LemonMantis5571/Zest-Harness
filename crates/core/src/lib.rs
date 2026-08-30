@@ -30,6 +30,7 @@ pub mod orchestration;
 pub mod persist;
 pub mod prefs;
 pub mod pricing;
+pub mod process_job;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
