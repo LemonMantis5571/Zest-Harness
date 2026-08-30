@@ -613,9 +613,7 @@ fn merge_tool(dest: &mut ToolAccum, src: ToolAccum) {
     if dest.name.is_empty() {
         dest.name = src.name;
     }
-    if dest.arguments.is_empty() {
-        dest.arguments = src.arguments;
-    } else if src.arguments.len() > dest.arguments.len() {
+    if src.arguments.len() > dest.arguments.len() {
         dest.arguments = src.arguments;
     }
     dest.emitted |= src.emitted;
