@@ -74,6 +74,12 @@ import {
   removeThreadTurn,
   type ThreadQueueMap,
 } from "@/lib/threadQueue";
+import {
+  appendNewerMessages,
+  firstLoadedMessageId,
+  lastLoadedMessageId,
+  prependOlderMessages,
+} from "@/lib/threadWindow";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -453,6 +459,11 @@ export default function App() {
 
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [hasNewerMessages, setHasNewerMessages] = useState(false);
+  const [hiddenUserTurns, setHiddenUserTurns] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
@@ -644,6 +655,15 @@ export default function App() {
   const workspaceChangesRef = useRef(new Map<string, WorkspaceChange>());
   const messagesRef = useRef<ChatMessage[]>([]);
   messagesRef.current = messages;
+  const loadingOlderRef = useRef(false);
+  const loadingNewerRef = useRef(false);
+  const hasOlderMessagesRef = useRef(false);
+  hasOlderMessagesRef.current = hasOlderMessages;
+  const hasNewerMessagesRef = useRef(false);
+  hasNewerMessagesRef.current = hasNewerMessages;
+  const threadWindowRef = useRef(
+    new Map<string, { hasOlder: boolean; hasNewer: boolean; hidden: number }>()
+  );
   const sendingRef = useRef(sending);
   sendingRef.current = sending;
   const threadActivityRef = useRef<ThreadActivityMap>({});
@@ -1413,6 +1433,24 @@ export default function App() {
     });
     setMessages(messages);
     messagesRef.current = messages;
+    const windowFlags = liveState
+      ? threadWindowRef.current.get(info.threadId)
+      : undefined;
+    const hasOlder = windowFlags?.hasOlder ?? Boolean(info.hasOlderMessages);
+    const hasNewer = windowFlags?.hasNewer ?? Boolean(info.hasNewerMessages);
+    const hiddenTurns = windowFlags?.hidden ?? info.hiddenUserTurns ?? 0;
+    setHasOlderMessages(hasOlder);
+    setHasNewerMessages(hasNewer);
+    setHiddenUserTurns(hiddenTurns);
+    setLoadingOlder(false);
+    loadingOlderRef.current = false;
+    setLoadingNewer(false);
+    loadingNewerRef.current = false;
+    threadWindowRef.current.set(info.threadId, {
+      hasOlder,
+      hasNewer,
+      hidden: hiddenTurns,
+    });
     activeAssistantId.current = chatState.activeAssistantId;
     currentTurnIdRef.current = chatState.currentTurnId;
     setSending(chatState.sending);
@@ -1467,6 +1505,93 @@ export default function App() {
 
     setPickerError(null);
     setScreen("chat");
+  }, []);
+
+  const onLoadOlder = useCallback(async () => {
+    const threadId = sessionRef.current?.threadId;
+    const beforeMessageId = firstLoadedMessageId(messagesRef.current);
+    if (
+      !threadId ||
+      !beforeMessageId ||
+      loadingOlderRef.current ||
+      !hasOlderMessagesRef.current
+    ) {
+      return;
+    }
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const page = await backend.loadOlderThreadMessages({
+        threadId,
+        beforeMessageId,
+      });
+      if (sessionRef.current?.threadId !== threadId) return;
+      const next = prependOlderMessages(
+        messagesRef.current,
+        normalizeMessages(page.messages)
+      );
+      setMessages(next);
+      messagesRef.current = next;
+      const chatState = chatStatesRef.current.get(threadId);
+      if (chatState) {
+        chatStatesRef.current.set(threadId, { ...chatState, messages: next });
+      }
+      setHasOlderMessages(page.hasOlderMessages);
+      setHiddenUserTurns(page.hiddenUserTurns);
+      threadWindowRef.current.set(threadId, {
+        hasOlder: page.hasOlderMessages,
+        hasNewer: hasNewerMessagesRef.current,
+        hidden: page.hiddenUserTurns,
+      });
+    } catch (error) {
+      ignoreExpectedFailure(error, "load earlier turns");
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, []);
+
+  const onLoadNewer = useCallback(async () => {
+    const threadId = sessionRef.current?.threadId;
+    const afterMessageId = lastLoadedMessageId(messagesRef.current);
+    if (
+      !threadId ||
+      !afterMessageId ||
+      loadingNewerRef.current ||
+      !hasNewerMessagesRef.current
+    ) {
+      return;
+    }
+    loadingNewerRef.current = true;
+    setLoadingNewer(true);
+    try {
+      const page = await backend.loadNewerThreadMessages({
+        threadId,
+        afterMessageId,
+      });
+      if (sessionRef.current?.threadId !== threadId) return;
+      const next = appendNewerMessages(
+        messagesRef.current,
+        normalizeMessages(page.messages)
+      );
+      setMessages(next);
+      messagesRef.current = next;
+      const chatState = chatStatesRef.current.get(threadId);
+      if (chatState) {
+        chatStatesRef.current.set(threadId, { ...chatState, messages: next });
+      }
+      setHasNewerMessages(page.hasNewerMessages);
+      threadWindowRef.current.set(threadId, {
+        hasOlder: hasOlderMessagesRef.current,
+        hasNewer: page.hasNewerMessages,
+        hidden: threadWindowRef.current.get(threadId)?.hidden ?? 0,
+      });
+    } catch (error) {
+      ignoreExpectedFailure(error, "load later turns");
+    } finally {
+      loadingNewerRef.current = false;
+      setLoadingNewer(false);
+    }
   }, []);
 
   const enterChat = useCallback(
@@ -2106,6 +2231,7 @@ export default function App() {
       newThread?: boolean;
       providerId?: string;
       copyThread?: boolean;
+      focusMessageId?: string;
     }): Promise<boolean> => {
       try {
         const current = sessionRef.current;
@@ -2816,6 +2942,13 @@ export default function App() {
           <ChatScreen
             session={session}
             messages={messages}
+            hasOlderMessages={hasOlderMessages}
+            hasNewerMessages={hasNewerMessages}
+            hiddenUserTurns={hiddenUserTurns}
+            loadingOlder={loadingOlder}
+            loadingNewer={loadingNewer}
+            onLoadOlder={onLoadOlder}
+            onLoadNewer={onLoadNewer}
             draft={draft}
             attachments={attachments}
             branch={branch}

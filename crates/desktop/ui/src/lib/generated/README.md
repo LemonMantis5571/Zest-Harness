@@ -14,6 +14,7 @@ Committed files:
 
 - `ChatEvent.ts` — tagged union (`kind` + snake_case variants), optional `metadata`
 - `SessionInfo.ts` — camelCase session snapshot with Rust `models` / `defaultModel`
+- `OlderThreadMessages.ts` — paged older turns for a windowed open
 - `ProviderView.ts` — picker row with configured + catalogue
 - `ModelCapability.ts` — model id + efforts
 - `ToolMetaView.ts` — delegation provenance side-channel

@@ -121,10 +121,12 @@ describe("command palette search", () => {
           projectPath: "/code/zest",
           updatedAt: 10,
           snippet,
+          messageId: "u-local",
         },
       ]
     );
     assert.equal(merged.length, 1);
     assert.equal(merged[0]?.snippet, snippet);
+    assert.equal(merged[0]?.messageId, "u-local");
   });
 });

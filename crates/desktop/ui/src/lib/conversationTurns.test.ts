@@ -88,6 +88,39 @@ describe("conversation turn index", () => {
     assert.equal(turn.checkpoint?.createdAt, 1_700_000_000);
   });
 
+  it("numbers a windowed tail from the hidden offset and ignores stale counts", () => {
+    const checkpoints = [
+      {
+        id: "cp-old",
+        createdAt: 1,
+        label: "Turn 1",
+        messageCount: 2,
+        agentMessageCount: 1,
+        preview: "first",
+        kind: "turn",
+      },
+      {
+        id: "cp-visible",
+        createdAt: 2,
+        label: "Turn 6",
+        messageCount: 12,
+        agentMessageCount: 6,
+        anchorMessageId: "u6",
+        preview: "six",
+        kind: "turn",
+      },
+    ] as ThreadCheckpoint[];
+
+    const [turn] = buildConversationTurns(
+      [user("u6", "six"), assistant("a6", "ok")],
+      checkpoints,
+      { turnNumberOffset: 5, windowed: true }
+    );
+
+    assert.equal(turn.number, 6);
+    assert.equal(turn.checkpoint?.id, "cp-visible");
+  });
+
   it("uses a safe fallback for empty prompts and preserves error status", () => {
     const [turn] = buildConversationTurns([
       user("u1", "   "),

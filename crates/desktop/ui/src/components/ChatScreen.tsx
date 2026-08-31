@@ -140,6 +140,13 @@ function shortRoot(root: string): string {
 type Props = {
   session: SessionInfo;
   messages: ChatMessage[];
+  hasOlderMessages?: boolean;
+  hasNewerMessages?: boolean;
+  hiddenUserTurns?: number;
+  loadingOlder?: boolean;
+  loadingNewer?: boolean;
+  onLoadOlder?: () => void;
+  onLoadNewer?: () => void;
   draft: string;
   attachments: PreparedAttachment[];
   branch: string | null;
@@ -177,6 +184,7 @@ type Props = {
     newThread?: boolean;
     providerId?: string;
     copyThread?: boolean;
+    focusMessageId?: string;
   }) => Promise<boolean>;
   providers: ProviderRow[];
   onSwitchProvider: (providerId: string, model?: string) => Promise<void>;
@@ -671,6 +679,13 @@ function TranscriptScrollRegistration({
 export function ChatScreen({
   session,
   messages,
+  hasOlderMessages = false,
+  hasNewerMessages = false,
+  hiddenUserTurns = 0,
+  loadingOlder = false,
+  loadingNewer = false,
+  onLoadOlder,
+  onLoadNewer,
   draft,
   attachments,
   branch,
@@ -825,9 +840,91 @@ export function ChatScreen({
   const scrollToTranscriptMessageRef =
     useRef<ScrollToTranscriptMessage | null>(null);
   const conversationTurns = useMemo(
-    () => buildConversationTurns(messages, session.checkpoints),
-    [messages, session.checkpoints]
+    () =>
+      buildConversationTurns(messages, session.checkpoints, {
+        turnNumberOffset: hiddenUserTurns,
+        windowed: hasOlderMessages || hasNewerMessages,
+      }),
+    [hasNewerMessages, hasOlderMessages, hiddenUserTurns, messages, session.checkpoints]
   );
+  const pendingScrollRestore = useRef<{ height: number; top: number } | null>(
+    null
+  );
+  const olderLoadArmed = useRef(true);
+  const newerLoadArmed = useRef(true);
+  const focusedMessageRef = useRef<string | null>(null);
+  const transcriptViewport = () =>
+    document.querySelector<HTMLElement>(
+      '[data-slot="message-scroller-viewport"]'
+    );
+
+  const requestOlderTurns = useCallback(() => {
+    if (!onLoadOlder || loadingOlder || !hasOlderMessages) return;
+    const viewport = transcriptViewport();
+    if (viewport) {
+      pendingScrollRestore.current = {
+        height: viewport.scrollHeight,
+        top: viewport.scrollTop,
+      };
+    }
+    olderLoadArmed.current = false;
+    onLoadOlder();
+  }, [hasOlderMessages, loadingOlder, onLoadOlder]);
+
+  const requestNewerTurns = useCallback(() => {
+    if (!onLoadNewer || loadingNewer || !hasNewerMessages) return;
+    newerLoadArmed.current = false;
+    onLoadNewer();
+  }, [hasNewerMessages, loadingNewer, onLoadNewer]);
+
+  useLayoutEffect(() => {
+    const pending = pendingScrollRestore.current;
+    if (!pending) return;
+    pendingScrollRestore.current = null;
+    const viewport = transcriptViewport();
+    if (!viewport) return;
+    viewport.scrollTop = pending.top + (viewport.scrollHeight - pending.height);
+  }, [messages]);
+
+  useEffect(() => {
+    if (!hasOlderMessages) {
+      olderLoadArmed.current = true;
+      return;
+    }
+    const viewport = transcriptViewport();
+    if (!viewport) return;
+    const onScroll = () => {
+      if (viewport.scrollTop > 24) {
+        olderLoadArmed.current = true;
+        return;
+      }
+      if (!olderLoadArmed.current || loadingOlder) return;
+      requestOlderTurns();
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, [hasOlderMessages, loadingOlder, requestOlderTurns]);
+
+  useEffect(() => {
+    if (!hasNewerMessages) {
+      newerLoadArmed.current = true;
+      return;
+    }
+    const viewport = transcriptViewport();
+    if (!viewport) return;
+    const onScroll = () => {
+      const gap =
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      if (gap > 24) {
+        newerLoadArmed.current = true;
+        return;
+      }
+      if (!newerLoadArmed.current || loadingNewer) return;
+      requestNewerTurns();
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, [hasNewerMessages, loadingNewer, requestNewerTurns]);
 
   const registerScrollToTranscriptMessage = useCallback(
     (scrollToMessage: ScrollToTranscriptMessage | null) => {
@@ -847,6 +944,14 @@ export function ChatScreen({
       block: "center",
     });
   }, []);
+
+  useLayoutEffect(() => {
+    const focusId = session.focusMessageId;
+    if (!focusId || focusedMessageRef.current === focusId) return;
+    if (!messages.some((message) => message.id === focusId)) return;
+    focusedMessageRef.current = focusId;
+    scrollToTranscriptMessage(focusId);
+  }, [messages, scrollToTranscriptMessage, session.focusMessageId]);
 
   const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
   const toggleWorkbench = useCallback(() => {
@@ -1611,7 +1716,7 @@ export function ChatScreen({
             />
           )}
           <MessageScrollerProvider
-            autoScroll
+            autoScroll={!session.focusMessageId}
             defaultScrollPosition="last-anchor"
             scrollEdgeThreshold={24}
             scrollPreviousItemPeek={64}
@@ -1633,6 +1738,24 @@ export function ChatScreen({
                     narrow ? "px-3" : "pl-8 pr-4"
                   )}
                 >
+                  {hasOlderMessages || loadingOlder ? (
+                    <MessageScrollerItem messageId="earlier-turns">
+                      <div className="flex justify-center">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={loadingOlder || !hasOlderMessages}
+                          onClick={requestOlderTurns}
+                        >
+                          {loadingOlder
+                            ? "Loading earlier turns…"
+                            : "Earlier turns"}
+                        </Button>
+                      </div>
+                    </MessageScrollerItem>
+                  ) : null}
+
                   {messages.length === 0 ? (
                     <MessageScrollerItem messageId="empty">
                       <div className="flex min-h-[42vh] flex-col items-center justify-center gap-4 text-center">
@@ -1739,6 +1862,23 @@ export function ChatScreen({
                       workingAction={workingAction}
                     />
                   ))}
+                  {hasNewerMessages || loadingNewer ? (
+                    <MessageScrollerItem messageId="later-turns">
+                      <div className="flex justify-center">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={loadingNewer || !hasNewerMessages}
+                          onClick={requestNewerTurns}
+                        >
+                          {loadingNewer
+                            ? "Loading later turns…"
+                            : "Later turns"}
+                        </Button>
+                      </div>
+                    </MessageScrollerItem>
+                  ) : null}
                   {showTurnWorking &&
                   messages[messages.length - 1]?.role !== "assistant" ? (
                     <MessageScrollerItem

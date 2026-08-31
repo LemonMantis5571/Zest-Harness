@@ -269,6 +269,73 @@ describe("fixture safety scenarios", () => {
   });
 });
 
+describe("fixture windowed open", () => {
+  it("opens a long chat on the last ten user turns and pages older ones", async () => {
+    const backend = createFixtureBackend();
+    const listed = await backend.listThreads();
+    assert.equal(listed[0]?.id, "fixture");
+    assert.ok(listed.some((thread) => thread.id === "fixture-long"));
+
+    const opened = await backend.openProjectChat({
+      root: ".",
+      threadId: "fixture-long",
+    });
+    assert.equal(opened.threadId, "fixture-long");
+    assert.equal(opened.messages[0]?.id, "long-u6");
+    assert.equal(opened.messages.at(-1)?.id, "long-a15");
+    assert.equal(opened.hasOlderMessages, true);
+    assert.equal(opened.hiddenUserTurns, 5);
+    assert.equal(
+      opened.messages.some((message) => message.id === "long-u1"),
+      false
+    );
+
+    const older = await backend.loadOlderThreadMessages({
+      threadId: "fixture-long",
+      beforeMessageId: "long-u6",
+    });
+    assert.equal(older.messages[0]?.id, "long-u1");
+    assert.equal(older.messages.at(-1)?.id, "long-a5");
+    assert.equal(older.hasOlderMessages, false);
+    assert.equal(older.hiddenUserTurns, 0);
+    assert.equal(
+      older.messages.some((message) => message.id === "long-u6"),
+      false
+    );
+  });
+
+  it("opens a search hit on the page that contains that turn", async () => {
+    const backend = createFixtureBackend();
+    const hits = await backend.searchChats("Turn 1 prompt");
+    const long = hits.find((hit) => hit.id === "fixture-long");
+    assert.ok(long, `expected fixture-long in ${hits.map((hit) => hit.id).join(",")}`);
+    assert.equal(long.messageId, "long-u1");
+
+    const opened = await backend.openProjectChat({
+      root: ".",
+      threadId: "fixture-long",
+      focusMessageId: long.messageId,
+    });
+    assert.equal(opened.messages[0]?.id, "long-u1");
+    assert.equal(opened.messages.at(-1)?.id, "long-a10");
+    assert.equal(opened.hasOlderMessages, false);
+    assert.equal(opened.hasNewerMessages, true);
+    assert.equal(opened.focusMessageId, "long-u1");
+    assert.equal(
+      opened.messages.some((message) => message.id === "long-u15"),
+      false
+    );
+
+    const newer = await backend.loadNewerThreadMessages({
+      threadId: "fixture-long",
+      afterMessageId: "long-a10",
+    });
+    assert.equal(newer.messages[0]?.id, "long-u11");
+    assert.equal(newer.messages.at(-1)?.id, "long-a15");
+    assert.equal(newer.hasNewerMessages, false);
+  });
+});
+
 describe("fixture queued-message recovery", () => {
   it("claims only the oldest durable followup before delivering it", async () => {
     const backend = createFixtureBackend();

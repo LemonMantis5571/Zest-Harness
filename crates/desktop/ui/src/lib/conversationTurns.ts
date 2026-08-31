@@ -23,8 +23,26 @@ function compactPreview(message: Extract<ChatMessage, { role: "user" }>): string
     : "Empty prompt";
 }
 
-function checkpointAnchor(checkpoint: ThreadCheckpoint, messages: ChatMessage[]): string | undefined {
-  if (checkpoint.anchorMessageId) return checkpoint.anchorMessageId;
+export type ConversationTurnOptions = {
+  /** User turns not present in `messages`. Rail numbers start after this. */
+  turnNumberOffset?: number;
+  /** `messages` is a tail window; `messageCount` is not an index into it. */
+  windowed?: boolean;
+};
+
+function checkpointAnchor(
+  checkpoint: ThreadCheckpoint,
+  messages: ChatMessage[],
+  windowed: boolean
+): string | undefined {
+  if (checkpoint.anchorMessageId) {
+    if (messages.some((message) => message.id === checkpoint.anchorMessageId)) {
+      return checkpoint.anchorMessageId;
+    }
+    if (windowed) return undefined;
+  }
+
+  if (windowed) return undefined;
 
   const candidates = [checkpoint.messageCount, checkpoint.messageCount - 1]
     .filter((index) => index >= 0 && index < messages.length)
@@ -53,11 +71,14 @@ function turnStatus(assistantMessages: Extract<ChatMessage, { role: "assistant" 
 /** Build the safe, navigation-only index shown by the chat turn history UI. */
 export function buildConversationTurns(
   messages: ChatMessage[],
-  checkpoints: ThreadCheckpoint[] = []
+  checkpoints: ThreadCheckpoint[] = [],
+  options: ConversationTurnOptions = {}
 ): ConversationTurn[] {
+  const turnNumberOffset = options.turnNumberOffset ?? 0;
+  const windowed = options.windowed === true;
   const checkpointsByMessageId = new Map<string, ThreadCheckpoint>();
   for (const checkpoint of checkpoints) {
-    const anchor = checkpointAnchor(checkpoint, messages);
+    const anchor = checkpointAnchor(checkpoint, messages, windowed);
     if (anchor) checkpointsByMessageId.set(anchor, checkpoint);
   }
 
@@ -80,7 +101,7 @@ export function buildConversationTurns(
     turns.push({
       id: `turn-${message.id}`,
       messageId: message.id,
-      number: turns.length + 1,
+      number: turnNumberOffset + turns.length + 1,
       preview: compactPreview(message),
       toolCount: assistantMessages.reduce((total, assistant) => total + assistant.tools.length, 0),
       status: turnStatus(assistantMessages),

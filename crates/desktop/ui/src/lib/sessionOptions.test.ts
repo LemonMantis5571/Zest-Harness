@@ -35,13 +35,24 @@ const base: SessionInfo = {
       supportsVision: false,
     },
   ],
+  ownsAgentLoop: false,
   checkpoints: [],
+  pendingInputs: [],
   messages: [{ id: "u1", role: "user", text: "hi" }],
+  hasOlderMessages: false,
+  hasNewerMessages: false,
+  hiddenUserTurns: 0,
 };
 
 /** What Rust now replies with when only options changed: no transcript. */
 const meta: SessionMeta = (() => {
-  const { messages: _messages, ...rest } = base;
+  const {
+    messages: _messages,
+    hasOlderMessages: _hasOlder,
+    hasNewerMessages: _hasNewer,
+    hiddenUserTurns: _hidden,
+    ...rest
+  } = base;
   return rest;
 })();
 

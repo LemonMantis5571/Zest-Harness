@@ -43,16 +43,16 @@ use zest_core::{
     ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts,
     ChatPersistence, CompactionOutcome, Config, CredentialPolicy, ExternalAgentMode,
     ExternalWorkspace, HarnessError, JobEvent, JobRegistry, JobSnapshot, JobStatus, Ledger,
-    LoginPoll, LoginProcess, McpCatalog, PersistPriority, PersistSnapshot, PersistWorker, Prices,
-    ProfileStats, ProjectSessionState, ProviderCommandRequest, ProviderConfig,
-    ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
+    LoginPoll, LoginProcess, McpCatalog, MessageWindow, PersistPriority, PersistSnapshot,
+    PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderCommandRequest,
+    ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
     ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
     Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
     StreamEvent, SystemPrompt, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadEventKind,
     ThreadGitContext, ThreadInput, ThreadInputAttachment, ThreadInputTarget, ThreadLoadError,
     ThreadProviderHandoff, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
     UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    THREAD_FORMAT_VERSION, THREAD_OLDER_USER_TURNS, THREAD_WINDOW_USER_TURNS,
 };
 
 use attachments::{
@@ -1100,12 +1100,40 @@ struct SessionInfo {
     /// UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
     #[cfg_attr(feature = "export-bindings", ts(type = "unknown[]"))]
     messages: Vec<StoredMessage>,
+    /// `messages` is a tail window; older user turns are still on disk.
+    has_older_messages: bool,
+    /// User turns after the last loaded message. Set when a search open lands
+    /// on a page that is not the tail.
+    has_newer_messages: bool,
+    /// User turns entirely before the first loaded message. The rail numbers
+    /// from this offset so a windowed open does not restart at turn 1.
+    hidden_user_turns: usize,
+    /// Message a search open should scroll into view. Absent on a normal open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    focus_message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     recovery: Option<TurnRecoveryView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "OlderThreadMessages.ts", rename_all = "camelCase")
+)]
+struct OlderThreadMessages {
+    thread_id: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "unknown[]"))]
+    messages: Vec<StoredMessage>,
+    has_older_messages: bool,
+    has_newer_messages: bool,
+    hidden_user_turns: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -3887,13 +3915,35 @@ fn session_info_from_turn(turn: &ActiveTurn) -> SessionInfo {
         checkpoints: Vec::new(),
         pending_inputs,
         messages: Vec::new(),
+        has_older_messages: false,
+        has_newer_messages: false,
+        hidden_user_turns: 0,
+        focus_message_id: None,
         warning: None,
         recovery: None,
     }
 }
 
 fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo {
+    session_info_from_window(session, warning, None)
+}
+
+fn session_info_from_window(
+    session: &Session,
+    warning: Option<String>,
+    around_message_id: Option<&str>,
+) -> SessionInfo {
     let (default_model, models) = session_capabilities(session);
+    let window = match around_message_id {
+        Some(id) => MessageWindow::around(&session.thread.messages, id, THREAD_WINDOW_USER_TURNS)
+            .unwrap_or_else(|_| {
+                MessageWindow::tail(&session.thread.messages, THREAD_WINDOW_USER_TURNS)
+            }),
+        None => MessageWindow::tail(&session.thread.messages, THREAD_WINDOW_USER_TURNS),
+    };
+    let focus_message_id = around_message_id
+        .filter(|id| window.messages.iter().any(|message| message.id() == *id))
+        .map(|id| id.to_string());
     SessionInfo {
         session_id: session.session_id.clone(),
         provider: session.provider_id.clone(),
@@ -3919,7 +3969,11 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
             .iter()
             .map(PendingInputView::from)
             .collect(),
-        messages: session.thread.messages.clone(),
+        messages: window.messages,
+        has_older_messages: window.has_older,
+        has_newer_messages: window.has_newer,
+        hidden_user_turns: window.hidden_user_turns,
+        focus_message_id,
         warning,
         recovery: session.recovery.as_ref().map(TurnRecoveryView::from),
     }
@@ -4710,6 +4764,8 @@ struct ChatSearchHit {
     updated_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
 }
 
 const CHAT_SEARCH_LIMIT: usize = 24;
@@ -4808,7 +4864,11 @@ fn search_threads_in_store(
         if thread.version > THREAD_FORMAT_VERSION {
             continue;
         }
-        let snippet = thread.search_excerpt(query);
+        let found = thread.search_match(query);
+        let (message_id, snippet) = match found {
+            Some((id, snippet)) => (Some(id.to_string()), Some(snippet)),
+            None => (None, thread.search_excerpt(query)),
+        };
         hits.push(ChatSearchHit {
             id: thread.id,
             title: thread
@@ -4822,6 +4882,7 @@ fn search_threads_in_store(
             project_path: project_path.clone(),
             updated_at: thread.updated_at,
             snippet,
+            message_id,
         });
     }
     hits
@@ -5586,6 +5647,7 @@ async fn open_project_chat(
     new_thread: Option<bool>,
     provider_id: Option<String>,
     copy_thread: Option<bool>,
+    focus_message_id: Option<String>,
 ) -> Result<SessionInfo, String> {
     let requested_provider = state
         .sessions
@@ -5753,7 +5815,66 @@ async fn open_project_chat(
         }
     }
 
-    result
+    let Ok(info) = result else {
+        return result;
+    };
+    let Some(focus) = focus_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(info);
+    };
+    match state.sessions.session_info_snapshot(|session| {
+        session_info_from_window(session, info.warning.clone(), Some(focus))
+    }) {
+        Ok(Some(windowed)) => Ok(windowed),
+        Ok(None) | Err(_) => Ok(info),
+    }
+}
+
+#[tauri::command]
+fn load_older_thread_messages(
+    state: State<'_, AppState>,
+    thread_id: String,
+    before_message_id: String,
+) -> Result<OlderThreadMessages, String> {
+    let window = state
+        .sessions
+        .with_thread_messages(&thread_id, |messages| {
+            MessageWindow::before(messages, &before_message_id, THREAD_OLDER_USER_TURNS)
+        })
+        .map_err(map_session_err)?
+        .map_err(|error| desktop_err("not_found", error))?;
+    Ok(OlderThreadMessages {
+        thread_id,
+        messages: window.messages,
+        has_older_messages: window.has_older,
+        has_newer_messages: window.has_newer,
+        hidden_user_turns: window.hidden_user_turns,
+    })
+}
+
+#[tauri::command]
+fn load_newer_thread_messages(
+    state: State<'_, AppState>,
+    thread_id: String,
+    after_message_id: String,
+) -> Result<OlderThreadMessages, String> {
+    let window = state
+        .sessions
+        .with_thread_messages(&thread_id, |messages| {
+            MessageWindow::after(messages, &after_message_id, THREAD_OLDER_USER_TURNS)
+        })
+        .map_err(map_session_err)?
+        .map_err(|error| desktop_err("not_found", error))?;
+    Ok(OlderThreadMessages {
+        thread_id,
+        messages: window.messages,
+        has_older_messages: window.has_older,
+        has_newer_messages: window.has_newer,
+        hidden_user_turns: window.hidden_user_turns,
+    })
 }
 
 #[tauri::command]
@@ -6310,6 +6431,10 @@ async fn delete_thread_inner(
             checkpoints: Vec::new(),
             pending_inputs: Vec::new(),
             messages: Vec::new(),
+            has_older_messages: false,
+            has_newer_messages: false,
+            hidden_user_turns: 0,
+            focus_message_id: None,
             warning: None,
             recovery: None,
         }))),
@@ -8727,6 +8852,8 @@ pub fn run() {
             list_chat_projects,
             search_chats,
             open_project_chat,
+            load_older_thread_messages,
+            load_newer_thread_messages,
             load_thread,
             new_thread,
             fork_thread,
@@ -9087,6 +9214,7 @@ mod export_bindings {
     fn export_bindings() {
         ChatEvent::export_all().expect("export ChatEvent bindings");
         SessionInfo::export_all().expect("export SessionInfo bindings");
+        OlderThreadMessages::export_all().expect("export OlderThreadMessages bindings");
         SessionMeta::export_all().expect("export SessionMeta bindings");
         ProviderView::export_all().expect("export ProviderView bindings");
         ExternalAgentView::export_all().expect("export ExternalAgentView bindings");

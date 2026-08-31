@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use zest_core::{
-    new_id, Agent, CancelToken, InputInbox, RecoverableRun, SkillSet, Thread, ThreadInput,
-    ThreadInputTarget,
+    new_id, Agent, CancelToken, InputInbox, RecoverableRun, SkillSet, StoredMessage, Thread,
+    ThreadInput, ThreadInputTarget,
 };
 
 use super::{ApprovalHub, QuestionHub};
@@ -262,6 +262,32 @@ impl SessionController {
             .session
             .as_ref()
             .map(|session| session.thread_id.clone()))
+    }
+
+    /// Read the durable transcript for a chat, including while a turn holds it.
+    pub fn with_thread_messages<R>(
+        &self,
+        thread_id: &str,
+        f: impl FnOnce(&[StoredMessage]) -> R,
+    ) -> Result<R, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        for slot in g.sessions.values() {
+            if let Some(turn) = &slot.turn {
+                if turn.thread_id == thread_id {
+                    let thread = turn
+                        .live_thread
+                        .lock()
+                        .map_err(|_| SessionError::Poisoned)?;
+                    return Ok(f(&thread.messages));
+                }
+            }
+            if let Some(session) = &slot.session {
+                if session.thread_id == thread_id {
+                    return Ok(f(&session.thread.messages));
+                }
+            }
+        }
+        Err(SessionError::NoSession)
     }
 
     pub fn session_info_snapshot<R>(

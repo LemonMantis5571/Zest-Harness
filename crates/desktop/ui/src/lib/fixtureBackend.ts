@@ -14,11 +14,20 @@ import { runFixtureStream } from "./fixture.ts";
 import { safeMarkdownFilename } from "./markdownExport.ts";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT } from "./models.ts";
 import { matchExcerpt } from "./commandPaletteSearch.ts";
+import {
+  THREAD_OLDER_USER_TURNS,
+  THREAD_WINDOW_USER_TURNS,
+  aroundUserTurns,
+  newerUserTurns,
+  olderUserTurns,
+  tailUserTurns,
+} from "./threadWindow.ts";
 import type { DesktopBackend } from "./backend";
 import type {
   ApprovalMode,
   AttachmentInput,
   ChatEvent,
+  ChatMessage,
   DelegationEvent,
   DelegationCreateInput,
   DelegationJob,
@@ -29,6 +38,7 @@ import type {
   JobRead,
   JobSnapshot,
   McpServerRow,
+  OlderThreadMessages,
   SessionInfo,
   ThreadSummary,
   ChatSearchHit,
@@ -71,10 +81,35 @@ const FIXTURE_SESSION: SessionInfo = {
   checkpoints: [],
   pendingInputs: [],
   messages: [],
+  hasOlderMessages: false,
+  hasNewerMessages: false,
+  hiddenUserTurns: 0,
 };
 
 function notAvailable(op: string): never {
   throw new Error(`fixture backend: ${op} is not available`);
+}
+
+const LONG_THREAD_ID = "fixture-long";
+
+function longThreadMessages(): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  for (let index = 1; index <= 15; index += 1) {
+    messages.push({
+      id: `long-u${index}`,
+      role: "user",
+      text: `Turn ${index} prompt`,
+    });
+    messages.push({
+      id: `long-a${index}`,
+      role: "assistant",
+      text: `Turn ${index} reply`,
+      thinking: "",
+      tools: [],
+      streaming: false,
+    });
+  }
+  return messages;
 }
 
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
@@ -116,6 +151,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     ["fixture", "Fixture"],
     ["fixture-local", "Local model chat"],
     ["fixture-free", "Free chat"],
+    [LONG_THREAD_ID, "Fifteen turns"],
   ]);
   const fixtureThreadBodies = new Map<string, string>([
     [
@@ -124,6 +160,30 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     ],
     ["fixture-free", "Hi — can you sketch a webring homepage?"],
   ]);
+  const fixtureTranscripts = new Map<string, ChatMessage[]>([
+    [LONG_THREAD_ID, longThreadMessages()],
+  ]);
+
+  function windowSessionFor(
+    threadId: string,
+    extra: Partial<SessionInfo> = {},
+    focusMessageId?: string | null
+  ): SessionInfo {
+    const full = fixtureTranscripts.get(threadId) ?? [];
+    const window = focusMessageId
+      ? aroundUserTurns(full, focusMessageId, THREAD_WINDOW_USER_TURNS)
+      : tailUserTurns(full, THREAD_WINDOW_USER_TURNS);
+    return {
+      ...session,
+      ...extra,
+      threadId,
+      messages: window.messages,
+      hasOlderMessages: window.hasOlder,
+      hasNewerMessages: window.hasNewer,
+      hiddenUserTurns: window.hiddenUserTurns,
+      focusMessageId: focusMessageId || undefined,
+    };
+  }
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
@@ -1122,7 +1182,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           title: fixtureThreadTitles.get(session.threadId) || "Fixture",
           pinned: fixturePinned,
           providerId: "codex",
-          messageCount: session.messages.length,
+          messageCount:
+            fixtureTranscripts.get(session.threadId)?.length ??
+            session.messages.length,
         });
       }
       // A provider Zest has no mark for, so the generic fallback is visible
@@ -1137,6 +1199,17 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           pinned: false,
           providerId: "ollama",
           messageCount: 1,
+        });
+      }
+      if (session.threadId !== LONG_THREAD_ID) {
+        threads.push({
+          id: LONG_THREAD_ID,
+          createdAt: Math.floor(Date.now() / 1000) - 7200,
+          updatedAt: Math.floor(Date.now() / 1000) - 7200,
+          title: fixtureThreadTitles.get(LONG_THREAD_ID) || "Fifteen turns",
+          pinned: false,
+          providerId: "codex",
+          messageCount: fixtureTranscripts.get(LONG_THREAD_ID)?.length ?? 30,
         });
       }
       return threads;
@@ -1186,12 +1259,25 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
             thread.id === session.threadId
               ? session.messages.map((message) => message.text).join("\n")
               : "";
-          const transcript = [liveText, fixtureThreadBodies.get(thread.id) ?? ""]
+          const storedText =
+            fixtureTranscripts.get(thread.id)
+              ?.map((message) => message.text)
+              .join("\n") ?? "";
+          const transcript = [
+            liveText,
+            storedText,
+            fixtureThreadBodies.get(thread.id) ?? "",
+          ]
             .filter(Boolean)
             .join("\n");
           const snippet = matchExcerpt(transcript, needle);
           const titleHit = title.toLowerCase().includes(needle.toLowerCase());
           if (!snippet && !titleHit) continue;
+          const matched = (
+            thread.id === session.threadId ? session.messages : []
+          )
+            .concat(fixtureTranscripts.get(thread.id) ?? [])
+            .find((message) => matchExcerpt(message.text, needle));
           hits.push({
             id: thread.id,
             title,
@@ -1199,6 +1285,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
             projectPath: project.path,
             updatedAt: thread.updatedAt,
             snippet,
+            messageId: matched?.id,
           });
         }
       }
@@ -1210,19 +1297,45 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (targetRoot !== null) {
         workspace = targetRoot;
       }
-      if (options.newThread) fixturePinned = false;
+      if (options.newThread) {
+        fixturePinned = false;
+        session = {
+          ...session,
+          root: openingFreeChat ? "." : workspace,
+          isFreeChat: openingFreeChat,
+          threadId: `fixture-${crypto.randomUUID()}`,
+          messages: [],
+          hasOlderMessages: false,
+          hasNewerMessages: false,
+          hiddenUserTurns: 0,
+        };
+        return { ...session };
+      }
+      const nextId = options.threadId || session.threadId;
+      if (fixtureTranscripts.has(nextId)) {
+        session = windowSessionFor(
+          nextId,
+          {
+            root: openingFreeChat ? "." : workspace,
+            isFreeChat: openingFreeChat,
+          },
+          options.focusMessageId
+        );
+        return { ...session };
+      }
       session = {
         ...session,
         root: openingFreeChat ? "." : workspace,
         isFreeChat: openingFreeChat,
-        messages: options.newThread ? [] : session.messages,
-        threadId: options.newThread
-          ? `fixture-${crypto.randomUUID()}`
-          : options.threadId || session.threadId,
+        threadId: nextId,
       };
       return { ...session };
     },
     async loadThread(id: string) {
+      if (fixtureTranscripts.has(id)) {
+        session = windowSessionFor(id);
+        return { ...session };
+      }
       if (id !== session.threadId) {
         throw new Error(`fixture: unknown thread ${id}`);
       }
@@ -1239,6 +1352,48 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         messages: [],
       };
       return { ...session };
+    },
+    async loadOlderThreadMessages(options: {
+      threadId: string;
+      beforeMessageId: string;
+    }): Promise<OlderThreadMessages> {
+      if (session.threadId !== options.threadId) {
+        throw new Error("fixture: that chat is not open");
+      }
+      const full = fixtureTranscripts.get(options.threadId) ?? session.messages;
+      const page = olderUserTurns(
+        full,
+        options.beforeMessageId,
+        THREAD_OLDER_USER_TURNS
+      );
+      return {
+        threadId: options.threadId,
+        messages: page.messages,
+        hasOlderMessages: page.hasOlder,
+        hasNewerMessages: page.hasNewer,
+        hiddenUserTurns: page.hiddenUserTurns,
+      };
+    },
+    async loadNewerThreadMessages(options: {
+      threadId: string;
+      afterMessageId: string;
+    }): Promise<OlderThreadMessages> {
+      if (session.threadId !== options.threadId) {
+        throw new Error("fixture: that chat is not open");
+      }
+      const full = fixtureTranscripts.get(options.threadId) ?? session.messages;
+      const page = newerUserTurns(
+        full,
+        options.afterMessageId,
+        THREAD_OLDER_USER_TURNS
+      );
+      return {
+        threadId: options.threadId,
+        messages: page.messages,
+        hasOlderMessages: page.hasOlder,
+        hasNewerMessages: page.hasNewer,
+        hiddenUserTurns: page.hiddenUserTurns,
+      };
     },
     async sessionInfo() {
       return { ...session };
@@ -1312,7 +1467,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if ([...normalized].length > MAX_FIXTURE_THREAD_TITLE_CHARS) {
         throw new Error("fixture: chat title is too long");
       }
-      if (id !== session.threadId && id !== "fixture-local") {
+      if (
+        id !== session.threadId &&
+        id !== "fixture-local" &&
+        id !== LONG_THREAD_ID
+      ) {
         throw new Error(`fixture: unknown thread ${id}`);
       }
       fixtureThreadTitles.set(id, normalized);
