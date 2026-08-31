@@ -618,7 +618,7 @@ pub fn parse_claude_line(line: &str) -> Option<UsageRecord> {
 
     let message_id = message.get("id").and_then(|v| v.as_str());
     let request_id = value.get("requestId").and_then(|v| v.as_str());
-    // Matching ccusage: the message/request pair, falling back to whichever half
+    // Dedupe on the message/request pair, falling back to whichever half
     // exists. A record with neither cannot be de-duplicated and is kept.
     let dedupe_key = match (message_id, request_id) {
         (None, None) => None,

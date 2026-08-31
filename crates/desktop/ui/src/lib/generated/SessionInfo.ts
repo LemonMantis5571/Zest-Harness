@@ -19,4 +19,22 @@ ownsAgentLoop: boolean, models: Array<ModelCapability>, checkpoints: Array<Threa
 /**
  * UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
  */
-messages: unknown[], warning?: string, recovery?: TurnRecoveryView, };
+messages: unknown[], 
+/**
+ * `messages` is a tail window; older user turns are still on disk.
+ */
+hasOlderMessages: boolean, 
+/**
+ * User turns after the last loaded message. Set when a search open lands
+ * on a page that is not the tail.
+ */
+hasNewerMessages: boolean, 
+/**
+ * User turns entirely before the first loaded message. The rail numbers
+ * from this offset so a windowed open does not restart at turn 1.
+ */
+hiddenUserTurns: number, 
+/**
+ * Message a search open should scroll into view. Absent on a normal open.
+ */
+focusMessageId?: string, warning?: string, recovery?: TurnRecoveryView, };

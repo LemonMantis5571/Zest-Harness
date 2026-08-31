@@ -17,6 +17,7 @@ export type ChatHit = {
   projectPath: string | null;
   updatedAt: number;
   snippet?: string | null;
+  messageId?: string | null;
 };
 
 export type PaletteItem =
@@ -66,13 +67,19 @@ export function mergeChatHits(titleHits: ChatHit[], bodyHits: ChatHit[]): ChatHi
       continue;
     }
     if (!existing.snippet && hit.snippet) {
-      byId.set(hit.id, { ...existing, snippet: hit.snippet });
+      byId.set(hit.id, {
+        ...existing,
+        snippet: hit.snippet,
+        messageId: existing.messageId ?? hit.messageId,
+      });
+    } else if (!existing.messageId && hit.messageId) {
+      byId.set(hit.id, { ...existing, messageId: hit.messageId });
     }
   }
   return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-/** Compact relative age like the reference palette (6m, 8h, 2d). */
+/** Compact relative age (6m, 8h, 2d). */
 export function formatPaletteAge(epochSecs: number, nowSecs = Math.floor(Date.now() / 1000)) {
   if (!epochSecs) return "";
   const delta = Math.max(0, nowSecs - epochSecs);

@@ -41,6 +41,7 @@ pub mod reading_diff;
 pub mod runtime;
 pub mod skills;
 pub mod thread;
+pub mod thread_window;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;
@@ -150,6 +151,7 @@ pub use thread::{
     ThreadLoadError, ThreadStore, ThreadSummary, ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION,
     WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
+pub use thread_window::{MessageWindow, THREAD_OLDER_USER_TURNS, THREAD_WINDOW_USER_TURNS};
 pub use tools::approval::{
     AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,
     ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,

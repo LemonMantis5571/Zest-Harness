@@ -42,7 +42,11 @@ type Props = {
   actions: PaletteAction[];
   onClose: () => void;
   onCommand: (name: string) => void;
-  onOpenChat?: (options: { root: string | null; threadId: string }) => void;
+  onOpenChat?: (options: {
+    root: string | null;
+    threadId: string;
+    focusMessageId?: string;
+  }) => void;
 };
 
 export function CommandPalette({
@@ -148,7 +152,11 @@ export function CommandPalette({
   function run(item: PaletteItem) {
     if (item.kind === "command") onCommand(item.item.name);
     else if (item.kind === "chat") {
-      onOpenChat?.({ root: item.item.projectPath, threadId: item.item.id });
+      onOpenChat?.({
+        root: item.item.projectPath,
+        threadId: item.item.id,
+        focusMessageId: item.item.messageId ?? undefined,
+      });
     } else {
       const action = actions.find((entry) => entry.id === item.item.id);
       action?.run();

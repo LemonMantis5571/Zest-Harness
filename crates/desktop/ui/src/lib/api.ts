@@ -32,6 +32,7 @@ import type {
   ProviderRow,
   ProviderQuotaSnapshot,
   RatesStatus,
+  OlderThreadMessages,
   SessionInfo,
   SessionMeta,
   ProjectChats,
@@ -301,6 +302,7 @@ export function openProjectChat(options: {
   newThread?: boolean;
   providerId?: string | null;
   copyThread?: boolean;
+  focusMessageId?: string | null;
 }) {
   return invoke<SessionInfo>("open_project_chat", {
     root: options.root,
@@ -308,6 +310,27 @@ export function openProjectChat(options: {
     newThread: options.newThread ?? null,
     providerId: options.providerId ?? null,
     copyThread: options.copyThread ?? null,
+    focusMessageId: options.focusMessageId ?? null,
+  });
+}
+
+export function loadOlderThreadMessages(options: {
+  threadId: string;
+  beforeMessageId: string;
+}) {
+  return invoke<OlderThreadMessages>("load_older_thread_messages", {
+    threadId: options.threadId,
+    beforeMessageId: options.beforeMessageId,
+  });
+}
+
+export function loadNewerThreadMessages(options: {
+  threadId: string;
+  afterMessageId: string;
+}) {
+  return invoke<OlderThreadMessages>("load_newer_thread_messages", {
+    threadId: options.threadId,
+    afterMessageId: options.afterMessageId,
   });
 }
 

@@ -33,6 +33,7 @@ import type {
   ProfileStats,
   ProjectChats,
   ChatSearchHit,
+  OlderThreadMessages,
   ProviderRow,
   RatesStatus,
   SessionInfo,
@@ -154,7 +155,16 @@ export type DesktopBackend = {
     newThread?: boolean;
     providerId?: string | null;
     copyThread?: boolean;
+    focusMessageId?: string | null;
   }): Promise<SessionInfo>;
+  loadOlderThreadMessages(options: {
+    threadId: string;
+    beforeMessageId: string;
+  }): Promise<OlderThreadMessages>;
+  loadNewerThreadMessages(options: {
+    threadId: string;
+    afterMessageId: string;
+  }): Promise<OlderThreadMessages>;
   loadThread(id: string): Promise<SessionInfo>;
   newThread(): Promise<SessionInfo>;
   sessionInfo(): Promise<SessionInfo | null>;
@@ -309,6 +319,8 @@ export function createTauriBackend(): DesktopBackend {
     listChatProjects: () => tauriApi.listChatProjects(),
     searchChats: (query) => tauriApi.searchChats(query),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
+    loadOlderThreadMessages: (options) => tauriApi.loadOlderThreadMessages(options),
+    loadNewerThreadMessages: (options) => tauriApi.loadNewerThreadMessages(options),
     loadThread: (id) => tauriApi.loadThread(id),
     newThread: () => tauriApi.newThread(),
     sessionInfo: () => tauriApi.sessionInfo(),

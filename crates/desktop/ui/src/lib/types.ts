@@ -6,6 +6,7 @@ import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
 import type { McpCheckView } from "./generated/McpCheckView.ts";
 import type { McpServerView } from "./generated/McpServerView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
+import type { OlderThreadMessages as GeneratedOlderThreadMessages } from "./generated/OlderThreadMessages.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
 import type { SessionMeta as GeneratedSessionMeta } from "./generated/SessionMeta.ts";
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
@@ -179,6 +180,11 @@ export type SessionInfo = Omit<GeneratedSessionInfo, "messages"> & {
   messages: ChatMessage[];
 };
 
+/** Older page from `load_older_thread_messages`. */
+export type OlderThreadMessages = Omit<GeneratedOlderThreadMessages, "messages"> & {
+  messages: ChatMessage[];
+};
+
 export type PendingInput = PendingInputView;
 export type PendingInputAttachment = PendingInputAttachmentView;
 export type InputTarget = PendingInput["target"];
@@ -256,6 +262,7 @@ export type ChatSearchHit = {
   projectPath: string | null;
   updatedAt: number;
   snippet?: string | null;
+  messageId?: string | null;
 };
 
 export type PreparedAttachment = {

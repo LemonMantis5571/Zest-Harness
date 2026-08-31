@@ -25,6 +25,11 @@ a replacement for the commit history.
 
 ### Fixed
 
+- Opening a long chat shipped the whole transcript into the window. The
+  first paint is now the last ten user turns; earlier turns load on scroll
+  up. Search opens on the page that contains the match instead of the
+  latest turns.
+
 - A timed-out command on Windows could keep running after Zest stopped
   waiting. The process is now put in a job object so the whole tree dies.
 

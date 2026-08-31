@@ -1,9 +1,9 @@
 //! The published rate catalogue, fetched rather than hand-maintained.
 //!
-//! Zest prices tokens against LiteLLM's `model_prices_and_context_window.json`
-//! — the same table `ccusage` and T3 Code price against. Hand-keeping rates for
-//! every model on every provider is a losing job: the list changes weekly, and a
-//! table that is quietly six months stale is worse than one that says so.
+//! Zest prices tokens against LiteLLM's `model_prices_and_context_window.json`.
+//! Hand-keeping rates for every model on every provider is a losing job: the
+//! list changes weekly, and a table that is quietly six months stale is worse
+//! than one that says so.
 //!
 //! Three properties this module is built around:
 //!

@@ -90,7 +90,7 @@ function threadTitle(thread: ThreadSummary) {
   return "Untitled chat";
 }
 
-/** Compact relative age like the reference UI (6m, 8h, 2d). */
+/** Compact relative age (6m, 8h, 2d). */
 function formatAge(epochSecs: number) {
   if (!epochSecs) return "";
   const now = Math.floor(Date.now() / 1000);

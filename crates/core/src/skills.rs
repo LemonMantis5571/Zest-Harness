@@ -1,4 +1,4 @@
-//! Cursor-style personal skills (`SKILL.md` with YAML frontmatter).
+//! Personal skills (`SKILL.md` with YAML frontmatter).
 
 use std::collections::BTreeMap;
 use std::fs;

@@ -971,9 +971,14 @@ impl Thread {
 
     /// Snippet from the first user or assistant message that contains `query`.
     pub fn search_excerpt(&self, query: &str) -> Option<String> {
-        self.messages
-            .iter()
-            .find_map(|msg| match_excerpt(msg.searchable_text(), query))
+        self.search_match(query).map(|(_, snippet)| snippet)
+    }
+
+    /// First matching UI message and the snippet shown in the palette.
+    pub fn search_match(&self, query: &str) -> Option<(&str, String)> {
+        self.messages.iter().find_map(|msg| {
+            match_excerpt(msg.searchable_text(), query).map(|snippet| (msg.id(), snippet))
+        })
     }
 
     /// Append one lifecycle record and return its durable identity.
@@ -2590,6 +2595,9 @@ mod characterization {
         thread.apply_user("u1", text);
         let body = thread.search_excerpt("OceanicUI").expect("body");
         assert!(body.contains("OceanicUI"), "{body}");
+        let (id, snippet) = thread.search_match("OceanicUI").expect("match");
+        assert_eq!(id, "u1");
+        assert_eq!(snippet, body);
         assert!(contains_ignore_ascii_case(text, "GIT PU"));
         assert!(!contains_ignore_ascii_case(text, "harness"));
     }
