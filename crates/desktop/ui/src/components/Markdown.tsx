@@ -6,6 +6,8 @@ import { ArrowUpRightIcon, Globe2Icon } from "lucide-react";
 
 import { CodeBlock } from "@/components/CodeBlock";
 import { MermaidBlock } from "@/components/MermaidBlock";
+import { ZoomableImage } from "@/components/ZoomableImage";
+import { safeHttpUrl } from "@/lib/externalLinks";
 import { linkClassName } from "@/lib/linkify";
 import { splitBlocks } from "@/lib/markdownBlocks";
 import { cn } from "@/lib/utils";
@@ -25,17 +27,6 @@ function codeText(children: ReactNode): string {
 type LinkElement = {
   props?: { href?: string; children?: ReactNode };
 };
-
-function safeHttpUrl(value: string | null | undefined): string | null {
-  const href = value?.trim();
-  if (!href) return null;
-  try {
-    const url = new URL(href);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
-  } catch {
-    return null;
-  }
-}
 
 function standaloneLink(children: ReactNode): { href: string; label: ReactNode } | null {
   const child = Array.isArray(children) && children.length === 1 ? children[0] : children;
@@ -156,6 +147,7 @@ function componentsFor(streaming: boolean): Components {
     );
   },
   hr: () => <hr className="my-4 border-border/70" />,
+  img: ({ src, alt }) => <ZoomableImage src={src} alt={alt} />,
   table: ({ children }) => (
     <div className="mb-4 overflow-x-auto rounded-xl border border-border/80 bg-card/30 shadow-[0_1px_2px_rgb(0_0_0/10%)] last:mb-0">
       <table className="min-w-full border-separate border-spacing-0 text-left text-[13px]">

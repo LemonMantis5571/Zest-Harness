@@ -191,11 +191,29 @@ pub fn parse_callback(target: &str, expected_state: &str) -> Result<String, Stri
 }
 
 pub fn open_https_url(url: &str) -> Result<(), String> {
+    open_url(&parsed_web_url(url, true)?)
+}
+
+/// Open an http or https URL in the system browser. Chat links use this.
+pub fn open_http_url(url: &str) -> Result<(), String> {
+    open_url(&parsed_web_url(url, false)?)
+}
+
+fn parsed_web_url(url: &str, https_only: bool) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
-    if parsed.scheme() != "https" {
-        return Err("only https URLs can be opened".into());
+    let allowed = if https_only {
+        parsed.scheme() == "https"
+    } else {
+        parsed.scheme() == "http" || parsed.scheme() == "https"
+    };
+    if !allowed {
+        return Err(if https_only {
+            "only https URLs can be opened".into()
+        } else {
+            "only http(s) URLs can be opened".into()
+        });
     }
-    open_url(url)
+    Ok(parsed.as_str().to_string())
 }
 
 fn open_url(url: &str) -> Result<(), String> {
@@ -222,7 +240,7 @@ fn open_url(url: &str) -> Result<(), String> {
             )
         };
         if (result as isize) <= 32 {
-            Err("Windows could not open the ChatGPT sign-in URL.".into())
+            Err("Windows could not open the URL.".into())
         } else {
             Ok(())
         }
@@ -578,5 +596,20 @@ mod tests {
     fn open_https_url_rejects_http() {
         assert!(open_https_url("http://example.com").is_err());
         assert!(open_https_url("file:///tmp/x").is_err());
+    }
+
+    #[test]
+    fn parsed_web_url_allows_http_when_not_https_only() {
+        assert_eq!(
+            parsed_web_url("http://example.com/a", false).unwrap(),
+            "http://example.com/a"
+        );
+        assert_eq!(
+            parsed_web_url("https://example.com/a", false).unwrap(),
+            "https://example.com/a"
+        );
+        assert!(parsed_web_url("http://example.com/a", true).is_err());
+        assert!(parsed_web_url("file:///tmp/x", false).is_err());
+        assert!(parsed_web_url("javascript:alert(1)", false).is_err());
     }
 }

@@ -14,4 +14,9 @@ describe("Markdown streaming fences", () => {
       /<CodeBlock code=\{code\} language=\{language\} streaming=\{streaming\} \/>/
     );
   });
+
+  it("renders markdown images through ZoomableImage", () => {
+    const src = readFileSync(join(here, "../components/Markdown.tsx"), "utf8");
+    assert.match(src, /img: \(\{ src, alt \}\) => <ZoomableImage src=\{src\} alt=\{alt\} \/>/);
+  });
 });

@@ -65,6 +65,7 @@ pub use chat_persistence::{
     RecoverableRun, RecoveryReconciliation, RunError, RunPatch, RunRecord, RunStatus, RunStore,
     RunUsage,
 };
+pub use codex_oauth::{open_http_url, open_https_url};
 pub use commands::{
     expand as expand_command, expand_as as expand_command_as, list_slash_commands, mcp_slashes,
     parse_command, Expansion, McpSlash, ParsedCommand, SlashCommand, SlashKind,

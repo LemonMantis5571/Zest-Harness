@@ -1,3 +1,5 @@
+import { ignoreExpectedFailure } from "./backgroundFailure.ts";
+
 export type ThemeAppearance = "dark" | "light";
 
 export type ThemeSwatches = {
@@ -130,7 +132,15 @@ export function applyTheme(themeId: string): AppTheme {
 
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(THEME_CHANGED_EVENT));
+    void syncNativeChrome(theme);
   }
 
   return theme;
+}
+
+function syncNativeChrome(theme: AppTheme) {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  void import("./windowChrome.ts")
+    .then((chrome) => chrome.setWindowChrome(theme.swatches.background, theme.appearance))
+    .catch((error) => ignoreExpectedFailure(error, "sync native window chrome"));
 }
