@@ -1,7 +1,10 @@
 //! Ignore-aware workspace walking.
 //!
 //! Respects `.gitignore` (via the `ignore` crate) and always skips `.git`,
-//! `.zest`, `target`, and `node_modules`.
+//! `.zest`, `target`, and `node_modules`. A walk never consults gitignore
+//! files above the project root, and a folder that is not a git work tree
+//! does not inherit the operator's global excludes — that combination is
+//! what made a `/tmp` grep fixture look empty on Linux.
 
 use std::path::{Path, PathBuf};
 
@@ -17,13 +20,21 @@ fn hard_skip_name(name: &str) -> bool {
     HARD_SKIP_DIRS.contains(&name)
 }
 
-fn configure_builder(builder: &mut WalkBuilder) {
+/// Shared ignore rules for project-scoped walks (grep, glob, list).
+///
+/// `parents(false)` keeps a gitignore sitting in `/tmp` or `$HOME` from hiding
+/// files inside a project that merely lives underneath. `git_global` stays off
+/// until the project itself is a git work tree, so a unit-test scratch dir is
+/// not filtered by `~/.config/git/ignore`.
+pub(crate) fn configure_walk_builder(builder: &mut WalkBuilder, project_root: &Path) {
+    let git_repo = project_root.join(".git").exists();
     builder
         .hidden(false)
         .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
+        .git_global(git_repo)
+        .git_exclude(git_repo)
         .require_git(false)
+        .parents(false)
         .follow_links(false)
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
@@ -32,6 +43,10 @@ fn configure_builder(builder: &mut WalkBuilder) {
             }
             true
         });
+    let gitignore = project_root.join(".gitignore");
+    if gitignore.is_file() {
+        let _ = builder.add_ignore(&gitignore);
+    }
 }
 
 /// Walk files under `start` (must already be confined under `root`), handing
@@ -44,7 +59,7 @@ fn configure_builder(builder: &mut WalkBuilder) {
 /// since on a large repository the walk *is* the cost and the matching is free.
 pub fn walk_files(root: &ProjectRoot, start: &Path, mut visit: impl FnMut(PathBuf) -> bool) {
     let mut builder = WalkBuilder::new(start);
-    configure_builder(&mut builder);
+    configure_walk_builder(&mut builder, root.as_path());
 
     for entry in builder.build().flatten() {
         let path = entry.path();
@@ -71,7 +86,7 @@ pub fn walk_files(root: &ProjectRoot, start: &Path, mut visit: impl FnMut(PathBu
 /// Applies gitignore for entries under the project.
 pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>, String> {
     let mut builder = WalkBuilder::new(dir);
-    configure_builder(&mut builder);
+    configure_walk_builder(&mut builder, root.as_path());
     builder.max_depth(Some(1));
 
     let mut entries = Vec::new();

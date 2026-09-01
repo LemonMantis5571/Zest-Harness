@@ -155,7 +155,25 @@ pub fn credentials_for<'a>(id: &'a str, config: &'a ProviderConfig) -> Credentia
             request.account = Some(id);
         }
     }
+    // A `[providers.deepseek]` entry ships with `credential = "deepseek"` and
+    // no `api_key_env`. Without this fallback the OS store is the only source,
+    // so a `DEEPSEEK_API_KEY` sitting in `~/.zest/env` never reaches the client.
+    if request.env.is_none() && matches!(config, ProviderConfig::OpenaiCompatible { .. }) {
+        request.env = conventional_api_key_env(id);
+    }
     request
+}
+
+/// Conventional `{ID}_API_KEY` names for OpenAI-compatible entries that omit
+/// `api_key_env`. Unknown ids stay env-less so a keyless local server is not
+/// reported as missing a variable Zest invented.
+fn conventional_api_key_env(id: &str) -> Option<&'static str> {
+    match id {
+        "deepseek" => Some("DEEPSEEK_API_KEY"),
+        "openai" => Some("OPENAI_API_KEY"),
+        "gemini" => Some("GEMINI_API_KEY"),
+        _ => None,
+    }
 }
 
 /// Resolve and enforce in one step, so no caller can do the first without the second.
@@ -734,5 +752,37 @@ mod tests {
         });
         std::env::remove_var("ZEST_TEST_DRIVER_ENV");
         assert_eq!(key, Ok(Some("present".to_string())));
+    }
+
+    #[test]
+    fn a_deepseek_entry_without_api_key_env_still_names_the_conventional_variable() {
+        let config = crate::config::Config::parse(
+            r#"
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+credential = "deepseek"
+"#,
+        )
+        .unwrap();
+        let request = credentials_for("deepseek", &config.providers["deepseek"]);
+        assert_eq!(request.env, Some("DEEPSEEK_API_KEY"));
+        assert_eq!(request.account, Some("deepseek"));
+    }
+
+    #[test]
+    fn a_keyless_openai_compatible_server_does_not_invent_an_env_name() {
+        let config = crate::config::Config::parse(
+            r#"
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+model = "m"
+"#,
+        )
+        .unwrap();
+        let request = credentials_for("local", &config.providers["local"]);
+        assert_eq!(request.env, None);
     }
 }

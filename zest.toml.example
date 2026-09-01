@@ -61,6 +61,7 @@ enabled = true
 # model = "deepseek-v4-flash"
 # models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 # credential = "deepseek"
+# api_key_env = "DEEPSEEK_API_KEY"
 #
 # [providers.openai]
 # kind = "openai_compatible"
