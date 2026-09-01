@@ -218,7 +218,7 @@ fn search(
         if matches.len() >= MAX_MATCHES || output_bytes >= MAX_OUTPUT_BYTES {
             break;
         }
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+        if !super::walk::dir_entry_is_file(&entry) {
             continue;
         }
         let Ok(resolved) = root.confine(entry.path()) else {
@@ -438,6 +438,18 @@ mod tests {
     async fn a_parent_gitignore_does_not_hide_project_files() {
         let outer = scratch("parent-ignore");
         std::fs::write(outer.join(".gitignore"), "*.txt\n").unwrap();
+        let dir = outer.join("proj");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("hit.txt"), "needle here\n").unwrap();
+        let tool = Grep::new(&dir).unwrap();
+        let out = tool.run(json!({ "pattern": "needle" })).await.unwrap().body;
+        assert!(out.contains("hit.txt"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_parent_ignore_file_does_not_hide_project_files() {
+        let outer = scratch("parent-dot-ignore");
+        std::fs::write(outer.join(".ignore"), "*.txt\n").unwrap();
         let dir = outer.join("proj");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("hit.txt"), "needle here\n").unwrap();

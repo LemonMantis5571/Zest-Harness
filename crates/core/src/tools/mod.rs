@@ -557,7 +557,8 @@ mod characterization {
     /// and needs no approval.
     #[tokio::test]
     async fn a_real_grep_spill_can_be_read_back_through_its_locator() {
-        let dir = scratch("spill-roundtrip");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         // `grep` stops at 100 matches and clips each line to 400 chars, so its
         // output only reaches the 32 KiB cap when the matching lines are long.
         // Long lines are exactly the case worth keeping: a minified bundle or a
@@ -567,15 +568,21 @@ mod characterization {
             std::fs::write(dir.join(format!("f{file}.txt")), body).unwrap();
         }
 
-        let store = self::spill::SpillStore::open(&dir, "t-1").unwrap();
+        let store = self::spill::SpillStore::open(dir, "t-1").unwrap();
         let mut reg = ToolRegistry::new();
-        register_read_tools(&mut reg, &dir).unwrap();
+        register_read_tools(&mut reg, dir).unwrap();
         let reg = reg.with_spill(Arc::new(self::spill::SpillPolicy::new(store, 32 * 1024)));
 
         let out = reg
             .run("grep", serde_json::json!({ "pattern": "needle" }))
             .await
             .unwrap();
+        assert_ne!(
+            out.body.as_str(),
+            "(no matches)",
+            "grep walked none of the fixture files in {}",
+            dir.display()
+        );
         assert!(out.body.len() <= 32 * 1024, "{}", out.body.len());
 
         let locator = out
