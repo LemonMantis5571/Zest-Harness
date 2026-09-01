@@ -26,7 +26,8 @@ npm run desktop:dev
 ```
 
 On Linux, install the desktop packages listed in the Linux verification
-workflow, then run the same commands from `pwsh` or Bash.
+workflow, then run the same npm commands from Bash. PowerShell is not
+required.
 
 For Ubuntu 24.04, the CI-equivalent prerequisites are:
 
@@ -36,8 +37,6 @@ sudo apt-get install -y build-essential pkg-config libssl-dev cmake \
   libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
   libdbus-1-dev libxdo-dev curl wget file tar patchelf libfuse2t64
 ```
-
-Install PowerShell 7 (`pwsh`) before running the release scripts.
 
 Run the terminal client with:
 
@@ -78,6 +77,13 @@ Run the repository verification gate before opening a pull request:
 ./scripts/release-verify.ps1
 ```
 
+On Linux or macOS:
+
+```bash
+cargo install cargo-audit --locked
+bash scripts/release-verify.sh
+```
+
 The gate checks formatting, linting, Rust and UI tests, generated bindings,
 dependency advisories, and Git whitespace. Live provider checks are separate:
 they require credentials and may consume real quota.
@@ -87,6 +93,8 @@ For a source-only check without dependency audits or generated-binding drift:
 ```powershell
 npm run verify
 ```
+
+The same command works in Bash.
 
 Add a focused regression test for behavior changes. For UI changes, update the
 relevant characterization tests under `crates/desktop/ui/src`.

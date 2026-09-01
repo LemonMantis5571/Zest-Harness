@@ -605,21 +605,30 @@ pub struct Target {
     pub effort: Option<String>,
 }
 
-/// Load `.env` from the project (searching upward), then `~/.zest/.env`.
+/// Load `.env` from the project (searching upward), then the user-global files
+/// under `~/.zest`.
 ///
-/// The second one is the point: a key like `ANTHROPIC_API_KEY` belongs to the
+/// The user files are the point: a key like `DEEPSEEK_API_KEY` belongs to the
 /// machine for the same reason the provider list does. With only the upward
 /// search, opening a folder outside the Zest checkout finds no `.env` at all
 /// and a correctly-configured provider fails for want of a credential.
 ///
-/// dotenv semantics are first-wins and never clobber a variable already in the
-/// environment, so a project `.env` still overrides the user one, and a real
-/// environment variable overrides both.
+/// Two filenames are accepted because Linux installs commonly write
+/// `~/.zest/env` while dotenv's default is `~/.zest/.env`. dotenv semantics are
+/// first-wins and never clobber a variable already in the environment, so a
+/// project `.env` still overrides the user files, a dotted user file overrides
+/// the undotted one for the same key, and a real environment variable
+/// overrides all of them.
 pub fn load_env() {
     let _ = dotenvy::dotenv();
     if let Some(home) = dirs::home_dir() {
-        let _ = dotenvy::from_path(home.join(".zest").join(".env"));
+        load_user_env_files(&home.join(".zest"));
     }
+}
+
+fn load_user_env_files(zest_dir: &Path) {
+    let _ = dotenvy::from_path(zest_dir.join(".env"));
+    let _ = dotenvy::from_path(zest_dir.join("env"));
 }
 
 /// User-global config: `~/.zest/zest.toml`.
@@ -1667,5 +1676,30 @@ url = "https://example.com/mcp"
         let config = Config::env_fallback();
         assert_eq!(config.default_target().unwrap().provider, "anthropic");
         assert!(config.lint().is_empty());
+    }
+
+    #[test]
+    fn user_env_file_without_a_dot_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("ZEST_TEST_USER_ENV_{}", std::process::id());
+        std::env::remove_var(&name);
+        std::fs::write(dir.path().join("env"), format!("{name}=from-plain\n")).unwrap();
+        load_user_env_files(dir.path());
+        let got = std::env::var(&name);
+        std::env::remove_var(&name);
+        assert_eq!(got.ok().as_deref(), Some("from-plain"));
+    }
+
+    #[test]
+    fn dotted_user_env_wins_over_the_undotted_file_for_the_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("ZEST_TEST_USER_ENV_DOT_{}", std::process::id());
+        std::env::remove_var(&name);
+        std::fs::write(dir.path().join(".env"), format!("{name}=from-dot\n")).unwrap();
+        std::fs::write(dir.path().join("env"), format!("{name}=from-plain\n")).unwrap();
+        load_user_env_files(dir.path());
+        let got = std::env::var(&name);
+        std::env::remove_var(&name);
+        assert_eq!(got.ok().as_deref(), Some("from-dot"));
     }
 }

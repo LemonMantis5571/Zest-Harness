@@ -317,16 +317,27 @@ pub fn detect_antigravity() -> AuthStatus {
     }
 }
 
+/// Environment variable names that count as a bring-your-own key.
+///
+/// Presence only — values are never read here. `DEEPSEEK_API_KEY` belongs on
+/// this list because the shipped OpenAI-compatible DeepSeek entry is configured
+/// from that variable, and omitting it made `zest auth` report no key when the
+/// runtime could already serve DeepSeek.
+pub const BYOK_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+];
+
 /// A key in the environment. Deliberately checks presence only — the value is
 /// never inspected, compared, or reported.
 pub fn detect_byok() -> AuthStatus {
-    let present = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
-        .iter()
-        .any(|k| {
-            std::env::var(k)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-        });
+    let present = BYOK_ENV_VARS.iter().any(|k| {
+        std::env::var(k)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    });
 
     if present {
         AuthStatus::Ready { account: None }
@@ -547,6 +558,11 @@ mod tests {
         let slots = detect_all();
         let ids: Vec<_> = slots.iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["codex", "claude", "antigravity", "byok"]);
+    }
+
+    #[test]
+    fn byok_includes_the_deepseek_environment_variable() {
+        assert!(BYOK_ENV_VARS.contains(&"DEEPSEEK_API_KEY"));
     }
 
     #[test]

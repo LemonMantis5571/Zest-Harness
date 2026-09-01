@@ -212,22 +212,7 @@ fn search(
 
     // Stream via ignore-aware walker; stop early when budgets are hit.
     let mut builder = ignore::WalkBuilder::new(start);
-    builder
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            if entry.depth() > 0
-                && matches!(name.as_ref(), ".git" | ".zest" | "target" | "node_modules")
-            {
-                return false;
-            }
-            true
-        });
+    super::walk::configure_walk_builder(&mut builder, root.as_path());
 
     for entry in builder.build().flatten() {
         if matches.len() >= MAX_MATCHES || output_bytes >= MAX_OUTPUT_BYTES {
@@ -447,5 +432,17 @@ mod tests {
         let clipped = clip_chars(mixed, 5);
         assert_eq!(clipped, "café😀…");
         assert!(std::str::from_utf8(clipped.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_parent_gitignore_does_not_hide_project_files() {
+        let outer = scratch("parent-ignore");
+        std::fs::write(outer.join(".gitignore"), "*.txt\n").unwrap();
+        let dir = outer.join("proj");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("hit.txt"), "needle here\n").unwrap();
+        let tool = Grep::new(&dir).unwrap();
+        let out = tool.run(json!({ "pattern": "needle" })).await.unwrap().body;
+        assert!(out.contains("hit.txt"), "{out}");
     }
 }

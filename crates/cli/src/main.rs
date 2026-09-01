@@ -5,8 +5,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use zest_core::{
     detect_all, ApprovalDecision, ApprovalPreview, ApprovalRequest, Approver, AuthStatus, Config,
     Ledger, Prices, ProviderCommandRequest, ProviderFileChangeRequest, ProviderInteractionHost,
-    ProviderQuestionRequest, RuntimeBuilder, StreamEvent, Thread, ThreadStore, ToolRisk,
-    DEFAULT_SYSTEM,
+    ProviderQuestionRequest, ProviderRegistry, RuntimeBuilder, StreamEvent, Thread, ThreadStore,
+    ToolRisk, DEFAULT_SYSTEM,
 };
 
 #[tokio::main]
@@ -601,26 +601,76 @@ async fn run_doctor_live() -> anyhow::Result<()> {
 fn print_auth() {
     println!("\n\x1b[1mProviders\x1b[0m\n");
 
+    let mut seen = std::collections::HashSet::new();
     for slot in detect_all() {
-        let (mark, detail) = match &slot.status {
-            AuthStatus::Ready { account } => (
-                "\x1b[32m●\x1b[0m",
-                account.clone().unwrap_or_else(|| "signed in".into()),
-            ),
-            // Deliberately not red: we cannot see the credentials, which is not
-            // the same as their being absent.
-            AuthStatus::Unknown { reason } => ("\x1b[33m●\x1b[0m", reason.clone()),
-            AuthStatus::NotLoggedIn { fix } => ("\x1b[90m○\x1b[0m", format!("run: {fix}")),
-            AuthStatus::Unconfigured => ("\x1b[90m○\x1b[0m", "no key set".into()),
-        };
+        seen.insert(slot.id.to_string());
+        print_auth_row(slot.label, slot.method, &slot.status);
+    }
 
-        println!(
-            "  {mark} \x1b[1m{:<13}\x1b[0m \x1b[90m{:<20}\x1b[0m {detail}",
-            slot.label, slot.method
-        );
+    // `detect_all` is the launch-picker catalogue. Configured OpenAI-compatible
+    // parents such as DeepSeek only appear when zest.toml is consulted, which
+    // is how `zest auth` missed a working `DEEPSEEK_API_KEY`.
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Ok(config) = Config::find(&root) {
+        let (registry, skipped) = ProviderRegistry::from_config_at(&config, &root);
+        for id in config.providers.keys() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let method = config
+                .providers
+                .get(id)
+                .map(provider_kind_method)
+                .unwrap_or("API key");
+            let status = registry
+                .get(id)
+                .map(|provider| provider.auth_status())
+                .or_else(|| {
+                    skipped.iter().find(|row| row.id == *id).map(|row| {
+                        if row.reason.contains("not set") {
+                            AuthStatus::Unconfigured
+                        } else {
+                            AuthStatus::Unknown {
+                                reason: row.reason.clone(),
+                            }
+                        }
+                    })
+                })
+                .unwrap_or(AuthStatus::Unconfigured);
+            print_auth_row(id, method, &status);
+        }
     }
 
     println!("\n\x1b[90m● selectable   ○ unavailable\x1b[0m\n");
+}
+
+fn provider_kind_method(config: &zest_core::ProviderConfig) -> &'static str {
+    match config {
+        zest_core::ProviderConfig::Anthropic { .. } => "API key",
+        zest_core::ProviderConfig::OpenaiCompatible { .. } => "API key",
+        zest_core::ProviderConfig::ClaudeCode { .. } => "Claude sign-in",
+        zest_core::ProviderConfig::CodexCli { .. } => "Codex CLI",
+        zest_core::ProviderConfig::CodexOAuth { .. } => "ChatGPT sign-in",
+    }
+}
+
+fn print_auth_row(label: &str, method: &str, status: &AuthStatus) {
+    let (mark, detail) = match status {
+        AuthStatus::Ready { account } => (
+            "\x1b[32m●\x1b[0m",
+            account.clone().unwrap_or_else(|| "signed in".into()),
+        ),
+        // Deliberately not red: we cannot see the credentials, which is not
+        // the same as their being absent.
+        AuthStatus::Unknown { reason } => ("\x1b[33m●\x1b[0m", reason.clone()),
+        AuthStatus::NotLoggedIn { fix } => ("\x1b[90m○\x1b[0m", format!("run: {fix}")),
+        AuthStatus::Unconfigured => ("\x1b[90m○\x1b[0m", "no key set".into()),
+    };
+
+    println!(
+        "  {mark} \x1b[1m{:<13}\x1b[0m \x1b[90m{:<20}\x1b[0m {detail}",
+        label, method
+    );
 }
 
 /// Spend and headroom are printed as separate lines on purpose. They answer

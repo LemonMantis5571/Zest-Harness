@@ -33,6 +33,17 @@ a replacement for the commit history.
 - A timed-out command on Windows could keep running after Zest stopped
   waiting. The process is now put in a job object so the whole tree dies.
 
+- `~/.zest/env` is loaded next to `~/.zest/.env`, so a DeepSeek key kept in
+  the undotted Linux file is visible to `zest auth` and the desktop.
+- Debug desktop now points Vite and Tauri at `127.0.0.1:1420`, so a Linux
+  `localhost` that resolves to IPv4 is not a white window.
+- Clicking a project in the sidebar opens it, and a remembered last folder
+  is restored on launch instead of leaving the main chat on No workspace.
+- Grep in a folder that is not a git work tree no longer inherits a parent
+  or global gitignore.
+- Linux CI and the release gate run `scripts/release-verify.sh` instead of
+  requiring PowerShell.
+
 - A failed Sign in with ChatGPT turn said only "The provider could not
   complete the request. Try again." The chat now shows ChatGPT's own error,
   or that the stream died, instead of that sentence.

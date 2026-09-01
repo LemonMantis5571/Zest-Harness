@@ -871,10 +871,16 @@ export function ChatHistorySidebar({
                           <button
                             type="button"
                             title={project.path}
-                            onClick={() => toggleExpanded(project.path)}
+                            onClick={() => {
+                              toggleExpanded(project.path);
+                              if (!project.active) {
+                                void onOpenProjectChat({ root: project.path });
+                              }
+                            }}
                             className={cn(
                               "flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left outline-none transition-colors",
-                              "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50"
+                              "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
+                              project.active && "bg-[var(--sidebar-accent)]"
                             )}
                           >
                             <ChevronRightIcon

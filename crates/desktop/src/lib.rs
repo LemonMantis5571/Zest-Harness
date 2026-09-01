@@ -3330,12 +3330,32 @@ fn remove_implicit_internal_workspace() {
     }
 }
 
-/// Projects are opt-in. A fresh launch starts without a workspace so the user
-/// can either explicitly open a project or continue with a projectless chat.
-/// In particular, never turn Zest's own working/install directory into a
-/// project just because it happened to be the process current directory.
+/// Projects are opt-in. The process current directory is never a project.
+/// If the user last opened a known, writable folder, restore that one so the
+/// sidebar and the main chat agree on launch.
 fn initial_workspace_root() -> Option<PathBuf> {
-    None
+    remembered_workspace()
+}
+
+fn remembered_workspace() -> Option<PathBuf> {
+    let path = zest_config_dir().ok()?.join("last-workspace");
+    let raw = std::fs::read_to_string(path).ok()?;
+    choose_remembered_workspace(raw.trim(), &load_known_workspaces())
+}
+
+fn choose_remembered_workspace(raw: &str, known: &[PathBuf]) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let root = canonicalize_dir(PathBuf::from(raw)).ok()?;
+    if is_internal_zest_workspace(&root) || !dir_is_writable(&root) {
+        return None;
+    }
+    let root_key = display_path(&root);
+    known
+        .iter()
+        .any(|path| display_path(path) == root_key)
+        .then_some(root)
 }
 
 fn no_writable_workspace_error() -> String {
@@ -4131,9 +4151,8 @@ async fn start_session_inner(
 ) -> Result<SessionInfo, String> {
     zest_core::load_env();
 
-    // No workspace is selected on startup by design. Starting a session from
-    // the provider picker therefore opens the user-local free-chat store;
-    // selecting a project later is still an explicit action.
+    // No remembered project means the picker opens the user-local free-chat
+    // store. Selecting a folder later is still an explicit action.
     let root = root_override.unwrap_or(active_or_free_chat_root(&state)?);
     let config = if is_free_chat_root(&root) {
         config_for_free_chat(&state, &root)?
@@ -8777,9 +8796,8 @@ pub fn run() {
                 browser: Arc::new(BrowserHost::new()),
                 login: Mutex::new(None),
                 persist: Mutex::new(HashMap::new()),
-                // Do not infer a project from the process current/install
-                // directory. The user chooses a project explicitly or starts a
-                // projectless chat.
+                // Restore the last known project when one exists. Never infer a
+                // project from the process current or install directory.
                 workspace_root: Mutex::new(initial_workspace_root()),
                 workspace_config: Mutex::new(None),
                 policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
@@ -9125,8 +9143,36 @@ mod workspace_root_tests {
     }
 
     #[test]
-    fn launch_starts_without_a_default_workspace() {
-        assert_eq!(initial_workspace_root(), None);
+    fn launch_does_not_use_the_process_working_directory() {
+        assert_eq!(choose_remembered_workspace("", &[]), None);
+        assert_eq!(
+            choose_remembered_workspace("not-a-directory-that-exists", &[]),
+            None
+        );
+        let Some(root) = source_checkout_root() else {
+            return;
+        };
+        assert_eq!(
+            choose_remembered_workspace(&display_path(&root), std::slice::from_ref(&root)),
+            None,
+            "Zest's own checkout must never become the launch workspace"
+        );
+    }
+
+    #[test]
+    fn a_known_writable_folder_is_restored_as_the_launch_workspace() {
+        let dir = scratch("remembered-workspace");
+        let known = vec![canonicalize_dir(dir.clone()).unwrap()];
+        let restored = choose_remembered_workspace(&display_path(&dir), &known);
+        assert_eq!(restored.as_ref(), Some(&known[0]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unknown_folder_is_not_restored_as_the_launch_workspace() {
+        let dir = scratch("unknown-workspace");
+        assert_eq!(choose_remembered_workspace(&display_path(&dir), &[]), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

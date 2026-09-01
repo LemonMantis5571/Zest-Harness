@@ -1065,10 +1065,12 @@ export function ChatScreen({
   // the wrong size for "something changed" — BranchChangesBar carries that
   // message in one row and opens the panel when the user actually asks.
 
-  // The branch button carries counts only once there is something to review,
-  // so a clean tree gets a plain icon button instead of a row of zeroes.
+  // The strip is a review invite. A snapshot with files but +0 −0 is not
+  // worth surfacing — that used to leave the bar up as a row of zeroes.
   const branchChangeCount = workspaceChange?.changedFiles.length ?? 0;
-  const hasBranchChanges = branchChangeCount > 0;
+  const hasLineChanges =
+    (workspaceChange?.additions ?? 0) > 0 || (workspaceChange?.deletions ?? 0) > 0;
+  const hasBranchChanges = branchChangeCount > 0 && hasLineChanges;
 
   const openBranchChangeId = diffTarget?.source === "branch" ? diffTarget.changeId : null;
   useEffect(() => {

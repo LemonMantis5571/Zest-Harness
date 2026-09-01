@@ -34,6 +34,7 @@ export function BranchChangesBar({
   const fileCount =
     workspaceChange?.changedFiles.length ?? gitContext?.changedFiles ?? 0;
   const pullRequest = gitContext?.pullRequest;
+  const hasLineChanges = additions > 0 || deletions > 0;
 
   return (
     <div className="mb-2">
@@ -52,9 +53,15 @@ export function BranchChangesBar({
           title={`Review ${fileCount} changed ${fileCount === 1 ? "file" : "files"} on ${
             branch ?? "this branch"
           }`}
-          aria-label={`Show branch diff: ${fileCount} ${
-            fileCount === 1 ? "file" : "files"
-          } changed, ${additions} added, ${deletions} removed`}
+          aria-label={
+            hasLineChanges
+              ? `Show branch diff: ${fileCount} ${
+                  fileCount === 1 ? "file" : "files"
+                } changed, ${additions} added, ${deletions} removed`
+              : `Show branch diff: ${fileCount} ${
+                  fileCount === 1 ? "file" : "files"
+                } changed`
+          }
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left outline-none hover:bg-secondary/60 focus-visible:ring-2 focus-visible:ring-ring/50"
         >
           <span className="truncate text-[12px] font-medium">{projectLabel}</span>
@@ -66,15 +73,17 @@ export function BranchChangesBar({
           ) : null}
         </button>
 
-        <span
-          className="shrink-0 rounded-md bg-secondary/70 px-1.5 py-0.5 text-[11px] tabular-nums"
-          title={`${additions} added, ${deletions} removed across ${fileCount} ${
-            fileCount === 1 ? "file" : "files"
-          }`}
-        >
-          <span className="text-primary">+{additions}</span>{" "}
-          <span className="text-destructive">−{deletions}</span>
-        </span>
+        {hasLineChanges ? (
+          <span
+            className="shrink-0 rounded-md bg-secondary/70 px-1.5 py-0.5 text-[11px] tabular-nums"
+            title={`${additions} added, ${deletions} removed across ${fileCount} ${
+              fileCount === 1 ? "file" : "files"
+            }`}
+          >
+            <span className="text-primary">+{additions}</span>{" "}
+            <span className="text-destructive">−{deletions}</span>
+          </span>
+        ) : null}
 
         {/* Zest can read an existing pull request but cannot open one, so this
             slot links to the PR when there is one and stays empty otherwise

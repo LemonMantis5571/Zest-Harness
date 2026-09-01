@@ -18,8 +18,9 @@ and creates a GitHub prerelease only after both platforms pass.
    ./scripts/release-verify.ps1
    ```
 
-   On Linux or macOS, run it with `pwsh` and install the desktop libraries
-   listed in `.github/workflows/linux-verify.yml`.
+   On Linux or macOS, run `bash scripts/release-verify.sh` after installing
+   `cargo-audit` and the desktop libraries listed in
+   `.github/workflows/linux-verify.yml`.
 
 The gate includes the UI, Rust, generated TypeScript bindings, dependency
 audits, and Git whitespace. Live provider checks are not a
