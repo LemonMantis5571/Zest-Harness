@@ -16,9 +16,14 @@ a replacement for the commit history.
 
 ### Changed
 
-- The desktop app icon is a filled dark tile. The chameleon used to sit on
-  transparency, so the dock showed a floating glyph instead of a square
-  like Cursor or Grok.
+- The desktop app icon is a rounded dark tile with transparent corners, so
+  Windows shows a rounded square instead of a sharp black box. The chameleon
+  used to sit on a full-bleed square.
+- An empty chat is just the composer. The centered paragraph and Plan /
+  Explain / Review / commands / Open folder chips repeated the placeholder
+  and made a project chat look like onboarding.
+- The native title bar follows the selected colour theme. Windows 11 tints
+  the caption, text, and border; other platforms switch light/dark chrome.
 
 ### Removed
 
@@ -35,6 +40,11 @@ a replacement for the commit history.
   first paint is now the last ten user turns; earlier turns load on scroll
   up. Search opens on the page that contains the match instead of the
   latest turns.
+
+- Links in chat, including Wikimedia attributions and pull-request chips,
+  open in the system browser. The webview used to swallow `target=_blank`.
+- Pictures in assistant replies open a zoom overlay. Click the image, then
+  use + / − or Ctrl/Cmd + wheel.
 
 - A timed-out command on Windows could keep running after Zest stopped
   waiting. The process is now put in a job object so the whole tree dies.

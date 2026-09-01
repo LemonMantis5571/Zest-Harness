@@ -12,6 +12,7 @@ mod delegation;
 mod plugins;
 mod session;
 mod turn;
+mod window_chrome;
 mod workspace_files;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -35,8 +36,8 @@ use zest_core::{
     can_start_login, codex_cli_on_path, compose_system_with_docs, contains_ignore_ascii_case,
     derive_profile_stats, descriptor_for_picker_id, descriptor_from_config, detect_all,
     detect_claude_code, detect_codex_cli, detect_codex_oauth, display_path, driver_for,
-    env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
-    start_claude_code_login as core_start_claude_code_login,
+    env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
+    save_custom_system, start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
     thread_provider_handoff, thread_summary_from_json, truncate_chars, ApprovalDecision,
@@ -68,6 +69,7 @@ pub(crate) use delegation::{
 };
 use plugins::{NowPlayingView, PluginView, WallpaperView};
 use session::{ActiveTurn, Session, SessionController, SessionError};
+use window_chrome::set_window_chrome;
 use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 
 /// Providers shown in the desktop launch picker.
@@ -2754,6 +2756,11 @@ fn open_project_config(root: String) -> Result<(), String> {
     }
 
     open_path_in_editor(&path).map_err(|e| format!("could not open project configuration: {e}"))
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    open_http_url(&url)
 }
 
 /// Hand a file to whatever the OS opens it with.
@@ -8839,6 +8846,8 @@ pub fn run() {
             configure_codex_oauth_provider,
             codex_cli_available,
             open_project_config,
+            open_external_url,
+            set_window_chrome,
             usage_snapshot,
             provider_quota,
             list_plugins,

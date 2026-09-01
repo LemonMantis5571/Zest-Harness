@@ -4,6 +4,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
 import "./index.css";
 import App from "./App.tsx";
 import { shouldPreserveNativeContextMenu } from "./lib/contextMenu.ts";
+import { installExternalLinkHandling } from "./lib/externalLinks.ts";
 import { markStartup, measureStartup } from "./lib/startupPerf.ts";
 
 markStartup("ui-module");
@@ -19,6 +20,8 @@ document.addEventListener(
   },
   true
 );
+
+installExternalLinkHandling();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
