@@ -14,13 +14,18 @@ step() {
   shift
   echo
   echo "==> $name"
-  if "$@"; then
+  # `if cmd; then` is a success even when cmd fails, so `$?` after `fi` is 0.
+  # That is what let `cargo test` fail and the gate still exit 0.
+  set +e
+  "$@"
+  local code=$?
+  set -e
+  if [ "$code" -eq 0 ]; then
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
       echo "- [x] **$name**: PASSED" >> "$GITHUB_STEP_SUMMARY"
     fi
     return 0
   fi
-  local code=$?
   echo "==> [ERROR] in step '$name' (exit $code)" >&2
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "- [ ] **$name**: FAILED (exit code $code)" >> "$GITHUB_STEP_SUMMARY"

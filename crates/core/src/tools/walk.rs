@@ -3,12 +3,12 @@
 //! Respects `.gitignore` (via the `ignore` crate) and always skips `.git`,
 //! `.zest`, `target`, and `node_modules`. A walk never consults gitignore
 //! files above the project root, and a folder that is not a git work tree
-//! does not inherit the operator's global excludes — that combination is
+//! does not inherit the operator's global excludes. That combination is
 //! what made a `/tmp` grep fixture look empty on Linux.
 
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
+use ignore::{DirEntry, WalkBuilder};
 
 use super::project::ProjectRoot;
 use super::sensitive::is_sensitive_path;
@@ -22,18 +22,24 @@ fn hard_skip_name(name: &str) -> bool {
 
 /// Shared ignore rules for project-scoped walks (grep, glob, list).
 ///
-/// `parents(false)` keeps a gitignore sitting in `/tmp` or `$HOME` from hiding
-/// files inside a project that merely lives underneath. `git_global` stays off
-/// until the project itself is a git work tree, so a unit-test scratch dir is
-/// not filtered by `~/.config/git/ignore`.
+/// Git-related ignore files stay off until this folder is a work tree or
+/// ships its own `.gitignore`. `require_git(false)` plus `git_ignore(true)`
+/// still walks every ancestor looking for ignore files; `parents(false)`
+/// only skips them at match time, and a `/tmp/.gitignore` of `*.txt` was
+/// enough to empty a grep fixture. Non-git scratch dirs now disable those
+/// matchers entirely.
 pub(crate) fn configure_walk_builder(builder: &mut WalkBuilder, project_root: &Path) {
     let git_repo = project_root.join(".git").exists();
+    let gitignore = project_root.join(".gitignore");
+    let honor_gitignore = git_repo || gitignore.is_file();
     builder
+        .current_dir(project_root)
         .hidden(false)
-        .git_ignore(true)
+        .ignore(true)
+        .git_ignore(honor_gitignore)
         .git_global(git_repo)
         .git_exclude(git_repo)
-        .require_git(false)
+        .require_git(git_repo)
         .parents(false)
         .follow_links(false)
         .filter_entry(|entry| {
@@ -43,9 +49,27 @@ pub(crate) fn configure_walk_builder(builder: &mut WalkBuilder, project_root: &P
             }
             true
         });
-    let gitignore = project_root.join(".gitignore");
+    // `add_ignore` roots patterns at `current_dir`. Pointing that at the
+    // project recovers the root `.gitignore` when the walk starts in a
+    // subdirectory and `parents(false)` would skip it.
     if gitignore.is_file() {
         let _ = builder.add_ignore(&gitignore);
+    }
+}
+
+/// Some filesystems report `DT_UNKNOWN`, and `DirEntry::file_type` is then
+/// `None`. Treat those as files only after a real metadata check.
+pub(crate) fn dir_entry_is_file(entry: &DirEntry) -> bool {
+    match entry.file_type() {
+        Some(ft) => ft.is_file(),
+        None => entry.path().is_file(),
+    }
+}
+
+fn dir_entry_is_dir(entry: &DirEntry) -> bool {
+    match entry.file_type() {
+        Some(ft) => ft.is_dir(),
+        None => entry.path().is_dir(),
     }
 }
 
@@ -63,7 +87,7 @@ pub fn walk_files(root: &ProjectRoot, start: &Path, mut visit: impl FnMut(PathBu
 
     for entry in builder.build().flatten() {
         let path = entry.path();
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+        if !dir_entry_is_file(&entry) {
             continue;
         }
         let Ok(resolved) = root.confine(path) else {
@@ -105,7 +129,7 @@ pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>,
             continue;
         }
 
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_dir = dir_entry_is_dir(&entry);
         if is_dir {
             // Confine directories when they exist; skip symlink escapes.
             if root.confine(path).is_err() {
@@ -197,5 +221,39 @@ mod tests {
         assert!(names.contains(&"ok.txt"), "{names:?}");
         assert!(!names.contains(&".env"), "{names:?}");
         assert!(!names.contains(&"node_modules"), "{names:?}");
+    }
+
+    #[test]
+    fn a_parent_ignore_file_does_not_hide_project_files() {
+        let outer = scratch("parent-dot-ignore");
+        fs::write(outer.join(".ignore"), "*.txt\n").unwrap();
+        let dir = outer.join("proj");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("keep.txt"), "yes").unwrap();
+
+        let root = ProjectRoot::new(&dir).unwrap();
+        let mut rels: Vec<String> = Vec::new();
+        walk_files(&root, root.as_path(), |path| {
+            rels.push(root.relativize(&path));
+            true
+        });
+        assert!(rels.iter().any(|r| r == "keep.txt"), "{rels:?}");
+    }
+
+    #[test]
+    fn a_project_gitignore_without_git_still_applies() {
+        let dir = scratch("own-gitignore");
+        fs::write(dir.join(".gitignore"), "skip.txt\n").unwrap();
+        fs::write(dir.join("skip.txt"), "no").unwrap();
+        fs::write(dir.join("keep.txt"), "yes").unwrap();
+
+        let root = ProjectRoot::new(&dir).unwrap();
+        let mut rels: Vec<String> = Vec::new();
+        walk_files(&root, root.as_path(), |path| {
+            rels.push(root.relativize(&path));
+            true
+        });
+        assert!(rels.iter().any(|r| r == "keep.txt"), "{rels:?}");
+        assert!(!rels.iter().any(|r| r == "skip.txt"), "{rels:?}");
     }
 }

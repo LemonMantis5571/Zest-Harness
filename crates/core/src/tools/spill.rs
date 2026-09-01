@@ -181,7 +181,7 @@ impl SpillStore {
             files.push((modified, meta.len(), entry.path()));
         }
 
-        files.sort_by_key(|(modified, _, _)| *modified);
+        files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
         let mut total: u64 = kept_bytes + files.iter().map(|(_, len, _)| *len).sum::<u64>();
         let mut count = files.len();
         for (_, len, path) in &files {
@@ -518,13 +518,22 @@ mod tests {
     fn an_over_budget_directory_is_pruned_oldest_first() {
         let root = scratch("prune");
         let store = store(&root);
+        let dir = root.join(".zest/spill/t-1");
         let mut names = Vec::new();
-        for i in 0..MAX_FILES + 8 {
+        let total = MAX_FILES + 8;
+        for i in 0..total {
             let name = store.next_name("bash");
             assert!(store.write(&name, &format!("body {i}")).is_some());
+            // Linux tmpfs and overlay often give every file the same mtime when
+            // writes land in one burst. The next sweep would then follow
+            // readdir order, which is not insertion order, and names[0] survived.
+            let path = dir.join(&name);
+            let ts = SystemTime::now() - Duration::from_secs((total - i) as u64);
+            let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(ts))
+                .unwrap();
             names.push(name);
         }
-        let dir = root.join(".zest/spill/t-1");
         let left = fs::read_dir(&dir).unwrap().count();
         // The budget bounds the directory including the file just written.
         assert!(left <= MAX_FILES, "{left} files survived the sweep");
