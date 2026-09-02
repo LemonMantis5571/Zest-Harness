@@ -244,6 +244,7 @@ export type DesktopBackend = {
   gitBranch(): Promise<string | null>;
   gitContext(): Promise<GitContext>;
   workspaceChanges(): Promise<WorkspaceChange>;
+  pullRequestDiff(number?: number): Promise<WorkspaceChange>;
   verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
   getUserProfile(): Promise<UserProfile>;
@@ -370,6 +371,7 @@ export function createTauriBackend(): DesktopBackend {
     gitBranch: () => tauriApi.gitBranch(),
     gitContext: () => tauriApi.gitContext(),
     workspaceChanges: () => tauriApi.workspaceChanges(),
+    pullRequestDiff: (number) => tauriApi.pullRequestDiff(number),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),
     getUserProfile: () => tauriApi.getUserProfile(),

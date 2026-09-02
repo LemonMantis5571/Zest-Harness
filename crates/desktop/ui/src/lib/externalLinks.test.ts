@@ -84,4 +84,41 @@ describe("externalHttpUrlFromClick", () => {
       null
     );
   });
+
+  it("leaves an in-app pull request link alone on an unmodified click", () => {
+    const anchor = {
+      tagName: "A",
+      getAttribute(name: string) {
+        return name === "href" ? "https://github.com/zest/pr/13" : null;
+      },
+      hasAttribute(name: string) {
+        return name === "data-internal-link";
+      },
+    };
+    assert.equal(
+      externalHttpUrlFromClick({
+        defaultPrevented: false,
+        button: 0,
+        target: anchor,
+      }),
+      null
+    );
+    assert.equal(
+      externalHttpUrlFromClick({
+        defaultPrevented: false,
+        button: 0,
+        metaKey: true,
+        target: anchor,
+      }),
+      "https://github.com/zest/pr/13"
+    );
+    assert.equal(
+      externalHttpUrlFromClick({
+        defaultPrevented: false,
+        button: 1,
+        target: anchor,
+      }),
+      "https://github.com/zest/pr/13"
+    );
+  });
 });

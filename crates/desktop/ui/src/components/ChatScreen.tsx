@@ -72,6 +72,7 @@ import { ZestPulse } from "@/components/ZestPulse";
 import { toast } from "@/components/ui/toast";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
+import { openExternalUrl } from "@/lib/externalLinks";
 import { buildConversationTurns } from "@/lib/conversationTurns";
 import { ensureFontLoaded } from "@/lib/fonts";
 import { LinkifyText } from "@/lib/linkify";
@@ -97,9 +98,11 @@ import type {
   DelegationJob,
   GitContext,
   PreparedAttachment,
+  ProjectChats,
   ProviderActivityPart,
   ProviderRow,
   SessionInfo,
+  ThreadSummary,
   SessionWarning,
   UserProfile,
   WorkspaceChange,
@@ -772,6 +775,10 @@ export function ChatScreen({
    */
   const narrow = useMediaQuery("(max-width: 767px)");
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
+  const pendingPullRequestRef = useRef<{ number: number; url: string } | null>(
+    null
+  );
+  const ignoreBranchRestoreRef = useRef(false);
   const workspaceRefreshRef = useRef<{
     threadId: string;
     promise: Promise<WorkspaceChange>;
@@ -959,7 +966,38 @@ export function ChatScreen({
     setWorkbenchOpen((value) => !value);
   }, [session.isFreeChat]);
 
+  const openPullRequestDiff = useCallback(
+    async (link: { number: number; url: string }) => {
+      if (session.isFreeChat) {
+        await openExternalUrl(link.url);
+        return;
+      }
+      try {
+        const change = await getBackend().pullRequestDiff(link.number);
+        if (
+          change.unavailable ||
+          (!change.changedFiles.length && !change.diff.trim())
+        ) {
+          await openExternalUrl(link.url);
+          return;
+        }
+        setDiffTarget({
+          path: `Pull request #${link.number}`,
+          diff: change.diff,
+          source: "pull_request",
+          changeId: `pr:${link.number}`,
+        });
+      } catch (error) {
+        ignoreExpectedFailure(error, "open pull request diff");
+        await openExternalUrl(link.url);
+      }
+    },
+    [session.isFreeChat]
+  );
+
   useEffect(() => {
+    const pending = pendingPullRequestRef.current;
+    pendingPullRequestRef.current = null;
     setDiffTarget(null);
     if (typeof window === "undefined") {
       setDiffWidth(520);
@@ -969,7 +1007,10 @@ export function ChatScreen({
     const savedWidth = Number(window.localStorage.getItem(diffWidthKey));
     setDiffWidth(Number.isFinite(savedWidth) && savedWidth >= 360 ? savedWidth : 520);
     setDismissedChangeId(window.localStorage.getItem(dismissedDiffKey));
-  }, [diffWidthKey, dismissedDiffKey]);
+    if (pending) {
+      void openPullRequestDiff(pending);
+    }
+  }, [diffWidthKey, dismissedDiffKey, openPullRequestDiff]);
 
   const openDiff = useCallback(
     (path: string, diff: string) => {
@@ -1007,7 +1048,29 @@ export function ChatScreen({
     return promise;
   }, [onRefreshWorkspaceChanges, session.threadId]);
 
+  const requestPullRequest = useCallback(
+    (link: { number: number; url: string }, switchTo?: { root: string | null; threadId: string }) => {
+      if (switchTo && switchTo.threadId !== session.threadId) {
+        ignoreBranchRestoreRef.current = true;
+        pendingPullRequestRef.current = link;
+        void onOpenProjectChat({
+          root: switchTo.root,
+          threadId: switchTo.threadId,
+        }).catch((error) =>
+          ignoreExpectedFailure(error, "open chat for pull request")
+        );
+        return;
+      }
+      void openPullRequestDiff(link);
+    },
+    [onOpenProjectChat, openPullRequestDiff, session.threadId]
+  );
+
   useEffect(() => {
+    if (ignoreBranchRestoreRef.current) {
+      ignoreBranchRestoreRef.current = false;
+      return;
+    }
     if (
       session.isFreeChat ||
       typeof window === "undefined" ||
@@ -1550,6 +1613,14 @@ export function ChatScreen({
         quotaRefreshKey={`${session.threadId}:${messages.length}`}
         onSearch={openPalette}
         onRevealTranscript={() => onRevealTranscript?.()}
+        onOpenPullRequest={(project: ProjectChats, thread: ThreadSummary) => {
+          const link = thread.gitContext?.pullRequest;
+          if (!link) return;
+          requestPullRequest(
+            { number: link.number, url: link.url },
+            { root: project.path, threadId: thread.id }
+          );
+        }}
         canNavigateBack={canNavigateBack}
         canNavigateForward={canNavigateForward}
         onNavigateBack={onNavigateBack}
@@ -1909,6 +1980,11 @@ export function ChatScreen({
             onRemoveAttachment={onRemoveAttachment}
             onPasteImages={onPasteImages}
             compacting={compacting}
+            onOpenPullRequest={() => {
+              const link = gitContext?.pullRequest;
+              if (!link) return;
+              requestPullRequest({ number: link.number, url: link.url });
+            }}
             aboveComposer={
               /*
                * The branch strip rides above the composer rather than under the
@@ -1939,6 +2015,11 @@ export function ChatScreen({
                   workspaceChange={workspaceChange}
                   gitContext={gitContext}
                   onOpen={() => void openBranchChanges()}
+                  onOpenPullRequest={() => {
+                    const link = gitContext?.pullRequest;
+                    if (!link) return;
+                    requestPullRequest({ number: link.number, url: link.url });
+                  }}
                   onDismiss={dismissBranchBar}
                 />
               ) : null

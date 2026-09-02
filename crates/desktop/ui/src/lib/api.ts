@@ -517,6 +517,12 @@ export function workspaceChanges() {
   return invoke<WorkspaceChange>("workspace_changes");
 }
 
+export function pullRequestDiff(number?: number) {
+  return invoke<WorkspaceChange>("pull_request_diff", {
+    number: number ?? null,
+  });
+}
+
 export function verifyWorkspace() {
   return invoke<WorkspaceReview>("verify_workspace");
 }

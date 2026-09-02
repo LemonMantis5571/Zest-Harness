@@ -6104,6 +6104,78 @@ async fn workspace_changes(state: State<'_, AppState>) -> Result<WorkspaceChange
     Ok(changes.into())
 }
 
+fn resolve_pull_request_number(requested: Option<u64>, stored: Option<u64>) -> Option<u64> {
+    [requested, stored]
+        .into_iter()
+        .flatten()
+        .find(|&number| zest_core::workspace_changes::is_safe_pr_number(number))
+}
+
+async fn fetch_github_pull_request_diff(root: &Path, number: u64) -> Option<Vec<u8>> {
+    let output = match tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new("gh")
+            .args(["pr", "diff", &number.to_string()])
+            .current_dir(root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) | Err(_) => return None,
+    };
+    output.status.success().then_some(output.stdout)
+}
+
+/// Read the pull request patch for the active chat. Prefer `gh pr diff`; if
+/// that is missing, compare the stored base branch against HEAD.
+#[tauri::command]
+async fn pull_request_diff(
+    state: State<'_, AppState>,
+    number: Option<u64>,
+) -> Result<WorkspaceChangeView, String> {
+    let snapshot = state
+        .sessions
+        .session_info_snapshot(|session| (session.root.clone(), session.thread.git_context.clone()))
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("no_session", "no active chat"))?;
+    let (root, context) = snapshot;
+    let stored = context
+        .as_ref()
+        .and_then(|context| context.pull_request.as_ref())
+        .map(|pull_request| pull_request.number);
+    let Some(number) = resolve_pull_request_number(number, stored) else {
+        return Ok(zest_core::WorkspaceChangeSet::unavailable("pull_request").into());
+    };
+    if let Some(raw) = fetch_github_pull_request_diff(&root, number).await {
+        return Ok(zest_core::snapshot_from_unified_diff(
+            "pull_request",
+            &raw,
+            context
+                .as_ref()
+                .and_then(|context| context.base_branch.as_deref()),
+            context
+                .as_ref()
+                .and_then(|context| context.branch.as_deref()),
+        )
+        .into());
+    }
+    let Some(base_branch) = context
+        .as_ref()
+        .and_then(|context| context.base_branch.as_deref())
+        .filter(|value| zest_core::workspace_changes::is_safe_git_ref(value))
+    else {
+        return Ok(zest_core::WorkspaceChangeSet::unavailable("pull_request").into());
+    };
+    zest_core::inspect_merge_base(&root, base_branch)
+        .await
+        .map(WorkspaceChangeView::from)
+        .map_err(|error| error.to_string())
+}
+
 /// Remove a user message and its later branch so the UI can submit an edited
 /// replacement as a fresh turn. Workspace files are intentionally untouched.
 #[tauri::command]
@@ -8921,6 +8993,7 @@ pub fn run() {
             prepare_pasted_image,
             git_branch,
             git_context,
+            pull_request_diff,
             workspace_changes,
             verify_workspace,
             context_usage,
@@ -9317,6 +9390,15 @@ mod characterization {
         assert_eq!(stats.additions, 3);
         assert_eq!(stats.deletions, 1);
         assert_eq!(stats.changed_files, 2);
+    }
+
+    #[test]
+    fn pull_request_number_prefers_the_requested_id_and_rejects_zero() {
+        assert_eq!(resolve_pull_request_number(Some(13), Some(2)), Some(13));
+        assert_eq!(resolve_pull_request_number(None, Some(18)), Some(18));
+        assert_eq!(resolve_pull_request_number(Some(0), Some(18)), Some(18));
+        assert_eq!(resolve_pull_request_number(Some(0), Some(0)), None);
+        assert_eq!(resolve_pull_request_number(None, None), None);
     }
 
     #[test]

@@ -336,6 +336,23 @@ describe("fixture windowed open", () => {
   });
 });
 
+describe("fixture pull request review", () => {
+  it("returns a local patch for the linked pull request", async () => {
+    const backend = createFixtureBackend();
+    const context = await backend.gitContext();
+    assert.equal(context.pullRequest?.number, 13);
+    assert.equal(context.statsSource, "pull_request");
+
+    const change = await backend.pullRequestDiff(13);
+    assert.equal(change.unavailable, false);
+    assert.match(change.diff, /hello from pull request 13/);
+    assert.equal(change.changedFiles[0]?.path, "src/example.ts");
+
+    const threads = await backend.listThreads();
+    assert.ok(threads.some((thread) => thread.gitContext?.pullRequest?.number === 13));
+  });
+});
+
 describe("fixture queued-message recovery", () => {
   it("claims only the oldest durable followup before delivering it", async () => {
     const backend = createFixtureBackend();
