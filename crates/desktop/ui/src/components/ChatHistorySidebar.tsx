@@ -36,6 +36,10 @@ import {
 } from "@/lib/threadActivity";
 import type { ProjectChats, ProviderRow, ThreadSummary, UserProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  handlePullRequestClick,
+  pullRequestAnchorProps,
+} from "@/lib/pullRequestLink";
 
 type Props = {
   open: boolean;
@@ -82,6 +86,8 @@ type Props = {
   canNavigateForward: boolean;
   onNavigateBack: () => void;
   onNavigateForward: () => void;
+  /** Open this chat's pull request in the review pane. */
+  onOpenPullRequest?: (project: ProjectChats, thread: ThreadSummary) => void;
 };
 
 function threadTitle(thread: ThreadSummary) {
@@ -208,6 +214,7 @@ export function ChatHistorySidebar({
   canNavigateForward,
   onNavigateBack,
   onNavigateForward,
+  onOpenPullRequest,
 }: Props) {
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [loading, setLoading] = useState(false);
@@ -563,13 +570,19 @@ export function ChatHistorySidebar({
             </span>
           ) : null}
           {pullRequest ? (
-            <span
-              title={`PR #${pullRequest.number}: ${pullRequest.title} · +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`}
+            <a
+              {...pullRequestAnchorProps(pullRequest.url)}
+              title={`Pull request #${pullRequest.number}: ${pullRequest.title} · +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`}
               aria-label={`Pull request #${pullRequest.number}`}
               className="flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+              onClick={(event) =>
+                handlePullRequestClick(event, () =>
+                  onOpenPullRequest?.(project, thread)
+                )
+              }
             >
               <GitPullRequestIcon className="size-3.5 opacity-80" />
-            </span>
+            </a>
           ) : null}
           {owner ? (
             <span

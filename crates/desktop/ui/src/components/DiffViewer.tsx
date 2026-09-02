@@ -11,6 +11,7 @@ import {
 import {
   ChevronDownIcon,
   GitBranchIcon,
+  GitPullRequestIcon,
   XIcon,
 } from "lucide-react";
 
@@ -25,7 +26,7 @@ import { cn } from "@/lib/utils";
 export type DiffViewerTarget = {
   path: string;
   diff: string;
-  source?: "tool" | "branch";
+  source?: "tool" | "branch" | "pull_request";
   changeId?: string;
 };
 
@@ -169,7 +170,9 @@ export function DiffViewer({
       : reading?.foldedLines ?? 0;
   const totalAdded = sections.reduce((sum, section) => sum + section.added, 0);
   const totalRemoved = sections.reduce((sum, section) => sum + section.removed, 0);
-  const hasBranchContext = target?.source === "branch" || Boolean(branch || baseBranch);
+  const isPullRequest = target?.source === "pull_request";
+  const hasBranchContext =
+    target?.source === "branch" || isPullRequest || Boolean(branch || baseBranch);
 
   function toggleSection(key: string) {
     setCollapsed((current) => {
@@ -207,8 +210,18 @@ export function DiffViewer({
           <div className="flex items-start justify-between gap-3 px-3 py-2.5">
             <div className="min-w-0">
               <div id={titleId} className="flex items-center gap-1.5 text-xs font-medium">
-                <GitBranchIcon className="size-3.5 text-primary/80" aria-hidden="true" />
-                <span>{hasBranchContext ? "Branch changes" : "File changes"}</span>
+                {isPullRequest ? (
+                  <GitPullRequestIcon className="size-3.5 text-primary/80" aria-hidden="true" />
+                ) : (
+                  <GitBranchIcon className="size-3.5 text-primary/80" aria-hidden="true" />
+                )}
+                <span>
+                  {isPullRequest
+                    ? target.path
+                    : hasBranchContext
+                      ? "Branch changes"
+                      : "File changes"}
+                </span>
                 <ChevronDownIcon className="size-3 text-muted-foreground/70" aria-hidden="true" />
               </div>
               <div

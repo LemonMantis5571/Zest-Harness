@@ -184,4 +184,6 @@ pub use usage::{
     ProviderCostRow, ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus,
     TokenCounts, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
 };
-pub use workspace_changes::{FileChangeSummary, WorkspaceChangeSet};
+pub use workspace_changes::{
+    inspect_merge_base, snapshot_from_unified_diff, FileChangeSummary, WorkspaceChangeSet,
+};

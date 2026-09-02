@@ -54,6 +54,10 @@ import {
   splitSlashMatch,
 } from "@/lib/slashCommands";
 import { cn } from "@/lib/utils";
+import {
+  handlePullRequestClick,
+  pullRequestAnchorProps,
+} from "@/lib/pullRequestLink";
 
 type Props = {
   value: string;
@@ -93,6 +97,8 @@ type Props = {
   onRemoveAttachment: (id: string) => void;
   onPasteImages: (files: File[]) => void;
   compacting?: boolean;
+  /** Open the pull request in the review pane. */
+  onOpenPullRequest?: () => void;
   /** Sticky chrome above the input (e.g. pending approvals). */
   aboveComposer?: ReactNode;
 };
@@ -140,6 +146,7 @@ export function Composer({
   onRemoveAttachment,
   onPasteImages,
   compacting = false,
+  onOpenPullRequest,
   aboveComposer,
 }: Props) {
   const supportsEffort = effortsForModel(models, model).length > 0;
@@ -685,11 +692,10 @@ export function Composer({
             ) : null}
             {gitContext?.pullRequest ? (
               <a
-                href={gitContext.pullRequest.url}
-                target="_blank"
-                rel="noreferrer"
+                {...pullRequestAnchorProps(gitContext.pullRequest.url)}
                 title={`${gitContext.pullRequest.title} · +${gitContext.additions} −${gitContext.deletions} · ${gitContext.changedFiles} files`}
                 className="inline-flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                onClick={(event) => handlePullRequestClick(event, onOpenPullRequest)}
               >
                 <GitPullRequestIcon className="size-3 opacity-80" />
                 <span>#{gitContext.pullRequest.number}</span>

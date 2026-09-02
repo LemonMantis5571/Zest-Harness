@@ -52,6 +52,98 @@ pub fn is_safe_commit_id(value: &str) -> bool {
     (4..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Hosts pass a numeric pull-request id into `gh`. Reject zero and anything
+/// large enough that it is no longer a plausible issue number.
+pub fn is_safe_pr_number(number: u64) -> bool {
+    (1..=1_000_000).contains(&number)
+}
+
+/// Branch and remote-ish refs used as `git diff <ref>...HEAD`. Option-like
+/// values and path traversal are rejected so the range cannot become a flag.
+pub fn is_safe_git_ref(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 255 || value.starts_with('-') || value.starts_with('.') {
+        return false;
+    }
+    if value.contains("..") || value.contains('\\') || value.contains('\0') {
+        return false;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'.'))
+}
+
+/// Turn a unified diff (from `gh pr diff` or `git diff A...HEAD`) into the
+/// same bounded, redacted snapshot the workspace inspector returns.
+pub fn snapshot_from_unified_diff(
+    repository: impl Into<String>,
+    raw: &[u8],
+    base_branch: Option<&str>,
+    branch: Option<&str>,
+) -> WorkspaceChangeSet {
+    let redacted = redact_diff(raw);
+    let (diff, truncated) = bounded_utf8(&redacted, MAX_DISPLAY_DIFF_BYTES);
+    let mut summaries = Vec::new();
+    fill_stats_from_diff(&mut summaries, raw);
+    for summary in &mut summaries {
+        if is_sensitive_path(&summary.path) {
+            summary.sensitive = true;
+        }
+    }
+    WorkspaceChangeSet {
+        change_id: blake3::hash(raw).to_hex().to_string(),
+        repository: repository.into(),
+        base_commit: None,
+        base_branch: base_branch
+            .filter(|value| is_safe_git_ref(value))
+            .map(str::to_string),
+        branch: branch
+            .filter(|value| is_safe_git_ref(value))
+            .map(str::to_string),
+        additions: summaries.iter().map(|file| file.additions).sum(),
+        deletions: summaries.iter().map(|file| file.deletions).sum(),
+        changed_files: summaries,
+        diff,
+        truncated,
+        unavailable: false,
+    }
+}
+
+/// Compare `base_ref...HEAD` the way a pull request compares its merge base.
+pub async fn inspect_merge_base(
+    root: impl AsRef<Path>,
+    base_ref: &str,
+) -> Result<WorkspaceChangeSet> {
+    let root = root.as_ref();
+    if !is_safe_git_ref(base_ref) {
+        return Ok(WorkspaceChangeSet::unavailable("invalid_base_ref"));
+    }
+    let range = format!("{base_ref}...HEAD");
+    let output = match run_git(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--find-renames",
+            "--binary",
+            range.as_str(),
+            "--",
+        ],
+    )
+    .await
+    {
+        Ok(output) if output.status.success() || output.status.code() == Some(1) => output,
+        _ => return Ok(WorkspaceChangeSet::unavailable("git")),
+    };
+    let branch = git_branch(root).await;
+    Ok(snapshot_from_unified_diff(
+        "git",
+        &output.stdout,
+        Some(base_ref),
+        branch.as_deref(),
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChangeSummary {
@@ -858,6 +950,136 @@ mod tests {
         assert!(is_safe_commit_id(&"b".repeat(64)));
         assert!(!is_safe_commit_id("--output=workspace.patch"));
         assert!(!is_safe_commit_id("not-a-commit"));
+    }
+
+    #[test]
+    fn pull_request_numbers_reject_zero_and_huge_ids() {
+        assert!(is_safe_pr_number(1));
+        assert!(is_safe_pr_number(13));
+        assert!(!is_safe_pr_number(0));
+        assert!(!is_safe_pr_number(1_000_001));
+    }
+
+    #[test]
+    fn git_refs_reject_ranges_and_flags() {
+        assert!(is_safe_git_ref("main"));
+        assert!(is_safe_git_ref("feature/pr-chip"));
+        assert!(is_safe_git_ref("origin/main"));
+        assert!(!is_safe_git_ref("--output=patch"));
+        assert!(!is_safe_git_ref("main...HEAD"));
+        assert!(!is_safe_git_ref("../etc"));
+        assert!(!is_safe_git_ref(""));
+    }
+
+    #[test]
+    fn unified_diff_snapshot_counts_files_and_redacts_secrets() {
+        let diff = concat!(
+            "diff --git a/src/lib.rs b/src/lib.rs\n",
+            "--- a/src/lib.rs\n",
+            "+++ b/src/lib.rs\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "diff --git a/.env b/.env\n",
+            "--- a/.env\n",
+            "+++ b/.env\n",
+            "@@ -1 +1 @@\n",
+            "-SECRET=1\n",
+            "+SECRET=2\n",
+        );
+        let snapshot = snapshot_from_unified_diff(
+            "pull_request",
+            diff.as_bytes(),
+            Some("main"),
+            Some("topic"),
+        );
+        assert_eq!(snapshot.repository, "pull_request");
+        assert_eq!(snapshot.base_branch.as_deref(), Some("main"));
+        assert_eq!(snapshot.branch.as_deref(), Some("topic"));
+        assert_eq!(snapshot.changed_files.len(), 2);
+        assert_eq!(snapshot.additions, 2);
+        assert_eq!(snapshot.deletions, 2);
+        assert!(snapshot.diff.contains("+new"));
+        assert!(!snapshot.diff.contains("SECRET"));
+        assert!(snapshot.diff.contains("sensitive file omitted"));
+        assert!(!snapshot.unavailable);
+    }
+
+    #[tokio::test]
+    async fn merge_base_diff_includes_commits_on_the_topic_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["checkout", "-b", "base"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(root.join("tracked.txt"), b"base\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "--", "tracked.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Zest Test",
+                "-c",
+                "user.email=zest-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["checkout", "-b", "topic"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(root.join("tracked.txt"), b"topic\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "--", "tracked.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Zest Test",
+                "-c",
+                "user.email=zest-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "topic",
+            ])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+
+        let snapshot = inspect_merge_base(root, "base").await.unwrap();
+        assert!(snapshot.diff.contains("-base"));
+        assert!(snapshot.diff.contains("+topic"));
+        assert!(!snapshot.unavailable);
+        assert_eq!(snapshot.base_branch.as_deref(), Some("base"));
+
+        let rejected = inspect_merge_base(root, "--output=patch").await.unwrap();
+        assert!(rejected.unavailable);
     }
 
     #[test]

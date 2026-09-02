@@ -16,6 +16,8 @@ a replacement for the commit history.
 
 ### Changed
 
+- Clicking a pull-request chip opens the review pane on that patch. Cmd/Ctrl-click,
+  Shift-click, or middle-click still opens the host page.
 - The desktop app icon is a rounded dark tile with transparent corners, so
   Windows shows a rounded square instead of a sharp black box. The chameleon
   used to sit on a full-bleed square.

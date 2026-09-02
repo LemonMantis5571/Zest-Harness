@@ -3,6 +3,10 @@ import { GitBranchIcon, GitPullRequestIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { GitContext, WorkspaceChange } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  handlePullRequestClick,
+  pullRequestAnchorProps,
+} from "@/lib/pullRequestLink";
 
 type Props = {
   /** Folder name of the open project, shown as the left-hand label. */
@@ -12,6 +16,8 @@ type Props = {
   gitContext: GitContext | null;
   /** Opens the branch diff. The whole strip is the affordance. */
   onOpen: () => void;
+  /** Open the pull request in the review pane. */
+  onOpenPullRequest?: () => void;
   onDismiss: () => void;
 };
 
@@ -27,6 +33,7 @@ export function BranchChangesBar({
   workspaceChange,
   gitContext,
   onOpen,
+  onOpenPullRequest,
   onDismiss,
 }: Props) {
   const additions = workspaceChange?.additions ?? gitContext?.additions ?? 0;
@@ -85,16 +92,14 @@ export function BranchChangesBar({
           </span>
         ) : null}
 
-        {/* Zest can read an existing pull request but cannot open one, so this
-            slot links to the PR when there is one and stays empty otherwise
-            rather than offering a button that would do nothing. */}
+        {/* Present only when a pull request was already found. An unmodified
+            click opens the review pane; a modified click keeps the host URL. */}
         {pullRequest ? (
           <a
-            href={pullRequest.url}
-            target="_blank"
-            rel="noreferrer"
+            {...pullRequestAnchorProps(pullRequest.url)}
             title={`${pullRequest.title} (${pullRequest.state.toLowerCase()})`}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border/70 px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+            onClick={(event) => handlePullRequestClick(event, onOpenPullRequest)}
           >
             <GitPullRequestIcon className="size-3 opacity-80" aria-hidden="true" />
             <span>#{pullRequest.number}</span>

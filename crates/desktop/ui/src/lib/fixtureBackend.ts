@@ -92,6 +92,29 @@ function notAvailable(op: string): never {
 
 const LONG_THREAD_ID = "fixture-long";
 
+const FIXTURE_PULL_REQUEST_DIFF = `diff --git a/src/example.ts b/src/example.ts
+--- a/src/example.ts
++++ b/src/example.ts
+@@ -1,3 +1,12 @@
+-export const greeting = "hi";
++export const greeting = "hello from pull request 13";
+`;
+
+const FIXTURE_THREAD_GIT = {
+  baseBranch: "master",
+  branch: "master",
+  pullRequest: {
+    number: 13,
+    title: "Bot CI",
+    url: "https://github.com/zest/app/pull/13",
+    state: "OPEN",
+    isDraft: false,
+    additions: 12,
+    deletions: 3,
+    changedFiles: 1,
+  },
+};
+
 function longThreadMessages(): ChatMessage[] {
   const messages: ChatMessage[] = [];
   for (let index = 1; index <= 15; index += 1) {
@@ -1185,6 +1208,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           messageCount:
             fixtureTranscripts.get(session.threadId)?.length ??
             session.messages.length,
+          gitContext: FIXTURE_THREAD_GIT,
         });
       }
       // A provider Zest has no mark for, so the generic fallback is visible
@@ -1199,6 +1223,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           pinned: false,
           providerId: "ollama",
           messageCount: 1,
+          gitContext: FIXTURE_THREAD_GIT,
         });
       }
       if (session.threadId !== LONG_THREAD_ID) {
@@ -1775,20 +1800,63 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         additions: 12,
         deletions: 3,
         changedFiles: 1,
-        statsSource: "branch",
+        statsSource: "pull_request",
+        pullRequest: {
+          number: 13,
+          title: "Bot CI",
+          url: "https://github.com/zest/app/pull/13",
+          state: "OPEN",
+          isDraft: false,
+          additions: 12,
+          deletions: 3,
+          changedFiles: 1,
+        },
       };
     },
     async workspaceChanges(): Promise<WorkspaceChange> {
       return {
-        changeId: "fixture-clean",
+        changeId: "fixture-pr-13",
         repository: "git",
         baseCommit: undefined,
         baseBranch: "master",
         branch: "master",
-        changedFiles: [],
-        additions: 0,
-        deletions: 0,
-        diff: "",
+        changedFiles: [
+          {
+            path: "src/example.ts",
+            status: "modified",
+            additions: 12,
+            deletions: 3,
+            binary: false,
+            sensitive: false,
+          },
+        ],
+        additions: 12,
+        deletions: 3,
+        diff: FIXTURE_PULL_REQUEST_DIFF,
+        truncated: false,
+        unavailable: false,
+      };
+    },
+    async pullRequestDiff(number = 13): Promise<WorkspaceChange> {
+      return {
+        changeId: `pr:${number}`,
+        repository: "pull_request",
+        baseCommit: undefined,
+        baseBranch: "master",
+        branch: "master",
+        changedFiles: [
+          {
+            path: "src/example.ts",
+            status: "modified",
+            additions: 12,
+            deletions: 3,
+            binary: false,
+            sensitive: false,
+          },
+        ],
+        additions: 12,
+        deletions: 3,
+        diff: FIXTURE_PULL_REQUEST_DIFF,
         truncated: false,
         unavailable: false,
       };

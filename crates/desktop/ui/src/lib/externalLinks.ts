@@ -1,4 +1,8 @@
 import { ignoreExpectedFailure } from "./backgroundFailure.ts";
+import {
+  INTERNAL_LINK_ATTR,
+  shouldOpenPullRequestExternally,
+} from "./pullRequestLink.ts";
 
 /** Match http(s) URLs. Reject javascript:, file:, and anything else. */
 export function safeHttpUrl(value: string | null | undefined): string | null {
@@ -49,6 +53,9 @@ export function externalHttpUrlFromClick(event: {
   defaultPrevented: boolean;
   button: number;
   altKey?: boolean;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
   target: unknown;
 }): string | null {
   if (event.defaultPrevented) return null;
@@ -57,6 +64,12 @@ export function externalHttpUrlFromClick(event: {
   const anchor = closestAnchor(event.target);
   if (!anchor) return null;
   if (anchor.hasAttribute?.("download")) return null;
+  if (
+    anchor.hasAttribute?.(INTERNAL_LINK_ATTR) &&
+    !shouldOpenPullRequestExternally(event)
+  ) {
+    return null;
+  }
   return hrefFromAnchor(anchor);
 }
 
