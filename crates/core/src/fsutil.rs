@@ -158,21 +158,52 @@ pub fn display_path_str(raw: &str) -> String {
     }
 }
 
+/// Auto-deleting test scratch dir. Keep the value alive for the whole test.
+#[cfg(test)]
+pub(crate) struct ScratchDir {
+    inner: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl ScratchDir {
+    pub(crate) fn new(prefix: &str) -> Self {
+        Self {
+            inner: tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir()
+                .expect("scratch dir"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.inner.path()
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for ScratchDir {
+    fn as_ref(&self) -> &Path {
+        self.inner.path()
+    }
+}
+
+#[cfg(test)]
+impl AsRef<std::ffi::OsStr> for ScratchDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.inner.path().as_os_str()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zest-fsutil-{name}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("zest-fsutil-{name}-"))
     }
 
     #[test]

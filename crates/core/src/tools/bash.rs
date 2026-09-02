@@ -885,20 +885,8 @@ mod tests {
         );
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        // Unique per call. A shared `zest-bash-kill` folder on Windows keeps a
-        // leftover `marker.txt` when a previous process still has the directory
-        // open, and `remove_dir_all` then fails silently.
-        let dir = std::env::temp_dir().join(format!(
-            "zest-bash-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-bash-{name}-"))
     }
 
     #[cfg(windows)]

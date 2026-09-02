@@ -663,11 +663,8 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-runtime-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-runtime-{name}-"))
     }
 
     #[test]
@@ -835,7 +832,8 @@ provider = "claude"
     fn opening_a_folder_with_no_config_names_the_real_problem() {
         // Canonicalized, because that is what the desktop passes in and it is
         // where the `\\?\` prefix comes from on Windows.
-        let dir = std::fs::canonicalize(scratch("no-config")).unwrap();
+        let scratch = scratch("no-config");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
         // Guard against the assertion below quietly becoming vacuous if
         // canonicalize ever stops producing the prefix.
         #[cfg(windows)]
@@ -942,7 +940,7 @@ model = "llama"
     /// without a key, carries an explicit model allow-list, *and* leaves Zest
     /// owning the agent loop. The two subscription kinds own their own loop, so a
     /// fixture built on them would correctly register no tools at all.
-    fn two_provider_dir(name: &str) -> PathBuf {
+    fn two_provider_dir(name: &str) -> crate::fsutil::ScratchDir {
         let dir = scratch(name);
         let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
         writeln!(

@@ -1554,8 +1554,7 @@ mod tests {
 
     #[test]
     fn survives_a_save_load_round_trip() {
-        let dir = std::env::temp_dir().join("zest-ledger-roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::fsutil::ScratchDir::new("zest-ledger-roundtrip-");
         let path = dir.join("usage.json");
 
         let mut ledger = Ledger::load_from(&path);
@@ -1564,14 +1563,11 @@ mod tests {
 
         let reloaded = Ledger::load_from(&path);
         assert_eq!(reloaded.get("anthropic").unwrap().input_tokens, 100);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_corrupt_file_starts_empty_instead_of_failing() {
-        let dir = std::env::temp_dir().join("zest-ledger-corrupt");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-ledger-corrupt-");
         let path = dir.join("usage.json");
         std::fs::write(&path, "{ this is not json").unwrap();
 
@@ -1579,8 +1575,6 @@ mod tests {
         assert!(ledger.is_empty());
         // ...and remains writable, so the next turn repairs it.
         assert!(ledger.path().is_some());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

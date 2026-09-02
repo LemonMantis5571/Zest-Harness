@@ -211,16 +211,13 @@ mod tests {
 
     #[test]
     fn rejects_parent_paths() {
-        let root = std::env::temp_dir().join(format!("zest-files-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::ScratchDir::new("zest-files-");
         assert!(resolve_path(&root, "../outside").is_err());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn lists_directories_before_files_and_omits_noise() {
-        let root = std::env::temp_dir().join(format!("zest-files-list-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::ScratchDir::new("zest-files-list-");
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("target")).unwrap();
         fs::write(root.join(".env"), "SECRET=hidden").unwrap();
@@ -237,28 +234,22 @@ mod tests {
         );
         assert!(list(&root, Some("target")).is_err());
         assert!(read(&root, ".env").is_err());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn truncates_large_text_previews() {
-        let root = std::env::temp_dir().join(format!("zest-files-read-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::ScratchDir::new("zest-files-read-");
         fs::write(root.join("large.txt"), "x".repeat(MAX_PREVIEW_BYTES + 10)).unwrap();
 
         let preview = read(&root, "large.txt").unwrap();
         assert!(preview.truncated);
         assert_eq!(preview.content.len(), MAX_PREVIEW_BYTES);
         assert_eq!(preview.byte_count, (MAX_PREVIEW_BYTES + 10) as u64);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn truncates_at_a_utf8_boundary_instead_of_rejecting_text() {
-        let root = std::env::temp_dir().join(format!("zest-files-unicode-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::ScratchDir::new("zest-files-unicode-");
         let content = format!("{}é", "x".repeat(MAX_PREVIEW_BYTES - 1));
         fs::write(root.join("unicode.txt"), content).unwrap();
 
@@ -266,6 +257,5 @@ mod tests {
         assert!(preview.truncated);
         assert_eq!(preview.content.len(), MAX_PREVIEW_BYTES - 1);
         assert_eq!(preview.byte_count, (MAX_PREVIEW_BYTES + 1) as u64);
-        let _ = fs::remove_dir_all(root);
     }
 }

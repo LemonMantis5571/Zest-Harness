@@ -822,14 +822,9 @@ impl ChatPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::new_id;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("zest-chat-persistence-{name}-{}", new_id("tmp")));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-chat-persistence-{name}-"))
     }
     /// Deleting a chat used to leave its lifecycle records behind, read on
     /// every open and never collected, describing a conversation the user had

@@ -93,11 +93,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-list-dir-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-list-dir-{name}-"))
     }
 
     #[tokio::test]

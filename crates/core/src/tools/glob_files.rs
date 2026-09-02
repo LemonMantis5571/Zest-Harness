@@ -127,9 +127,7 @@ mod walk_bounds_tests {
     /// apart from the outside — the returned matches look identical either way.
     #[test]
     fn the_cap_stops_the_walk_rather_than_filtering_its_output() {
-        let dir = std::env::temp_dir().join("zest-glob-cap");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-glob-cap-");
         // Comfortably more than the cap, so a full walk is clearly visible.
         for index in 0..(MAX_MATCHES * 3) {
             std::fs::write(dir.join(format!("f{index:04}.txt")), "x").unwrap();
@@ -149,8 +147,6 @@ mod walk_bounds_tests {
             .unwrap();
         let matches = collect_matches(&root, &set).unwrap();
         assert_eq!(matches.len(), MAX_MATCHES);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -158,9 +154,8 @@ mod walk_bounds_tests {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-glob-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        let dir = crate::fsutil::ScratchDir::new(&format!("zest-glob-{name}-"));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
         std::fs::write(dir.join("src/lib.rs"), "").unwrap();

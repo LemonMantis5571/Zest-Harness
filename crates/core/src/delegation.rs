@@ -1812,12 +1812,8 @@ fn apply_to_child(mut child: std::process::Child, diff: &str, phase: &str) -> Re
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("zest-delegation-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-delegation-{name}-"))
     }
 
     fn card(_root: &Path) -> FeatureCard {
@@ -2245,7 +2241,7 @@ mod tests {
         let dir = root.join(".zest").join("delegations");
         fs::create_dir_all(&dir).unwrap();
         let legacy = serde_json::json!({
-            "version": 1, "jobId": "legacy-job", "projectRoot": root,
+            "version": 1, "jobId": "legacy-job", "projectRoot": root.to_path_buf(),
             "parentThreadId": "thread-legacy",
             "card": {"version": 1, "cardId": "legacy-card", "title": "x", "objective": "y",
                 "lane": "z", "scope": ["src"], "context": [], "dependsOn": [],

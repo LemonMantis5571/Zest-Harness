@@ -367,12 +367,8 @@ fn notice(omitted: usize, locator: &str, total: usize) -> String {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        // Unique per call: the concurrency test runs several stores in one
-        // process, so a fixed name that gets removed up front is not safe here.
-        let dir = std::env::temp_dir().join(format!("zest-spill-{name}-{}", new_id("t")));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-spill-{name}-"))
     }
 
     fn store(root: &Path) -> SpillStore {

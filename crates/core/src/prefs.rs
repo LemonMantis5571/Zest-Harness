@@ -172,15 +172,8 @@ fn thread_owned_by(root: &Path, thread_id: &str, provider_id: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zest-prefs-{name}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        let dir = crate::fsutil::ScratchDir::new(&format!("zest-prefs-{name}-"));
         std::fs::create_dir_all(dir.join(".zest").join("threads")).unwrap();
         dir
     }

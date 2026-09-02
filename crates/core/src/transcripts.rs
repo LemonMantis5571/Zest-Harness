@@ -841,13 +841,12 @@ mod tests {
 
     /// A throwaway transcript tree, scanned with a fresh in-memory cache.
     struct Fixture {
-        dir: PathBuf,
+        dir: crate::fsutil::ScratchDir,
     }
 
     impl Fixture {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("zest-transcripts-{name}"));
-            let _ = std::fs::remove_dir_all(&dir);
+            let dir = crate::fsutil::ScratchDir::new(&format!("zest-transcripts-{name}-"));
             std::fs::create_dir_all(dir.join("claude")).unwrap();
             std::fs::create_dir_all(dir.join("codex")).unwrap();
             Self { dir }
@@ -871,12 +870,6 @@ mod tests {
                 ],
                 cache,
             )
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 

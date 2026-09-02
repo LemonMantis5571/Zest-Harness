@@ -387,8 +387,7 @@ mod tests {
 
     #[test]
     fn a_cache_written_in_an_older_format_is_discarded() {
-        let dir = std::env::temp_dir().join("zest-rates-format");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-rates-format-");
         let path = dir.join("model-rates.json");
         std::fs::write(
             &path,
@@ -399,14 +398,11 @@ mod tests {
         let catalog = RateCatalog::load_from(&path);
         assert!(catalog.is_empty(), "an unreadable shape prices nothing");
         assert!(catalog.is_stale(), "and asks to be fetched again");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_cached_catalogue_round_trips() {
-        let dir = std::env::temp_dir().join("zest-rates-roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::fsutil::ScratchDir::new("zest-rates-roundtrip-");
         let path = dir.join("model-rates.json");
 
         let written = RateCatalog {
@@ -430,7 +426,5 @@ mod tests {
         let price = reloaded.get("gpt-5.6-sol").unwrap();
         assert!((price.input - 5.0).abs() < 1e-9);
         assert!((price.cache_read() - 0.5).abs() < 1e-9);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

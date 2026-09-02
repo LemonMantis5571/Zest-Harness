@@ -326,9 +326,8 @@ fn format_results(matches: Vec<MatchLine>) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-grep-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        let dir = crate::fsutil::ScratchDir::new(&format!("zest-grep-{name}-"));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src/main.rs"),
