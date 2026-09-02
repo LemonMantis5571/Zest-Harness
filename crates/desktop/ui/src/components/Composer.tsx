@@ -1,4 +1,12 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   ArrowUpIcon,
   CheckIcon,
@@ -86,7 +94,7 @@ type Props = {
   optionsDisabled?: boolean;
   attachments: PreparedAttachment[];
   onChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: (currentDraft?: string) => void;
   onStop?: () => void;
   onApprovalModeChange: (mode: ApprovalMode) => void;
   onModelChange: (model: string) => void;
@@ -108,7 +116,7 @@ function attachmentPreviewUrl(att: PreparedAttachment): string | null {
   return `data:${att.mediaType};base64,${att.dataBase64}`;
 }
 
-export function Composer({
+export const Composer = memo(function Composer({
   value,
   model,
   effort,
@@ -156,6 +164,45 @@ export function Composer({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuId = useId();
 
+  const [text, setText] = useState(value);
+  const textRef = useRef(text);
+  textRef.current = text;
+  const debounceTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setText(value);
+  }, [value]);
+
+  const flushChange = useCallback(
+    (newText: string) => {
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      onChange(newText);
+    },
+    [onChange]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleTextChange = (newText: string) => {
+    setText(newText);
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = window.setTimeout(() => {
+      debounceTimerRef.current = null;
+      onChange(newText);
+    }, 200);
+  };
+
   const [commands, setCommands] = useState<CommandView[]>([]);
   const [commandIndex, setCommandIndex] = useState(0);
   const [commandsDismissed, setCommandsDismissed] = useState(false);
@@ -180,7 +227,7 @@ export function Composer({
 
   // Only a token being typed at the very start opens the palette — the same
   // rule the Rust parser uses, so what you see matches what will run.
-  const typedCommand = /^\/([a-z0-9-_]*)$/i.exec(value.trimStart())?.[1];
+  const typedCommand = /^\/([a-z0-9-_]*)$/i.exec(text.trimStart())?.[1];
   const slashOpen = typedCommand !== undefined && !commandsDismissed;
   const commandMatches = slashOpen
     ? filterSlashCommands(commands, typedCommand)
@@ -213,13 +260,16 @@ export function Composer({
 
   function applyCommand(command: CommandView) {
     if (command.kind === "builtin" && isModelCommandName(command.name)) {
-      onChange("");
+      setText("");
+      flushChange("");
       setCommandsDismissed(true);
       onModelPickerOpenChange?.(true);
       ref.current?.focus();
       return;
     }
-    onChange(`/${command.name} `);
+    const next = `/${command.name} `;
+    setText(next);
+    flushChange(next);
     setCommandsDismissed(true);
     ref.current?.focus();
   }
@@ -229,7 +279,7 @@ export function Composer({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
-  }, [value]);
+  }, [text]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -258,7 +308,13 @@ export function Composer({
         (a.kind === "image" && Boolean(a.dataBase64)))
   );
   const canSend =
-    !compacting && (value.trim().length > 0 || hasOkAttachment);
+    !compacting && (text.trim().length > 0 || hasOkAttachment);
+
+  const handleSend = () => {
+    if (!canSend) return;
+    flushChange(textRef.current);
+    onSubmit(textRef.current);
+  };
 
   useEffect(() => {
     if (
@@ -515,11 +571,12 @@ export function Composer({
             ref={ref}
             id="zest-composer-input"
             rows={1}
-            value={value}
+            value={text}
             placeholder="Ask about this project — / for commands, paste or attach files"
             autoComplete="off"
             className="block max-h-[180px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm text-foreground caret-foreground outline-none placeholder:text-muted-foreground"
-            onChange={(e) => onChange(e.target.value)}
+            onChange={(e) => handleTextChange(e.target.value)}
+            onBlur={() => flushChange(textRef.current)}
             onPaste={(e) => {
               const items = Array.from(e.clipboardData?.items ?? []);
               const imageFiles = items
@@ -557,7 +614,7 @@ export function Composer({
               }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (canSend) onSubmit();
+                handleSend();
               }
             }}
           />
@@ -654,7 +711,7 @@ export function Composer({
                   onStop?.();
                   return;
                 }
-                if (canSend) onSubmit();
+                handleSend();
               }}
             >
               <IconSwap
@@ -726,4 +783,4 @@ export function Composer({
       </div>
     </div>
   );
-}
+});

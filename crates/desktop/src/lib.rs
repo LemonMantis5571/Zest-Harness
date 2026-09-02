@@ -4850,6 +4850,41 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
     Ok(hits)
 }
 
+#[derive(Deserialize)]
+struct ThreadSearchMessage {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    thinking: Option<String>,
+}
+
+impl ThreadSearchMessage {
+    fn searchable_text(&self) -> &str {
+        if self.role == "thinking" {
+            self.thinking.as_deref().unwrap_or(self.text.as_str())
+        } else {
+            self.text.as_str()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ThreadSearchDocument {
+    #[serde(default)]
+    version: u32,
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    updated_at: u64,
+    #[serde(default)]
+    messages: Vec<ThreadSearchMessage>,
+}
+
 fn search_threads_in_store(
     store: &ThreadStore,
     project_name: &str,
@@ -4889,16 +4924,19 @@ fn search_threads_in_store(
         if !contains_ignore_ascii_case(&body, query) {
             continue;
         }
-        let Ok(thread) = serde_json::from_str::<Thread>(&body) else {
+        let Ok(thread) = serde_json::from_str::<ThreadSearchDocument>(&body) else {
             continue;
         };
         if thread.version > THREAD_FORMAT_VERSION {
             continue;
         }
-        let found = thread.search_match(query);
+        let found = thread.messages.iter().find_map(|msg| {
+            zest_core::match_excerpt(msg.searchable_text(), query)
+                .map(|snippet| (msg.id.clone(), snippet))
+        });
         let (message_id, snippet) = match found {
-            Some((id, snippet)) => (Some(id.to_string()), Some(snippet)),
-            None => (None, thread.search_excerpt(query)),
+            Some((id, snippet)) => (Some(id), Some(snippet)),
+            None => (None, None),
         };
         hits.push(ChatSearchHit {
             id: thread.id,

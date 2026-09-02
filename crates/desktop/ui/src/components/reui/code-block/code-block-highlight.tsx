@@ -695,12 +695,24 @@ const MAX_TRACKED_DOCUMENTS = 24
  */
 const previousDocuments = new Map<string, CodeBlockLine[]>()
 
+function sameState(
+  a?: CodeBlockLineState,
+  b?: CodeBlockLineState
+): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.highlighted === b.highlighted &&
+    a.focused === b.focused &&
+    a.diff === b.diff &&
+    a.level === b.level
+  )
+}
+
 function sameLine(a: CodeBlockLine, b: CodeBlockLine): boolean {
   if (a.number !== b.number || a.text !== b.text) return false
   if (a.tokens.length !== b.tokens.length) return false
-  if (JSON.stringify(a.state ?? null) !== JSON.stringify(b.state ?? null)) {
-    return false
-  }
+  if (!sameState(a.state, b.state)) return false
   for (let index = 0; index < a.tokens.length; index += 1) {
     const left = a.tokens[index]
     const right = b.tokens[index]

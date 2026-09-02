@@ -171,6 +171,11 @@ function componentsFor(streaming: boolean): Components {
   };
 }
 
+const REMARK_PLUGINS = [remarkGfm];
+
+const STATIC_COMPONENTS = componentsFor(false);
+const STREAMING_COMPONENTS = componentsFor(true);
+
 type Props = {
   children: string;
   className?: string;
@@ -185,10 +190,10 @@ type Props = {
  * entirely. That is the difference between O(n²) and O(n) over a long answer.
  */
 const Block = memo(function Block({ text, streaming }: { text: string; streaming: boolean }) {
-  const components = useMemo(() => componentsFor(streaming), [streaming]);
+  const components = streaming ? STREAMING_COMPONENTS : STATIC_COMPONENTS;
 
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
       {text}
     </ReactMarkdown>
   );

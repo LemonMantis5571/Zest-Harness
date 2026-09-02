@@ -36,6 +36,7 @@ ts-rs = { version = "11", default-features = true, optional = true }
 pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "main" }
 rfd = "0.15"
 base64 = "0.23"
+mimalloc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

@@ -34,7 +34,6 @@ import {
 import { approvalNotice } from "@/lib/mcpDisplay";
 import { isLongTurn } from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
-import { revealCount } from "@/lib/reveal";
 import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_EFFORT,
@@ -1269,69 +1268,35 @@ export default function App() {
     setMessages(currentState.messages);
   }, []);
 
-  const flushDeltaQueueRef = useRef<(drainAll?: boolean) => void>(() => {});
-  const flushDeltaQueue = useCallback(
-    (drainAll = false) => {
-      deltaRafRef.current = null;
-      const queued = deltaQueueRef.current;
-      deltaQueueRef.current = [];
-      // Merge adjacent text/thinking deltas before React reduce to cut renders.
-      const merged = mergeAdjacentDeltas(queued);
-      const frameEvents: ChatDeltaEvent[] = [];
-
-      for (let i = 0; i < merged.length; i += 1) {
-        const event = merged[i];
-        if (!drainAll && event.kind === "text_delta") {
-          const reveal = revealCount(event.text.length);
-          if (reveal < event.text.length) {
-            frameEvents.push({ ...event, text: event.text.slice(0, reveal) });
-            // Order matters: the remainder and everything queued behind it
-            // wait a frame together, or later text would overtake earlier text.
-            deltaQueueRef.current = [
-              { ...event, text: event.text.slice(reveal) },
-              ...merged.slice(i + 1),
-            ];
-            break;
-          }
-        }
-        frameEvents.push(event);
-      }
-
-      applyChatDeltasNow(frameEvents);
-
-      if (deltaQueueRef.current.length > 0 && deltaRafRef.current == null) {
-        deltaRafRef.current = window.requestAnimationFrame(() =>
-          flushDeltaQueueRef.current()
-        );
-      }
-    },
-    [applyChatDeltasNow]
-  );
+  const flushDeltaQueueRef = useRef<() => void>(() => {});
+  const flushDeltaQueue = useCallback(() => {
+    deltaRafRef.current = null;
+    const queued = deltaQueueRef.current;
+    deltaQueueRef.current = [];
+    if (queued.length === 0) return;
+    const merged = mergeAdjacentDeltas(queued);
+    applyChatDeltasNow(merged);
+  }, [applyChatDeltasNow]);
   flushDeltaQueueRef.current = flushDeltaQueue;
 
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
-      // This projection is intentionally ahead of the current-thread reducer:
-      // events from a chat left running in the background are stale for the
-      // transcript, but are the useful part of the sidebar status card.
       recordThreadActivity(event);
       if (event.kind === "text_delta" || event.kind === "thinking_delta") {
         deltaQueueRef.current.push(event);
         if (deltaRafRef.current == null) {
           deltaRafRef.current = window.requestAnimationFrame(() =>
-            flushDeltaQueue()
+            flushDeltaQueueRef.current()
           );
         }
         return;
       }
-      // Non-delta events must see coalesced text first — and all of it, so a
-      // partially revealed buffer never lands after the `done` that ended it.
       if (deltaQueueRef.current.length > 0) {
         if (deltaRafRef.current != null) {
           window.cancelAnimationFrame(deltaRafRef.current);
           deltaRafRef.current = null;
         }
-        flushDeltaQueue(true);
+        flushDeltaQueue();
       }
       applyChatEventNow(event);
     },

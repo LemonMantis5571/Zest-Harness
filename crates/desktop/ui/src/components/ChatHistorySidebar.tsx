@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -187,7 +187,7 @@ type WorkspaceAction = {
   project: ProjectChats;
 };
 
-export function ChatHistorySidebar({
+export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   open,
   activeThreadId,
   activeProjectPath,
@@ -1132,4 +1132,4 @@ export function ChatHistorySidebar({
       />
     </aside>
   );
-}
+});

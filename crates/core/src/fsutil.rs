@@ -24,7 +24,7 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temp)?;
         file.write_all(data)?;
         file.flush()?;
-        file.sync_all()?;
+        file.sync_data()?;
         Ok(())
     })();
 
