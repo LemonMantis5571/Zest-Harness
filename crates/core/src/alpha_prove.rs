@@ -6,7 +6,6 @@
 
 #![cfg(test)]
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -127,10 +126,8 @@ impl Provider for ScriptedProvider {
     }
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zest-alpha-{}-{}", name, std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+    let dir = crate::fsutil::ScratchDir::new(&format!("zest-alpha-{name}-"));
     std::fs::write(dir.join("README.md"), "# Zest alpha\n").unwrap();
     dir
 }

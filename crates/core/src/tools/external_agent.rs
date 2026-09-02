@@ -2644,12 +2644,8 @@ fn clip(value: &str) -> String {
 mod isolation_precondition_tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("zest-isolation-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-isolation-{name}-"))
     }
 
     fn repo_at(root: &Path, name: &str) {

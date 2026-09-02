@@ -451,8 +451,7 @@ mod tests {
 
     #[test]
     fn a_broken_file_drops_to_the_catalogue_rather_than_to_free() {
-        let dir = std::env::temp_dir().join("zest-prices-broken");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-prices-broken-");
         let path = dir.join("prices.toml");
         std::fs::write(&path, "this is not toml [[[").unwrap();
 
@@ -468,14 +467,11 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "this is not toml [[["
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_missing_file_is_seeded_and_reloads_identically() {
-        let dir = std::env::temp_dir().join("zest-prices-seed");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::fsutil::ScratchDir::new("zest-prices-seed-");
         let path = dir.join("prices.toml");
 
         let seeded = Prices::load_from(&path);
@@ -483,8 +479,6 @@ mod tests {
 
         let reloaded = Prices::load_from(&path);
         assert_eq!(reloaded.models, seeded.models);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -10,10 +10,15 @@ mod browser;
 mod context_meter;
 mod delegation;
 mod plugins;
+#[cfg(test)]
+mod scratch_dir;
 mod session;
 mod turn;
 mod window_chrome;
 mod workspace_files;
+
+#[cfg(test)]
+pub(crate) use scratch_dir::ScratchDir;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -5309,7 +5314,7 @@ mod chat_summary_tests {
 
     #[test]
     fn cached_summaries_follow_thread_changes_and_deletes() {
-        let root = std::env::temp_dir().join(format!("zest-chat-cache-{}", new_id("test")));
+        let root = ScratchDir::new("zest-chat-cache-");
         let store = ThreadStore::open(&root).unwrap();
         let mut first = Thread::new().with_provider("codex");
         let mut second = Thread::new().with_provider("codex");
@@ -5360,7 +5365,7 @@ mod chat_summary_tests {
 
     #[test]
     fn empty_chats_do_not_appear_in_the_sidebar() {
-        let root = std::env::temp_dir().join(format!("zest-empty-sidebar-{}", new_id("test")));
+        let root = ScratchDir::new("zest-empty-sidebar-");
         let store = ThreadStore::open(&root).unwrap();
         let empty = Thread::new().with_provider("codex");
         let mut started = Thread::new().with_provider("codex");
@@ -5382,7 +5387,7 @@ mod chat_summary_tests {
     /// chat" nobody started next to whichever chat the user did start.
     #[test]
     fn reopening_after_deleting_the_open_chat_adds_no_history_row() {
-        let root = std::env::temp_dir().join(format!("zest-delete-reopen-{}", new_id("test")));
+        let root = ScratchDir::new("zest-delete-reopen-");
         let store = ThreadStore::open(&root).unwrap();
         let config = Config::default();
 
@@ -5426,7 +5431,7 @@ mod chat_summary_tests {
     /// it exists to avoid. Guard the flag that vetoes that write.
     #[test]
     fn an_unsaved_draft_is_not_written_by_a_metadata_stamp() {
-        let root = std::env::temp_dir().join(format!("zest-draft-stamp-{}", new_id("test")));
+        let root = ScratchDir::new("zest-draft-stamp-");
         let store = ThreadStore::open(&root).unwrap();
 
         let only = store.create_for_provider("codex").unwrap();
@@ -5480,7 +5485,7 @@ mod chat_summary_tests {
     /// disk until the user sends something.
     #[test]
     fn a_project_with_no_pointer_still_resolves_to_a_new_chat() {
-        let root = std::env::temp_dir().join(format!("zest-fresh-project-{}", new_id("test")));
+        let root = ScratchDir::new("zest-fresh-project-");
         let store = ThreadStore::open(&root).unwrap();
         let resolved = resolve_thread(&root, &store, "codex", &Config::default(), false).unwrap();
         assert!(!resolved.created);
@@ -5497,7 +5502,7 @@ mod chat_recovery_tests {
 
     #[test]
     fn stale_lifecycle_is_closed_and_reported_to_session_loader() {
-        let root = std::env::temp_dir().join(format!("zest-chat-recovery-{}", new_id("test")));
+        let root = ScratchDir::new("zest-chat-recovery-");
         let store = ThreadStore::open(&root).unwrap();
         let mut thread = store.create_for_provider("codex").unwrap();
         thread.apply_user("user-restart", "Continue the interrupted work");
@@ -5555,12 +5560,8 @@ mod chat_recovery_tests {
 mod delete_thread_tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("zest-delete-thread-{name}-{}", new_id("test")));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("zest-delete-thread-{name}-"))
     }
 
     fn saved_thread(store: &ThreadStore, text: &str) -> Thread {
@@ -5581,7 +5582,7 @@ mod delete_thread_tests {
         let persist = Mutex::new(HashMap::new());
         let cache = Mutex::new(ChatSummaryCache::default());
         sessions
-            .set_session(session::test_session(active.id.clone(), root.clone()))
+            .set_session(session::test_session(active.id.clone(), root.to_path_buf()))
             .unwrap();
         let (_session, _turn) = sessions.begin_turn().unwrap();
 
@@ -5617,7 +5618,7 @@ mod delete_thread_tests {
         let persist = Mutex::new(HashMap::new());
         let cache = Mutex::new(ChatSummaryCache::default());
         sessions
-            .set_session(session::test_session(active.id.clone(), root.clone()))
+            .set_session(session::test_session(active.id.clone(), root.to_path_buf()))
             .unwrap();
         let (_session, turn) = sessions.begin_turn().unwrap();
 
@@ -7664,7 +7665,7 @@ mod markdown_export_tests {
 
     #[test]
     fn remembers_a_valid_directory_and_falls_back_for_missing_one() {
-        let base = std::env::temp_dir().join(format!("zest-markdown-dir-{}", new_id("test")));
+        let base = ScratchDir::new("zest-markdown-dir-");
         let workspace = base.join("workspace");
         let remembered = base.join("remembered");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -7683,7 +7684,7 @@ mod markdown_export_tests {
 
     #[test]
     fn reports_atomic_write_failures() {
-        let base = std::env::temp_dir().join(format!("zest-markdown-write-{}", new_id("test")));
+        let base = ScratchDir::new("zest-markdown-write-");
         std::fs::create_dir_all(&base).unwrap();
         let parent_file = base.join("not-a-directory");
         std::fs::write(&parent_file, "occupied").unwrap();
@@ -9027,11 +9028,8 @@ mod persist_event_tests {
 mod chat_search_tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-chat-search-{name}-{}", new_id("test")));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("zest-chat-search-{name}-"))
     }
 
     #[test]
@@ -9113,10 +9111,8 @@ mod chat_search_tests {
 mod workspace_root_tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-workspace-{name}-{}", new_id("test")));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("zest-workspace-{name}-"))
     }
 
     #[test]
@@ -9171,7 +9167,7 @@ mod workspace_root_tests {
     #[test]
     fn a_known_writable_folder_is_restored_as_the_launch_workspace() {
         let dir = scratch("remembered-workspace");
-        let known = vec![canonicalize_dir(dir.clone()).unwrap()];
+        let known = vec![canonicalize_dir(dir.to_path_buf()).unwrap()];
         let restored = choose_remembered_workspace(&display_path(&dir), &known);
         assert_eq!(restored.as_ref(), Some(&known[0]));
         let _ = std::fs::remove_dir_all(dir);

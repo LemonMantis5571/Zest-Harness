@@ -252,11 +252,8 @@ mod tests {
     use crate::tools::ToolRegistry;
     use std::sync::Arc;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-read-file-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-read-file-{name}-"))
     }
 
     #[tokio::test]

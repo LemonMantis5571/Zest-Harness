@@ -338,14 +338,9 @@ fn clone_result(result: &Result<()>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::new_id;
-    use std::fs;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-persist-{name}-{}", new_id("tmp")));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-persist-{name}-"))
     }
 
     #[tokio::test]

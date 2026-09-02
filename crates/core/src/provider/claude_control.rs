@@ -389,8 +389,7 @@ mod tests {
 
     #[test]
     fn an_edit_renders_a_diff_against_the_file_on_disk() {
-        let dir = std::env::temp_dir().join(format!("zest-cc-diff-{}", crate::thread::new_id("t")));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-cc-diff-");
         std::fs::write(dir.join("notes.txt"), "first line\n").unwrap();
 
         let (path, diff) = render_diff(
@@ -408,8 +407,7 @@ mod tests {
 
     #[test]
     fn a_path_outside_the_project_is_reported_instead_of_read() {
-        let dir = std::env::temp_dir().join(format!("zest-cc-esc-{}", crate::thread::new_id("t")));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-cc-esc-");
 
         let (_, diff) = render_diff(
             &dir,

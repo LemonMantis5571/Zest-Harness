@@ -1564,15 +1564,7 @@ timeout_ms = 5000
 
     #[test]
     fn first_run_config_is_valid_and_never_overwrites_user_config() {
-        let dir = std::env::temp_dir().join(format!(
-            "zest-config-bootstrap-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-config-bootstrap-");
         let path = dir.join(CONFIG_FILE);
 
         assert!(ensure_config_file(&path, DEFAULT_USER_CONFIG).unwrap());
@@ -1588,8 +1580,6 @@ timeout_ms = 5000
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("[providers.codex]"));
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

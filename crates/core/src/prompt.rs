@@ -434,11 +434,8 @@ mod tests {
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-prompt-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-prompt-{name}-"))
     }
 
     #[test]
@@ -573,14 +570,7 @@ mod tests {
 
     #[test]
     fn load_custom_rejects_oversized() {
-        let dir = std::env::temp_dir().join(format!(
-            "zest-prompt-big-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::fsutil::ScratchDir::new("zest-prompt-big-");
         fs::create_dir_all(dir.join(".zest")).unwrap();
         let big = "x".repeat(MAX_CUSTOM_PROMPT_BYTES + 1);
         fs::write(dir.join(".zest").join("system.md"), &big).unwrap();

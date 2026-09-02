@@ -2260,10 +2260,7 @@ mod tests {
     /// pre-image check treats our own write as an external change.
     #[tokio::test]
     async fn same_file_edits_in_one_batch_are_reprepared_after_the_first_write() {
-        let dir =
-            std::env::temp_dir().join(format!("zest-agent-edit-batch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fsutil::ScratchDir::new("zest-agent-edit-batch-");
         std::fs::write(dir.join("notes.txt"), "alpha\nbeta\n").unwrap();
 
         let mut tools = ToolRegistry::new();
@@ -2314,7 +2311,6 @@ mod tests {
                 "same-turn edit was rejected as stale: {body}"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Emits a scripted tool batch on the first call and `end_turn` afterwards.

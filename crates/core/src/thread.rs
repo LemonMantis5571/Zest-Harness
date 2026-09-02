@@ -1949,11 +1949,8 @@ fn preserve_corrupt(path: &Path) -> Result<PathBuf> {
 mod characterization {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-thread-{name}-{}", new_id("tmp")));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-thread-{name}-"))
     }
 
     /// `exists` is the guard that stops a metadata-only write from creating a

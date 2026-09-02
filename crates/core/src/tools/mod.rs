@@ -327,11 +327,8 @@ pub fn register_job_tools(
 mod characterization {
     use super::*;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-tools-char-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-tools-char-{name}-"))
     }
 
     #[test]

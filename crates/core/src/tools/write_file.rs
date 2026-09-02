@@ -510,11 +510,8 @@ mod tests {
     use super::*;
     use crate::tools::{register_write_tools, ToolRegistry};
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zest-write-file-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::ScratchDir::new(&format!("zest-write-file-{name}-"))
     }
 
     #[tokio::test]
