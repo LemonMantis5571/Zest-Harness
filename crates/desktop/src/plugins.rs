@@ -442,26 +442,7 @@ fn invoke<T: DeserializeOwned>(
         command.creation_flags(0x0800_0000);
     }
 
-    let mut child = None;
-    for attempt in 0..2 {
-        match command.spawn() {
-            Ok(process) => {
-                child = Some(process);
-                break;
-            }
-            Err(error)
-                if attempt == 0
-                    && matches!(
-                        error.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) =>
-            {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => return Err("Could not start the add-on.".to_string()),
-        }
-    }
-    let mut child = child.ok_or_else(|| "Could not start the add-on.".to_string())?;
+    let mut child = spawn_plugin_process(&mut command)?;
 
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
@@ -526,6 +507,33 @@ fn invoke<T: DeserializeOwned>(
     response
         .data
         .ok_or_else(|| "The add-on returned no data.".into())
+}
+
+fn spawn_plugin_process(command: &mut Command) -> Result<std::process::Child, String> {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 0..ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if attempt + 1 < ATTEMPTS && is_transient_spawn_error(&error) => {
+                std::thread::sleep(Duration::from_millis(25 * u64::from(attempt + 1)));
+            }
+            Err(_) => return Err("Could not start the add-on.".to_string()),
+        }
+    }
+    Err("Could not start the add-on.".to_string())
+}
+
+fn is_transient_spawn_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+            | ErrorKind::ResourceBusy
+            | ErrorKind::ExecutableFileBusy
+            | ErrorKind::QuotaExceeded
+    )
 }
 
 fn supported_kind(kind: &str) -> bool {
@@ -804,6 +812,23 @@ mod tests {
     }
 
     #[test]
+    fn plugin_spawn_retries_busy_and_quota_errors() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_transient_spawn_error(&Error::from(
+            ErrorKind::WouldBlock
+        )));
+        assert!(is_transient_spawn_error(&Error::from(
+            ErrorKind::ExecutableFileBusy
+        )));
+        assert!(is_transient_spawn_error(&Error::from(
+            ErrorKind::QuotaExceeded
+        )));
+        assert!(!is_transient_spawn_error(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
     fn manifest_text_is_bounded_and_clean() {
         assert!(valid_manifest_text("Now Playing", 80));
         assert!(!valid_manifest_text(" ", 80));
@@ -977,6 +1002,9 @@ mod tests {
         fs::create_dir(&directory).expect("plugin folder should be created");
         let executable_path = directory.join(format!("{mode}{}", executable_suffix()));
         fs::copy(fixture, &executable_path).expect("fixture should be copied");
+        if let Ok(file) = fs::File::open(&executable_path) {
+            let _ = file.sync_all();
+        }
 
         #[cfg(unix)]
         {
