@@ -76,37 +76,44 @@ export function buildConversationTurns(
 ): ConversationTurn[] {
   const turnNumberOffset = options.turnNumberOffset ?? 0;
   const windowed = options.windowed === true;
+  const messageIds = new Set(messages.map((m) => m.id));
   const checkpointsByMessageId = new Map<string, ThreadCheckpoint>();
   for (const checkpoint of checkpoints) {
+    if (checkpoint.anchorMessageId && messageIds.has(checkpoint.anchorMessageId)) {
+      checkpointsByMessageId.set(checkpoint.anchorMessageId, checkpoint);
+      continue;
+    }
     const anchor = checkpointAnchor(checkpoint, messages, windowed);
     if (anchor) checkpointsByMessageId.set(anchor, checkpoint);
   }
 
   const turns: ConversationTurn[] = [];
+  let currentUserTurn: Extract<ChatMessage, { role: "user" }> | null = null;
+  let currentAssistants: Extract<ChatMessage, { role: "assistant" }>[] = [];
+
+  const flushTurn = () => {
+    if (!currentUserTurn) return;
+    turns.push({
+      id: `turn-${currentUserTurn.id}`,
+      messageId: currentUserTurn.id,
+      number: turnNumberOffset + turns.length + 1,
+      preview: compactPreview(currentUserTurn),
+      toolCount: currentAssistants.reduce((total, assistant) => total + assistant.tools.length, 0),
+      status: turnStatus(currentAssistants),
+      checkpoint: checkpointsByMessageId.get(currentUserTurn.id),
+    });
+    currentAssistants = [];
+  };
+
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
-    if (message.role !== "user") continue;
-
-    const nextUserIndex = messages.findIndex(
-      (candidate, candidateIndex) => candidateIndex > index && candidate.role === "user"
-    );
-    const end = nextUserIndex < 0 ? messages.length : nextUserIndex;
-    const assistantMessages = messages
-      .slice(index + 1, end)
-      .filter(
-        (candidate): candidate is Extract<ChatMessage, { role: "assistant" }> =>
-          candidate.role === "assistant"
-      );
-
-    turns.push({
-      id: `turn-${message.id}`,
-      messageId: message.id,
-      number: turnNumberOffset + turns.length + 1,
-      preview: compactPreview(message),
-      toolCount: assistantMessages.reduce((total, assistant) => total + assistant.tools.length, 0),
-      status: turnStatus(assistantMessages),
-      checkpoint: checkpointsByMessageId.get(message.id),
-    });
+    if (message.role === "user") {
+      flushTurn();
+      currentUserTurn = message;
+    } else if (message.role === "assistant" && currentUserTurn) {
+      currentAssistants.push(message);
+    }
   }
+  flushTurn();
   return turns;
 }

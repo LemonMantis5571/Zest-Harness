@@ -7,7 +7,7 @@
 //! path cases are involved.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -275,22 +275,27 @@ pub async fn inspect(
             );
             continue;
         }
-        let output = run_git(
-            &root,
-            &[
-                "diff",
-                "--no-index",
-                "--binary",
-                "--",
-                "/dev/null",
-                &entry.path,
-            ],
-        )
-        .await?;
-        // `git diff --no-index` returns 1 when the files differ, which is the
-        // normal result for an untracked file.
-        if output.status.success() || output.status.code() == Some(1) {
-            raw_diff.extend_from_slice(&output.stdout);
+        let full_path = root.join(&entry.path);
+        if let Ok(content) = std::fs::read(&full_path) {
+            raw_diff.extend_from_slice(&format_untracked_diff(&entry.path, &content));
+        } else {
+            let output = run_git(
+                &root,
+                &[
+                    "diff",
+                    "--no-index",
+                    "--binary",
+                    "--",
+                    "/dev/null",
+                    &entry.path,
+                ],
+            )
+            .await?;
+            // `git diff --no-index` returns 1 when the files differ, which is the
+            // normal result for an untracked file.
+            if output.status.success() || output.status.code() == Some(1) {
+                raw_diff.extend_from_slice(&output.stdout);
+            }
         }
     }
 
@@ -489,7 +494,74 @@ async fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
         .map_err(|error| HarnessError::Other(format!("could not run git: {error}")))
 }
 
+fn format_untracked_diff(path: &str, content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n",
+            path
+        )
+        .as_bytes(),
+    );
+
+    let check_len = content.len().min(8000);
+    let is_binary = content[..check_len].contains(&0);
+
+    if is_binary {
+        out.extend_from_slice(
+            format!("Binary files /dev/null and b/{0} differ\n", path).as_bytes(),
+        );
+        return out;
+    }
+
+    let text = String::from_utf8_lossy(content);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return out;
+    }
+
+    out.extend_from_slice(format!("@@ -0,0 +1,{} @@\n", lines.len()).as_bytes());
+    for line in lines {
+        out.push(b'+');
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+    if !content.is_empty() && !content.ends_with(b"\n") {
+        out.extend_from_slice(b"\\ No newline at end of file\n");
+    }
+    out
+}
+
+fn read_git_branch_fast(root: &Path) -> Option<String> {
+    let git_path = root.join(".git");
+    let head = if git_path.is_file() {
+        let content = std::fs::read_to_string(&git_path).ok()?;
+        let line = content.lines().next()?.trim();
+        let dir = line.strip_prefix("gitdir:")?.trim();
+        let resolved = if Path::new(dir).is_absolute() {
+            PathBuf::from(dir)
+        } else {
+            root.join(dir)
+        };
+        resolved.join("HEAD")
+    } else {
+        git_path.join("HEAD")
+    };
+    let contents = std::fs::read_to_string(head).ok()?;
+    let line = contents.lines().next()?.trim();
+    if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
+        return Some(branch.to_string());
+    }
+    if line.len() >= 7 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(line[..7].to_string());
+    }
+    None
+}
+
 async fn git_branch(root: &Path) -> Option<String> {
+    if let Some(branch) = read_git_branch_fast(root) {
+        return Some(branch);
+    }
     let output = run_git(root, &["symbolic-ref", "--short", "-q", "HEAD"])
         .await
         .ok()?;
@@ -1114,5 +1186,20 @@ mod tests {
                 ("new.txt", "renamed"),
             ]
         );
+    }
+
+    #[test]
+    fn untracked_diff_formatting_matches_git_output() {
+        let text_content = b"hello\nworld\n";
+        let diff = format_untracked_diff("foo/bar.txt", text_content);
+        let diff_str = String::from_utf8(diff).unwrap();
+        assert!(diff_str.contains("diff --git a/foo/bar.txt b/foo/bar.txt\n"));
+        assert!(diff_str.contains("new file mode 100644\n--- /dev/null\n+++ b/foo/bar.txt\n"));
+        assert!(diff_str.contains("@@ -0,0 +1,2 @@\n+hello\n+world\n"));
+
+        let binary_content = b"hello\0world";
+        let bin_diff = format_untracked_diff("foo/bar.bin", binary_content);
+        let bin_str = String::from_utf8(bin_diff).unwrap();
+        assert!(bin_str.contains("Binary files /dev/null and b/foo/bar.bin differ\n"));
     }
 }

@@ -271,7 +271,7 @@ type ChatMessageRowProps = {
   isLast: boolean;
   sending: boolean;
   approvalMode: ApprovalMode;
-  planToBuild: string | null;
+  isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
   onResolveApproval: (
     approvalId: string,
@@ -406,7 +406,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   isLast,
   sending,
   approvalMode,
-  planToBuild,
+  isPlanToBuild = false,
   onBuildPlan,
   onResolveApproval,
   onOpenDiff,
@@ -571,7 +571,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 text={msg.text}
                 streaming={msg.streaming}
                 action={
-                  msg.id === planToBuild && onBuildPlan
+                  isPlanToBuild && onBuildPlan
                     ? {
                         label: "Build plan",
                         hint:
@@ -1829,43 +1829,45 @@ export function ChatScreen({
                     </MessageScrollerItem>
                   ) : null}
 
-                  {messages.map((msg, index) => (
-                    <ChatMessageRow
-                      key={msg.id}
-                      message={msg}
-                      isLast={index === messages.length - 1}
-                      sending={sending}
-                      approvalMode={approvalMode}
-                      planToBuild={planToBuild}
-                      onBuildPlan={onBuildPlan}
-                      onResolveApproval={onResolveApproval}
-                      onOpenDiff={openDiff}
-                      onReconnectProvider={onReconnectProvider}
-                      onOpenProviderSwitch={refreshAndOpenProviderSwitch}
-                      onSend={onSend}
-                      editing={editingMessageId === msg.id}
-                      editingText={
-                        editingMessageId === msg.id ? editingMessageText : ""
-                      }
-                      editingBusy={editingMessageBusy}
-                      onStartEdit={startEditingMessage}
-                      onChangeEdit={setEditingMessageText}
-                      onCancelEdit={cancelEditingMessage}
-                      onSubmitEdit={submitEditingMessage}
-                      onResolveQuestion={onResolveQuestion}
-                      pinQuestion={
-                        pendingApprovals.length === 0 &&
-                        pendingQuestion?.messageId === msg.id
-                      }
-                      showWorking={
-                        showTurnWorking &&
-                        msg.role === "assistant" &&
-                        index === messages.length - 1
-                      }
-                      workingStartedAt={turnActivity?.startedAt}
-                      workingAction={workingAction}
-                    />
-                  ))}
+                  {messages.map((msg, index) => {
+                    const isLast = index === messages.length - 1;
+                    const isActiveWorking = showTurnWorking && isLast;
+                    return (
+                      <ChatMessageRow
+                        key={msg.id}
+                        message={msg}
+                        isLast={isLast}
+                        sending={sending}
+                        approvalMode={approvalMode}
+                        isPlanToBuild={planToBuild === msg.id}
+                        onBuildPlan={onBuildPlan}
+                        onResolveApproval={onResolveApproval}
+                        onOpenDiff={openDiff}
+                        onReconnectProvider={onReconnectProvider}
+                        onOpenProviderSwitch={refreshAndOpenProviderSwitch}
+                        onSend={onSend}
+                        editing={editingMessageId === msg.id}
+                        editingText={
+                          editingMessageId === msg.id ? editingMessageText : ""
+                        }
+                        editingBusy={editingMessageBusy}
+                        onStartEdit={startEditingMessage}
+                        onChangeEdit={setEditingMessageText}
+                        onCancelEdit={cancelEditingMessage}
+                        onSubmitEdit={submitEditingMessage}
+                        onResolveQuestion={onResolveQuestion}
+                        pinQuestion={
+                          pendingApprovals.length === 0 &&
+                          pendingQuestion?.messageId === msg.id
+                        }
+                        showWorking={isActiveWorking && msg.role === "assistant"}
+                        workingStartedAt={
+                          isActiveWorking ? turnActivity?.startedAt : undefined
+                        }
+                        workingAction={isActiveWorking ? workingAction : undefined}
+                      />
+                    );
+                  })}
                   {hasNewerMessages || loadingNewer ? (
                     <MessageScrollerItem messageId="later-turns">
                       <div className="flex justify-center">
@@ -1963,13 +1965,14 @@ export function ChatScreen({
             optionsDisabled={optionsDisabled}
             attachments={attachments}
             onChange={onDraftChange}
-            onSubmit={() => {
-              if (isModelSlash(draft)) {
+            onSubmit={(currentDraft?: string) => {
+              const text = currentDraft ?? draft;
+              if (isModelSlash(text)) {
                 onDraftChange("");
                 setModelPickerOpen(true);
                 return;
               }
-              onSend();
+              onSend(text);
             }}
             onStop={onStop}
             onModelChange={onModelChange}

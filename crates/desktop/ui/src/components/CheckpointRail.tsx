@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { memo, useRef } from "react";
 
 import type { ConversationTurn } from "@/lib/conversationTurns";
 import { cn } from "@/lib/utils";
@@ -13,7 +13,7 @@ type Props = {
  * instead of stretching across the whole transcript and mirroring message
  * positions one-for-one.
  */
-export function CheckpointRail({ turns, onJump }: Props) {
+export const CheckpointRail = memo(function CheckpointRail({ turns, onJump }: Props) {
   const markerRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   if (turns.length === 0) return null;
@@ -59,4 +59,4 @@ export function CheckpointRail({ turns, onJump }: Props) {
       </div>
     </div>
   );
-}
+});
