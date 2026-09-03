@@ -1,8 +1,16 @@
-# `zest serve`
+<div align="center">
 
-`zest serve` is a windowless coordinator daemon. It owns one project, the
-delegation queue, and an inbound MCP endpoint on loopback. It does not open a
-parent chat, read prompts from stdin, or load Tauri, WebKit, or dialogs.
+<img src="../crates/desktop/ui/src/assets/zest-mark.png" alt="Zest" width="72" height="72" />
+
+# zest serve
+
+Windowless coordinator daemon. One project, inbound MCP on loopback.
+
+</div>
+
+`zest serve` owns one project, the delegation queue, and an inbound MCP
+endpoint on loopback. It does not open a parent chat, read prompts from stdin,
+or load Tauri, WebKit, or dialogs.
 
 This is one of four different things people call “headless” or “MCP” in Zest:
 
@@ -52,25 +60,72 @@ fails on `.zest/delegations/coordinator.lock`.
 ## Readiness
 
 When the store is open, the lock is held, and the first reconcile has finished,
-stdout prints one JSON line. Diagnostics go to stderr.
+stdout prints one JSON line. Diagnostics go to stderr. Do not POST until that
+line parses.
 
 ```json
 {"kind":"ready","protocol":"zest-serve-v1","pid":1234,"projectRoot":"/repo","mcpUrl":"http://127.0.0.1:43127/mcp","healthUrl":"http://127.0.0.1:43127/healthz","policy":"gated"}
 ```
 
-Connect with `Authorization: Bearer $ZEST_SERVE_TOKEN` to `POST /mcp`. `GET
-/healthz` is unauthenticated and only reports liveness on loopback. If a
-request includes `Origin`, it must be localhost.
+Connect with `Authorization: Bearer $ZEST_SERVE_TOKEN` to `POST /mcp`. Use
+`mcpUrl` from the ready line. `GET /healthz` is unauthenticated and only
+reports liveness on loopback. If a request includes `Origin`, it must be
+localhost.
 
-## MCP tools
+```text
+POST $mcpUrl
+Authorization: Bearer $ZEST_SERVE_TOKEN
+Content-Type: application/json
+```
 
 The handshake accepts `server/discover`, `initialize`, `tools/list`, and
-`tools/call` using the same protocol versions as Zest's outbound MCP client.
+`tools/call` using the same protocol versions as Zest's outbound MCP client. A
+tool result is `result.content[0].text`, a JSON string of the job view. Read
+`status` from that inner object.
+
+## delegation_create
+
+Required fields: `idempotencyKey`, `parentThreadId`, `title`, `objective`,
+`lane`, `scope`, and `worker`. The same `idempotencyKey` returns the same job.
+`parentThreadId` is an id the host chooses. It does not have to exist as a
+Zest thread.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "delegation_create",
+    "arguments": {
+      "idempotencyKey": "card-1",
+      "parentThreadId": "host-thread-1",
+      "title": "Lima counter",
+      "objective": "Add index.html, css, and js for a small counter.",
+      "lane": "app",
+      "scope": ["index.html", "style.css", "app.js"],
+      "worker": { "kind": "provider", "providerId": "deepseek" }
+    }
+  }
+}
+```
+
+`worker` is a target, not a model name alone:
+
+```json
+{"kind": "provider", "providerId": "deepseek"}
+{"kind": "externalAgent", "agentId": "worker"}
+```
+
+Call `delegation_targets` to see what this project can run. Optional `reviewer`
+defaults to the same target as `worker`.
+
+## MCP tools
 
 | Tool | Role |
 | --- | --- |
 | `delegation_targets` | Available worker/reviewer targets |
-| `delegation_create` | Create a card. Requires `idempotencyKey`. Stays `awaiting_approval` |
+| `delegation_create` | Create a card. Requires `idempotencyKey`. Stays `awaiting_approval` unless the daemon is `trusted` |
 | `delegation_list` / `delegation_get` | Read cards |
 | `delegation_artifact` | Paged `worker.diff`, `worker-result.json`, or `review-result.json` |
 | `delegation_update` | Edit a card that is still awaiting approval |
@@ -87,6 +142,20 @@ Cards created here record `origin.coordinator = "inbound_mcp"` by default,
 plus the `parentThreadId` and `idempotencyKey`. A host may send
 `originCoordinator` if it wants a more specific label. Secrets are not stored.
 
+## Status is accepted
+
+There is no `applied` status. After a successful apply the job is `accepted`.
+
+In `gated`, poll `delegation_get` until `ready_to_apply`, then call
+`delegation_apply`. That call also returns `accepted`. Calling apply again with
+the same `expectedUpdatedAt` is a no-op and still `accepted`.
+
+In `trusted`, poll `delegation_get` until `accepted`. Do not wait for
+`applied`. Do not require `delegation_apply`.
+
+`changes_requested`, `blocked`, and `failed` are stops. `delegation_retry`
+sends a blocked or failed card back to `awaiting_approval`.
+
 ## Policy
 
 `gated` is the default. MCP create stays `awaiting_approval`. The host must
@@ -94,9 +163,10 @@ call `delegation_approve` and later `delegation_apply`.
 
 `trusted` is for a bot you already allowed to hold `ZEST_SERVE_TOKEN`. Create
 records approval and starts the worker. When review accepts the diff, the
-daemon applies it. `delegation_approve` and `delegation_apply` still exist and
-stay idempotent. Reviewer rejection still stops at `changes_requested`. Scope
-validation and `git apply --check` still run.
+daemon applies it and the job status is `accepted`. `delegation_approve` and
+`delegation_apply` still exist and stay idempotent. Reviewer rejection still
+stops at `changes_requested`. Scope validation and `git apply --check` still
+run.
 
 Set it with `--policy trusted` or `ZEST_SERVE_POLICY=trusted`. The readiness
 line includes `"policy":"trusted"` so the host can tell which daemon it got.
