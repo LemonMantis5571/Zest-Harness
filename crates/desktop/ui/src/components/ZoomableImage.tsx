@@ -14,29 +14,28 @@ function clampZoom(value: number) {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 }
 
-type Props = {
-  src?: string | null;
+type LightboxProps = {
+  src: string;
   alt?: string | null;
+  onClose: () => void;
 };
 
 /**
- * Inline chat image that opens a zoom overlay on click.
- * Same overlay idea as Mermaid: click to expand, wheel or +/- to zoom.
+ * Full-screen image zoom. Used by chat markdown and composer attachment chips.
  */
-export function ZoomableImage({ src, alt }: Props) {
+export function ImageLightbox({ src, alt, onClose }: LightboxProps) {
   const href = safeImageSrc(src);
-  const [expanded, setExpanded] = useState(false);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const titleId = useId();
   const label = alt?.trim() || "Image";
 
   useEffect(() => {
-    if (!expanded) return;
+    if (!href) return;
 
     const previousOverflow = document.body.style.overflow;
-    const trigger = triggerRef.current;
     document.body.style.overflow = "hidden";
     closeButtonRef.current?.focus();
 
@@ -44,7 +43,7 @@ export function ZoomableImage({ src, alt }: Props) {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        setExpanded(false);
+        onCloseRef.current();
         return;
       }
       if (event.key === "+" || event.key === "=") {
@@ -65,6 +64,128 @@ export function ZoomableImage({ src, alt }: Props) {
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       document.body.style.overflow = previousOverflow;
+    };
+  }, [href]);
+
+  if (!href) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-2 sm:p-4">
+      <button
+        type="button"
+        aria-label="Close image"
+        className="absolute inset-0 cursor-pointer"
+        onClick={onClose}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="relative z-10 flex h-full w-full flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-in zoom-in-95 fade-in duration-150"
+      >
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
+          <h2 id={titleId} className="truncate text-sm font-semibold">
+            {label}
+          </h2>
+          <Button
+            ref={closeButtonRef}
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title="Close image"
+            aria-label="Close image"
+            onClick={onClose}
+          >
+            <XIcon />
+          </Button>
+        </header>
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 bg-muted/20 px-4 py-2">
+          <span className="mr-1 text-xs font-medium text-muted-foreground">Zoom</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            title="Zoom out"
+            aria-label="Zoom out"
+            disabled={zoom <= MIN_ZOOM}
+            onClick={() => setZoom((value) => clampZoom(value - ZOOM_STEP))}
+          >
+            <MinusIcon />
+            <span>Zoom out</span>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-w-16 tabular-nums"
+            title="Reset zoom"
+            aria-label={`Reset zoom to 100 percent (currently ${Math.round(zoom * 100)} percent)`}
+            onClick={() => setZoom(DEFAULT_ZOOM)}
+          >
+            <RotateCcwIcon aria-hidden="true" />
+            <span>{Math.round(zoom * 100)}%</span>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            title="Zoom in"
+            aria-label="Zoom in"
+            disabled={zoom >= MAX_ZOOM}
+            onClick={() => setZoom((value) => clampZoom(value + ZOOM_STEP))}
+          >
+            <PlusIcon />
+            <span>Zoom in</span>
+          </Button>
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            Ctrl/Cmd + wheel or + / -
+          </span>
+        </div>
+        <div
+          className="min-h-0 flex-1 overflow-auto p-4 sm:p-8"
+          onWheel={(event) => {
+            if (!event.ctrlKey && !event.metaKey) return;
+            event.preventDefault();
+            setZoom((value) => clampZoom(value - event.deltaY * 0.01));
+          }}
+        >
+          <div
+            className="flex min-h-full w-max min-w-full items-center justify-center"
+            style={{ zoom }}
+          >
+            <img
+              src={href}
+              alt={alt ?? ""}
+              referrerPolicy="no-referrer"
+              className="max-w-none rounded-md"
+            />
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+type Props = {
+  src?: string | null;
+  alt?: string | null;
+};
+
+/**
+ * Inline chat image that opens a zoom overlay on click.
+ * Same overlay idea as Mermaid: click to expand, wheel or +/- to zoom.
+ */
+export function ZoomableImage({ src, alt }: Props) {
+  const href = safeImageSrc(src);
+  const [expanded, setExpanded] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const label = alt?.trim() || "Image";
+
+  useEffect(() => {
+    if (!expanded) return;
+    const trigger = triggerRef.current;
+    return () => {
       trigger?.focus();
     };
   }, [expanded]);
@@ -80,10 +201,7 @@ export function ZoomableImage({ src, alt }: Props) {
           className="relative block max-w-full cursor-zoom-in overflow-hidden rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
           title="Expand image"
           aria-label={`Expand ${label}`}
-          onClick={() => {
-            setZoom(DEFAULT_ZOOM);
-            setExpanded(true);
-          }}
+          onClick={() => setExpanded(true)}
         >
           <span className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-card/90 px-2 py-1 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover/image:opacity-100 group-focus-within/image:opacity-100">
             <Maximize2Icon className="size-3.5" aria-hidden="true" />
@@ -98,104 +216,9 @@ export function ZoomableImage({ src, alt }: Props) {
         </button>
       </div>
 
-      {expanded
-        ? createPortal(
-            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-2 sm:p-4">
-              <button
-                type="button"
-                aria-label="Close image"
-                className="absolute inset-0 cursor-pointer"
-                onClick={() => setExpanded(false)}
-              />
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby={titleId}
-                className="relative z-10 flex h-full w-full flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-in zoom-in-95 fade-in duration-150"
-              >
-                <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
-                  <h2 id={titleId} className="truncate text-sm font-semibold">
-                    {label}
-                  </h2>
-                  <Button
-                    ref={closeButtonRef}
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    title="Close image"
-                    aria-label="Close image"
-                    onClick={() => setExpanded(false)}
-                  >
-                    <XIcon />
-                  </Button>
-                </header>
-                <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 bg-muted/20 px-4 py-2">
-                  <span className="mr-1 text-xs font-medium text-muted-foreground">Zoom</span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    title="Zoom out"
-                    aria-label="Zoom out"
-                    disabled={zoom <= MIN_ZOOM}
-                    onClick={() => setZoom((value) => clampZoom(value - ZOOM_STEP))}
-                  >
-                    <MinusIcon />
-                    <span>Zoom out</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="min-w-16 tabular-nums"
-                    title="Reset zoom"
-                    aria-label={`Reset zoom to 100 percent (currently ${Math.round(zoom * 100)} percent)`}
-                    onClick={() => setZoom(DEFAULT_ZOOM)}
-                  >
-                    <RotateCcwIcon aria-hidden="true" />
-                    <span>{Math.round(zoom * 100)}%</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    title="Zoom in"
-                    aria-label="Zoom in"
-                    disabled={zoom >= MAX_ZOOM}
-                    onClick={() => setZoom((value) => clampZoom(value + ZOOM_STEP))}
-                  >
-                    <PlusIcon />
-                    <span>Zoom in</span>
-                  </Button>
-                  <span className="ml-auto text-[11px] text-muted-foreground">
-                    Ctrl/Cmd + wheel or + / -
-                  </span>
-                </div>
-                <div
-                  className="min-h-0 flex-1 overflow-auto p-4 sm:p-8"
-                  onWheel={(event) => {
-                    if (!event.ctrlKey && !event.metaKey) return;
-                    event.preventDefault();
-                    setZoom((value) => clampZoom(value - event.deltaY * 0.01));
-                  }}
-                >
-                  <div
-                    className="flex min-h-full w-max min-w-full items-center justify-center"
-                    style={{ zoom }}
-                  >
-                    <img
-                      src={href}
-                      alt={alt ?? ""}
-                      referrerPolicy="no-referrer"
-                      className="max-w-none rounded-md"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>,
-            document.body
-          )
-        : null}
+      {expanded ? (
+        <ImageLightbox src={href} alt={alt} onClose={() => setExpanded(false)} />
+      ) : null}
     </>
   );
 }

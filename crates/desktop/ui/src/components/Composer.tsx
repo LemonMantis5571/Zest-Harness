@@ -36,10 +36,12 @@ import {
   AttachmentGroup,
   AttachmentMedia,
   AttachmentTitle,
+  AttachmentTrigger,
 } from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { IconSwap } from "@/components/ui/icon-swap";
+import { ImageLightbox } from "@/components/ZoomableImage";
 import {
   chipLabel,
   effortsForModel,
@@ -168,6 +170,9 @@ export const Composer = memo(function Composer({
   const textRef = useRef(text);
   textRef.current = text;
   const debounceTimerRef = useRef<number | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(
+    null
+  );
 
   useEffect(() => {
     setText(value);
@@ -351,6 +356,7 @@ export const Composer = memo(function Composer({
   }
 
   return (
+    <>
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-3 pt-20">
       <div className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)]">
         {aboveComposer}
@@ -491,6 +497,7 @@ export const Composer = memo(function Composer({
                     key={att.id}
                     size="sm"
                     state={att.status === "error" ? "error" : "done"}
+                    className={preview ? "cursor-zoom-in" : undefined}
                   >
                     <AttachmentMedia variant={preview ? "image" : "icon"}>
                       {preview ? (
@@ -516,6 +523,16 @@ export const Composer = memo(function Composer({
                         <XIcon />
                       </AttachmentAction>
                     </AttachmentActions>
+                    {preview ? (
+                      <AttachmentTrigger
+                        aria-label={`Expand ${att.name}`}
+                        title="Expand image"
+                        className="cursor-zoom-in"
+                        onClick={() =>
+                          setLightbox({ src: preview, alt: att.name })
+                        }
+                      />
+                    ) : null}
                   </Attachment>
                 );
               })}
@@ -782,5 +799,13 @@ export const Composer = memo(function Composer({
         </div>
       </div>
     </div>
+    {lightbox ? (
+      <ImageLightbox
+        src={lightbox.src}
+        alt={lightbox.alt}
+        onClose={() => setLightbox(null)}
+      />
+    ) : null}
+    </>
   );
 });

@@ -499,156 +499,137 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     const isEditing = editingThread?.key === key;
 
     return (
-      <li key={key} className="group/thread relative">
-        {isEditing ? (
-          <div
-            role="group"
-            aria-label={`Renaming ${title}`}
-            className="flex w-full cursor-text items-center gap-2 rounded-md bg-[var(--sidebar-accent)] py-1 pr-24 pl-2 text-left outline-none"
-          >
-            <input
-              ref={renameInputRef}
-              value={editingThread?.value ?? ""}
-              maxLength={MAX_CHAT_TITLE_CHARS}
-              aria-label={`Rename chat ${title}`}
-              placeholder="Untitled chat"
-              disabled={renameBusy}
-              className="min-w-0 flex-1 rounded-sm border border-primary/60 bg-background/60 px-1.5 py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
-              onChange={(event) =>
-                setEditingThread((current) =>
-                  current ? { ...current, value: event.target.value } : current
-                )
-              }
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void commitRename();
-                } else if (event.key === "Escape") {
-                  event.preventDefault();
-                  cancelRename();
-                }
-              }}
-              onBlur={handleRenameBlur}
-            />
-          </div>
-        ) : (
-        <button
-          type="button"
-          onClick={() => {
-            if (active) {
-              onRevealTranscript();
-              return;
-            }
-            void openThread(project, thread).catch((error) =>
-              ignoreExpectedFailure(error, "open chat from history")
-            );
-          }}
-          onDoubleClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            beginRename(project, thread, key);
-          }}
-          title={`Double-click to rename “${title}”`}
-          aria-label={[title, activityText, gitText].filter(Boolean).join(". ")}
+      <li key={key} className="group/thread">
+        <div
           className={cn(
-            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1 pr-24 pl-2 text-left outline-none transition-colors",
-            "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
-            "focus-visible:ring-2 focus-visible:ring-ring/50",
-            active
-              ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]"
-              : ""
+            "relative flex items-center gap-0.5 rounded-md",
+            isEditing
+              ? "bg-[var(--sidebar-accent)]"
+              : active
+                ? "bg-[color-mix(in_srgb,var(--sidebar-primary)_18%,transparent)] text-[var(--sidebar-accent-foreground)] before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-[var(--sidebar-primary)]"
+                : "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]"
           )}
         >
-          <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
-          {branchChanged ? (
-            <span
-              title={`This chat is on ${git?.branch}; its original branch was ${git?.baseBranch}.`}
-              aria-label={gitText}
-              className="flex shrink-0 items-center text-muted-foreground"
+          {isEditing ? (
+            <div
+              role="group"
+              aria-label={`Renaming ${title}`}
+              className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pr-1 pl-2.5"
             >
-              <GitBranchIcon className="size-3.5 opacity-80" />
-            </span>
-          ) : null}
-          {pullRequest ? (
-            <a
-              {...pullRequestAnchorProps(pullRequest.url)}
-              title={`Pull request #${pullRequest.number}: ${pullRequest.title} · +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`}
-              aria-label={`Pull request #${pullRequest.number}`}
-              className="flex shrink-0 items-center text-muted-foreground hover:text-foreground"
-              onClick={(event) =>
-                handlePullRequestClick(event, () =>
-                  onOpenPullRequest?.(project, thread)
-                )
-              }
-            >
-              <GitPullRequestIcon className="size-3.5 opacity-80" />
-            </a>
-          ) : null}
-          {owner ? (
-            <span
-              title={`This chat belongs to ${owner}. Zest will keep the original provider or let you open a copy.`}
-              className="flex shrink-0 items-center text-muted-foreground"
-            >
-              {/* The name still reaches a screen reader through the title
-                  above, so the glyph itself stays decorative. */}
-              <ProviderIcon
-                providerId={owner}
-                label={owner}
-                className="size-4 opacity-80"
+              {owner ? (
+                <ProviderIcon
+                  providerId={owner}
+                  label={owner}
+                  className="size-4 shrink-0 opacity-80"
+                />
+              ) : null}
+              <input
+                ref={renameInputRef}
+                value={editingThread?.value ?? ""}
+                maxLength={MAX_CHAT_TITLE_CHARS}
+                aria-label={`Rename chat ${title}`}
+                placeholder="Untitled chat"
+                disabled={renameBusy}
+                className="min-w-0 flex-1 rounded-sm border border-primary/60 bg-background/60 px-1.5 py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+                onChange={(event) =>
+                  setEditingThread((current) =>
+                    current ? { ...current, value: event.target.value } : current
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void commitRename();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelRename();
+                  }
+                }}
+                onBlur={handleRenameBlur}
               />
-            </span>
-          ) : null}
-          {activity && activity.state !== "idle" ? (
-            <span
-              className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground"
-              aria-hidden="true"
-            >
-              {activity.state === "awaiting_approval" ? (
-                <span className="size-1.5 rounded-full bg-amber-400" />
-              ) : (
-                <span className="flex items-center gap-0.5">
-                  <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.32s]" />
-                  <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.16s]" />
-                  <span className="size-1 rounded-full bg-primary animate-bounce" />
-                </span>
-              )}
-              {elapsedLabel(activity.startedAt, now) ?? age}
-            </span>
-          ) : age ? (
-            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-              {age}
-            </span>
-          ) : null}
-        </button>
-        )}
-        {/* One flex row rather than three fixed offsets. Fork only exists on
-            the active chat, and pinning it to its own `right-7` slot meant
-            every other row rendered that slot empty — a hole between the pin
-            and the bin that read as a missing button. Packing them lets the
-            row close up when fork is absent. */}
-        <div className="absolute top-1 right-0.5 flex items-center gap-0.5">
-          <Button
+            </div>
+          ) : (
+          <div className="flex min-w-0 flex-1 items-center">
+          <button
             type="button"
-            variant="ghost"
-            size="icon-xs"
-            title={thread.pinned ? "Unpin chat" : "Pin chat"}
-            aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
-            aria-pressed={thread.pinned}
-            disabled={deleting || pinning === thread.id || (sending && active)}
-            className={cn(
-              "text-muted-foreground transition-opacity",
-              "hover:bg-muted hover:text-foreground",
-              thread.pinned
-                ? "fill-current text-primary opacity-100"
-                : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100"
-            )}
-            onClick={(event) => {
-              event.stopPropagation();
-              void togglePinned(project.path, thread);
+            onClick={() => {
+              if (active) {
+                onRevealTranscript();
+                return;
+              }
+              void openThread(project, thread).catch((error) =>
+                ignoreExpectedFailure(error, "open chat from history")
+              );
             }}
+            onDoubleClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              beginRename(project, thread, key);
+            }}
+            title={`Double-click to rename “${title}”`}
+            aria-current={active ? "page" : undefined}
+            aria-label={[title, activityText, gitText].filter(Boolean).join(". ")}
+            className="flex min-w-0 cursor-pointer items-center gap-1.5 overflow-hidden py-1 pr-1 pl-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           >
-            <PinIcon aria-hidden="true" />
-          </Button>
+            {owner ? (
+              <span
+                title={`This chat belongs to ${owner}. Zest will keep the original provider or let you open a copy.`}
+                className="flex shrink-0 items-center text-muted-foreground"
+              >
+                <ProviderIcon
+                  providerId={owner}
+                  label={owner}
+                  className="size-4 opacity-80"
+                />
+              </span>
+            ) : null}
+            <span className="min-w-0 truncate text-[13px]">{title}</span>
+            {branchChanged ? (
+              <span
+                title={`This chat is on ${git?.branch}; its original branch was ${git?.baseBranch}.`}
+                aria-label={gitText}
+                className="flex shrink-0 items-center text-muted-foreground"
+              >
+                <GitBranchIcon className="size-3.5 opacity-80" />
+              </span>
+            ) : null}
+            {pullRequest ? (
+              <a
+                {...pullRequestAnchorProps(pullRequest.url)}
+                title={`Pull request #${pullRequest.number}: ${pullRequest.title} · +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`}
+                aria-label={`Pull request #${pullRequest.number}`}
+                className="flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+                onClick={(event) =>
+                  handlePullRequestClick(event, () =>
+                    onOpenPullRequest?.(project, thread)
+                  )
+                }
+              >
+                <GitPullRequestIcon className="size-3.5 opacity-80" />
+              </a>
+            ) : null}
+            {activity && activity.state !== "idle" ? (
+              <span
+                className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground"
+                aria-hidden="true"
+              >
+                {activity.state === "awaiting_approval" ? (
+                  <span className="size-1.5 rounded-full bg-amber-400" />
+                ) : (
+                  <span className="flex items-center gap-0.5">
+                    <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.32s]" />
+                    <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.16s]" />
+                    <span className="size-1 rounded-full bg-primary animate-bounce" />
+                  </span>
+                )}
+                {elapsedLabel(activity.startedAt, now) ?? age}
+              </span>
+            ) : age ? (
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                {age}
+              </span>
+            ) : null}
+          </button>
           {active ? (
             <Button
               type="button"
@@ -657,11 +638,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               title="Fork conversation"
               aria-label="Fork conversation"
               disabled={sending || deleting}
-              className={cn(
-                "text-muted-foreground transition-opacity",
-                "hover:bg-muted hover:text-foreground",
-                "opacity-100 focus-visible:opacity-100"
-              )}
+              className="shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={(event) => {
                 event.stopPropagation();
                 void onForkThread();
@@ -670,28 +647,52 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               <GitForkIcon aria-hidden="true" />
             </Button>
           ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            title={`Delete “${title}”`}
-            disabled={deleting}
-            className={cn(
-              "text-muted-foreground transition-opacity",
-              "hover:bg-destructive/15 hover:text-destructive",
-              "focus-visible:opacity-100",
-              active ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100"
-            )}
-            onClick={(event) => {
-              event.stopPropagation();
-              setPendingDelete({
-                thread,
-                projectPath: project.path,
-              });
-            }}
-          >
-            <Trash2Icon />
-          </Button>
+          </div>
+          )}
+          <div className="flex shrink-0 items-center gap-0.5 pr-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              title={thread.pinned ? "Unpin chat" : "Pin chat"}
+              aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
+              aria-pressed={thread.pinned}
+              disabled={deleting || pinning === thread.id || (sending && active)}
+              className={cn(
+                "text-muted-foreground hover:bg-muted hover:text-foreground",
+                thread.pinned
+                  ? "fill-current text-primary opacity-100"
+                  : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100"
+              )}
+              onClick={(event) => {
+                event.stopPropagation();
+                void togglePinned(project.path, thread);
+              }}
+            >
+              <PinIcon aria-hidden="true" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              title={`Delete “${title}”`}
+              disabled={deleting}
+              className={cn(
+                "text-muted-foreground hover:bg-destructive/15 hover:text-destructive",
+                "focus-visible:opacity-100",
+                active ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100"
+              )}
+              onClick={(event) => {
+                event.stopPropagation();
+                setPendingDelete({
+                  thread,
+                  projectPath: project.path,
+                });
+              }}
+            >
+              <Trash2Icon />
+            </Button>
+          </div>
         </div>
       </li>
     );
@@ -878,6 +879,12 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                   <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
                     {visibleProjects.map((project) => {
                       const expandedHere = isExpanded(project);
+                      const folderClass = cn(
+                        "size-3.5 shrink-0",
+                        project.active
+                          ? "text-[var(--sidebar-primary)]"
+                          : "text-muted-foreground"
+                      );
                       return (
                         <li key={project.path} className="relative min-w-0">
                         <div className="group/project flex items-center gap-0.5">
@@ -892,8 +899,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                             }}
                             className={cn(
                               "flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left outline-none transition-colors",
-                              "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
-                              project.active && "bg-[var(--sidebar-accent)]"
+                              "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50"
                             )}
                           >
                             <ChevronRightIcon
@@ -903,9 +909,9 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                               )}
                             />
                             {expandedHere ? (
-                              <FolderOpenIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                              <FolderOpenIcon className={folderClass} />
                             ) : (
-                              <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                              <FolderIcon className={folderClass} />
                             )}
                             <span className="truncate text-[13px] font-medium">
                               {project.name}
