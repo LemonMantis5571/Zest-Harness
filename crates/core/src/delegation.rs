@@ -464,7 +464,7 @@ impl FeatureCard {
                 .join("\n")
         };
         format!(
-            "You are a fresh, independent Zest reviewer. Inspect the current isolated workspace and the applied worker diff. You may read files and run checks, but you must not edit files and you must not create delegation jobs. Any reviewer-side edits are discarded. Do not address the end user.\n\n# Feature card\n{card}\n\n# Selected context\n{context}\n\n# Worker result\n{worker}\n\n# Required acceptance checks\n{checks}\n\n# Workspace snapshot\nhead={:?}\nfingerprint={}\n\nReturn only one JSON object with this shape: {{\"decision\":\"accepted\" or \"changes_requested\",\"summary\":\"…\",\"findings\":[{{\"severity\":\"blocking\" or \"advisory\",\"path\":\"relative/path\",\"message\":\"…\"}}],\"checks\":[{{\"command\":\"…\",\"status\":\"passed\" or \"failed\" or \"skipped\",\"output\":\"…\"}}]}}. Include evidence for every required check; never claim a check passed without running it.",
+            "You are a fresh, independent Zest reviewer. Inspect the current isolated workspace and the applied worker diff. You may read files and run checks, but you must not edit files and you must not create delegation jobs. Any reviewer-side edits are discarded. Do not address the end user.\n\n# Feature card\n{card}\n\n# Selected context\n{context}\n\n# Worker result\n{worker}\n\n# Required acceptance checks\n{checks}\n\n# Workspace snapshot\nhead={:?}\nfingerprint={}\n\nReply with one JSON object and nothing else. Do not wrap it in markdown or prose. Shape: {{\"decision\":\"accepted\" or \"changes_requested\",\"summary\":\"…\",\"findings\":[{{\"severity\":\"blocking\" or \"advisory\",\"path\":\"relative/path\",\"message\":\"…\"}}],\"checks\":[{{\"command\":\"…\",\"status\":\"passed\" or \"failed\" or \"skipped\",\"output\":\"…\"}}]}}. Include evidence for every required check; never claim a check passed without running it.",
             snapshot.head, snapshot.fingerprint
         )
     }
@@ -1193,7 +1193,9 @@ impl WorkerResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
+    #[serde(alias = "accept", alias = "approved", alias = "approve")]
     Accepted,
+    #[serde(alias = "changes", alias = "reject", alias = "rejected")]
     ChangesRequested,
 }
 
@@ -1233,7 +1235,9 @@ pub struct AcceptanceCheckResult {
 pub struct ReviewReport {
     pub decision: ReviewDecision,
     pub summary: String,
+    #[serde(default)]
     pub findings: Vec<ReviewFinding>,
+    #[serde(default)]
     pub checks: Vec<AcceptanceCheckResult>,
 }
 
@@ -1243,19 +1247,7 @@ impl ReviewReport {
         if value.chars().count() > MAX_REVIEW_REPORT_CHARS {
             return Err(HarnessError::Other("reviewer report is too large".into()));
         }
-        let value = if value.starts_with("```") && value.ends_with("```") {
-            value
-                .lines()
-                .skip(1)
-                .take_while(|line| !line.trim_start().starts_with("```"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            value.to_string()
-        };
-        let report: Self = serde_json::from_str(value.trim()).map_err(|error| {
-            HarnessError::Other(format!("reviewer returned malformed JSON: {error}"))
-        })?;
+        let report = parse_review_json(value)?;
         report.validate(required_checks)?;
         Ok(report)
     }
@@ -1318,6 +1310,268 @@ impl ReviewReport {
                 .iter()
                 .any(|finding| finding.severity == ReviewSeverity::Blocking)
     }
+}
+
+fn parse_review_json(raw: &str) -> Result<ReviewReport> {
+    let mut last_error = None;
+    let mut consider = |payload: &str| -> Option<ReviewReport> {
+        match deserialize_review_prefix(payload) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                last_error = Some(error);
+                None
+            }
+        }
+    };
+    if let Some(report) = consider(raw) {
+        return Ok(report);
+    }
+    if raw.trim_start().starts_with('"') {
+        let mut de = serde_json::Deserializer::from_str(raw.trim_start());
+        if let Ok(inner) = String::deserialize(&mut de) {
+            if let Some(report) = consider(&inner) {
+                return Ok(report);
+            }
+        }
+    }
+    let fences = fenced_blocks(raw);
+    for block in fences.iter().filter(|block| is_json_fence(block.lang)) {
+        if let Some(report) = consider(block.body) {
+            return Ok(report);
+        }
+    }
+    for block in fences.iter().filter(|block| !is_json_fence(block.lang)) {
+        if let Some(report) = consider(block.body) {
+            return Ok(report);
+        }
+    }
+    for slice in objects_near_decision_keys(raw) {
+        if let Some(report) = consider(slice) {
+            return Ok(report);
+        }
+    }
+    let mut rest = raw;
+    let mut scanned = 0;
+    while let Some(offset) = rest.find('{') {
+        if let Some(report) = consider(&rest[offset..]) {
+            return Ok(report);
+        }
+        rest = &rest[offset + 1..];
+        scanned += 1;
+        if scanned >= 256 {
+            break;
+        }
+    }
+    Err(HarnessError::Other(format!(
+        "reviewer returned malformed JSON: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no JSON object found".into())
+    )))
+}
+
+fn deserialize_review_prefix(raw: &str) -> std::result::Result<ReviewReport, serde_json::Error> {
+    let trimmed = raw.trim_start();
+    match deserialize_report_or_normalized(trimmed) {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let stripped = strip_trailing_commas(trimmed);
+            if stripped != trimmed {
+                deserialize_report_or_normalized(&stripped)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn deserialize_report_or_normalized(
+    raw: &str,
+) -> std::result::Result<ReviewReport, serde_json::Error> {
+    let mut de = serde_json::Deserializer::from_str(raw);
+    match ReviewReport::deserialize(&mut de) {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let mut de = serde_json::Deserializer::from_str(raw);
+            match serde_json::Value::deserialize(&mut de) {
+                Ok(value) => serde_json::from_value(normalize_review_value(value)),
+                Err(_) => Err(error),
+            }
+        }
+    }
+}
+
+fn normalize_review_value(mut value: serde_json::Value) -> serde_json::Value {
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    if let Some(verdict) = object.remove("verdict") {
+        object.entry("decision").or_insert(verdict);
+    }
+    if let Some(serde_json::Value::String(decision)) = object.get_mut("decision") {
+        let normalized = decision.trim().replace('-', "_").to_ascii_lowercase();
+        *decision = match normalized.as_str() {
+            "accept" | "approved" | "approve" | "pass" | "passed" | "ok" => "accepted".into(),
+            "changes" | "reject" | "rejected" | "request_changes" | "changesrequested" => {
+                "changes_requested".into()
+            }
+            other => other.to_string(),
+        };
+    }
+    for key in ["findings", "checks"] {
+        if matches!(object.get(key), Some(serde_json::Value::Null)) {
+            object.insert(key.to_string(), serde_json::Value::Array(Vec::new()));
+        }
+    }
+    if let Some(serde_json::Value::Array(findings)) = object.get_mut("findings") {
+        for finding in findings {
+            if let Some(serde_json::Value::String(severity)) = finding.get_mut("severity") {
+                *severity = severity.trim().to_ascii_lowercase();
+            }
+        }
+    }
+    if let Some(serde_json::Value::Array(checks)) = object.get_mut("checks") {
+        for check in checks {
+            if let Some(serde_json::Value::String(status)) = check.get_mut("status") {
+                *status = status.trim().to_ascii_lowercase();
+            }
+        }
+    }
+    value
+}
+
+fn strip_trailing_commas(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte);
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            out.push(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b',' {
+            let mut next = index + 1;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if next < bytes.len() && (bytes[next] == b'}' || bytes[next] == b']') {
+                index += 1;
+                continue;
+            }
+        }
+        out.push(byte);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+struct FencedBlock<'a> {
+    lang: &'a str,
+    body: &'a str,
+}
+
+fn fenced_blocks(raw: &str) -> Vec<FencedBlock<'_>> {
+    let mut blocks = Vec::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find("```") {
+        let after = &rest[open + 3..];
+        let (lang, body) = match after.find('\n') {
+            Some(newline) => (
+                after[..newline].trim().trim_end_matches('\r'),
+                &after[newline + 1..],
+            ),
+            None => {
+                let lang_len = after
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+                    .unwrap_or(0);
+                (after[..lang_len].trim(), after[lang_len..].trim_start())
+            }
+        };
+        let Some(close) = body.find("```") else {
+            break;
+        };
+        blocks.push(FencedBlock {
+            lang,
+            body: body[..close].trim(),
+        });
+        rest = &body[close + 3..];
+        if blocks.len() >= 32 {
+            break;
+        }
+    }
+    blocks
+}
+
+fn is_json_fence(lang: &str) -> bool {
+    matches!(
+        lang.to_ascii_lowercase().as_str(),
+        "json" | "jsonc" | "json5"
+    )
+}
+
+fn objects_near_decision_keys(raw: &str) -> Vec<&str> {
+    let lower = raw.to_ascii_lowercase();
+    let mut seen = Vec::new();
+    let mut slices = Vec::new();
+    for key in ["\"decision\"", "\"verdict\""] {
+        let mut from = 0;
+        while let Some(relative) = lower[from..].find(key) {
+            let at = from + relative;
+            for start in object_starts_before(raw, at) {
+                if !seen.contains(&start) {
+                    seen.push(start);
+                    slices.push(&raw[start..]);
+                }
+            }
+            from = at + key.len();
+            if slices.len() >= 24 {
+                return slices;
+            }
+        }
+    }
+    slices
+}
+
+fn object_starts_before(raw: &str, key_at: usize) -> Vec<usize> {
+    let bytes = raw.as_bytes();
+    let mut starts = Vec::new();
+    let mut depth = 0i32;
+    let mut index = key_at;
+    while index > 0 {
+        index -= 1;
+        match bytes[index] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    starts.push(index);
+                    if starts.len() >= 8 {
+                        break;
+                    }
+                } else {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    starts
 }
 
 pub fn validate_review_paths(root: &Path, report: &ReviewReport) -> Result<()> {
@@ -2093,6 +2347,28 @@ mod tests {
         let malformed = "not json";
         assert!(ReviewReport::parse(malformed, &checks).is_err());
 
+        let prose = r#"
+Here is my review of the lima counter.
+
+```json
+{"decision":"accepted","summary":"Small app looks correct","findings":[],"checks":[{"command":"cargo test","status":"passed","output":"ok"}]}
+```
+
+The JSON is the verdict.
+"#;
+        let from_prose = ReviewReport::parse(prose, &checks).unwrap();
+        assert!(from_prose.can_accept(&checks));
+
+        let trailing = r#"The change is fine.
+{"decision":"accepted","summary":"Looks good","findings":[],"checks":[{"command":"cargo test","status":"passed","output":"ok"}]}
+Thanks."#;
+        assert!(ReviewReport::parse(trailing, &checks)
+            .unwrap()
+            .can_accept(&checks));
+
+        let aliased = r#"{"decision":"accept","summary":"Looks good"}"#;
+        assert!(ReviewReport::parse(aliased, &[]).is_ok());
+
         let blocking = r#"{
             "decision":"accepted",
             "summary":"Needs one fix",
@@ -2113,6 +2389,48 @@ mod tests {
             checks: vec![],
         };
         assert!(validate_review_paths(&scratch("review-paths"), &report).is_err());
+    }
+
+    #[test]
+    fn review_report_extracts_json_when_code_fences_come_first() {
+        let checks = vec!["cargo test".into()];
+        let braces = "{\n".repeat(40);
+        let lima = format!(
+            r#"The lima counter looks correct.
+
+```html
+<!DOCTYPE html>
+<html><body><script>
+{braces}
+</script></body></html>
+```
+
+```javascript
+const state = {{ count: 0 }};
+function render() {{
+  document.body.textContent = state.count;
+}}
+```
+
+Here is the JSON verdict:
+
+```json
+{{
+  "decision": "Accepted",
+  "summary": "Small vanilla counter is complete",
+  "findings": null,
+  "checks": [{{"command":"cargo test","status":"Passed","output":"ok"}}],
+}}
+```
+"#
+        );
+        let report = ReviewReport::parse(&lima, &checks).unwrap();
+        assert!(report.can_accept(&checks));
+        assert_eq!(report.decision, ReviewDecision::Accepted);
+
+        let verdict = r#"I accept this change.
+{"verdict":"approved","summary":"Looks good","findings":null}"#;
+        assert!(ReviewReport::parse(verdict, &[]).is_ok());
     }
 
     #[test]

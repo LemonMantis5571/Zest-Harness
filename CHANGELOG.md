@@ -47,6 +47,9 @@ a replacement for the commit history.
 
 ### Fixed
 
+- Reviewers that wrap the verdict in prose, a markdown fence, or code samples
+  before the JSON still count as a parseable report. DeepSeek-style
+  "here is JSON" replies no longer block apply when the object itself is valid.
 - Opening a long chat shipped the whole transcript into the window. The
   first paint is now the last ten user turns; earlier turns load on scroll
   up. Search opens on the page that contains the match instead of the
