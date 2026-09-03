@@ -74,6 +74,10 @@ fn write_project(root: &Path) {
         root,
         &["commit", "--quiet", "--no-verify", "-m", "baseline"],
     );
+    write_worker_config(root);
+}
+
+fn write_worker_config(root: &Path) {
     let command = serde_json::to_string(&fixture_binary().to_string_lossy().to_string()).unwrap();
     std::fs::write(
         root.join("zest.toml"),
@@ -359,6 +363,78 @@ fn serve_trusted_create_runs_and_applies_without_extra_calls() {
     assert_ne!(job_status(&created), "awaiting_approval");
     assert_eq!(created["approved"], true);
 
+    let job_id = created["jobId"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let job = call_tool(&daemon, "delegation_get", json!({ "jobId": job_id }));
+        let status = job_status(&job).to_string();
+        if status == "accepted" {
+            break;
+        }
+        assert!(
+            !matches!(
+                status.as_str(),
+                "failed" | "blocked" | "cancelled" | "apply_conflict" | "changes_requested"
+            ),
+            "job ended in {status}: {job}"
+        );
+        assert!(Instant::now() < deadline, "timed out in {status}: {job}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("delegated.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "fixture worker change\n"
+    );
+}
+
+#[test]
+fn serve_without_init_rejects_a_missing_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing-app");
+    let output = Command::new(env!("CARGO_BIN_EXE_zest"))
+        .args([
+            "serve",
+            "--project",
+            &missing.to_string_lossy(),
+            "--port",
+            "0",
+        ])
+        .env("ZEST_SERVE_TOKEN", TOKEN)
+        .env_remove("ZEST_SERVE_POLICY")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--init"), "{stderr}");
+}
+
+#[test]
+fn serve_init_bootstraps_git_and_trusted_apply() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("new-app");
+    std::fs::create_dir_all(&root).unwrap();
+    write_worker_config(&root);
+    assert!(!root.join(".git").exists());
+    let daemon = spawn_serve_with(&root, &["--init", "--policy", "trusted"]);
+    assert_eq!(daemon.policy, "trusted");
+    git(&root, &["rev-parse", "--verify", "HEAD"]);
+
+    let created = call_tool(
+        &daemon,
+        "delegation_create",
+        json!({
+            "idempotencyKey": "e2e-init-1",
+            "parentThreadId": "thread-e2e",
+            "title": "Init serve e2e",
+            "objective": "Create the fixture change",
+            "lane": "test",
+            "scope": ["."],
+            "worker": {"kind": "externalAgent", "agentId": "worker"}
+        }),
+    );
+    assert_ne!(job_status(&created), "awaiting_approval");
     let job_id = created["jobId"].as_str().unwrap().to_string();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {

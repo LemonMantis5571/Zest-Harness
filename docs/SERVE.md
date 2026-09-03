@@ -29,11 +29,19 @@ generic shell tool.
 ```text
 ZEST_SERVE_TOKEN=<at least 32 characters> zest serve --project /path/to/repo --port 0
 ZEST_SERVE_TOKEN=<at least 32 characters> zest serve --project /path/to/repo --policy trusted
+ZEST_SERVE_TOKEN=<at least 32 characters> zest serve --project /new/app --init --policy trusted
 ```
 
 `--project` is required and is the only project this process will serve. The
 path is canonicalized and must be a writable directory. `--port 0` (the default)
 picks a free loopback port. The daemon binds `127.0.0.1` only.
+
+`--init` is how a bot starts a project that does not exist yet. It creates the
+directory if missing, runs `git init` if the folder is not a repository, and
+makes an empty HEAD commit so an isolated worker can return a diff. It does
+not write `zest.toml` and it does not scaffold an app. The first card still
+has to ask for real files. Providers and `[agents.*]` come from `~/.zest/zest.toml`
+unless the project already has its own config.
 
 `ZEST_SERVE_TOKEN` is a high-entropy bearer token. It is never accepted on
 argv, never written into the project, and never printed in readiness or logs.

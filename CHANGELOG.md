@@ -10,7 +10,9 @@ a replacement for the commit history.
 - `zest serve --project PATH`, a windowless coordinator daemon with authenticated
   loopback MCP. Default policy is gated: create, then `delegation_approve` and
   `delegation_apply` after confirmation. `--policy trusted` lets a token holder
-  run a card through worker, review, and apply without those extra calls. See
+  run a card through worker, review, and apply without those extra calls.
+  `--init` creates a missing directory, `git init`, and an empty HEAD commit so
+  a bot can serve a project that does not exist yet. See
   [docs/SERVE.md](docs/SERVE.md).
 - Standalone `zest` CLI artifacts on Linux and Windows releases, so a VM does
   not need the WebKit desktop bundle.

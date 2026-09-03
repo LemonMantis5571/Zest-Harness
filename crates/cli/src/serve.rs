@@ -66,6 +66,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let mut project = None;
     let mut port: u16 = 0;
     let mut policy = None;
+    let mut init = false;
     let mut rest = args.into_iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -84,6 +85,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .context("`--policy` requires gated or trusted")?;
                 policy = Some(ServePolicy::parse(&value)?);
             }
+            "--init" => init = true,
             other => bail!("unknown serve option `{other}` (try: zest serve --help)"),
         }
     }
@@ -96,7 +98,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         },
     };
     let token = require_token()?;
-    let root = prepare_project(Path::new(&project))?;
+    let root = prepare_project(Path::new(&project), init)?;
     let _config = Config::find(&root).context("could not load zest.toml for this project")?;
     let _store = DelegationStore::open(&root).map_err(|error| anyhow::anyhow!(error))?;
 
@@ -176,7 +178,7 @@ pub fn print_help() {
 zest serve — headless coordinator daemon
 
 USAGE
-  zest serve --project PATH [--port 0] [--policy gated|trusted]
+  zest serve --project PATH [--port 0] [--policy gated|trusted] [--init]
 
 OPTIONS
   --project PATH              Project root this process will own (required)
@@ -187,6 +189,9 @@ OPTIONS
                               trusted: the token holder can run a card
                               through worker, review, and apply without
                               those extra calls.
+  --init                      Create the directory if missing, git init if
+                              needed, and make an empty HEAD commit so a
+                              worker can return a diff. Does not write zest.toml.
   -h, --help                  Show this help
 
 ENVIRONMENT
@@ -219,7 +224,17 @@ fn require_token() -> anyhow::Result<String> {
     Ok(token)
 }
 
-fn prepare_project(project: &Path) -> anyhow::Result<PathBuf> {
+fn prepare_project(project: &Path, init: bool) -> anyhow::Result<PathBuf> {
+    if !project.exists() {
+        if !init {
+            bail!(
+                "project `{}` does not exist (pass --init to create a git repo there)",
+                project.display()
+            );
+        }
+        std::fs::create_dir_all(project)
+            .with_context(|| format!("could not create project `{}`", project.display()))?;
+    }
     let meta = std::fs::metadata(project)
         .with_context(|| format!("project `{}` does not exist", project.display()))?;
     if !meta.is_dir() {
@@ -234,7 +249,64 @@ fn prepare_project(project: &Path) -> anyhow::Result<PathBuf> {
     std::fs::write(&probe, b"ok")
         .with_context(|| format!("project `{}` is not writable", root.display()))?;
     let _ = std::fs::remove_file(&probe);
+    if init {
+        ensure_git_head(&root)?;
+    }
     Ok(root)
+}
+
+fn ensure_git_head(root: &Path) -> anyhow::Result<()> {
+    if !root.join(".git").exists() {
+        run_git(
+            root,
+            &["init", "--quiet"],
+            "could not git init this project",
+        )?;
+    }
+    if git_ok(root, &["rev-parse", "--verify", "HEAD"]) {
+        return Ok(());
+    }
+    run_git(
+        root,
+        &[
+            "-c",
+            "user.name=Zest",
+            "-c",
+            "user.email=zest@localhost",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            "zest init",
+        ],
+        "could not create the initial empty commit",
+    )
+}
+
+fn git_ok(root: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn run_git(root: &Path, args: &[&str], context: &str) -> anyhow::Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| context.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        bail!("{context}");
+    }
+    bail!("{context}: {stderr}")
 }
 
 fn display_root(root: &Path) -> String {

@@ -155,7 +155,7 @@ USAGE
   zest usage                   Show local usage totals
   zest doctor --live           Run the opt-in live read-only check
   zest run --jsonl -- PROMPT   Run one deny-only JSONL/headless turn
-  zest serve --project PATH [--policy trusted]
+  zest serve --project PATH [--policy trusted] [--init]
 
 OPTIONS
   -h, --help                  Show this help
