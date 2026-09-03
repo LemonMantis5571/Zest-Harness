@@ -1,20 +1,31 @@
 # MCP servers
 
 Zest can call tools from Model Context Protocol servers you configure yourself.
-Add one in **Customize > MCPs**, or write it into `zest.toml`.
+Add one in **Customize > MCPs**, or write it into `zest.toml`. That outbound
+path is not the coordinator daemon.
 
-## Two different things called MCP
+## Four different things called MCP or headless
+
+`zest serve` is an **inbound** MCP server. Any host that can spawn a process
+and hold `ZEST_SERVE_TOKEN` can call the delegation tools. See
+[SERVE.md](SERVE.md).
+
+`zest run --jsonl` is one deny-only parent turn for CI and editors. It is not
+a coordinator and does not host MCP.
+
+`[agents.<id>].mode = "headless"` configures an **external worker CLI** that
+Zest launches for a feature card. It is not Zest running without a UI.
 
 `allow_mcp` on a `claude_code` / `codex_cli` provider, or on an `[agents.<id>]`
 worker, lets **that CLI** use the MCP servers in its own configuration. Zest
 neither sees those servers nor approves the individual calls, which is why the
 switch is opt-in.
 
-`[mcp.<id>]` is Zest's own. A subscription CLI runs its own agent loop and keeps
-using its own MCP configuration, so Zest's servers are not registered on such a
-chat. Everything else — an Anthropic key, or an OpenAI-compatible endpoint such
-as DeepSeek — has no CLI behind it, and this is the only way those chats can
-reach an MCP server at all.
+`[mcp.<id>]` is Zest's own **outbound** client. A subscription CLI runs its own
+agent loop and keeps using its own MCP configuration, so Zest's servers are not
+registered on such a chat. Everything else — an Anthropic key, or an
+OpenAI-compatible endpoint such as DeepSeek — has no CLI behind it, and this is
+the only way those chats can reach an MCP server at all.
 
 ## Configuration
 

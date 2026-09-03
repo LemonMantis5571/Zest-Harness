@@ -44,9 +44,14 @@ Run the terminal client with:
 cargo run -p zest
 ```
 
-The shared Rust library is in `crates/core`, the terminal client is in
+The shared Rust library is in `crates/core`, the shared delegation coordinator
+is in `crates/coordinator`, the terminal client and `zest serve` daemon are in
 `crates/cli`, and the desktop application is in `crates/desktop`. The desktop
 web UI lives in `crates/desktop/ui`.
+
+`zest serve` is a coordinator-only process. It must not depend on the desktop
+crate or WebKit. Linux CI builds and tests it without WebKitGTK. See
+[docs/SERVE.md](docs/SERVE.md).
 
 Optional desktop add-ons are separate processes and are not part of the normal
 desktop build. Read [docs/PLUGINS.md](docs/PLUGINS.md) for the plugin standard,

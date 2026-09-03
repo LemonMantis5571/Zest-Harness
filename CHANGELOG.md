@@ -7,6 +7,13 @@ a replacement for the commit history.
 
 ### Added
 
+- `zest serve --project PATH`, a windowless coordinator daemon with authenticated
+  loopback MCP. Default policy is gated: create, then `delegation_approve` and
+  `delegation_apply` after confirmation. `--policy trusted` lets a token holder
+  run a card through worker, review, and apply without those extra calls. See
+  [docs/SERVE.md](docs/SERVE.md).
+- Standalone `zest` CLI artifacts on Linux and Windows releases, so a VM does
+  not need the WebKit desktop bundle.
 - Enabled MCP servers are slash commands. `/haiku` (or any server id) tells the
   model to use that server for the rest of the message, and the composer list
   matches by prefix the same way skills already did.

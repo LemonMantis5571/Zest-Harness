@@ -9,6 +9,8 @@ use zest_core::{
     ToolRisk, DEFAULT_SYSTEM,
 };
 
+mod serve;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -65,6 +67,11 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             run_headless(args).await?;
+            return Ok(());
+        }
+        Some("serve") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            serve::run(args).await?;
             return Ok(());
         }
         _ => {}
@@ -148,11 +155,13 @@ USAGE
   zest usage                   Show local usage totals
   zest doctor --live           Run the opt-in live read-only check
   zest run --jsonl -- PROMPT   Run one deny-only JSONL/headless turn
+  zest serve --project PATH [--policy trusted]
 
 OPTIONS
   -h, --help                  Show this help
 
-Run `zest doctor --help` or `zest run --jsonl --help` for command details.
+Run `zest doctor --help`, `zest run --jsonl --help`, or `zest serve --help`
+for command details.
 "
     );
 }

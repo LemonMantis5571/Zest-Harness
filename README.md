@@ -36,6 +36,8 @@ Two lanes share those records, not credentials or parent history:
 
 The parent conversation stays with its provider. Workers do not inherit the parent transcript. External CLIs keep their own credentials and sessions. Review happens in a fresh, isolated workspace; reviewer edits are discarded, and only a validated review report can make a job ready to apply.
 
+A VM or editor host can run [`zest serve`](docs/SERVE.md) as the coordinator without a display. That process is not `zest run --jsonl` and not `[agents.<id>].mode = "headless"`.
+
 Delegation is opt-in and configured. Zest does not auto-route tasks between providers, implement vendor OAuth for workers, or manage a worker's own MCP servers.
 
 ## Local-first
@@ -50,6 +52,8 @@ Packages live on [GitHub Releases](https://github.com/LemonMantis5571/Zest-Harne
 
 - **Windows 10/11 x64.** `.msi` or `.exe`
 - **Linux x64.** `.deb`, `.rpm`, or AppImage
+- **Standalone `zest` CLI.** Linux and Windows binaries without WebKit, for
+  `zest serve` and the terminal client
 
 Each release includes `SHA256SUMS` and third-party notices. Official packages do not bundle plugins.
 
@@ -81,7 +85,8 @@ Writes, commands, and delegated jobs are gated before they run. An approved comm
 
 - [Plugins](docs/PLUGINS.md). Install, build, protocol, and review standard.
 - [Skills](docs/SKILLS.md). Personal skills and install locations.
-- [MCP servers](docs/MCP.md). Zest's own servers and how they differ from `allow_mcp`.
+- [MCP servers](docs/MCP.md). Zest's own outbound servers, `allow_mcp`, and `zest serve`.
+- [Coordinator daemon](docs/SERVE.md). Headless `zest serve` for inbound MCP.
 - [Provider quota](docs/QUOTA.md). Live limits, balances, and local usage.
 - [Contributing](CONTRIBUTING.md). Development, tests, and pull requests.
 - [Contributors](CONTRIBUTORS.md). People who have contributed to Zest.

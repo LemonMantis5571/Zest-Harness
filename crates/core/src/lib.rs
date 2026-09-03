@@ -84,9 +84,10 @@ pub use delegation::{
     diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths,
     AcceptanceCheckResult, AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts,
     DelegationAttempt, DelegationJob, DelegationOrigin, DelegationStatus, DelegationStore,
-    DelegationTarget, FeatureCard, ResolvedTargetMetadata, ReviewDecision, ReviewFinding,
-    ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
+    DelegationTarget, DispatchReceipt, FeatureCard, ResolvedTargetMetadata, ReviewDecision,
+    ReviewFinding, ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
     WorkspaceSnapshot, DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION,
+    V2_DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -95,6 +96,8 @@ pub use inbox::InputInbox;
 pub use jobs::{JobEvent, JobOutput, JobRead, JobRegistry, JobSnapshot, JobStatus};
 pub use mcp::{
     probe_server as probe_mcp_server, register_mcp_tools, McpCatalog, McpServer, McpToolDef,
+    LEGACY_PROTOCOL_VERSION as LEGACY_MCP_PROTOCOL_VERSION,
+    MODERN_PROTOCOL_VERSION as MODERN_MCP_PROTOCOL_VERSION,
 };
 pub use orchestration::{
     DecisionGate, DispatchRole, DispatchState, DispatchStatus, ExternalSessionEvidence, GateStatus,

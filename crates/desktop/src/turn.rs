@@ -93,15 +93,8 @@ async fn run_loop(
 ) -> Result<(), String> {
     let sink = TauriEventSink { app: app.clone() };
     while let Some((text, attachments, claim_input_id)) = next.take() {
-        let completed = run_with_sink_internal(
-            &sink,
-            Some(app.clone()),
-            state,
-            text,
-            attachments,
-            claim_input_id,
-        )
-        .await?;
+        let completed =
+            run_with_sink_internal(&sink, state, text, attachments, claim_input_id).await?;
         if !completed {
             break;
         }
@@ -150,7 +143,6 @@ async fn run_loop(
 
 async fn run_with_sink_internal<S: EventSink>(
     sink: &S,
-    delegation_app: Option<AppHandle>,
     state: &AppState,
     text: String,
     attachments: Option<Vec<AttachmentInput>>,
@@ -453,7 +445,6 @@ async fn run_with_sink_internal<S: EventSink>(
         let live_thread = live_thread.clone();
         let worker = worker.clone();
         let persistence = persistence.clone();
-        let delegation_app = delegation_app.clone();
         // Whether a tool has run since the last thing the model said.
         //
         // A tool-using turn is several provider rounds, and all of them write
@@ -560,15 +551,12 @@ async fn run_with_sink_internal<S: EventSink>(
                         diff: diff.map(str::to_string),
                         metadata: metadata.map(ToolMetaView::from),
                     };
-                    if let (Some(app), Some(job_id)) = (delegation_app.as_ref(), delegation_job_id)
-                    {
-                        // `delegate_feature` already passed the model/tool approval gate;
-                        // that approval is the explicit approval for this exact card.
-                        let _ = delegation_coordinator.approve(
-                            app,
-                            &delegation_root,
-                            &job_id,
-                        );
+                    if let Some(job_id) = delegation_job_id {
+                        // `delegate_feature` already passed the model/tool approval
+                        // gate and wrote a dispatch receipt. Consume that receipt
+                        // instead of inventing a second approval.
+                        let _ = delegation_coordinator
+                            .apply_dispatch_receipt(&delegation_root, &job_id);
                     }
                     event
                 }

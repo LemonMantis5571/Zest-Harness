@@ -2,4 +2,4 @@
 import type { DelegationTargetView } from "./DelegationTarget";
 import type { ReviewerTargetView } from "./ReviewerTarget";
 
-export type UpdateDelegationJobRequest = { jobId: string, worker: DelegationTargetView | null, reviewer: ReviewerTargetView | null, title: string | null, objective: string | null, scope: Array<string> | null, context: Array<string> | null, acceptanceChecks: Array<string> | null, };
+export type UpdateDelegationJobRequest = { jobId: string, worker: DelegationTargetView | null, reviewer: ReviewerTargetView | null, title: string | null, objective: string | null, scope: Array<string> | null, context: Array<string> | null, acceptanceChecks: Array<string> | null, expectedUpdatedAt?: bigint, };

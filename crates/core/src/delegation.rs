@@ -23,8 +23,9 @@ use crate::orchestration::{
 };
 use crate::tools::sensitive::is_sensitive_path;
 
-pub const DELEGATION_FORMAT_VERSION: u32 = 2;
+pub const DELEGATION_FORMAT_VERSION: u32 = 3;
 pub const LEGACY_DELEGATION_FORMAT_VERSION: u32 = 1;
+pub const V2_DELEGATION_FORMAT_VERSION: u32 = 2;
 pub const MAX_FEATURE_TITLE_CHARS: usize = 200;
 pub const MAX_FEATURE_OBJECTIVE_CHARS: usize = 16_000;
 pub const MAX_FEATURE_LANE_CHARS: usize = 120;
@@ -169,6 +170,41 @@ pub struct DelegationOrigin {
     pub chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// Proof that a human already approved dispatch for this exact card and target.
+///
+/// The interactive tool gate writes this after `y`. The coordinator may then
+/// enqueue the job without inventing a second approval. A later card edit
+/// invalidates the receipt because the fingerprints no longer match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchReceipt {
+    pub source: String,
+    pub granted_at: u64,
+    pub card_fingerprint: String,
+    pub worker_fingerprint: String,
+    pub reviewer_fingerprint: String,
+}
+
+impl DispatchReceipt {
+    pub fn for_job(job: &DelegationJob, source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            granted_at: now_millis(),
+            card_fingerprint: job.card.fingerprint(),
+            worker_fingerprint: job.worker_target().fingerprint(),
+            reviewer_fingerprint: job.resolved_reviewer_target().fingerprint(),
+        }
+    }
+
+    pub fn matches(&self, job: &DelegationJob) -> bool {
+        self.card_fingerprint == job.card.fingerprint()
+            && self.worker_fingerprint == job.worker_target().fingerprint()
+            && self.reviewer_fingerprint == job.resolved_reviewer_target().fingerprint()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +299,49 @@ impl FeatureCard {
 
     pub fn effective_reviewer_target(&self) -> ReviewerTarget {
         self.reviewer_target.clone()
+    }
+
+    /// Stable identity of the bounded request. Used to bind a dispatch receipt
+    /// to the card that was actually approved, so a later edit cannot reuse it.
+    pub fn fingerprint(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.title.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.objective.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.lane.as_bytes());
+        hasher.update(b"\0");
+        for path in &self.scope {
+            hasher.update(path.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update(b"context\0");
+        for path in &self.context {
+            hasher.update(path.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update(b"checks\0");
+        for check in &self.acceptance_checks {
+            hasher.update(check.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update(b"depends\0");
+        for dependency in &self.depends_on {
+            hasher.update(dependency.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update(self.effective_worker_target().fingerprint().as_bytes());
+        hasher.update(b"\0");
+        match self.effective_reviewer_target() {
+            ReviewerTarget::SameAsWorker => {
+                hasher.update(b"same\0");
+            }
+            ReviewerTarget::Target(target) => {
+                hasher.update(b"target\0");
+                hasher.update(target.fingerprint().as_bytes());
+            }
+        }
+        format!("card-{}", hasher.finalize().to_hex())
     }
 
     pub fn validate(
@@ -662,6 +741,10 @@ pub struct DelegationJob {
     pub error: Option<String>,
     #[serde(default)]
     pub orchestration: OrchestrationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_receipt: Option<DispatchReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Explain why a queued job cannot proceed because one of its prerequisites
@@ -762,6 +845,30 @@ impl DelegationJob {
         Ok(())
     }
 
+    pub fn grant_dispatch_receipt(&mut self, source: impl Into<String>) {
+        self.dispatch_receipt = Some(DispatchReceipt::for_job(self, source));
+        self.updated_at = now_millis();
+    }
+
+    pub fn has_valid_dispatch_receipt(&self) -> bool {
+        self.dispatch_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.matches(self))
+    }
+
+    pub fn require_updated_at(&self, expected: Option<u64>) -> Result<()> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        if self.updated_at == expected {
+            return Ok(());
+        }
+        Err(HarnessError::Other(format!(
+            "delegation job {} changed; expected updatedAt {expected}, found {}",
+            self.job_id, self.updated_at
+        )))
+    }
+
     pub fn is_approved(&self) -> bool {
         self.approved_at.is_some()
             && self
@@ -819,6 +926,7 @@ impl DelegationJob {
                 DelegationStatus::AwaitingApproval
             ) | (DelegationStatus::AwaitingApproval, DelegationStatus::Queued)
                 | (DelegationStatus::Queued, DelegationStatus::WorkerRunning)
+                | (DelegationStatus::Queued, DelegationStatus::AwaitingApproval)
                 | (
                     DelegationStatus::WorkerRunning,
                     DelegationStatus::ReviewRunning
@@ -1299,6 +1407,9 @@ impl DelegationStore {
         snapshot: WorkspaceSnapshot,
     ) -> Result<DelegationJob> {
         validate_id(parent_thread_id, "parent thread")?;
+        if card.card_id.trim().is_empty() {
+            card.card_id = crate::thread::new_id("card");
+        }
         card.validate(&self.root, &BTreeMap::new())
             .or_else(|error| {
                 // The caller normally validates with the configured agent map. The
@@ -1319,11 +1430,6 @@ impl DelegationStore {
             }
         }
         let job_id = crate::thread::new_id("job");
-        card.card_id = if card.card_id.trim().is_empty() {
-            crate::thread::new_id("card")
-        } else {
-            card.card_id
-        };
         let now = now_millis();
         let mut orchestration = OrchestrationState::new(
             format!("run-{job_id}"),
@@ -1346,6 +1452,7 @@ impl DelegationStore {
                 coordinator: "zest".into(),
                 chat_id: None,
                 thread_id: Some(parent_thread_id.to_string()),
+                idempotency_key: None,
             }),
             approved_at: None,
             approval_fingerprint: None,
@@ -1372,6 +1479,8 @@ impl DelegationStore {
             updated_at: now,
             error: None,
             orchestration,
+            dispatch_receipt: None,
+            idempotency_key: None,
         };
         if self.load(&job_id)?.is_some() {
             return Err(HarnessError::Other(
@@ -1380,6 +1489,17 @@ impl DelegationStore {
         }
         self.save(&job)?;
         Ok(job)
+    }
+
+    pub fn find_by_idempotency_key(&self, key: &str) -> Result<Option<DelegationJob>> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|job| job.idempotency_key.as_deref() == Some(key)))
     }
 
     pub fn list(&self) -> Result<Vec<DelegationJob>> {
@@ -1524,6 +1644,23 @@ fn read_job(path: &Path, id: &str) -> Result<Option<DelegationJob>> {
             }
         }
     }
+    if version == u64::from(V2_DELEGATION_FORMAT_VERSION) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "version".into(),
+                serde_json::json!(DELEGATION_FORMAT_VERSION),
+            );
+            if let Some(card) = object
+                .get_mut("card")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                card.insert(
+                    "version".into(),
+                    serde_json::json!(DELEGATION_FORMAT_VERSION),
+                );
+            }
+        }
+    }
     let mut job: DelegationJob = serde_json::from_value(value).map_err(|error| {
         HarnessError::Other(format!(
             "delegation job {id} is corrupt at {}: {error}",
@@ -1551,7 +1688,10 @@ fn read_job(path: &Path, id: &str) -> Result<Option<DelegationJob>> {
         );
         job.orchestration = orchestration;
     }
-    if version == u64::from(LEGACY_DELEGATION_FORMAT_VERSION) || needs_orchestration_repair {
+    if version == u64::from(LEGACY_DELEGATION_FORMAT_VERSION)
+        || version == u64::from(V2_DELEGATION_FORMAT_VERSION)
+        || needs_orchestration_repair
+    {
         write_json(path, "migrated delegation job", id, &job)?;
     }
     Ok(Some(job))
@@ -1919,6 +2059,8 @@ mod tests {
             updated_at: now,
             error: None,
             orchestration: OrchestrationState::default(),
+            dispatch_receipt: None,
+            idempotency_key: None,
         };
         assert!(job.transition(DelegationStatus::AwaitingApproval).unwrap());
         assert!(!job.transition(DelegationStatus::AwaitingApproval).unwrap());
@@ -2008,6 +2150,8 @@ mod tests {
             updated_at: now,
             error: None,
             orchestration: OrchestrationState::default(),
+            dispatch_receipt: None,
+            idempotency_key: None,
         };
         job.approve().unwrap();
         job.transition(DelegationStatus::Queued).unwrap();
@@ -2357,5 +2501,98 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap()
+    }
+
+    #[test]
+    fn v2_jobs_migrate_to_the_receipt_format() {
+        let root = scratch("v2-migrate");
+        let dir = root.join(".zest").join("delegations");
+        fs::create_dir_all(&dir).unwrap();
+        let v2 = serde_json::json!({
+            "version": 2,
+            "jobId": "v2-job",
+            "projectRoot": root.to_string_lossy(),
+            "parentThreadId": "thread-1",
+            "card": {
+                "version": 2,
+                "cardId": "card-v2",
+                "title": "Legacy card",
+                "objective": "Keep state",
+                "lane": "test",
+                "scope": ["."],
+                "context": [],
+                "dependsOn": [],
+                "agent": "worker",
+                "workerTarget": {"kind":"externalAgent","agentId":"worker"},
+                "acceptanceChecks": [],
+                "reviewRequired": true,
+                "reviewerTarget": {"kind":"sameAsWorker"},
+                "createdAt": 1
+            },
+            "reviewerTarget": {"kind":"sameAsWorker"},
+            "status": "awaiting_approval",
+            "attempt": 0,
+            "attempts": [],
+            "baseWorkspaceSnapshot": {"head": null, "fingerprint": "x", "capturedAt": 1},
+            "artifacts": {
+                "workerDiff": "delegations/v2-job/worker.diff",
+                "workerResult": "delegations/v2-job/worker-result.json",
+                "reviewResult": "delegations/v2-job/review-result.json"
+            },
+            "createdAt": 1,
+            "updatedAt": 1
+        });
+        fs::write(dir.join("v2-job.json"), serde_json::to_vec(&v2).unwrap()).unwrap();
+        let job = DelegationStore::open(&root)
+            .unwrap()
+            .load("v2-job")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.version, DELEGATION_FORMAT_VERSION);
+        assert_eq!(job.card.version, DELEGATION_FORMAT_VERSION);
+        assert!(job.dispatch_receipt.is_none());
+        assert!(job.idempotency_key.is_none());
+        assert_eq!(job.status, DelegationStatus::AwaitingApproval);
+    }
+
+    #[test]
+    fn dispatch_receipt_binds_to_the_approved_card_fingerprint() {
+        let root = scratch("receipt-fingerprint");
+        let store = DelegationStore::open(&root).unwrap();
+        let mut job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        job.grant_dispatch_receipt("delegate_feature");
+        assert!(job.has_valid_dispatch_receipt());
+        job.card.title = "edited after approval".into();
+        assert!(!job.has_valid_dispatch_receipt());
+    }
+
+    #[test]
+    fn store_finds_jobs_by_idempotency_key() {
+        let root = scratch("idempotency-key");
+        let store = DelegationStore::open(&root).unwrap();
+        let mut job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        job.idempotency_key = Some("ext-1".into());
+        store.update(job.clone()).unwrap();
+        let found = store.find_by_idempotency_key("ext-1").unwrap().unwrap();
+        assert_eq!(found.job_id, job.job_id);
+        assert!(store.find_by_idempotency_key("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn require_updated_at_rejects_a_stale_revision() {
+        let root = scratch("stale-revision");
+        let store = DelegationStore::open(&root).unwrap();
+        let job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        assert!(job.require_updated_at(None).is_ok());
+        assert!(job.require_updated_at(Some(job.updated_at)).is_ok());
+        assert!(job
+            .require_updated_at(Some(job.updated_at.saturating_sub(1)))
+            .is_err());
     }
 }

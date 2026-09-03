@@ -1,0 +1,35 @@
+[package]
+name = "zest-coordinator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared delegation coordinator for the Zest desktop and headless daemon."
+
+[lints]
+workspace = true
+
+[dependencies]
+zest-core = { path = "../core" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+ts-rs = { version = "11", default-features = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[features]
+default = []
+export-bindings = ["dep:ts-rs"]
