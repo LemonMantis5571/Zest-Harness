@@ -25,6 +25,9 @@ a replacement for the commit history.
 
 ### Changed
 
+- Hovering a dash on the chat turn rail lengthens the mark and shows that
+  turn's preview beside it.
+- The README states what Zest does and drops the "what it is not" asides.
 - Clicking a pull-request chip opens the review pane on that patch. Cmd/Ctrl-click,
   Shift-click, or middle-click still opens the host page.
 - The desktop app icon is a rounded dark tile with transparent corners, so

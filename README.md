@@ -21,28 +21,28 @@ Keep the parent session on one provider. Hand bounded work to a worker. Review t
 
 ## What Zest is
 
-Zest is a coding harness. The parent session stays with the provider you picked: it reads the project, runs the agent loop, and keeps that transcript recoverable. Desktop and terminal both sit on the same core.
+Zest is a coding harness. The parent session stays with the provider you picked. It reads the project, runs the agent loop, and keeps that transcript recoverable. Desktop and terminal share the same core.
 
-Orchestration is the point. When a task is better handled elsewhere, Zest does not switch the parent provider or fold another model into the same chat. It delegates.
+When a task belongs elsewhere, Zest writes a feature card and the coordinator runs it.
 
 ## Delegation
 
-A delegated job is a **feature card**: objective, scope, selected context, dependencies, acceptance checks, worker target, and reviewer target. The coordinator owns that card, the queue, retries, and apply/review transitions. It is not a second parent agent.
+A feature card holds objective, scope, selected context, dependencies, acceptance checks, worker target, and reviewer target. The coordinator owns that card, the queue, retries, and apply.
 
-Two lanes share those records, not credentials or parent history:
+Two lanes share those records:
 
-- **Native provider workers** run through Zest's own provider and runtime boundary.
-- **External workers** run through a configured ACP session or a signed-in CLI that already owns its own login.
+- **Native provider workers** run through Zest's own provider runtime.
+- **External workers** run through a configured ACP session or a signed-in CLI.
 
-The parent conversation stays with its provider. Workers do not inherit the parent transcript. External CLIs keep their own credentials and sessions. Review happens in a fresh, isolated workspace; reviewer edits are discarded, and only a validated review report can make a job ready to apply.
+The parent conversation stays with its provider. External CLIs keep their own credentials and sessions. Review happens in a fresh workspace. A validated review report makes a job ready to apply.
 
-A VM or editor host can run [`zest serve`](docs/SERVE.md) as the coordinator without a display. That process is not `zest run --jsonl` and not `[agents.<id>].mode = "headless"`.
+A VM or editor host runs [`zest serve`](docs/SERVE.md) as the coordinator without a display.
 
-Delegation is opt-in and configured. Zest does not auto-route tasks between providers, implement vendor OAuth for workers, or manage a worker's own MCP servers.
+Delegation is opt-in. Set the worker and reviewer on the card.
 
 ## Local-first
 
-No Zest account and no telemetry to a Zest server. Config lives at `~/.zest`. Provider credentials use the OS credential manager when available. Usage is recorded honestly per provider; external-CLI spend is never invented or merged into the parent balance.
+Config lives at `~/.zest`. Provider credentials use the OS credential manager when available. Usage is recorded per provider.
 
 The parent can be a native API, an OpenAI-compatible endpoint, or an authenticated coding CLI. Optional plugins install as separate processes. See [Plugins](docs/PLUGINS.md) and [quota](docs/QUOTA.md).
 
@@ -55,7 +55,7 @@ Packages live on [GitHub Releases](https://github.com/LemonMantis5571/Zest-Harne
 - **Standalone `zest` CLI.** Linux and Windows binaries without WebKit, for
   `zest serve` and the terminal client
 
-Each release includes `SHA256SUMS` and third-party notices. Official packages do not bundle plugins.
+Each release includes `SHA256SUMS` and third-party notices.
 
 ### First session
 
@@ -79,14 +79,14 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pinned toolchain, Linux package
 
 ## Security
 
-Writes, commands, and delegated jobs are gated before they run. An approved command still runs with your OS permissions; Zest is not an operating-system sandbox. Plugins are separate child processes, not a sandbox either. Install only plugins you trust.
+Writes, commands, and delegated jobs are gated before they run. An approved command still runs with your OS permissions. Install only plugins you trust.
 
 ## Docs
 
 - [Plugins](docs/PLUGINS.md). Install, build, protocol, and review standard.
 - [Skills](docs/SKILLS.md). Personal skills and install locations.
-- [MCP servers](docs/MCP.md). Zest's own outbound servers, `allow_mcp`, and `zest serve`.
-- [Coordinator daemon](docs/SERVE.md). Headless `zest serve` for inbound MCP.
+- [MCP servers](docs/MCP.md). Outbound servers the parent chat can call.
+- [Coordinator daemon](docs/SERVE.md). `zest serve` inbound MCP.
 - [Provider quota](docs/QUOTA.md). Live limits, balances, and local usage.
 - [Contributing](CONTRIBUTING.md). Development, tests, and pull requests.
 - [Contributors](CONTRIBUTORS.md). People who have contributed to Zest.
