@@ -23,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 zest-core = { path = "../core" }
+zest-coordinator = { path = "../coordinator" }
 blake3 = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -47,4 +48,4 @@ tempfile = "3"
 [features]
 default = []
 # Enable with `cargo test -p zest-desktop --features export-bindings` to regenerate TS DTOs.
-export-bindings = ["dep:ts-rs"]
+export-bindings = ["dep:ts-rs", "zest-coordinator/export-bindings"]

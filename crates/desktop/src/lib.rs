@@ -8365,12 +8365,9 @@ async fn verify_workspace(state: State<'_, AppState>) -> Result<WorkspaceReview,
 }
 
 #[tauri::command]
-fn list_delegation_jobs(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<DelegationJobView>, String> {
+fn list_delegation_jobs(state: State<'_, AppState>) -> Result<Vec<DelegationJobView>, String> {
     let root = resolve_workspace_root(&state)?;
-    let _ = state.delegations.reconcile(&app, &root)?;
+    let _ = state.delegations.reconcile(&root)?;
     list_delegation_views(&root)
 }
 
@@ -8402,12 +8399,11 @@ fn update_delegation_job(
 
 #[tauri::command]
 fn approve_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.approve(&app, &root, &job_id)
+    state.delegations.approve(&root, &job_id, None)
 }
 
 #[tauri::command]
@@ -8430,32 +8426,29 @@ fn get_delegation_job(
 
 #[tauri::command]
 fn cancel_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.cancel(&app, &root, &job_id)
+    state.delegations.cancel(&root, &job_id, None)
 }
 
 #[tauri::command]
 fn retry_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.retry(&app, &root, &job_id)
+    state.delegations.retry(&root, &job_id, None)
 }
 
 #[tauri::command]
 fn apply_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.apply(&app, &root, &job_id)
+    state.delegations.apply(&root, &job_id, None)
 }
 
 #[tauri::command]
@@ -8923,11 +8916,19 @@ pub fn run() {
                 ledger: ledger.clone(),
                 config_edit: Mutex::new(()),
                 chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
-                delegations: Arc::new(DelegationCoordinator::with_ledger(ledger)),
+                delegations: Arc::new(DelegationCoordinator::with_runtime(
+                    ledger,
+                    Arc::new(crate::delegation::TauriSpawner),
+                    Arc::new(zest_coordinator::NoopNotifier),
+                )),
             }
         })
         .setup(|app| {
             app.state::<AppState>().browser.attach(app.handle().clone());
+            crate::delegation::bind_tauri(
+                app.state::<AppState>().delegations.as_ref(),
+                app.handle().clone(),
+            );
             let jobs = app.state::<AppState>().jobs.clone();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(forward_job_events(app_handle, jobs));

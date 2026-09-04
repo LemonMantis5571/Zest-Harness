@@ -44,3 +44,42 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: bash scripts/release-verify.sh
+
+  cli-headless:
+    name: zest serve without WebKit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev cmake \
+            libdbus-1-dev curl wget file tar
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and test the CLI daemon
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          set -euo pipefail
+          if dpkg -s libwebkit2gtk-4.1-dev >/dev/null 2>&1; then
+            echo "WebKitGTK must not be installed on this job" >&2
+            exit 1
+          fi
+          cargo build -p zest
+          cargo test -p zest-coordinator
+          cargo test -p zest --test serve_e2e
+          if cargo tree -p zest --edges normal | grep -Eiq 'webkit|zest-desktop'; then
+            echo "zest must not depend on the desktop or WebKit" >&2
+            cargo tree -p zest --edges normal >&2
+            exit 1
+          fi
+

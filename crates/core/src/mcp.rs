@@ -54,9 +54,9 @@ use crate::tools::prepared::PreparedToolCall;
 use crate::tools::{Tool, ToolRegistry};
 
 /// Per-request version for servers that answered `server/discover`.
-pub(super) const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 /// Handshake version for servers that still require `initialize`.
-pub(super) const LEGACY_PROTOCOL_VERSION: &str = "2025-06-18";
+pub const LEGACY_PROTOCOL_VERSION: &str = "2025-06-18";
 /// JSON-RPC code for `UnsupportedProtocolVersionError`.
 pub(super) const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 /// `HeaderMismatchError`. HTTP-only, but still a modern-era signal.

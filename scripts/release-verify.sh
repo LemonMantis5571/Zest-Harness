@@ -109,6 +109,19 @@ check_whitespace() {
   git diff --cached --check --ignore-space-at-eol
 }
 
+npm_audit() {
+  local attempt
+  for attempt in 1 2 3; do
+    if npm audit --omit=dev; then
+      return 0
+    fi
+    echo "npm audit attempt ${attempt} failed; retrying" >&2
+    sleep 5
+  done
+  echo "npm audit failed after 3 attempts" >&2
+  return 1
+}
+
 step "toolchain check" check_toolchain
 step "npm ci" npm ci --no-fund --no-audit
 step "binding drift (ts-rs)" check_bindings
@@ -119,7 +132,7 @@ step "ui build" npm run ui:build
 step "cargo fmt --check" cargo fmt --all -- --check
 step "cargo clippy (strict)" cargo clippy --workspace --all-targets -- -D warnings
 step "cargo test" cargo test --workspace --all-targets
-step "npm audit" npm audit --omit=dev
+step "npm audit" npm_audit
 step "RustSec (cargo audit)" check_audit
 step "git diff --check" check_whitespace
 

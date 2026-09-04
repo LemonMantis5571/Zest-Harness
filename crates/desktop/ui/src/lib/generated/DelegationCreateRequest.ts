@@ -2,4 +2,4 @@
 import type { DelegationTargetView } from "./DelegationTarget";
 import type { ReviewerTargetView } from "./ReviewerTarget";
 
-export type CreateDelegationJobRequest = { parentThreadId: string, title: string, objective: string, lane: string, scope: Array<string>, context: Array<string>, dependsOn: Array<string>, acceptanceChecks: Array<string>, worker: DelegationTargetView, reviewer: ReviewerTargetView | null, chatId: string | null, };
+export type CreateDelegationJobRequest = { parentThreadId: string, title: string, objective: string, lane: string, scope: Array<string>, context: Array<string>, dependsOn: Array<string>, acceptanceChecks: Array<string>, worker: DelegationTargetView, reviewer: ReviewerTargetView | null, chatId: string | null, idempotencyKey?: string, originCoordinator?: string, };

@@ -72,6 +72,10 @@ enabled = true
 # Zest's own MCP servers are optional, and are reached by the chat provider
 # itself. Add them from Customize > MCPs, or here.
 #
+# These are not `zest serve`. That command is an inbound coordinator MCP for
+# feature cards. Its policy (`gated` or `trusted`) is a CLI flag / env var,
+# not a key here. `[mcp.*]` is outbound: Zest calls those servers from a chat.
+#
 # These are not the same thing as `allow_mcp` above: that lets a CLI use the MCP
 # servers configured in *its* own settings, which Zest never sees. A Claude Code
 # or Codex parent runs its own agent loop, so it uses that path and ignores the
@@ -107,6 +111,9 @@ timeout_secs = 120
 # allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900
+#
+# `mode = "headless"` means this worker is an external CLI. It is not
+# `zest serve` and not `zest run --jsonl`.
 #
 # [agents.gemini]
 # mode = "acp"
