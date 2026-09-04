@@ -712,8 +712,12 @@ mod tests {
         assert_eq!(request.env, Some(SESSION_ENV));
         std::env::remove_var(SESSION_ENV);
         let error = resolve_required(request).expect_err("a missing ChatGPT session must fail");
+        // Headless Linux has no Secret Service, so get() is Err, not Ok(None).
+        // The load still fails; it must not point at the vendor CLI store.
         assert!(
-            error.contains("p") || error.contains(SESSION_ENV),
+            error.contains("p")
+                || error.contains(SESSION_ENV)
+                || error.contains("could not read the saved API key"),
             "{error}"
         );
         assert!(
