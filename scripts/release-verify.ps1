@@ -140,7 +140,20 @@ Step "cargo test" {
 }
 
 Step "npm audit" {
-  npm audit --omit=dev
+  $ok = $false
+  foreach ($attempt in 1..3) {
+    $global:LASTEXITCODE = 0
+    npm audit --omit=dev
+    if ($LASTEXITCODE -eq 0) {
+      $ok = $true
+      break
+    }
+    Write-Host "npm audit attempt $attempt failed (exit $LASTEXITCODE); retrying"
+    Start-Sleep -Seconds 5
+  }
+  if (-not $ok) {
+    throw "npm audit failed after 3 attempts"
+  }
 }
 
 Step "RustSec (cargo audit)" {
