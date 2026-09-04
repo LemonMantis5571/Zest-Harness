@@ -326,7 +326,6 @@ async fn shutdown_signal() {
             _ = ctrl_c => {}
             _ = term.recv() => {}
         }
-        return;
     }
     #[cfg(not(unix))]
     {
