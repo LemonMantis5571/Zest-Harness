@@ -29,6 +29,7 @@ use crate::anthropic::types::{Message, ToolDef, Usage, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
 use crate::config::ProviderConfig;
 use crate::error::Result;
+use crate::tools::approval::{ApprovalDecision, ApprovalPolicy};
 
 /// Build a picker/validation catalogue from config without loading credentials.
 ///
@@ -392,16 +393,38 @@ pub struct ProviderQuestionRequest {
 /// represented safely; providers must never guess an approval.
 #[async_trait]
 pub trait ProviderInteractionHost: Send + Sync {
+    /// Shared session policy, when the front-end has one. Claude Code consults
+    /// this before drawing a card so "Allow for session" and Auto actually stick.
+    fn approval_policy(&self) -> Option<Arc<std::sync::Mutex<ApprovalPolicy>>> {
+        None
+    }
+
     async fn prepare_command_approval(&self, _approval_id: &str) {}
 
     async fn approve_command(&self, _request: ProviderCommandRequest) -> bool {
         false
     }
 
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+        if self.approve_command(request).await {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
+    }
+
     async fn prepare_file_change_approval(&self, _approval_id: &str) {}
 
     async fn approve_file_change(&self, _request: ProviderFileChangeRequest) -> bool {
         false
+    }
+
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+        if self.approve_file_change(request).await {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
     }
 
     async fn prepare_question(&self, _question_id: &str) {}

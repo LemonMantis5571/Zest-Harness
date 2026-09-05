@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::claude_control::{
-    control_response, decide, initialize_request_id, initialize_response, render_diff,
+    control_response, decide, grant_target, initialize_request_id, initialize_response,
+    prepare_approval, preview_permission, remember_session_grant, render_diff, risk_for,
     stream_json_user_message, summarize, surface_for, Surface, ToolPermissionRequest,
 };
 use super::{
@@ -27,7 +28,7 @@ use crate::config::{
 };
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
-use crate::tools::approval::ToolRisk;
+use crate::tools::approval::{ApprovalDecision, PolicyOutcome, ToolRisk};
 use crate::tools::external_agent::{
     run_headless_command_streaming, ControlResponder, ExternalAgentEvent,
 };
@@ -254,13 +255,14 @@ impl Provider for ClaudeCodeProvider {
 
         let answer = run.text();
         if answer.trim().is_empty() {
+            // Tag these so the desktop shows Claude's words. `Other` is
+            // treated as internal and becomes "Try again."
             if let Some(error) = run.errors().first() {
-                return Err(HarnessError::Other(format!(
-                    "Claude Code parent returned an error: {error}"
-                )));
+                return Err(HarnessError::from_provider_stream("claude_code", *error));
             }
-            return Err(HarnessError::Other(
-                "Claude Code parent returned no answer".into(),
+            return Err(HarnessError::from_provider_stream(
+                "claude_code",
+                "Claude Code returned no answer.",
             ));
         }
 
@@ -317,6 +319,15 @@ enum TurnEvent {
         summary: String,
         diff: String,
     },
+    /// Close the Zest tool row after a decision. Without this the card stays
+    /// `awaiting_approval`, sits at the head of the queue, and the next Allow
+    /// hits a waiter that is already gone ("approval expired").
+    ApprovalSettled {
+        approval_id: String,
+        tool_name: String,
+        summary: String,
+        allowed: bool,
+    },
 }
 
 fn emit(
@@ -351,6 +362,20 @@ fn emit(
             summary,
             diff,
         }),
+        TurnEvent::ApprovalSettled {
+            approval_id,
+            tool_name,
+            summary,
+            allowed,
+        } => on_event(StreamEvent::ToolCallResult {
+            name: &tool_name,
+            id: &approval_id,
+            summary: &summary,
+            is_error: !allowed,
+            path: None,
+            diff: None,
+            metadata: None,
+        }),
     }
 }
 
@@ -379,13 +404,25 @@ impl ControlResponder for ClaudePermissions {
             Surface::FileChange => render_diff(&self.root, &request),
             Surface::Command(_) => (String::new(), String::new()),
         };
-        let risk = match surface {
-            Surface::FileChange => ToolRisk::Write,
-            Surface::Command(risk) => risk,
-        };
+        let risk = risk_for(&request);
+        let target = grant_target(&request, &path, &summary);
+        let policy = self.host.as_ref().and_then(|host| host.approval_policy());
 
-        // Render the card first, then await the answer. The other order shows
-        // the user a decision that has already been made.
+        // The CLI asks about every tool, including ordinary reads. Native Zest
+        // tools do not. Consult the session policy before drawing a card so
+        // Auto and "Allow for session" are not no-ops that re-ask on the next
+        // slightly different path.
+        match preview_permission(policy.as_ref(), &request.tool_name, &target, risk) {
+            PolicyOutcome::Allow => {
+                return Some(control_response(&request.request_id, true, ""));
+            }
+            PolicyOutcome::Block(reason) => {
+                return Some(control_response(&request.request_id, false, &reason));
+            }
+            PolicyOutcome::Ask => {}
+        }
+
+        prepare_approval(self.host.as_ref(), &approval_id, surface).await;
         let _ = self.cards.send(TurnEvent::Approval {
             approval_id: approval_id.clone(),
             tool_name: request.tool_name.clone(),
@@ -395,15 +432,32 @@ impl ControlResponder for ClaudePermissions {
             diff: diff.clone(),
         });
 
-        let allowed = decide(
+        let decision = decide(
             self.host.as_ref(),
             &approval_id,
             surface,
             path,
-            summary,
+            summary.clone(),
             diff,
         )
         .await;
+        if decision == ApprovalDecision::AllowSession {
+            if let Some(policy) = &policy {
+                if let Ok(mut guard) = policy.lock() {
+                    remember_session_grant(&mut guard, surface, &request.tool_name, &target);
+                }
+            }
+        }
+        let allowed = matches!(
+            decision,
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+        );
+        let _ = self.cards.send(TurnEvent::ApprovalSettled {
+            approval_id,
+            tool_name: request.tool_name.clone(),
+            summary,
+            allowed,
+        });
         Some(control_response(
             &request.request_id,
             allowed,

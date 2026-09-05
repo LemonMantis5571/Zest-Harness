@@ -96,7 +96,7 @@ export type LoginStarted = {
 };
 
 export type LoginStatus = {
-  state: "idle" | "running" | "exited";
+  state: "idle" | "running" | "succeeded" | "exited";
   detail: string | null;
 };
 

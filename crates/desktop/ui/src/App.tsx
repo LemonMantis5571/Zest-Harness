@@ -22,6 +22,8 @@ import {
   type ChatUiState,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { loginSessionIsNew } from "@/lib/loginWait";
+import { sendOwnsComposer, type SendTurnRequest } from "@/lib/sendTurn";
 import {
   busyTurnMessage,
   conversationRecovery,
@@ -451,7 +453,7 @@ export default function App() {
 
   const [waitingTitle, setWaitingTitle] = useState("Sign in");
   const [waitingBody, setWaitingBody] = useState(
-    "Finish in your browser. This window will update when you’re done."
+    "A sign-in window should open. Finish in the browser, then press Enter there if it asks."
   );
   const [waitingHint, setWaitingHint] = useState("Waiting for browser sign-in…");
   const [waitingError, setWaitingError] = useState<string | null>(null);
@@ -647,6 +649,7 @@ export default function App() {
   const loginAttemptRef = useRef(0);
   /** Prevent duplicate vendor login processes while the first spawn is pending. */
   const loginStartingRef = useRef(false);
+  const loginReadyAtStartRef = useRef(false);
   const activeAssistantId = useRef<string | null>(null);
   /** Live UI projections for chats that continue while another one is open. */
   const chatStatesRef = useRef(new Map<string, ChatUiState>());
@@ -850,8 +853,11 @@ export default function App() {
           return;
         }
         markProviderVerifyFailed(row.id);
-        setWaitingHint("Provider unavailable");
-        setWaitingError(`Could not connect to ${row.label}. Try connecting again.`);
+        setWaitingHint("Sign-in did not work");
+        setWaitingError(
+          formatInvokeError(err) ||
+            `Could not connect to ${row.label}. Try connecting again.`
+        );
         return;
       }
       markProviderVerified(row.id);
@@ -888,12 +894,11 @@ export default function App() {
         consecutiveFailures = 0;
         const row = rows.find((p) => p.id === selectedIdRef.current);
         // Ready, or a session file appeared but looked incomplete — either way
-        // prove it with a probe instead of spinning on "Waiting…".
-        const fileAppeared =
-          row?.statusKind === "ready" ||
-          (row?.statusKind === "not_logged_in" &&
-            row.detail.toLowerCase().includes("incomplete"));
-        if (row && fileAppeared) {
+        // prove it with a probe instead of spinning on "Waiting…". A file that
+        // was already ready when Connect started is the expired session we
+        // are replacing, so ignore it until `claude login` writes a new one
+        // or the CLI exits successfully.
+        if (row && loginSessionIsNew(row, loginReadyAtStartRef.current)) {
           stopPolling();
           await finishVerifiedLogin(row, attempt);
           return;
@@ -901,6 +906,11 @@ export default function App() {
 
         const login = await withTimeout(backend.loginStatus(), "login status");
         if (attempt !== loginAttemptRef.current) return;
+        if (login.state === "succeeded") {
+          stopPolling();
+          if (row) await finishVerifiedLogin(row, attempt);
+          return;
+        }
         if (login.state === "exited") {
           stopPolling();
           setWaitingHint("Sign-in stopped");
@@ -1762,13 +1772,17 @@ export default function App() {
             if (attempt !== loginAttemptRef.current) return;
             const row = rows.find((p) => p.id === selectedIdRef.current);
             if (!row) return;
-            const fileAppeared =
-              row.statusKind === "ready" ||
-              (row.statusKind === "not_logged_in" &&
-                row.detail.toLowerCase().includes("incomplete"));
-            if (!fileAppeared) return;
-            stopPolling();
-            await finishVerifiedLogin(row, attempt);
+            if (loginSessionIsNew(row, loginReadyAtStartRef.current)) {
+              stopPolling();
+              await finishVerifiedLogin(row, attempt);
+              return;
+            }
+            const login = await withTimeout(backend.loginStatus(), "login status");
+            if (attempt !== loginAttemptRef.current) return;
+            if (login.state === "succeeded") {
+              stopPolling();
+              await finishVerifiedLogin(row, attempt);
+            }
           } catch {
             /* keep waiting */
           }
@@ -1813,6 +1827,7 @@ export default function App() {
         backend.startLogin(row.id),
         "sign-in start"
       );
+      loginReadyAtStartRef.current = row.statusKind === "ready";
       setWaitingTitle(started.browserTitle);
       setWaitingBody(started.browserBody);
       setScreen("waiting");
@@ -1885,6 +1900,8 @@ export default function App() {
           backend.startLogin(providerId),
           "sign-in start"
         );
+        const existing = providers.find((row) => row.id === providerId);
+        loginReadyAtStartRef.current = existing?.statusKind === "ready";
         setSelectedId(providerId);
         setWaitingTitle(started.browserTitle);
         setWaitingBody(started.browserBody);
@@ -1900,7 +1917,7 @@ export default function App() {
         loginStartingRef.current = false;
       }
     },
-    [startWaitingPoll]
+    [providers, startWaitingPoll]
   );
 
   const onNewChat = useCallback(async () => {
@@ -2446,10 +2463,11 @@ export default function App() {
   }, [enterChat, loadProviders]);
 
   const onSend = useCallback(
-    async (textOverride?: string) => {
-      const directAnswer = textOverride !== undefined;
-      const text = (textOverride ?? draftRef.current).trim();
-      const pending = directAnswer ? [] : attachmentsRef.current;
+    async (request?: SendTurnRequest) => {
+      const origin = request?.origin ?? "composer";
+      const keepComposer = !sendOwnsComposer(origin);
+      const text = (request?.text ?? draftRef.current).trim();
+      const pending = keepComposer ? [] : attachmentsRef.current;
       const hasOk = pending.some(
         (a) =>
           a.status === "done" &&
@@ -2468,6 +2486,14 @@ export default function App() {
         (sendingRef.current ||
           (threadQueuesRef.current[queueThreadId]?.length ?? 0) > 0);
 
+      if (!keepComposer) {
+        setDraft("");
+        setAttachments([]);
+        if (queueThreadId) {
+          saveDraft(queueThreadId, "");
+        }
+      }
+
       if (shouldQueue && queueThreadId) {
         try {
           await backend.sendMessage(
@@ -2483,12 +2509,12 @@ export default function App() {
             })),
             "followup"
           );
-          if (!directAnswer) {
-            setDraft("");
-            setAttachments([]);
-            saveDraft(queueThreadId, "");
-          }
         } catch (error) {
+          if (!keepComposer) {
+            setDraft(text);
+            setAttachments(pending);
+            saveDraft(queueThreadId, text);
+          }
           toast.add({
             type: "error",
             title: "Could not queue message",
@@ -2498,15 +2524,7 @@ export default function App() {
         return;
       }
 
-      if (!directAnswer) {
-        setDraft("");
-        setAttachments([]);
-        const threadId = threadIdRef.current;
-        if (threadId) {
-          saveDraft(threadId, "");
-        }
-      }
-      await submitTurn(text, pending, { restoreDraftOnFailure: !directAnswer });
+      await submitTurn(text, pending, { restoreDraftOnFailure: !keepComposer });
     },
     [submitTurn]
   );

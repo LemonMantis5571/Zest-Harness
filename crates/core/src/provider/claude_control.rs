@@ -21,13 +21,16 @@
 //! the first allow option when no host is attached.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 use super::{ProviderCommandRequest, ProviderFileChangeRequest, ProviderInteractionHost};
-use crate::tools::approval::ToolRisk;
+use crate::tools::approval::{
+    ApprovalDecision, ApprovalMode, ApprovalPolicy, PolicyOutcome, ToolRisk,
+};
 use crate::tools::project::ProjectRoot;
+use crate::tools::sensitive::is_sensitive_path;
 use crate::tools::write_file::bounded_unified_diff;
 
 /// Cap on a rendered diff handed to the approval card.
@@ -94,6 +97,72 @@ pub(crate) fn surface_for(tool_name: &str) -> Surface {
         "Bash" | "BashOutput" | "KillShell" => Surface::Command(ToolRisk::Exec),
         "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" => Surface::Command(ToolRisk::Read),
         _ => Surface::Command(ToolRisk::Exec),
+    }
+}
+
+/// Risk the session policy sees. Reads of credential-looking files stay gated.
+pub(crate) fn risk_for(request: &ToolPermissionRequest) -> ToolRisk {
+    match surface_for(&request.tool_name) {
+        Surface::FileChange => ToolRisk::Write,
+        Surface::Command(ToolRisk::Read) => {
+            let path = request
+                .field("file_path")
+                .or_else(|| request.field("notebook_path"))
+                .unwrap_or("");
+            if is_sensitive_path(path) {
+                ToolRisk::Sensitive
+            } else {
+                ToolRisk::Read
+            }
+        }
+        Surface::Command(risk) => risk,
+    }
+}
+
+/// What a session grant keys on: a path, a command, or the card summary.
+pub(crate) fn grant_target(request: &ToolPermissionRequest, path: &str, summary: &str) -> String {
+    if !path.is_empty() {
+        return path.to_string();
+    }
+    match request.tool_name.as_str() {
+        "Bash" => request.field("command").unwrap_or(summary).to_string(),
+        "WebFetch" => request.field("url").unwrap_or(summary).to_string(),
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => request
+            .field("file_path")
+            .or_else(|| request.field("notebook_path"))
+            .unwrap_or(summary)
+            .to_string(),
+        _ => summary.to_string(),
+    }
+}
+
+/// Consult the session policy before drawing a card. No policy still lets
+/// ordinary reads through — that is how native Zest tools already behave.
+pub(crate) fn preview_permission(
+    policy: Option<&Arc<Mutex<ApprovalPolicy>>>,
+    tool_name: &str,
+    target: &str,
+    risk: ToolRisk,
+) -> PolicyOutcome {
+    if let Some(policy) = policy {
+        if let Ok(guard) = policy.lock() {
+            return guard.decide(tool_name, target, risk, false);
+        }
+    }
+    ApprovalPolicy::new(ApprovalMode::Manual).decide(tool_name, target, risk, false)
+}
+
+/// "Allow for session" on a command-class tool covers the next string too.
+/// File edits stay per-path: approving `notes.txt` is not approving `.env`.
+pub(crate) fn remember_session_grant(
+    policy: &mut ApprovalPolicy,
+    surface: Surface,
+    tool_name: &str,
+    target: &str,
+) {
+    match surface {
+        Surface::FileChange => policy.trust(tool_name, target),
+        Surface::Command(_) => policy.trust_tool(tool_name),
     }
 }
 
@@ -243,7 +312,26 @@ pub(crate) fn render_diff(root: &Path, request: &ToolPermissionRequest) -> (Stri
     (relative, diff)
 }
 
+/// Register the waiter before the card is drawn. Native tools do this; doing
+/// it after left a window where Allow hit "no pending approval" and the card
+/// retired as expired.
+pub(crate) async fn prepare_approval(
+    host: Option<&Arc<dyn ProviderInteractionHost>>,
+    approval_id: &str,
+    surface: Surface,
+) {
+    let Some(host) = host else {
+        return;
+    };
+    match surface {
+        Surface::FileChange => host.prepare_file_change_approval(approval_id).await,
+        Surface::Command(_) => host.prepare_command_approval(approval_id).await,
+    }
+}
+
 /// Ask the front-end, or deny when there is nobody to ask.
+///
+/// The waiter must already have been registered with [`prepare_approval`].
 pub(crate) async fn decide(
     host: Option<&Arc<dyn ProviderInteractionHost>>,
     approval_id: &str,
@@ -251,14 +339,13 @@ pub(crate) async fn decide(
     path: String,
     summary: String,
     diff: String,
-) -> bool {
+) -> ApprovalDecision {
     let Some(host) = host else {
-        return false;
+        return ApprovalDecision::Deny;
     };
     match surface {
         Surface::FileChange => {
-            host.prepare_file_change_approval(approval_id).await;
-            host.approve_file_change(ProviderFileChangeRequest {
+            host.decide_file_change(ProviderFileChangeRequest {
                 approval_id: approval_id.to_string(),
                 path: Some(path),
                 diff: (!diff.is_empty()).then_some(diff),
@@ -267,8 +354,7 @@ pub(crate) async fn decide(
             .await
         }
         Surface::Command(_) => {
-            host.prepare_command_approval(approval_id).await;
-            host.approve_command(ProviderCommandRequest {
+            host.decide_command(ProviderCommandRequest {
                 approval_id: approval_id.to_string(),
                 command: summary,
                 cwd: (!path.is_empty()).then_some(path),
@@ -444,7 +530,7 @@ mod tests {
             Surface::Command(ToolRisk::Exec),
             Surface::Command(ToolRisk::Read),
         ] {
-            let allowed = decide(
+            let decision = decide(
                 None,
                 "approval-1",
                 surface,
@@ -453,10 +539,86 @@ mod tests {
                 String::new(),
             )
             .await;
-            assert!(
-                !allowed,
+            assert_eq!(
+                decision,
+                ApprovalDecision::Deny,
                 "a headless turn must not self-approve {surface:?}"
             );
         }
+    }
+
+    #[test]
+    fn auto_mode_does_not_ask_about_ordinary_reads() {
+        let policy = ApprovalPolicy::new(ApprovalMode::Auto);
+        let locked = Arc::new(Mutex::new(policy));
+        assert_eq!(
+            preview_permission(
+                Some(&locked),
+                "Read",
+                r"C:\Users\brite\AppData\Local\Temp\frutiger-aero.png",
+                ToolRisk::Read
+            ),
+            PolicyOutcome::Allow
+        );
+        assert_eq!(
+            preview_permission(
+                Some(&locked),
+                "WebFetch",
+                "https://example.com",
+                ToolRisk::Read
+            ),
+            PolicyOutcome::Allow
+        );
+        assert_eq!(
+            preview_permission(Some(&locked), "Bash", "curl example.com", ToolRisk::Exec),
+            PolicyOutcome::Ask
+        );
+    }
+
+    #[test]
+    fn a_session_allow_on_read_covers_the_next_path() {
+        let mut policy = ApprovalPolicy::new(ApprovalMode::Manual);
+        remember_session_grant(
+            &mut policy,
+            Surface::Command(ToolRisk::Read),
+            "Read",
+            r"C:\temp\a.png",
+        );
+        assert_eq!(
+            policy.decide("Read", r"C:\temp\b.png", ToolRisk::Sensitive, false),
+            PolicyOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn a_session_allow_on_an_edit_stays_on_that_path() {
+        let mut policy = ApprovalPolicy::new(ApprovalMode::Manual);
+        remember_session_grant(&mut policy, Surface::FileChange, "Edit", "notes.txt");
+        assert_eq!(
+            policy.decide("Edit", "notes.txt", ToolRisk::Write, false),
+            PolicyOutcome::Allow
+        );
+        assert_eq!(
+            policy.decide("Edit", "secrets.env", ToolRisk::Write, false),
+            PolicyOutcome::Ask
+        );
+    }
+
+    #[test]
+    fn reading_a_credentials_file_is_sensitive() {
+        assert_eq!(
+            risk_for(&request(
+                "Read",
+                json!({ "file_path": r"C:\Users\brite\.claude\.credentials.json" }),
+            )),
+            ToolRisk::Sensitive
+        );
+        assert_eq!(
+            risk_for(&request(
+                "Read",
+                json!({ "file_path": r"C:\Temp\frutiger-aero.png" }),
+            )),
+            ToolRisk::Read
+        );
     }
 }

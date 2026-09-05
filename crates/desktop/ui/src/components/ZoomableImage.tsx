@@ -3,7 +3,7 @@ import { Maximize2Icon, MinusIcon, PlusIcon, RotateCcwIcon, XIcon } from "lucide
 import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
-import { safeImageSrc } from "@/lib/imageSrc";
+import { resolveChatImageSrc } from "@/lib/chatImageSrc";
 
 const DEFAULT_ZOOM = 1;
 const MIN_ZOOM = 0.5;
@@ -24,7 +24,7 @@ type LightboxProps = {
  * Full-screen image zoom. Used by chat markdown and composer attachment chips.
  */
 export function ImageLightbox({ src, alt, onClose }: LightboxProps) {
-  const href = safeImageSrc(src);
+  const href = resolveChatImageSrc(src);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
@@ -177,10 +177,15 @@ type Props = {
  * Same overlay idea as Mermaid: click to expand, wheel or +/- to zoom.
  */
 export function ZoomableImage({ src, alt }: Props) {
-  const href = safeImageSrc(src);
+  const href = resolveChatImageSrc(src);
   const [expanded, setExpanded] = useState(false);
+  const [failed, setFailed] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const label = alt?.trim() || "Image";
+
+  useEffect(() => {
+    setFailed(false);
+  }, [href]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -190,7 +195,7 @@ export function ZoomableImage({ src, alt }: Props) {
     };
   }, [expanded]);
 
-  if (!href) return null;
+  if (!href || failed) return null;
 
   return (
     <>
@@ -212,6 +217,7 @@ export function ZoomableImage({ src, alt }: Props) {
             alt={alt ?? ""}
             referrerPolicy="no-referrer"
             className="max-h-[28rem] w-auto max-w-full rounded-xl"
+            onError={() => setFailed(true)}
           />
         </button>
       </div>

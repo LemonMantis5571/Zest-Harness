@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost https: http:; font-src 'self' data:; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost https: http:; font-src 'self' data:; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**", "$TEMP/**", "$HOME/**", "$DOWNLOAD/**", "$PICTURE/**"]
+      }
     }
   },
   "bundle": {

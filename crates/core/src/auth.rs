@@ -22,9 +22,23 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
+
+use crate::tools::external_agent::resolve_program;
 
 pub const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
+
+/// Copy on the waiting screen for a vendor CLI login. Those flows need a real
+/// console: they open a browser only when stdin looks like a terminal, then
+/// wait for Enter after "Login successful".
+const CLI_LOGIN_BODY: &str =
+    "A sign-in window should open. Finish in the browser, then press Enter there if it asks.";
+
+/// Windows `CREATE_NEW_CONSOLE`. A hidden process with nulled stdio is why
+/// Connect used to sit on "Waiting for browser sign-in" forever: `claude login`
+/// never got a TTY, so it never opened a browser.
+#[cfg(windows)]
+const LOGIN_CREATION_FLAGS: u32 = 0x0000_0010;
 
 /// What a provider's sign-in looks like from the outside.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -86,6 +100,10 @@ pub struct LoginProcess {
     pub spawn: LoginSpawn,
     child: Option<Child>,
     oauth: Option<crate::codex_oauth::CodexOAuthLogin>,
+    /// Vendor store as it looked when Connect started. Presence and mtime only;
+    /// the file is never opened. A rewrite means login finished even if the
+    /// CLI is still sitting on "Press Enter to continue".
+    store: Option<StoreSnapshot>,
 }
 
 impl LoginProcess {
@@ -112,9 +130,16 @@ impl LoginProcess {
                 crate::codex_oauth::CodexOAuthPoll::Failed(detail) => LoginPoll::Failed(detail),
             });
         }
+        if self.store.as_ref().is_some_and(store_rewritten) {
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Ok(LoginPoll::Succeeded);
+        }
         Ok(match self.try_wait()? {
             None => LoginPoll::Running,
-            Some(_) => LoginPoll::Failed("The sign-in did not finish. Try again.".into()),
+            Some(status) => login_poll_from_cli_exit(status),
         })
     }
 
@@ -130,6 +155,14 @@ impl LoginProcess {
         child.kill()?;
         let _ = child.wait();
         Ok(())
+    }
+}
+
+fn login_poll_from_cli_exit(status: std::process::ExitStatus) -> LoginPoll {
+    if status.success() {
+        LoginPoll::Succeeded
+    } else {
+        LoginPoll::Failed("The sign-in did not finish. Try again.".into())
     }
 }
 
@@ -358,13 +391,13 @@ pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
             program: PathBuf::from("codex"),
             args: vec!["login".into()],
             browser_title: "Sign in with ChatGPT",
-            browser_body: "Finish in your browser. This window will update when you’re done.",
+            browser_body: CLI_LOGIN_BODY,
         }),
         "claude" => Some(LoginSpawn {
             program: PathBuf::from("claude"),
-            args: vec!["login".into()],
+            args: vec!["auth".into(), "login".into()],
             browser_title: "Sign in with Claude",
-            browser_body: "Finish in your browser. This window will update when you’re done.",
+            browser_body: CLI_LOGIN_BODY,
         }),
         _ => None,
     }
@@ -376,9 +409,9 @@ pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
 pub fn resolve_claude_code_login() -> LoginSpawn {
     LoginSpawn {
         program: PathBuf::from("claude"),
-        args: vec!["login".into()],
+        args: vec!["auth".into(), "login".into()],
         browser_title: "Sign in with Claude",
-        browser_body: "Finish in your browser. This window will update when you’re done.",
+        browser_body: CLI_LOGIN_BODY,
     }
 }
 
@@ -388,13 +421,13 @@ pub fn resolve_codex_cli_login() -> LoginSpawn {
         program: PathBuf::from("codex"),
         args: vec!["login".into()],
         browser_title: "Sign in with ChatGPT",
-        browser_body: "Finish in your browser. This window will update when you’re done.",
+        browser_body: CLI_LOGIN_BODY,
     }
 }
 
-/// Spawn the vendor/gateway login flow with no console window. Credentials stay
-/// with the vendor — Zest only starts the process and later re-detects whether
-/// a store appeared.
+/// Spawn the vendor CLI login in its own console. Credentials stay with the
+/// vendor. Zest only starts the process and later re-detects whether a store
+/// appeared.
 pub fn start_login(provider_id: &str) -> std::result::Result<LoginProcess, String> {
     if provider_id == "codex" && !codex_callback_port_available() {
         return Err(format!(
@@ -410,32 +443,13 @@ pub fn start_login(provider_id: &str) -> std::result::Result<LoginProcess, Strin
         other => format!("no login command for provider `{other}`"),
     })?;
 
-    let child = spawn_silent(&spawn.program, &spawn.args).map_err(|e| {
-        format!(
-            "could not start `{} {}` — is it installed? ({e})",
-            spawn.program.display(),
-            spawn.args.join(" ")
-        )
-    })?;
-
-    Ok(LoginProcess {
-        spawn,
-        child: Some(child),
-        oauth: None,
-    })
+    start_cli_login(spawn)
 }
 
 /// Start the direct Claude Code subscription login without routing through a
 /// gateway-owned authentication store.
 pub fn start_claude_code_login() -> std::result::Result<LoginProcess, String> {
-    let spawn = resolve_claude_code_login();
-    let child = spawn_silent(&spawn.program, &spawn.args)
-        .map_err(|e| format!("could not start Claude Code login: {e}"))?;
-    Ok(LoginProcess {
-        spawn,
-        child: Some(child),
-        oauth: None,
-    })
+    start_cli_login(resolve_claude_code_login())
 }
 
 /// Start the direct Codex CLI subscription login without using a gateway store.
@@ -445,14 +459,7 @@ pub fn start_codex_cli_login() -> std::result::Result<LoginProcess, String> {
             "Codex sign-in cannot start because localhost:{CODEX_OAUTH_CALLBACK_PORT} is already in use. Close any other Codex/Zest sign-in window and try again."
         ));
     }
-    let spawn = resolve_codex_cli_login();
-    let child = spawn_silent(&spawn.program, &spawn.args)
-        .map_err(|e| format!("could not start Codex CLI login: {e}"))?;
-    Ok(LoginProcess {
-        spawn,
-        child: Some(child),
-        oauth: None,
-    })
+    start_cli_login(resolve_codex_cli_login())
 }
 
 /// Start an in-process ChatGPT sign-in and store the session under `account`.
@@ -466,6 +473,7 @@ pub fn start_codex_oauth_login(account: &str) -> std::result::Result<LoginProces
         spawn,
         child: None,
         oauth: Some(oauth),
+        store: None,
     })
 }
 
@@ -473,36 +481,97 @@ fn codex_callback_port_available() -> bool {
     TcpListener::bind(("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT)).is_ok()
 }
 
-fn spawn_silent(program: &Path, args: &[String]) -> std::io::Result<Child> {
-    // Hide the console entirely on Windows so Connect feels like Zest, not a
-    // terminal handoff. The system browser still opens for OAuth.
-    #[cfg(windows)]
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    #[cfg(windows)]
-    return spawn_with_flags(program, args, CREATE_NO_WINDOW);
-    #[cfg(not(windows))]
-    spawn_with_flags(program, args, 0)
+/// Resolve a bare CLI name the same way provider workers do, so Windows
+/// `CreateProcessW` is not asked to spawn `claude` when only `claude.exe` or
+/// `claude.cmd` exists.
+fn resolve_login_program(program: &Path) -> PathBuf {
+    match program.to_str() {
+        Some(name) if program.components().count() == 1 => PathBuf::from(resolve_program(name)),
+        _ => program.to_path_buf(),
+    }
 }
 
-fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Result<Child> {
+fn start_cli_login(mut spawn: LoginSpawn) -> std::result::Result<LoginProcess, String> {
+    spawn.program = resolve_login_program(&spawn.program);
+    let store = store_path_for_program(&spawn.program).map(snapshot_store);
+    let child = spawn_login_cli(&spawn.program, &spawn.args).map_err(|e| {
+        format!(
+            "could not start `{} {}` — is it installed? ({e})",
+            spawn.program.display(),
+            spawn.args.join(" ")
+        )
+    })?;
+    Ok(LoginProcess {
+        spawn,
+        child: Some(child),
+        oauth: None,
+        store,
+    })
+}
+
+fn spawn_login_cli(program: &Path, args: &[String]) -> std::io::Result<Child> {
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.args(args);
     // Login helpers are not provider workers. They must not inherit the
     // serialized OAuth session used by Zest's in-process client.
     cmd.env_remove(crate::codex_oauth::SESSION_ENV);
 
+    // Do not redirect stdio. CREATE_NEW_CONSOLE then attaches the child's
+    // default handles to that console. Nulled handles plus CREATE_NO_WINDOW
+    // made `claude login` a zombie: no browser, no prompt, Zest waiting forever.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(flags);
+        cmd.creation_flags(LOGIN_CREATION_FLAGS);
     }
-    #[cfg(not(windows))]
-    let _ = flags;
 
     cmd.spawn()
+}
+
+/// Metadata of a vendor credential file. The file itself is never opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreSnapshot {
+    path: PathBuf,
+    exists: bool,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn snapshot_store(path: PathBuf) -> StoreSnapshot {
+    match std::fs::metadata(&path) {
+        Ok(meta) => StoreSnapshot {
+            path,
+            exists: true,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        },
+        Err(_) => StoreSnapshot {
+            path,
+            exists: false,
+            len: 0,
+            modified: None,
+        },
+    }
+}
+
+fn store_rewritten(before: &StoreSnapshot) -> bool {
+    let now = snapshot_store(before.path.clone());
+    now.exists && (!before.exists || now.len != before.len || now.modified != before.modified)
+}
+
+fn store_path_for_program(program: &Path) -> Option<PathBuf> {
+    let name = program.file_stem()?.to_str()?.to_ascii_lowercase();
+    match name.as_str() {
+        "claude" => home_dir().map(|home| home.join(".claude").join(".credentials.json")),
+        "codex" => {
+            let home = match std::env::var("CODEX_HOME") {
+                Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+                _ => home_dir()?.join(".codex"),
+            };
+            Some(home.join("auth.json"))
+        }
+        _ => None,
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -605,5 +674,117 @@ mod tests {
             None => std::env::remove_var("PATH"),
         }
         assert!(found, "PATH probe must see a dummy Codex CLI entry");
+    }
+
+    #[test]
+    fn a_successful_cli_login_exit_is_success() {
+        assert_eq!(
+            login_poll_from_cli_exit(exit_status(true)),
+            LoginPoll::Succeeded
+        );
+        assert!(matches!(
+            login_poll_from_cli_exit(exit_status(false)),
+            LoginPoll::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn cli_login_copy_mentions_the_sign_in_window() {
+        assert_eq!(resolve_claude_code_login().browser_body, CLI_LOGIN_BODY);
+        assert_eq!(resolve_codex_cli_login().browser_body, CLI_LOGIN_BODY);
+        assert!(CLI_LOGIN_BODY.contains("sign-in window"));
+    }
+
+    #[test]
+    fn claude_connect_runs_auth_login_not_the_interactive_cli() {
+        assert_eq!(
+            resolve_claude_code_login().args,
+            vec!["auth".to_string(), "login".to_string()]
+        );
+        assert_eq!(
+            resolve_login("claude").map(|spawn| spawn.args),
+            Some(vec!["auth".into(), "login".into()])
+        );
+    }
+
+    #[test]
+    fn a_rewritten_store_counts_as_login_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        std::fs::write(&path, "{\"before\":true}").unwrap();
+        let before = snapshot_store(path.clone());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "{\"after\":true}").unwrap();
+        assert!(store_rewritten(&before));
+    }
+
+    #[test]
+    fn an_untouched_store_is_not_login_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        std::fs::write(&path, "{\"same\":true}").unwrap();
+        let before = snapshot_store(path);
+        assert!(!store_rewritten(&before));
+    }
+
+    #[test]
+    fn a_store_that_appears_counts_as_login_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        let before = snapshot_store(path.clone());
+        assert!(!before.exists);
+        std::fs::write(&path, "{}").unwrap();
+        assert!(store_rewritten(&before));
+    }
+
+    #[test]
+    fn a_bare_login_name_is_resolved_to_a_claude_binary() {
+        let resolved = resolve_login_program(Path::new("claude"));
+        let file = resolved
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("login program has a file name");
+        assert!(
+            file.eq_ignore_ascii_case("claude")
+                || file.eq_ignore_ascii_case("claude.exe")
+                || file.eq_ignore_ascii_case("claude.cmd")
+                || file.eq_ignore_ascii_case("claude.bat"),
+            "resolved {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_login_path_is_kept() {
+        let path = PathBuf::from("C:\\already\\resolved\\claude.exe");
+        assert_eq!(resolve_login_program(&path), path);
+    }
+
+    #[test]
+    fn claude_login_watches_the_cli_credentials_file() {
+        let path = store_path_for_program(Path::new("claude.exe")).expect("claude store");
+        assert!(path.ends_with(".credentials.json"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cli_login_opens_a_console_instead_of_hiding_it() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        assert_eq!(LOGIN_CREATION_FLAGS, 0x0000_0010);
+        assert_ne!(LOGIN_CREATION_FLAGS, CREATE_NO_WINDOW);
+    }
+
+    fn exit_status(ok: bool) -> std::process::ExitStatus {
+        let code = if ok { "0" } else { "1" };
+        if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", &format!("exit {code}")])
+                .status()
+                .expect("cmd exit")
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("exit {code}")])
+                .status()
+                .expect("sh exit")
+        }
     }
 }

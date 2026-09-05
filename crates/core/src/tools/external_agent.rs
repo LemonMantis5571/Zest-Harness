@@ -584,7 +584,7 @@ pub(crate) async fn run_headless_command_streaming(
             if error == EXTERNAL_RUN_CANCELLED {
                 crate::error::HarnessError::Cancelled
             } else {
-                crate::error::HarnessError::Other(error)
+                crate::error::HarnessError::from_provider_stream("cli", error)
             }
         })
 }
@@ -621,7 +621,6 @@ async fn spawn_headless_with_session(
     let timeout = Duration::from_secs(config.timeout_secs.min(MAX_TIMEOUT_SECS));
     let run_result = tokio::select! {
         result = read_headless_with_session(&mut process, on_event, control, timeout) => result,
-        _ = sleep(timeout) => Err(format!("timed out after {} seconds", timeout.as_secs())),
         _ = wait_cancel(cancel) => Err(EXTERNAL_RUN_CANCELLED.to_string()),
     };
 
@@ -638,12 +637,7 @@ async fn spawn_headless_with_session(
     let status = process.wait().await.map_err(|error| error.to_string())?;
     let stderr = process.stderr_text().await;
     if !status.success() {
-        let detail = if stderr.is_empty() {
-            format!("process exited with {status}")
-        } else {
-            format!("process exited with {status}: {}", clip(&stderr))
-        };
-        return Err(detail);
+        return Err(failed_process_detail(&run, status, &stderr));
     }
     if !stderr.is_empty() {
         run.events.push(ExternalAgentEvent::Error(clip(&stderr)));
@@ -659,8 +653,13 @@ async fn read_headless_with_session(
 ) -> Result<ExternalAgentRun, String> {
     let started = Instant::now();
     let mut run = ExternalAgentRun::default();
+    // Time spent waiting on a human approval is not CLI work. Counting it
+    // against the turn budget made the card appear and then die: the outer
+    // deadline fired, the waiter was dropped, and Allow came back as
+    // "approval expired".
+    let mut human_wait = Duration::ZERO;
     loop {
-        let remaining = timeout.saturating_sub(started.elapsed());
+        let remaining = timeout.saturating_sub(started.elapsed().saturating_sub(human_wait));
         if remaining.is_zero() {
             return Err(format!("timed out after {} seconds", timeout.as_secs()));
         }
@@ -681,13 +680,16 @@ async fn read_headless_with_session(
                 // the responder answers it on stdin and the line never
                 // reaches the accumulator.
                 if let Some(responder) = control.as_deref_mut() {
+                    let paused = Instant::now();
                     if let Some(reply) = responder.respond(&value).await {
+                        human_wait += paused.elapsed();
                         process
                             .send(&reply)
                             .await
                             .map_err(|error| error.to_string())?;
                         continue;
                     }
+                    human_wait += paused.elapsed();
                 }
                 let event_start = run.events.len();
                 absorb_headless_value(&value, &mut run);
@@ -724,6 +726,31 @@ fn with_stderr(error: String, stderr: String) -> String {
     } else {
         format!("{error}: {}", clip(&stderr))
     }
+}
+
+/// Claude Code (and other stream-json CLIs) write the real reason on stdout,
+/// then exit 1 with an empty stderr. Dropping the accumulated stream left the
+/// chat with only "process exited with exit code: 1".
+fn failed_process_detail(
+    run: &ExternalAgentRun,
+    status: impl std::fmt::Display,
+    stderr: &str,
+) -> String {
+    if let Some(error) = run
+        .errors()
+        .into_iter()
+        .find(|error| !error.trim().is_empty())
+    {
+        return error.to_string();
+    }
+    if !stderr.is_empty() {
+        return format!("process exited with {status}: {}", clip(stderr));
+    }
+    let answer = run.text();
+    if !answer.trim().is_empty() {
+        return answer;
+    }
+    format!("process exited with {status}")
 }
 
 fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
@@ -1142,12 +1169,7 @@ async fn spawn_and_run_with_cancel(
     };
 
     if !status.success() {
-        let detail = if stderr.is_empty() {
-            format!("process exited with {status}")
-        } else {
-            format!("process exited with {status}: {}", clip(&stderr))
-        };
-        return Err(detail);
+        return Err(failed_process_detail(&result, status, &stderr));
     }
 
     if !stderr.is_empty() {
@@ -3287,6 +3309,52 @@ mod tests {
         assert!(run.errors().is_empty());
     }
 
+    #[test]
+    fn failed_cli_prefers_streamed_error_over_bare_exit_code() {
+        let mut run = ExternalAgentRun::default();
+        run.events.push(ExternalAgentEvent::Error(
+            "You've hit your usage limit.".into(),
+        ));
+        assert_eq!(
+            failed_process_detail(&run, "exit code: 1", ""),
+            "You've hit your usage limit."
+        );
+    }
+
+    #[test]
+    fn failed_cli_falls_back_to_exit_code_when_the_stream_was_silent() {
+        let run = ExternalAgentRun::default();
+        assert_eq!(
+            failed_process_detail(&run, "exit code: 1", ""),
+            "process exited with exit code: 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cli_keeps_the_stdout_error_instead_of_the_exit_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = fixture_config("fail_stdout", false);
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        let error =
+            run_headless_command_streaming(temp.path(), &config, "task", None, &mut sink, None)
+                .await
+                .expect_err("exit 1 must fail the turn");
+        match error {
+            crate::error::HarnessError::Stream { message, .. } => {
+                assert!(
+                    message.contains("usage limit"),
+                    "expected the streamed reason, got {message}"
+                );
+                assert!(
+                    !message.contains("exit code"),
+                    "exit code should not hide the streamed reason: {message}"
+                );
+            }
+            other => panic!("expected a provider stream error, got {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn forwards_headless_partial_events_before_the_final_result() {
         let temp = tempfile::tempdir().unwrap();
@@ -3363,6 +3431,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(run.text(), "got user");
+    }
+
+    #[tokio::test]
+    async fn a_slow_approval_does_not_eat_the_turn_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = fixture_config("ask_then_result", false);
+        config.timeout_secs = 1;
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        struct SlowAllow;
+        #[async_trait]
+        impl ControlResponder for SlowAllow {
+            async fn respond(&mut self, message: &Value) -> Option<Value> {
+                let request_id = message.get("request_id")?.as_str()?.to_string();
+                let subtype = message
+                    .get("request")
+                    .and_then(|request| request.get("subtype"))
+                    .and_then(Value::as_str)?;
+                if subtype != "can_use_tool" {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                Some(crate::provider::claude_control::control_response(
+                    &request_id,
+                    true,
+                    "",
+                ))
+            }
+        }
+        let mut allow = SlowAllow;
+        let run = tokio::time::timeout(
+            Duration::from_secs(4),
+            run_headless_command_streaming(
+                temp.path(),
+                &config,
+                "run after allow",
+                None,
+                &mut sink,
+                Some(&mut allow),
+            ),
+        )
+        .await
+        .expect("approval wait must not hang the runner")
+        .expect("time spent waiting for Allow is not turn timeout");
+
+        assert_eq!(run.text(), "ran");
     }
 
     #[tokio::test]

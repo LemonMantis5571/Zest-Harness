@@ -9,6 +9,7 @@ import { MermaidBlock } from "@/components/MermaidBlock";
 import { ZoomableImage } from "@/components/ZoomableImage";
 import { safeHttpUrl } from "@/lib/externalLinks";
 import { linkClassName } from "@/lib/linkify";
+import { hoistLocalImages } from "@/lib/localImagePath";
 import { splitBlocks } from "@/lib/markdownBlocks";
 import { cn } from "@/lib/utils";
 
@@ -217,7 +218,10 @@ export const Markdown = memo(function Markdown({
   className,
   streaming = false,
 }: Props) {
-  const blocks = useMemo(() => splitBlocks(children), [children]);
+  const blocks = useMemo(
+    () => splitBlocks(hoistLocalImages(children)),
+    [children]
+  );
 
   return (
     <div

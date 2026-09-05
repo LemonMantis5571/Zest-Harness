@@ -317,8 +317,15 @@ export const Composer = memo(function Composer({
 
   const handleSend = () => {
     if (!canSend) return;
-    flushChange(textRef.current);
-    onSubmit(textRef.current);
+    const sent = textRef.current;
+    // Empty the box now. Parent `value` often never changes on type-then-enter:
+    // the draft is still "" because of the 200ms debounce, so flushing `sent`
+    // and App's setDraft("") batch back to "" and the value-sync effect does
+    // not run. Waiting on that effect is how a sent message stayed visible.
+    setText("");
+    textRef.current = "";
+    flushChange("");
+    onSubmit(sent);
   };
 
   useEffect(() => {
@@ -629,7 +636,11 @@ export const Composer = memo(function Composer({
                   return;
                 }
               }
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (
+                e.key === "Enter" &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing
+              ) {
                 e.preventDefault();
                 handleSend();
               }
