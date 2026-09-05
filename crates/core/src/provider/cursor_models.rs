@@ -30,7 +30,7 @@ use super::{context_window_for_model, ModelSpec, STANDARD_EFFORTS};
 /// that a week would go stale, and `cursor-agent models` costs about a second,
 /// which is far too slow to pay on every render of the provider list.
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
 
 /// Fallback when discovery has never succeeded.
 ///
@@ -189,6 +189,28 @@ pub fn parse(stdout: &str) -> Vec<ModelSpec> {
         }
     }
 
+    // `-fast` is its own family. Cursor usually writes the window on the
+    // plain name (`GPT-5.4 1M`) and omits it from `GPT-5.4 Fast`, so copy
+    // the labelled sibling across rather than dropping the fast row to the
+    // heuristic.
+    let inherited: Vec<(String, u64)> = families
+        .iter()
+        .filter_map(|(id, (_, context))| {
+            let context = (*context)?;
+            if id.ends_with("-fast") {
+                return None;
+            }
+            Some((format!("{id}-fast"), context))
+        })
+        .collect();
+    for (fast_id, context) in inherited {
+        if let Some((_, existing)) = families.get_mut(&fast_id) {
+            if existing.is_none() {
+                *existing = Some(context);
+            }
+        }
+    }
+
     families
         .into_iter()
         .map(|(family, (mut efforts, context))| {
@@ -301,6 +323,8 @@ cursor-grok-4.6-high - Cursor Grok 4.6\n\
 cursor-grok-4.6-high-fast - Cursor Grok 4.6 Fast\n\
 cursor-grok-4.6-xhigh - Cursor Grok 4.6 Extra High\n\
 claude-opus-5-thinking-max - Claude Opus 5 1M Max Thinking\n\
+gpt-5.4-high - GPT-5.4 1M High\n\
+gpt-5.4-high-fast - GPT-5.4 Fast\n\
 gpt-5.6-sol-high - GPT-5.6 Sol 1M High\n";
 
     fn find<'a>(models: &'a [ModelSpec], id: &str) -> &'a ModelSpec {
@@ -392,11 +416,15 @@ gpt-5.6-sol-high - GPT-5.6 Sol 1M High\n";
             1_000_000
         );
         assert_eq!(find(&models, "gpt-5.6-sol").context_window, 1_000_000);
+        // Fast omitted the label; the plain sibling's 1M still applies.
+        assert_eq!(find(&models, "gpt-5.4").context_window, 1_000_000);
+        assert_eq!(find(&models, "gpt-5.4-fast").context_window, 1_000_000);
         // No label, so the shared heuristic answers instead of a guess of ours.
         assert_eq!(
             find(&models, "composer-2.5").context_window,
             context_window_for_model("composer-2.5")
         );
+        assert_eq!(find(&models, "composer-2.5").context_window, 200_000);
     }
 
     #[test]

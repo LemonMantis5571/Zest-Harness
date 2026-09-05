@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,7 @@ pub const RATES_TTL_SECS: u64 = 24 * 60 * 60;
 /// Bumped when the projected shape changes, so an old cache is re-fetched rather
 /// than misread. The cache stores the projection, not the 1.6 MB source
 /// document: it is what every read actually wants, and a sixth of the size.
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
 
 /// Model names that must never resolve to a rate.
 ///
@@ -62,6 +63,10 @@ const UNPRICEABLE: &[&str] = &[
     "unknown",
 ];
 
+/// Process-wide published windows, installed when rates refresh. The meter
+/// reads this rather than opening the cache file on every occupancy check.
+static PUBLISHED_WINDOWS: RwLock<BTreeMap<String, u64>> = RwLock::new(BTreeMap::new());
+
 /// Rates projected from the published table, keyed by normalised model name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RateCatalog {
@@ -72,6 +77,10 @@ pub struct RateCatalog {
     fetched_at: Option<u64>,
     #[serde(default)]
     models: BTreeMap<String, ModelPrice>,
+    /// `max_input_tokens` from the same document, used when the static family
+    /// table does not recognise a model id.
+    #[serde(default)]
+    windows: BTreeMap<String, u64>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -99,6 +108,7 @@ impl RateCatalog {
             .filter(|c| c.format == CACHE_FORMAT)
             .unwrap_or_default();
         catalog.path = Some(path);
+        catalog.install_windows();
         catalog
     }
 
@@ -113,6 +123,7 @@ impl RateCatalog {
                 .into_iter()
                 .map(|(id, price)| (normalize_model_name(id), price))
                 .collect(),
+            windows: BTreeMap::new(),
             path: None,
         }
     }
@@ -123,6 +134,20 @@ impl RateCatalog {
             return None;
         }
         self.models.get(&key)
+    }
+
+    /// Published input window for a model id, if the table named one.
+    pub fn context_window(&self, model_id: &str) -> Option<u64> {
+        window_in_map(&self.windows, model_id)
+    }
+
+    fn install_windows(&self) {
+        if self.windows.is_empty() {
+            return;
+        }
+        if let Ok(mut slot) = PUBLISHED_WINDOWS.write() {
+            *slot = self.windows.clone();
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -165,22 +190,25 @@ impl RateCatalog {
 /// rates at all.
 pub async fn refresh(force: bool) -> RateCatalog {
     let existing = RateCatalog::load();
+    existing.install_windows();
     if !force && !existing.is_stale() {
         return existing;
     }
 
     let url = std::env::var("ZEST_RATES_URL").unwrap_or_else(|_| DEFAULT_RATES_URL.to_string());
     match fetch(&url).await {
-        Ok(models) if !models.is_empty() => {
+        Ok(projected) if !projected.prices.is_empty() => {
             let refreshed = RateCatalog {
                 format: CACHE_FORMAT,
                 fetched_at: Some(now_secs()),
-                models,
+                models: projected.prices,
+                windows: projected.windows,
                 path: existing.path.clone(),
             };
             // A write failure costs one day's freshness, not correctness: the
             // in-memory catalogue is already right for this session.
             let _ = refreshed.save();
+            refreshed.install_windows();
             refreshed
         }
         // An empty table would blank out every price. Keep what we had.
@@ -188,7 +216,60 @@ pub async fn refresh(force: bool) -> RateCatalog {
     }
 }
 
-async fn fetch(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
+/// Published window installed by the last successful rate refresh.
+///
+/// Tests keep the static empty so occupancy arithmetic stays deterministic.
+pub fn published_context_window(model: &str) -> Option<u64> {
+    #[cfg(test)]
+    {
+        let _ = model;
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(slot) = PUBLISHED_WINDOWS.read() else {
+            return None;
+        };
+        window_in_map(&slot, model)
+    }
+}
+
+fn window_in_map(windows: &BTreeMap<String, u64>, model_id: &str) -> Option<u64> {
+    let key = normalize_model_name(model_id);
+    if key.is_empty() || UNPRICEABLE.contains(&key.as_str()) {
+        return None;
+    }
+    if let Some(window) = windows.get(&key) {
+        return Some(*window);
+    }
+    let stripped = key.strip_prefix("cursor-").unwrap_or(key.as_str());
+    if stripped != key {
+        if let Some(window) = windows.get(stripped) {
+            return Some(*window);
+        }
+    }
+    for suffix in [
+        "-fast",
+        "-thinking",
+        "-none",
+        "-thinking-fast",
+        "-none-fast",
+    ] {
+        if let Some(base) = stripped.strip_suffix(suffix) {
+            if let Some(window) = windows.get(base) {
+                return Some(*window);
+            }
+        }
+    }
+    windows.get(&format!("{stripped}-preview")).copied()
+}
+
+struct ProjectedCatalog {
+    prices: BTreeMap<String, ModelPrice>,
+    windows: BTreeMap<String, u64>,
+}
+
+async fn fetch(url: &str) -> Result<ProjectedCatalog, String> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("zest/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
@@ -200,7 +281,7 @@ async fn fetch(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
         return Err(format!("rate table HTTP {}", response.status()));
     }
     let document: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    Ok(project(&document))
+    Ok(project_catalog(&document))
 }
 
 /// Project the published document into Zest's per-million rate table.
@@ -208,15 +289,40 @@ async fn fetch(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
 /// Public so the projection is testable against a real document without a
 /// network round trip.
 pub fn project(document: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
-    let mut table = BTreeMap::new();
+    project_catalog(document).prices
+}
+
+fn project_catalog(document: &serde_json::Value) -> ProjectedCatalog {
+    let mut prices = BTreeMap::new();
+    let mut windows = BTreeMap::new();
     let Some(entries) = document.as_object() else {
-        return table;
+        return ProjectedCatalog { prices, windows };
     };
 
     for (name, raw) in entries {
         let Some(entry) = raw.as_object() else {
             continue;
         };
+        let key = normalize_model_name(name);
+        if key.is_empty() || UNPRICEABLE.contains(&key.as_str()) {
+            continue;
+        }
+
+        if let Some(window) = entry
+            .get("max_input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|window| *window > 0)
+        {
+            windows
+                .entry(key.clone())
+                .and_modify(|existing| {
+                    if window > *existing {
+                        *existing = window;
+                    }
+                })
+                .or_insert(window);
+        }
+
         // An entry priced on one side only would under-report every turn that
         // used it. Reporting the model as unpriced is the honest failure.
         let (Some(input), Some(output)) = (
@@ -225,11 +331,6 @@ pub fn project(document: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
         ) else {
             continue;
         };
-
-        let key = normalize_model_name(name);
-        if key.is_empty() || UNPRICEABLE.contains(&key.as_str()) {
-            continue;
-        }
 
         // Absent cache rates are left absent rather than defaulted here, so the
         // "unstated bills as input" rule lives in exactly one place —
@@ -246,9 +347,9 @@ pub fn project(document: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
             ),
             _ => ModelPrice::simple(per_million(input), per_million(output)),
         };
-        table.insert(key, price);
+        prices.insert(key, price);
     }
-    table
+    ProjectedCatalog { prices, windows }
 }
 
 /// The published table quotes per token; Zest works in per million throughout,
@@ -416,6 +517,7 @@ mod tests {
                     "cache_creation_input_token_cost": 0.00000625,
                 }
             })),
+            windows: BTreeMap::new(),
             path: Some(path.clone()),
         };
         written.save().unwrap();
@@ -426,5 +528,45 @@ mod tests {
         let price = reloaded.get("gpt-5.6-sol").unwrap();
         assert!((price.input - 5.0).abs() < 1e-9);
         assert!((price.cache_read() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_published_window_is_projected_and_reachable_by_alias() {
+        let catalog = RateCatalog {
+            windows: project_catalog(&json!({
+                "openai/gpt-5.2": {
+                    "input_cost_per_token": 0.00000175,
+                    "output_cost_per_token": 0.000014,
+                    "max_input_tokens": 272000,
+                },
+                "gemini-3.1-pro-preview": {
+                    "input_cost_per_token": 0.000002,
+                    "output_cost_per_token": 0.000012,
+                    "max_input_tokens": 1048576,
+                },
+            }))
+            .windows,
+            ..Default::default()
+        };
+
+        assert_eq!(catalog.context_window("gpt-5.2"), Some(272_000));
+        assert_eq!(catalog.context_window("gpt-5.2-fast"), Some(272_000));
+        assert_eq!(catalog.context_window("gemini-3.1-pro"), Some(1_048_576));
+        assert_eq!(catalog.context_window("cursor-gpt-5.2"), Some(272_000));
+        assert_eq!(catalog.context_window("unknown-model"), None);
+    }
+
+    #[test]
+    fn colliding_windows_keep_the_larger_published_value() {
+        let projected = project_catalog(&json!({
+            "vendor/local-model": { "max_input_tokens": 128000 },
+            "local-model": {
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+                "max_input_tokens": 200000,
+            },
+        }));
+        assert_eq!(projected.windows.get("local-model").copied(), Some(200_000));
+        assert!(projected.prices.contains_key("local-model"));
     }
 }

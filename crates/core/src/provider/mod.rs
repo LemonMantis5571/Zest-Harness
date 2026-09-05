@@ -92,18 +92,76 @@ fn default_true() -> bool {
     true
 }
 
+/// Window used when no family is recognised and the published table has no row.
+pub const FALLBACK_CONTEXT_WINDOW: u64 = 128_000;
+
+const CLAUDE_WINDOW: u64 = 1_000_000;
+const CLAUDE_HAIKU_WINDOW: u64 = 200_000;
+const GEMINI_WINDOW: u64 = 1_048_576;
+const GPT_LONG_WINDOW: u64 = 1_050_000;
+const GPT_STANDARD_WINDOW: u64 = 272_000;
+const COMPOSER_WINDOW: u64 = 200_000;
+const GROK_WINDOW: u64 = 256_000;
+const OPEN_WEIGHT_LONG_WINDOW: u64 = 1_000_000;
+
 /// Conservative built-in capacities for the models Zest knows without model
 /// discovery. Explicit provider catalogues remain authoritative for model ids;
 /// these values only keep the UI honest when no capacity was configured.
+///
+/// Recognised families use published API (or Cursor-product) windows. An
+/// unrecognised id stays at [`FALLBACK_CONTEXT_WINDOW`] unless the LiteLLM
+/// cache, loaded at rate refresh, has a larger `max_input_tokens`.
 pub fn context_window_for_model(model: &str) -> u64 {
-    let model = model.to_ascii_lowercase();
-    if model.contains("gpt-5.6") || model.contains("luna") || model.contains("codex") {
-        256_000
-    } else if model.contains("claude") {
-        200_000
-    } else {
-        128_000
+    let heuristic = heuristic_context_window(model);
+    if heuristic > FALLBACK_CONTEXT_WINDOW {
+        return heuristic;
     }
+    crate::rates::published_context_window(model)
+        .filter(|window| *window > heuristic)
+        .unwrap_or(heuristic)
+}
+
+fn heuristic_context_window(model: &str) -> u64 {
+    let raw = model.to_ascii_lowercase();
+    let model = raw.strip_prefix("cursor-").unwrap_or(raw.as_str());
+
+    if model.contains("haiku") {
+        return CLAUDE_HAIKU_WINDOW;
+    }
+    if model.contains("claude") || model == "sonnet" || model == "opus" {
+        return CLAUDE_WINDOW;
+    }
+    if model.contains("gemini") {
+        return GEMINI_WINDOW;
+    }
+    if model.contains("composer") {
+        return COMPOSER_WINDOW;
+    }
+    if model.contains("grok") {
+        // Cursor serves 256K; the xAI API is 500K. Overflowing the host is
+        // worse than compacting a little early on a direct Grok endpoint.
+        return GROK_WINDOW;
+    }
+    if model.contains("gpt-5.6")
+        || model.contains("gpt-5.5")
+        || (model.contains("gpt-5.4") && !model.contains("mini") && !model.contains("nano"))
+    {
+        return GPT_LONG_WINDOW;
+    }
+    if model.contains("gpt-5.4-mini")
+        || model.contains("gpt-5.4-nano")
+        || model.contains("gpt-5.3")
+        || model.contains("gpt-5.2")
+        || model.contains("gpt-5.1")
+        || model.contains("gpt-5-mini")
+        || model.contains("codex")
+    {
+        return GPT_STANDARD_WINDOW;
+    }
+    if model.contains("kimi") || model.contains("glm") || model.contains("deepseek") {
+        return OPEN_WEIGHT_LONG_WINDOW;
+    }
+    FALLBACK_CONTEXT_WINDOW
 }
 
 fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
@@ -970,5 +1028,63 @@ model = "deepseek-v4-flash"
             serde_json::from_value::<ResumeHandle>(encoded).unwrap(),
             handle
         );
+    }
+
+    #[test]
+    fn context_windows_follow_published_family_capacities() {
+        for (id, window) in [
+            ("claude-opus-5-thinking", CLAUDE_WINDOW),
+            ("claude-sonnet-5", CLAUDE_WINDOW),
+            ("opus", CLAUDE_WINDOW),
+            ("sonnet", CLAUDE_WINDOW),
+            ("haiku", CLAUDE_HAIKU_WINDOW),
+            ("claude-haiku-5", CLAUDE_HAIKU_WINDOW),
+            ("gemini-3.1-pro", GEMINI_WINDOW),
+            ("gemini-3.8-flash", GEMINI_WINDOW),
+            ("composer-2.5", COMPOSER_WINDOW),
+            ("composer-2.5-fast", COMPOSER_WINDOW),
+            ("cursor-grok-4.6", GROK_WINDOW),
+            ("cursor-grok-4.6-fast", GROK_WINDOW),
+            ("gpt-5.6-sol", GPT_LONG_WINDOW),
+            ("gpt-5.6-luna-fast", GPT_LONG_WINDOW),
+            ("gpt-5.5", GPT_LONG_WINDOW),
+            ("gpt-5.4", GPT_LONG_WINDOW),
+            ("gpt-5.4-fast", GPT_LONG_WINDOW),
+            ("gpt-5.4-mini", GPT_STANDARD_WINDOW),
+            ("gpt-5.4-nano", GPT_STANDARD_WINDOW),
+            ("gpt-5.3-codex", GPT_STANDARD_WINDOW),
+            ("gpt-5.2", GPT_STANDARD_WINDOW),
+            ("gpt-5.1", GPT_STANDARD_WINDOW),
+            ("gpt-5-mini", GPT_STANDARD_WINDOW),
+            ("kimi-k3", OPEN_WEIGHT_LONG_WINDOW),
+            ("glm-5.2", OPEN_WEIGHT_LONG_WINDOW),
+            ("deepseek-v4-flash", OPEN_WEIGHT_LONG_WINDOW),
+            ("auto", FALLBACK_CONTEXT_WINDOW),
+            ("local", FALLBACK_CONTEXT_WINDOW),
+        ] {
+            assert_eq!(context_window_for_model(id), window, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_codex_catalogue_carries_the_long_windows() {
+        let cat = catalogue(
+            "gpt-5.6-sol",
+            &[],
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(&[]),
+        );
+        let window = |id: &str| {
+            cat.iter()
+                .find(|model| model.id == id)
+                .map(|model| model.context_window)
+                .expect(id)
+        };
+        assert_eq!(window("gpt-5.6-sol"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.6-terra"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.6-luna"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.5"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.4"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.4-mini"), GPT_STANDARD_WINDOW);
     }
 }

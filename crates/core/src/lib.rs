@@ -131,7 +131,7 @@ pub use provider::{
     Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
     ProviderInteractionHost, ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot,
     ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt, ThreadProviderHandoff, TurnRequest,
-    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    CODEX_KNOWN_MODELS, FALLBACK_CONTEXT_WINDOW, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,
