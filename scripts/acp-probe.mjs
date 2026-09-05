@@ -27,6 +27,9 @@
 //   ZEST_ACP_ARGS       extra args before `acp`, space-separated (e.g. "-e https://api2.cursor.sh")
 //   ZEST_ACP_PROMPT     prompt for the single turn (default: a read-only question)
 //   ZEST_ACP_MODE       session mode to request: ask | plan | agent (default: ask)
+//   ZEST_ACP_CWD        session working directory (default: the repo root)
+//   ZEST_ACP_CLIENT_FS  1 to advertise and serve fs/read_text_file + fs/write_text_file,
+//                       which is what crates/core's own ACP client does
 //   ZEST_ACP_ALLOW      1 to answer permission requests with allow-once
 //   ZEST_ACP_LOGIN      1 to attempt `authenticate` (may open a browser)
 //   ZEST_ACP_TIMEOUT_MS overall budget in ms (default: 120000)
@@ -43,6 +46,11 @@ const command = process.env.ZEST_ACP_COMMAND || "cursor-agent";
 // `agent --api-key "$CURSOR_API_KEY" acp`, so extra args are a prefix.
 const args = [...(process.env.ZEST_ACP_ARGS || "").split(" ").filter(Boolean), "acp"];
 const mode = process.env.ZEST_ACP_MODE || "ask";
+const cwd = path.resolve(process.env.ZEST_ACP_CWD || root);
+// crates/core/src/tools/external_agent.rs advertises fs and terminal, so the
+// agent asks Zest to do the reading and writing. Mirroring that here is how we
+// find out whether Cursor takes the offer or keeps using its own tools.
+const clientFs = process.env.ZEST_ACP_CLIENT_FS === "1";
 const allow = process.env.ZEST_ACP_ALLOW === "1";
 const attemptLogin = process.env.ZEST_ACP_LOGIN === "1";
 const budgetMs = Number(process.env.ZEST_ACP_TIMEOUT_MS || 120_000);
@@ -192,6 +200,35 @@ function permissionResult(params) {
   return { outcome: { outcome: "selected", optionId } };
 }
 
+/**
+ * Serve a file the agent asked *us* to touch, refusing anything outside cwd.
+ *
+ * The path check is the same rule `acp_relative_path` enforces in the Rust
+ * client: an ACP agent naming a path is a request, not an authorization.
+ */
+function serveFile(id, params, write) {
+  const target = path.resolve(cwd, params?.path ?? "");
+  if (target !== cwd && !target.startsWith(cwd + path.sep)) {
+    respondError(id, -32602, `path escapes the session cwd: ${params?.path}`);
+    return;
+  }
+  try {
+    if (!write) {
+      respond(id, { content: fs.readFileSync(target, "utf8") });
+      return;
+    }
+    if (!allow) {
+      respondError(id, -32000, "probe is read-only; re-run with ZEST_ACP_ALLOW=1");
+      return;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, params?.content ?? "", "utf8");
+    respond(id, null);
+  } catch (error) {
+    respondError(id, -32000, error.message);
+  }
+}
+
 /** Server-initiated requests. Anything left unanswered blocks the agent. */
 function handleServerRequest(message) {
   const { id, method, params } = message;
@@ -199,6 +236,12 @@ function handleServerRequest(message) {
   switch (method) {
     case "session/request_permission":
       respond(id, permissionResult(params));
+      return;
+    case "fs/read_text_file":
+      serveFile(id, params, false);
+      return;
+    case "fs/write_text_file":
+      serveFile(id, params, true);
       return;
     case "cursor/ask_question": {
       const choices = params?.options ?? params?.choices ?? [];
@@ -285,7 +328,7 @@ const initialize = await within(
   request("initialize", {
     protocolVersion: 1,
     clientCapabilities: {
-      fs: { readTextFile: false, writeTextFile: false },
+      fs: { readTextFile: clientFs, writeTextFile: clientFs },
       terminal: false,
     },
     clientInfo: { name: "zest-acp-probe", version: "0" },
@@ -299,7 +342,7 @@ if (attemptLogin && authMethods.length > 0) {
   failed("authenticate", await within(request("authenticate", { methodId: "cursor_login" }), 180_000));
 }
 
-const session = await within(request("session/new", { cwd: root, mcpServers: [] }), 60_000);
+const session = await within(request("session/new", { cwd, mcpServers: [] }), 60_000);
 const sessionId = session?.result?.sessionId ?? session?.result?.session_id ?? null;
 if (failed("session/new", session) || !sessionId) {
   if (!attemptLogin && authMethods.length > 0) {
@@ -364,7 +407,8 @@ await new Promise((resolve) => transcript.end(resolve));
 const list = (set) => (set.size ? [...set].sort().join(", ") : "(none observed)");
 const permissions = allow ? "allow-once" : "refused";
 console.log(`acp probe: transcript ${path.relative(root, transcriptPath)}`);
-console.log(`  mode requested       ${mode} (permissions: ${permissions})`);
+console.log(`  cwd                  ${cwd}`);
+console.log(`  mode requested       ${mode} (permissions: ${permissions}, client fs: ${clientFs})`);
 console.log(`  server requests      ${list(seen.serverRequests)}`);
 console.log(`  server notifications ${list(seen.serverNotifications)}`);
 console.log(`  session/update kinds ${list(seen.updateKinds)}`);
