@@ -3,10 +3,8 @@ import { describe, it } from "node:test";
 
 import {
   COLLAPSE_THRESHOLD,
-  collapseThresholdFor,
   countDiffLines,
   groupToolRuns,
-  SETTLED_COLLAPSE_THRESHOLD,
   summarizeTools,
 } from "./toolRuns.ts";
 import type { ToolPart } from "./types.ts";
@@ -106,51 +104,6 @@ describe("summarizeTools", () => {
   });
 });
 
-describe("collapseThresholdFor", () => {
-  it("folds a live turn the same way as a finished one", () => {
-    const working = [...many(8), tool({ id: "spin", status: "running" })];
-    assert.equal(collapseThresholdFor(working), COLLAPSE_THRESHOLD);
-    const runs = groupToolRuns(working, collapseThresholdFor(working));
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].kind, "group");
-    if (runs[0].kind === "group") {
-      assert.equal(runs[0].tools.length, 9);
-    }
-  });
-
-  it("folds a finished message's tools once nothing is live", () => {
-    const finished = many(4);
-    assert.equal(collapseThresholdFor(finished), SETTLED_COLLAPSE_THRESHOLD);
-
-    const runs = groupToolRuns(finished, collapseThresholdFor(finished));
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].kind, "group");
-    if (runs[0].kind === "group") {
-      assert.equal(runs[0].tools.length, 4);
-      assert.equal(runs[0].summary.label, "Ran 4 lookups");
-    }
-  });
-
-  it("still shows a lone finished call as itself", () => {
-    // "Ran 1 lookup" is longer than the row it replaces and hides the path.
-    const runs = groupToolRuns(many(1), collapseThresholdFor(many(1)));
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].kind, "single");
-  });
-
-  it("waits for an approval that is still pending", () => {
-    const pending = [
-      ...many(3),
-      tool({ id: "ask", name: "bash", status: "awaiting_approval" }),
-    ];
-    const runs = groupToolRuns(pending, collapseThresholdFor(pending));
-    assert.equal(runs.length, 2);
-    assert.equal(runs[0].kind, "group");
-    assert.equal(runs[1].kind, "single");
-    if (runs[1].kind === "single") assert.equal(runs[1].tool.id, "ask");
-  });
-});
-
 describe("groupToolRuns", () => {
   it("leaves a single call as a row", () => {
     const runs = groupToolRuns(many(1));
@@ -173,7 +126,7 @@ describe("groupToolRuns", () => {
       tool({ id: "live", name: "bash", status: "awaiting_approval" }),
       tool({ id: "spin", name: "bash", status: "running" }),
     ];
-    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    const runs = groupToolRuns(tools);
     assert.equal(runs[0]?.kind, "group");
     assert.equal(runs[1]?.kind, "single");
     if (runs[1].kind === "single") assert.equal(runs[1].tool.id, "live");
@@ -187,7 +140,7 @@ describe("groupToolRuns", () => {
       tool({ id: "live", status: "running" }),
       ...many(6).map((t, i) => ({ ...t, id: `b${i}` })),
     ];
-    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    const runs = groupToolRuns(tools);
     assert.deepEqual(
       runs.map((r) => r.kind),
       ["group"]
@@ -206,7 +159,7 @@ describe("groupToolRuns", () => {
       tool({ id: "c", name: "mcp__Haiku__context_shell", status: "done" }),
       tool({ id: "spin", name: "mcp__Haiku__context_shell", status: "running" }),
     ];
-    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    const runs = groupToolRuns(tools);
     assert.equal(runs.length, 1);
     assert.equal(runs[0].kind, "group");
     if (runs[0].kind === "group") {
@@ -222,7 +175,7 @@ describe("groupToolRuns", () => {
       tool({ id: "after-1", status: "done" }),
       tool({ id: "after-2", status: "done" }),
     ];
-    const runs = groupToolRuns(tools, collapseThresholdFor(tools));
+    const runs = groupToolRuns(tools);
     assert.deepEqual(
       runs.map((r) => r.kind),
       ["group", "single", "group"]

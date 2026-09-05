@@ -84,7 +84,7 @@ import {
 import type { SendTurnRequest } from "@/lib/sendTurn";
 import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
-import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
+import { groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import { escapeAction } from "@/lib/escapeStack";
@@ -536,7 +536,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
 
           {msg.tools.length > 0 ? (
             <div className="flex w-full max-w-full flex-col gap-0.5">
-              {groupToolRuns(msg.tools, collapseThresholdFor(msg.tools)).map((run) =>
+              {groupToolRuns(msg.tools).map((run) =>
                 run.kind === "group" ? (
                   <ToolRunGroup
                     key={`group-${run.tools[0].id}`}

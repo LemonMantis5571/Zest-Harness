@@ -32,17 +32,6 @@ export type ToolRunSummary = {
  */
 export const COLLAPSE_THRESHOLD = 2;
 
-export const SETTLED_COLLAPSE_THRESHOLD = COLLAPSE_THRESHOLD;
-
-/**
- * The threshold to group this message's tools at.
- *
- * Live and finished turns use the same bar: stay folded, append new calls.
- */
-export function collapseThresholdFor(_tools: ToolPart[]): number {
-  return COLLAPSE_THRESHOLD;
-}
-
 const WRITE_TOOLS = new Set(["write_file", "edit_file"]);
 
 function isSettled(tool: ToolPart): boolean {
@@ -126,15 +115,9 @@ export function groupToolRuns(
   const runs: ToolRun[] = [];
   let pending: ToolPart[] = [];
 
-  const lastRun = () => runs[runs.length - 1];
-
   const flush = () => {
     if (pending.length === 0) return;
-    const tail = lastRun();
-    if (tail?.kind === "group") {
-      tail.tools.push(...pending);
-      tail.summary = summarizeTools(tail.tools.filter(isSettled));
-    } else if (pending.length >= threshold) {
+    if (pending.length >= threshold) {
       runs.push({
         kind: "group",
         tools: pending,

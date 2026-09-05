@@ -72,26 +72,11 @@ export function joinThinkingStream(prev: string, delta: string): string {
   return prev + delta;
 }
 
-function eventSessionId(event: ChatEvent): string | undefined {
-  return event.session_id;
-}
-
-function eventThreadId(event: ChatEvent): string | undefined {
-  return event.thread_id;
-}
-
-function eventTurnId(event: ChatEvent): string | undefined {
-  const turn = event.turn_id;
-  return turn == null ? undefined : turn;
-}
-
 /** Drop events that belong to a different session, thread, or turn. */
 export function isStaleChatEvent(state: ChatUiState, event: ChatEvent): boolean {
-  const sid = eventSessionId(event);
-  const tid = eventThreadId(event);
+  const { session_id: sid, thread_id: tid, turn_id: turn } = event;
   if (state.sessionId && sid && sid !== state.sessionId) return true;
   if (state.threadId && tid && tid !== state.threadId) return true;
-  const turn = eventTurnId(event);
   if (
     state.currentTurnId &&
     turn &&
