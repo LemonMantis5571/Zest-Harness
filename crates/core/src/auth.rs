@@ -190,6 +190,12 @@ pub fn detect_all() -> Vec<ProviderSlot> {
             status: detect_claude(),
         },
         ProviderSlot {
+            id: "cursor",
+            label: "Cursor",
+            method: "Cursor subscription",
+            status: detect_cursor_cli(),
+        },
+        ProviderSlot {
             id: "antigravity",
             label: "Antigravity",
             method: "Google sign-in",
@@ -321,6 +327,51 @@ pub fn detect_claude_code() -> AuthStatus {
         Some(true) => AuthStatus::Ready { account: None },
         _ => AuthStatus::Unknown {
             reason: "Zest could not verify this sign-in.".into(),
+        },
+    }
+}
+
+/// Readiness for the Cursor CLI, which signs in with `cursor-agent login`.
+///
+/// `~/.cursor/cli-config.json` is settings, not a credential store: the tokens
+/// live elsewhere and this file only names who is signed in. That is exactly
+/// what makes it safe to read — `authInfo.email` is a display label, and no
+/// part of it is a secret. Its absence is the honest "logged out".
+pub fn detect_cursor_cli() -> AuthStatus {
+    let Some(dir) = home_dir().map(|h| h.join(".cursor")) else {
+        return AuthStatus::Unknown {
+            reason: "no home directory".into(),
+        };
+    };
+
+    let config = dir.join("cli-config.json");
+    if !config.is_file() {
+        return AuthStatus::NotLoggedIn {
+            fix: "cursor-agent login".into(),
+        };
+    }
+    let Ok(raw) = std::fs::read_to_string(&config) else {
+        return AuthStatus::Unknown {
+            reason: "cli-config.json is present but unreadable".into(),
+        };
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return AuthStatus::Unknown {
+            reason: "cli-config.json is present but not JSON".into(),
+        };
+    };
+    match value
+        .get("authInfo")
+        .and_then(|info| info.get("email"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+    {
+        Some(email) => AuthStatus::Ready {
+            account: Some(email.to_string()),
+        },
+        None => AuthStatus::NotLoggedIn {
+            fix: "cursor-agent login".into(),
         },
     }
 }
@@ -626,7 +677,10 @@ mod tests {
     fn detect_all_covers_every_provider_slot() {
         let slots = detect_all();
         let ids: Vec<_> = slots.iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec!["codex", "claude", "antigravity", "byok"]);
+        assert_eq!(
+            ids,
+            vec!["codex", "claude", "cursor", "antigravity", "byok"]
+        );
     }
 
     #[test]

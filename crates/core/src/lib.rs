@@ -55,9 +55,9 @@ pub use anthropic::types::{
 };
 pub use auth::{
     can_start_login, codex_cli_on_path, detect_all, detect_claude_code, detect_codex_cli,
-    detect_codex_oauth, resolve_claude_code_login, resolve_codex_cli_login, resolve_login,
-    start_claude_code_login, start_codex_cli_login, start_codex_oauth_login, start_login,
-    AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
+    detect_codex_oauth, detect_cursor_cli, resolve_claude_code_login, resolve_codex_cli_login,
+    resolve_login, start_claude_code_login, start_codex_cli_login, start_codex_oauth_login,
+    start_login, AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -71,7 +71,7 @@ pub use commands::{
     parse_command, Expansion, McpSlash, ParsedCommand, SlashCommand, SlashKind,
 };
 pub use config::{
-    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
+    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config, CursorMode,
     ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, McpServerConfig, ProviderConfig,
     Target, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };

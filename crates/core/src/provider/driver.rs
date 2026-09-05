@@ -27,6 +27,7 @@ use super::anthropic::AnthropicProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::codex_app_server::CodexAppServerProvider;
 use super::codex_oauth::CodexOAuthProvider;
+use super::cursor_acp::CursorAcpProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
 use super::{catalogue, EffortPolicy, ModelSpec, Provider, ProviderDescriptor, CODEX_KNOWN_MODELS};
 use crate::anthropic::types::DEFAULT_MODEL;
@@ -336,6 +337,77 @@ impl ProviderDriver for ClaudeCodeDriver {
     }
 }
 
+// --------------------------------------------------------------- cursor_acp
+
+struct CursorAcpDriver;
+
+impl CursorAcpDriver {
+    fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
+        let ProviderConfig::CursorAcp { model, models, .. } = config else {
+            unreachable!("driver_for routes only CursorAcp entries here");
+        };
+        let default_model = model
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| super::cursor_acp::DEFAULT_CURSOR_MODEL.to_string());
+        let catalogue = super::cursor_acp::model_catalogue(&default_model, models);
+        (default_model, catalogue)
+    }
+}
+
+impl ProviderDriver for CursorAcpDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind("cursor_acp")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Cursor CLI"
+    }
+
+    fn credentials<'a>(&self, _config: &'a ProviderConfig) -> CredentialRequest<'a> {
+        CredentialRequest::VENDOR_OWNED
+    }
+
+    fn descriptor(&self, id: &str, config: &ProviderConfig) -> ProviderDescriptor {
+        let (default_model, models) = Self::catalogue(config);
+        ProviderDescriptor {
+            id: id.to_string(),
+            default_model,
+            models,
+        }
+    }
+
+    fn create(
+        &self,
+        ctx: DriverContext<'_>,
+        config: &ProviderConfig,
+    ) -> std::result::Result<Arc<dyn Provider>, String> {
+        let ProviderConfig::CursorAcp {
+            command,
+            model,
+            models,
+            allow_mcp,
+            mode,
+            timeout_secs,
+        } = config
+        else {
+            unreachable!("driver_for routes only CursorAcp entries here");
+        };
+        let provider = CursorAcpProvider::new(
+            ctx.id.to_string(),
+            ctx.root,
+            command.clone(),
+            model.clone(),
+            models.clone(),
+            *allow_mcp,
+            *mode,
+            *timeout_secs,
+        )
+        .map_err(|error| format!("could not build Cursor provider: {error}"))?;
+        Ok(Arc::new(provider))
+    }
+}
+
 // ---------------------------------------------------------------- codex_cli
 
 struct CodexCliDriver;
@@ -598,6 +670,7 @@ pub fn driver_for(config: &ProviderConfig) -> &'static (dyn ProviderDriver + Syn
         ProviderConfig::ClaudeCode { .. } => &ClaudeCodeDriver,
         ProviderConfig::CodexCli { .. } => &CodexCliDriver,
         ProviderConfig::CodexOAuth { .. } => &CodexOAuthDriver,
+        ProviderConfig::CursorAcp { .. } => &CursorAcpDriver,
         ProviderConfig::OpenaiCompatible { .. } => &OpenAiCompatibleDriver,
     }
 }

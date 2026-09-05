@@ -173,7 +173,7 @@ fn default_bash_timeout_ms() -> u64 {
 ///
 /// `kind` discriminates, and it is the only thing that does: transport,
 /// credentials, and capabilities are all decided from this variant and never
-/// inferred from a provider id. Two of the five kinds spawn a vendor runtime
+/// inferred from a provider id. Three of the six kinds spawn a vendor runtime
 /// that owns its own agent loop; `codex_oauth` uses Zest's loop. See
 /// `Provider::owns_agent_loop`.
 #[derive(Debug, Clone, Deserialize)]
@@ -255,6 +255,32 @@ pub enum ProviderConfig {
         #[serde(default)]
         credential: Option<String>,
     },
+    /// Cursor CLI over ACP. Cursor owns the authenticated subscription
+    /// (`cursor-agent login`) and its own tool loop; zest.toml holds no key.
+    #[serde(rename = "cursor_acp")]
+    CursorAcp {
+        /// Executable name or absolute path. No shell is involved.
+        #[serde(default = "default_cursor_command")]
+        command: String,
+        /// Model passed to `--model`. Short names are resolved by Cursor into
+        /// its own parameterized ids.
+        #[serde(default)]
+        model: Option<String>,
+        /// Optional allow-list for the model picker.
+        #[serde(default)]
+        models: Vec<String>,
+        /// Cursor reads `.cursor/mcp.json` itself. This records the choice; it
+        /// cannot enforce it, because the CLI has no flag that narrows them.
+        #[serde(default)]
+        allow_mcp: bool,
+        /// Session mode. This is the only thing that stops Cursor editing:
+        /// it never asks permission for a file change, only for shell commands
+        /// outside its own allowlist.
+        #[serde(default)]
+        mode: CursorMode,
+        #[serde(default = "default_external_timeout_secs")]
+        timeout_secs: u64,
+    },
     OpenaiCompatible {
         /// API root, for example `https://api.openai.com/v1` or
         /// `https://api.deepseek.com`. The client appends `/chat/completions`.
@@ -277,6 +303,34 @@ pub enum ProviderConfig {
         #[serde(default)]
         api_key_env: Option<String>,
     },
+}
+
+/// Which Cursor session mode a chat runs in.
+///
+/// Not a convenience: Cursor never sends `session/request_permission` for a
+/// file edit, so `Plan` and `Ask` are the only mechanism that prevents one.
+/// `Agent` is full access, and on the real checkout that means unreviewed edits.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorMode {
+    /// Full tool access, including edits Zest is never asked about.
+    #[default]
+    Agent,
+    /// Read-only planning.
+    Plan,
+    /// Q&A. Cursor still runs allowlisted shell commands in this mode.
+    Ask,
+}
+
+impl CursorMode {
+    /// The `modeId` accepted by `session/set_mode`.
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Plan => "plan",
+            Self::Ask => "ask",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -552,7 +606,8 @@ impl ProviderConfig {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
             ProviderConfig::ClaudeCode { .. }
             | ProviderConfig::CodexCli { .. }
-            | ProviderConfig::CodexOAuth { .. } => None,
+            | ProviderConfig::CodexOAuth { .. }
+            | ProviderConfig::CursorAcp { .. } => None,
             ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
         }
     }
@@ -565,6 +620,7 @@ impl ProviderConfig {
             ProviderConfig::ClaudeCode { .. } => "claude_code",
             ProviderConfig::CodexCli { .. } => "codex_cli",
             ProviderConfig::CodexOAuth { .. } => "codex_oauth",
+            ProviderConfig::CursorAcp { .. } => "cursor_acp",
             ProviderConfig::OpenaiCompatible { .. } => "openai_compatible",
         }
     }
@@ -572,7 +628,10 @@ impl ProviderConfig {
     /// Whether this kind runs its own agent loop. ChatGPT sign-in and API
     /// keys use Zest's loop; vendor CLIs do not.
     pub fn owns_agent_loop(&self) -> bool {
-        matches!(self, Self::CodexCli { .. } | Self::ClaudeCode { .. })
+        matches!(
+            self,
+            Self::CodexCli { .. } | Self::ClaudeCode { .. } | Self::CursorAcp { .. }
+        )
     }
 }
 
@@ -586,6 +645,10 @@ fn default_claude_code_command() -> String {
 
 fn default_codex_command() -> String {
     "codex".to_string()
+}
+
+fn default_cursor_command() -> String {
+    "cursor-agent".to_string()
 }
 
 fn default_codex_model() -> String {

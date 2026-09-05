@@ -5,7 +5,9 @@ use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::config::{ClaudeCodePermissionMode, Config, ExternalAgentMode, ExternalWorkspace};
+use crate::config::{
+    ClaudeCodePermissionMode, Config, CursorMode, ExternalAgentMode, ExternalWorkspace,
+};
 use crate::fsutil::atomic_write;
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,17 @@ pub struct ClaudeCodeProviderInput {
     pub models: Vec<String>,
     pub allow_mcp: bool,
     pub permission_mode: ClaudeCodePermissionMode,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CursorProviderInput {
+    pub id: String,
+    pub command: String,
+    pub model: String,
+    pub models: Vec<String>,
+    pub allow_mcp: bool,
+    pub mode: CursorMode,
     pub timeout_secs: u64,
 }
 
@@ -92,6 +105,16 @@ pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
             "gemini-2.5-pro",
             "gemini-2.5-flash",
         ],
+        // Cursor resolves a short name to its own parameterized id — passing
+        // `composer-2.5` comes back from `session/new` as
+        // `composer-2.5[fast=true]` — so the short names are what belongs here.
+        "cursor" => &[
+            "composer-2.5",
+            "claude-opus-5",
+            "claude-sonnet-4-5",
+            "gpt-5.6-sol",
+            "gemini-3.1-pro",
+        ],
         _ => &[],
     }
 }
@@ -150,6 +173,30 @@ pub fn external_agent_preset_with_model(
                 }
                 args
             },
+            allow_mcp,
+            model,
+            workspace: ExternalWorkspace::Isolated,
+            timeout_secs: 900,
+        }),
+        "cursor" => Some(ExternalAgentInput {
+            id: id.to_string(),
+            mode: ExternalAgentMode::Acp,
+            command: "cursor-agent".into(),
+            args: {
+                // Cursor takes its options before the subcommand, the way its
+                // own docs write `agent --api-key "$KEY" acp`.
+                let mut args = Vec::new();
+                if model.is_some() {
+                    args.extend(["--model".into(), "{model}".into()]);
+                }
+                args.push("acp".into());
+                args
+            },
+            // Unlike Gemini there is no flag that narrows the servers: Cursor's
+            // ACP mode reads `.cursor/mcp.json` itself, and `session/new`
+            // carrying an empty `mcpServers` does not override that. So this
+            // records the user's choice without being able to enforce it, and
+            // the isolated worktree stays the boundary that does.
             allow_mcp,
             model,
             workspace: ExternalWorkspace::Isolated,
@@ -325,6 +372,81 @@ pub fn add_claude_code_provider(
         ClaudeCodePermissionMode::AcceptEdits => "accept_edits",
         ClaudeCodePermissionMode::Plan => "plan",
         ClaudeCodePermissionMode::BypassPermissions => "bypass_permissions",
+    });
+    provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
+
+    let mut models = Array::new();
+    for value in input
+        .models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        models.push(Value::from(value));
+    }
+    if models.is_empty() {
+        provider.remove("models");
+    } else {
+        provider["models"] = toml_edit::value(models);
+    }
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Add or update a Cursor CLI parent provider, preserving comments and
+/// unrelated entries.
+///
+/// `mode` is written every time rather than only when it differs from the
+/// default, because on this provider it is the safety setting: Cursor never
+/// asks before editing a file, so `agent` versus `plan` is the difference
+/// between a chat that can rewrite the checkout and one that cannot.
+pub fn add_cursor_provider(path: &Path, input: &CursorProviderInput) -> Result<(), String> {
+    let id = input.id.trim();
+    let command = input.command.trim();
+    let model = input.model.trim();
+
+    validate_id(id, "provider")?;
+    if command.is_empty() {
+        return Err("Cursor command is required".into());
+    }
+    if model.is_empty() {
+        return Err("a Cursor model is required".into());
+    }
+    if input.timeout_secs == 0 || input.timeout_secs > 3_600 {
+        return Err("Cursor timeout must be between 1 and 3600 seconds".into());
+    }
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("providers") {
+        doc["providers"] = Item::Table(Table::new());
+    }
+    let providers = doc["providers"]
+        .as_table_mut()
+        .ok_or_else(|| "[providers] is not a table".to_string())?;
+    let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
+    let provider = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("provider `{id}` is not a table"))?;
+    if let Some(kind) = provider.get("kind").and_then(Item::as_str) {
+        if kind != "cursor_acp" {
+            return Err(format!("provider `{id}` already has kind `{kind}`"));
+        }
+    }
+
+    provider["kind"] = toml_edit::value("cursor_acp");
+    provider["command"] = toml_edit::value(command);
+    provider["model"] = toml_edit::value(model);
+    provider["allow_mcp"] = toml_edit::value(input.allow_mcp);
+    provider["mode"] = toml_edit::value(match input.mode {
+        CursorMode::Agent => "agent",
+        CursorMode::Plan => "plan",
+        CursorMode::Ask => "ask",
     });
     provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
 
@@ -928,6 +1050,36 @@ mod tests {
         input.args.push("{prompt}".into());
         let error = upsert_external_agent(&path, &input).unwrap_err();
         assert!(error.contains("over stdio"));
+    }
+
+    #[test]
+    fn the_cursor_preset_puts_its_options_before_the_subcommand() {
+        let plain = external_agent_preset("cursor").unwrap();
+        assert_eq!(plain.command, "cursor-agent");
+        assert_eq!(plain.mode, ExternalAgentMode::Acp);
+        // Isolation is required for every ACP worker, and Cursor is the reason
+        // why: it edits without sending session/request_permission at all.
+        assert_eq!(plain.workspace, ExternalWorkspace::Isolated);
+        assert_eq!(plain.args, vec!["acp".to_string()]);
+
+        // `acp` is a subcommand, so a pinned model has to precede it — the CLI
+        // reads options before the command, as in `agent --api-key "$KEY" acp`.
+        let pinned =
+            external_agent_preset_with_model("cursor", false, Some("composer-2.5")).unwrap();
+        assert_eq!(pinned.model.as_deref(), Some("composer-2.5"));
+        assert_eq!(
+            pinned.args,
+            vec![
+                "--model".to_string(),
+                "{model}".to_string(),
+                "acp".to_string()
+            ]
+        );
+        assert!(upsert_external_agent(
+            &tempfile::tempdir().unwrap().path().join("zest.toml"),
+            &pinned
+        )
+        .is_ok());
     }
 
     #[test]
