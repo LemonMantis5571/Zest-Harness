@@ -710,6 +710,7 @@ export const Composer = memo(function Composer({
                   open={modelPickerOpen}
                   onOpenChange={onModelPickerOpenChange}
                   disabled={sending || compacting || optionsDisabled}
+                  pending={optionsDisabled}
                   onModelChange={onModelChange}
                   onEffortChange={onEffortChange}
                   onSwitchProvider={onSwitchProvider}

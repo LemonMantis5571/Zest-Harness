@@ -12,6 +12,7 @@ import { rawInvokeError } from "@/lib/invokeErrors";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
+import { useOptionNavigation } from "@/lib/useOptionNavigation";
 import type { ProviderRow } from "@/lib/types";
 
 type Props = {
@@ -86,6 +87,8 @@ export function ProviderPicker({
   const [configureParentError, setConfigureParentError] = useState<string | null>(null);
   const [cliAvailable, setCliAvailable] = useState<boolean | null>(null);
   const [confirmChatgpt, setConfirmChatgpt] = useState(false);
+  // Unconfigured rows remain selectable so users can reach their Connect flow.
+  const navigation = useOptionNavigation(providers.map((provider) => provider.id), selectedId ?? "", continuing || connecting);
 
   useEffect(() => {
     let cancelled = false;
@@ -221,6 +224,8 @@ export function ProviderPicker({
               <button
                 type="button"
                 role="option"
+                {...navigation.optionProps(p.id)}
+                disabled={continuing || connecting}
                 aria-selected={selectedRow}
                 onClick={() => onSelect(p.id)}
                 className={cn(

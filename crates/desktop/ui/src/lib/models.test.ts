@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   effortsForModel,
+  filterModelPickerGroups,
   formatContextWindow,
   modelPickerGroups,
   modelPickerHasChoices,
@@ -18,6 +19,29 @@ const noEffortModel: ModelCapability = {
   supportsTools: true,
   supportsVision: false,
 };
+
+describe("model catalogue search", () => {
+  const groups = [
+    { providerId: "one", label: "Local models", current: true, models: [noEffortModel, { ...noEffortModel, id: "gpt-5.6-sol" }] },
+    { providerId: "two", label: "Research", current: false, models: [noEffortModel] },
+  ];
+  it("returns the original catalogue for whitespace", () => {
+    assert.equal(filterModelPickerGroups(groups, "  "), groups);
+  });
+  it("matches provider labels case insensitively and preserves the group", () => {
+    assert.deepEqual(filterModelPickerGroups(groups, "LOCAL MODELS"), [groups[0]]);
+  });
+  it("matches display labels and model IDs without mutating the source", () => {
+    assert.deepEqual(filterModelPickerGroups(groups, "5.6 sol")[0].models.map((model) => model.id), ["gpt-5.6-sol"]);
+    assert.equal(groups[0].models.length, 2);
+  });
+  it("retains duplicate model IDs under their provider identities in stable order", () => {
+    assert.deepEqual(filterModelPickerGroups(groups, "LOCAL-MODEL").map((group) => group.providerId), ["one", "two"]);
+  });
+  it("returns no groups when nothing matches", () => {
+    assert.deepEqual(filterModelPickerGroups(groups, "not-a-model"), []);
+  });
+});
 
 describe("model capability helpers", () => {
   it("does not invent an effort selector for models with no effort support", () => {

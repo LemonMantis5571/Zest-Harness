@@ -165,6 +165,18 @@ export function modelPickerHasChoices(groups: ModelPickerGroup[]): boolean {
   return groups.length > 1 || models > 1;
 }
 
+/** Search the displayed catalogue without changing provider identity or order. */
+export function filterModelPickerGroups(groups: ModelPickerGroup[], query: string): ModelPickerGroup[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return groups;
+  return groups.flatMap((group) => {
+    const models = group.label.toLocaleLowerCase().includes(needle)
+      ? group.models
+      : group.models.filter((item) => item.id.toLocaleLowerCase().includes(needle) || modelLabel(item.id).toLocaleLowerCase().includes(needle));
+    return models.length ? [{ ...group, models }] : [];
+  });
+}
+
 /** Map Rust catalogue + display labels for the picker. */
 export function modelOptionsFromCapabilities(
   models: ModelCapability[] | undefined
