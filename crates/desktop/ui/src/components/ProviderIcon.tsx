@@ -52,12 +52,18 @@ function GeminiMark() {
   return <path d="M20.616 10.835a14.147 14.147 0 0 1-4.45-3.001 14.111 14.111 0 0 1-3.678-6.452.503.503 0 0 0-.975 0 14.134 14.134 0 0 1-3.679 6.452 14.155 14.155 0 0 1-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 0 0 0 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 0 1 4.45 3.001 14.112 14.112 0 0 1 3.679 6.453.502.502 0 0 0 .975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 0 1 3.001-4.45 14.113 14.113 0 0 1 6.453-3.678.503.503 0 0 0 0-.975 13.245 13.245 0 0 1-2.003-.678z" />;
 }
 
+/** Cursor's official cube. Relies on the wrapper's `fillRule="evenodd"`. */
+function CursorMark() {
+  return <path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z" />;
+}
+
 /** Which brand path draws each mark. The choosing lives in `providerMarks`. */
 const DRAW: Record<Exclude<ProviderMark, "generic">, () => React.ReactNode> = {
   codex: CodexMark,
   claude: ClaudeMark,
   deepseek: DeepSeekMark,
   gemini: GeminiMark,
+  cursor: CursorMark,
 };
 
 export function ProviderIcon({ providerId, className, label }: Props) {

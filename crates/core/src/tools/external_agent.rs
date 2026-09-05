@@ -772,6 +772,20 @@ fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
             "ACP agent args cannot contain {prompt}; prompts are sent over JSON-RPC".into(),
         );
     }
+    // An ACP agent is trusted inside its worktree and asked nothing on the way,
+    // because `respond_acp_permission` answers allow so the worker never blocks
+    // on a queue with nobody watching. That trade only holds while the diff is
+    // the review gate. Measured against `cursor-agent acp`: it edits files
+    // without sending `session/request_permission` at all — the request only
+    // covers commands outside its shell allowlist — so on the real checkout
+    // there would be no gate anywhere. Isolation is what earns the trust.
+    if config.mode == ExternalAgentMode::Acp && config.workspace == ExternalWorkspace::Current {
+        return Err(
+            "ACP agents require workspace = \"isolated\"; their edits are reviewed as a diff, \
+             not approved call by call"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -1413,6 +1427,24 @@ pub fn prepare_external_command(command: &mut Command) {
     {
         // Unix inherits the already-current environment; keep the shared
         // function's argument explicit so strict clippy stays clean there.
+        let _ = command;
+    }
+}
+
+/// [`prepare_external_command`] for a blocking `std::process::Command`.
+///
+/// Model discovery is a short synchronous probe off the async path, so it needs
+/// the same Windows PATH repair without dragging in a tokio command.
+pub fn prepare_sync_external_command(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        if let Some(path) = effective_search_path() {
+            command.env("PATH", path);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
         let _ = command;
     }
 }
@@ -2764,8 +2796,26 @@ mod tests {
     fn acp_args_do_not_receive_prompt() {
         let mut config = config(ExternalAgentMode::Acp);
         config.args = vec!["--acp".into()];
+        config.workspace = ExternalWorkspace::Isolated;
         assert_eq!(expanded_args(&config, "task"), vec!["--acp"]);
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn an_acp_agent_may_not_run_in_the_current_workspace() {
+        let mut config = config(ExternalAgentMode::Acp);
+        config.args = vec!["--acp".into()];
+        config.workspace = ExternalWorkspace::Current;
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.contains("isolated"), "{error}");
+
+        // The restriction is about the ACP path only: a headless CLI keeps its
+        // own permission handshake, which is why Claude Code runs on the real
+        // checkout as a parent provider.
+        let mut headless = config.clone();
+        headless.mode = ExternalAgentMode::Headless;
+        headless.args = vec!["--print".into()];
+        assert!(validate_config(&headless).is_ok());
     }
 
     #[test]

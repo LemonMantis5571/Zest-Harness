@@ -663,6 +663,7 @@ fn provider_kind_method(config: &zest_core::ProviderConfig) -> &'static str {
         zest_core::ProviderConfig::ClaudeCode { .. } => "Claude sign-in",
         zest_core::ProviderConfig::CodexCli { .. } => "Codex CLI",
         zest_core::ProviderConfig::CodexOAuth { .. } => "ChatGPT sign-in",
+        zest_core::ProviderConfig::CursorAcp { .. } => "Cursor subscription",
     }
 }
 

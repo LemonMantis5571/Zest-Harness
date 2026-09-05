@@ -40,8 +40,8 @@ use ts_rs::TS;
 use zest_core::{
     can_start_login, codex_cli_on_path, compose_system_with_docs, contains_ignore_ascii_case,
     derive_profile_stats, descriptor_for_picker_id, descriptor_from_config, detect_all,
-    detect_claude_code, detect_codex_cli, detect_codex_oauth, display_path, driver_for,
-    env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
+    detect_claude_code, detect_codex_cli, detect_codex_oauth, detect_cursor_cli, display_path,
+    driver_for, env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
     save_custom_system, start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
@@ -81,7 +81,7 @@ use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 ///
 /// Claude Code is available as a first-class parent and remains separately
 /// configurable as a delegated worker. Gemini remains worker-only.
-const PICKER_IDS: &[&str] = &["codex", "claude"];
+const PICKER_IDS: &[&str] = &["codex", "claude", "cursor"];
 
 /// Sign-in flows Zest can launch from the desktop. Claude here means the
 /// first-class parent provider; worker authentication remains CLI-owned.
@@ -789,6 +789,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     let auth_status = match configured_provider {
         Some(ProviderConfig::ClaudeCode { .. }) => detect_claude_code(),
         Some(ProviderConfig::CodexCli { .. }) => detect_codex_cli(),
+        Some(ProviderConfig::CursorAcp { .. }) => detect_cursor_cli(),
         Some(ProviderConfig::CodexOAuth { credential, .. }) => detect_codex_oauth(
             credential
                 .as_deref()
@@ -1729,8 +1730,11 @@ fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     list_providers(state)
 }
 
-const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] =
-    &[("claude", "Claude Code"), ("gemini", "Gemini CLI")];
+const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("gemini", "Gemini CLI"),
+    ("cursor", "Cursor CLI"),
+];
 
 #[tauri::command]
 fn list_external_agents(state: State<'_, AppState>) -> Vec<ExternalAgentView> {
@@ -2702,6 +2706,40 @@ fn configure_claude_code_provider(
             // diff. The provider downgrades it anyway — writing it here would
             // only mislead someone reading their own zest.toml.
             permission_mode: zest_core::ClaudeCodePermissionMode::Default,
+            timeout_secs: 900,
+        },
+    )?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn configure_cursor_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let _edit_guard = lock_config_edit(&state);
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_cursor_provider(
+        &path,
+        &zest_core::config_edit::CursorProviderInput {
+            id,
+            command: "cursor-agent".into(),
+            model,
+            // Empty on purpose, and `add_cursor_provider` removes any stale key
+            // it finds. A written-out list is an allow-list: it is taken
+            // literally and suppresses discovery, so enabling Cursor used to
+            // pin whichever five models happened to be hard-coded here and hide
+            // every other one the account owns.
+            models: Vec::new(),
+            allow_mcp: false,
+            // `agent` on purpose, and the reason is worth stating where someone
+            // enabling this will read it: Cursor never asks before editing a
+            // file — `session/request_permission` covers shell commands only —
+            // so this chat can edit the checkout without an approval card. Set
+            // `mode = "plan"` in zest.toml for a read-only Cursor instead.
+            mode: zest_core::CursorMode::Agent,
             timeout_secs: 900,
         },
     )?;
@@ -9001,6 +9039,7 @@ pub fn run() {
             configure_api_provider,
             configure_anthropic_provider,
             configure_claude_code_provider,
+            configure_cursor_provider,
             configure_codex_cli_provider,
             configure_codex_oauth_provider,
             codex_cli_available,
@@ -9666,11 +9705,15 @@ mod characterization {
 
     #[test]
     fn desktop_exposes_claude_as_a_parent_login_choice() {
-        assert_eq!(PICKER_IDS, &["codex", "claude"]);
+        assert_eq!(PICKER_IDS, &["codex", "claude", "cursor"]);
         assert!(desktop_can_start_login("codex"));
         assert!(desktop_can_start_login("claude"));
         assert!(desktop_can_start_login("codex-chatgpt"));
         assert!(!desktop_can_start_login("antigravity"));
+        // Cursor is pickable but its sign-in is not ours to drive: the CLI
+        // opens its own browser flow, so the row points at `cursor-agent
+        // login` rather than offering a Connect button Zest cannot honour.
+        assert!(!desktop_can_start_login("cursor"));
     }
 
     #[test]

@@ -15,6 +15,8 @@ pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod codex_app_server;
 pub mod codex_oauth;
+pub mod cursor_acp;
+pub mod cursor_models;
 pub mod driver;
 pub mod openai_compatible;
 pub mod registry;
@@ -51,6 +53,10 @@ pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
         "codex" | "codex-chatgpt" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
         "claude" | "anthropic" => (DEFAULT_MODEL.to_string(), &[][..]),
         "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
+        "cursor" => (
+            cursor_acp::DEFAULT_CURSOR_MODEL.to_string(),
+            cursor_models::BUILTIN_MODELS,
+        ),
         _ => (DEFAULT_MODEL.to_string(), &[][..]),
     };
     ProviderDescriptor {

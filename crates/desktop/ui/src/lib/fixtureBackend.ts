@@ -1086,6 +1086,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async configureClaudeCodeProvider() {
       notAvailable("configureClaudeCodeProvider");
     },
+    async configureCursorProvider() {
+      notAvailable("configureCursorProvider");
+    },
     async configureCodexCliProvider() {
       notAvailable("configureCodexCliProvider");
     },
