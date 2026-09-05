@@ -18,5 +18,6 @@ describe("Markdown streaming fences", () => {
   it("renders markdown images through ZoomableImage", () => {
     const src = readFileSync(join(here, "../components/Markdown.tsx"), "utf8");
     assert.match(src, /img: \(\{ src, alt \}\) => <ZoomableImage src=\{src\} alt=\{alt\} \/>/);
+    assert.match(src, /hoistLocalImages\(children\)/);
   });
 });

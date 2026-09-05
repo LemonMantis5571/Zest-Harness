@@ -337,17 +337,26 @@ impl Questioner for HubQuestioner {
 struct DesktopProviderInteraction {
     approval_hub: Arc<ApprovalHub>,
     question_hub: Arc<QuestionHub>,
+    policy: Arc<Mutex<ApprovalPolicy>>,
 }
 
 #[async_trait]
 impl ProviderInteractionHost for DesktopProviderInteraction {
+    fn approval_policy(&self) -> Option<Arc<Mutex<ApprovalPolicy>>> {
+        Some(self.policy.clone())
+    }
+
     async fn prepare_command_approval(&self, approval_id: &str) {
         self.approval_hub.prepare(approval_id);
     }
 
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+        self.approval_hub.wait(&request.approval_id).await
+    }
+
     async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
         matches!(
-            self.approval_hub.wait(&request.approval_id).await,
+            self.decide_command(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
@@ -356,9 +365,13 @@ impl ProviderInteractionHost for DesktopProviderInteraction {
         self.approval_hub.prepare(approval_id);
     }
 
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+        self.approval_hub.wait(&request.approval_id).await
+    }
+
     async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
         matches!(
-            self.approval_hub.wait(&request.approval_id).await,
+            self.decide_file_change(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
@@ -3198,9 +3211,14 @@ fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
                         detail: Some(detail),
                     });
                 }
+                return Ok(LoginStatus {
+                    state: "running".into(),
+                    detail: None,
+                });
             }
+            *active = None;
             Ok(LoginStatus {
-                state: "running".into(),
+                state: "succeeded".into(),
                 detail: None,
             })
         }
@@ -4292,6 +4310,7 @@ async fn start_session_inner(
     agent.provider_interaction = Some(Arc::new(DesktopProviderInteraction {
         approval_hub: approval_hub.clone(),
         question_hub: question_hub.clone(),
+        policy: state.policy.clone(),
     }));
 
     // A legacy thread is claimed only after the target provider has built a
@@ -8691,6 +8710,22 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_oauth_expiry_keeps_the_cli_words_and_offers_reconnect() {
+        let failure = HarnessError::from_provider_stream(
+            "cli",
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+        );
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "claude"),
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&failure, "claude"),
+            Some("claude".into())
+        );
+    }
+
+    #[test]
     fn auth_failures_offer_the_right_recovery_path() {
         let failure = HarnessError::Api {
             status: 401,
@@ -8801,6 +8836,18 @@ mod tests {
         assert_eq!(
             format_turn_error(&internal),
             "The provider could not complete the request. Try again."
+        );
+    }
+
+    #[test]
+    fn a_claude_code_cli_error_is_shown_instead_of_try_again() {
+        let failure = HarnessError::from_provider_stream(
+            "claude_code",
+            "process exited with exit status: 1: Rate limit reached",
+        );
+        assert_eq!(
+            format_turn_error(&failure),
+            "process exited with exit status: 1: Rate limit reached"
         );
     }
 

@@ -81,6 +81,7 @@ import {
   modelPickerHasChoices,
   type EffortId,
 } from "@/lib/models";
+import type { SendTurnRequest } from "@/lib/sendTurn";
 import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
@@ -165,7 +166,7 @@ type Props = {
   model: string;
   effort: EffortId;
   onDraftChange: (value: string) => void;
-  onSend: (text?: string) => void;
+  onSend: (request?: SendTurnRequest) => void;
   onEditMessage: (messageId: string, text: string) => Promise<void>;
   onStop?: () => void;
   onNewChat: () => void;
@@ -280,7 +281,7 @@ type ChatMessageRowProps = {
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
   onOpenProviderSwitch?: () => void;
-  onSend: (text?: string) => void;
+  onSend: (request?: SendTurnRequest) => void;
   editing: boolean;
   editingText: string;
   editingBusy: boolean;
@@ -513,7 +514,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const submitQuestion = structuredQuestion?.questionId
     ? (answer: string) =>
         onResolveQuestion(structuredQuestion.questionId as string, answer)
-    : onSend;
+    : (answer: string) => onSend({ origin: "answer", text: answer });
 
   return (
     <MessageScrollerItem
@@ -1972,7 +1973,7 @@ export function ChatScreen({
                 setModelPickerOpen(true);
                 return;
               }
-              onSend(text);
+              onSend({ origin: "composer", text });
             }}
             onStop={onStop}
             onModelChange={onModelChange}

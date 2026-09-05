@@ -28,7 +28,7 @@ blake3 = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-notification = "2"
 zest-plugin-api = { path = "../plugin-api" }
 dirs = { workspace = true }

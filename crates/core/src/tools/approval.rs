@@ -141,8 +141,14 @@ pub enum PolicyOutcome {
 pub struct ApprovalPolicy {
     mode: ApprovalMode,
     /// `(tool_name, target)` pairs the user has trusted for this session.
+    /// Target `"*"` means every invocation of that tool.
     trusted: std::collections::HashSet<(String, String)>,
 }
+
+/// Session grant that covers every target for a tool. Used when the user
+/// clicked "Allow for session" on a command-class Claude tool (Read, Bash,
+/// WebFetch) — the next card is the same tool with a different string.
+const ANY_TARGET: &str = "*";
 
 impl ApprovalPolicy {
     pub fn new(mode: ApprovalMode) -> Self {
@@ -173,9 +179,16 @@ impl ApprovalPolicy {
             .insert((tool_name.to_string(), target.to_string()));
     }
 
+    pub fn trust_tool(&mut self, tool_name: &str) {
+        self.trust(tool_name, ANY_TARGET);
+    }
+
     pub fn is_trusted(&self, tool_name: &str, target: &str) -> bool {
         self.trusted
             .contains(&(tool_name.to_string(), target.to_string()))
+            || self
+                .trusted
+                .contains(&(tool_name.to_string(), ANY_TARGET.to_string()))
     }
 
     /// Decide what happens to a gated call before a human sees it.
@@ -437,6 +450,24 @@ mod characterization {
         // Nor does it leak across tools.
         assert_eq!(
             policy.decide("write_file", "npm install", ToolRisk::Write, false),
+            PolicyOutcome::Ask
+        );
+    }
+
+    #[test]
+    fn a_tool_wide_session_grant_covers_every_string() {
+        let mut policy = ApprovalPolicy::new(ApprovalMode::Manual);
+        policy.trust_tool("Read");
+        assert_eq!(
+            policy.decide("Read", "C:\\\\temp\\\\a.png", ToolRisk::Sensitive, false),
+            PolicyOutcome::Allow
+        );
+        assert_eq!(
+            policy.decide("Read", "C:\\\\temp\\\\b.png", ToolRisk::Sensitive, false),
+            PolicyOutcome::Allow
+        );
+        assert_eq!(
+            policy.decide("Bash", "echo hi", ToolRisk::Exec, false),
             PolicyOutcome::Ask
         );
     }
