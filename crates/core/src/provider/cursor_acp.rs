@@ -347,6 +347,9 @@ impl Provider for CursorAcpProvider {
 #[derive(Default)]
 struct TurnState {
     text: String,
+    /// Tool-call titles by id. Cursor names a call once, then sends status-only
+    /// updates for it, so the name has to be held here to survive them.
+    titles: std::collections::HashMap<String, String>,
 }
 
 /// Send one request and pump everything that arrives until its response does.
@@ -435,21 +438,35 @@ fn absorb_notification(
         Some("tool_call") | Some("tool_call_update") => {
             // Provider-owned activity: Cursor runs these itself, and the id is
             // what ties a later update to the row already on screen.
-            let id = update
+            let Some(id) = update
                 .get("toolCallId")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
-            let title = update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("Working");
+                .filter(|id| !id.is_empty())
+            else {
+                return;
+            };
+            // Only the opening `tool_call` names the call; its updates usually
+            // carry a status and nothing else. The desktop upserts by id and
+            // takes whatever title arrives, so sending a placeholder overwrote
+            // the real one — fourteen rows all reading "Working". Remember the
+            // name instead and repeat it.
+            if let Some(title) = update.get("title").and_then(Value::as_str) {
+                if !title.trim().is_empty() {
+                    state.titles.insert(id.to_string(), title.to_string());
+                }
+            }
             let status = update
                 .get("status")
                 .and_then(Value::as_str)
                 .unwrap_or("in_progress");
-            if !id.is_empty() {
-                on_event(StreamEvent::ProviderActivity { id, title, status });
-            }
+            let title = state
+                .titles
+                .get(id)
+                .map(String::as_str)
+                // Only reachable when an update arrives before any `tool_call`
+                // named the row, which Cursor has not been observed doing.
+                .unwrap_or("Working");
+            on_event(StreamEvent::ProviderActivity { id, title, status });
         }
         _ => {}
     }
@@ -924,6 +941,68 @@ mod tests {
             host.prepared.lock().unwrap().as_slice(),
             std::slice::from_ref(id)
         );
+    }
+
+    #[test]
+    fn a_status_only_update_keeps_the_name_the_tool_call_gave_it() {
+        let mut state = TurnState::default();
+        let mut rows = Vec::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::ProviderActivity { title, status, .. } = event {
+                rows.push(format!("{title}|{status}"));
+            }
+        };
+        let call = json!({"update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-1",
+            "title": "`ls -la`",
+            "status": "pending"
+        }});
+        // Cursor names a call once and then sends status-only updates. The
+        // desktop upserts by id and takes whatever title arrives, so emitting a
+        // placeholder turned every row into "Working".
+        let progress = json!({"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-1",
+            "status": "in_progress"
+        }});
+        let done = json!({"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-1",
+            "status": "completed"
+        }});
+        for update in [&call, &progress, &done] {
+            absorb_notification("session/update", Some(update), &mut state, &mut sink);
+        }
+        assert_eq!(
+            rows,
+            vec![
+                "`ls -la`|pending",
+                "`ls -la`|in_progress",
+                "`ls -la`|completed"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_later_title_replaces_the_earlier_one() {
+        // Cursor does re-title a call once its input is known — `Find` becomes
+        // ``Find `README*```. A remembered name must not freeze the first one.
+        let mut state = TurnState::default();
+        let mut rows = Vec::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::ProviderActivity { title, .. } = event {
+                rows.push(title.to_string());
+            }
+        };
+        for update in [
+            json!({"update": {"sessionUpdate": "tool_call", "toolCallId": "c", "title": "Find", "status": "pending"}}),
+            json!({"update": {"sessionUpdate": "tool_call_update", "toolCallId": "c", "title": "Find `README*`"}}),
+            json!({"update": {"sessionUpdate": "tool_call_update", "toolCallId": "c", "status": "completed"}}),
+        ] {
+            absorb_notification("session/update", Some(&update), &mut state, &mut sink);
+        }
+        assert_eq!(rows, vec!["Find", "Find `README*`", "Find `README*`"]);
     }
 
     #[test]

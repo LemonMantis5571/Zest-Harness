@@ -272,6 +272,8 @@ type ChatMessageRowProps = {
   isLast: boolean;
   sending: boolean;
   approvalMode: ApprovalMode;
+  /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
+  providerLabel: string;
   isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
   onResolveApproval: (
@@ -365,14 +367,17 @@ function MessageEditForm({
 
 function ProviderActivityTrace({
   activities,
+  providerLabel,
 }: {
   activities: ProviderActivityPart[];
+  /** Whose loop ran these. Hard-coding one vendor mislabelled every other. */
+  providerLabel: string;
 }) {
   if (activities.length === 0) return null;
   return (
     <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground" aria-label="Provider activity">
       <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
-        Claude Code
+        {providerLabel}
       </div>
       {activities.map((activity) => {
         const icon =
@@ -407,6 +412,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   isLast,
   sending,
   approvalMode,
+  providerLabel,
   isPlanToBuild = false,
   onBuildPlan,
   onResolveApproval,
@@ -552,7 +558,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
           ) : null}
 
           {msg.providerActivity ? (
-            <ProviderActivityTrace activities={msg.providerActivity} />
+            <ProviderActivityTrace
+              activities={msg.providerActivity}
+              providerLabel={providerLabel}
+            />
           ) : null}
 
           {msg.thinking ? (
@@ -1840,6 +1849,7 @@ export function ChatScreen({
                         isLast={isLast}
                         sending={sending}
                         approvalMode={approvalMode}
+                        providerLabel={providerLabel}
                         isPlanToBuild={planToBuild === msg.id}
                         onBuildPlan={onBuildPlan}
                         onResolveApproval={onResolveApproval}
