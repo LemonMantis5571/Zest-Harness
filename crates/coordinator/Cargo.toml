@@ -14,7 +14,7 @@ blake3 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-ts-rs = { version = "11", default-features = true, optional = true }
+ts-rs = { version = "12", default-features = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

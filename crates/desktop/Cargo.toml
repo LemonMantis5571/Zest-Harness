@@ -33,7 +33,7 @@ tauri-plugin-notification = "2"
 zest-plugin-api = { path = "../plugin-api" }
 dirs = { workspace = true }
 tokio = { workspace = true }
-ts-rs = { version = "11", default-features = true, optional = true }
+ts-rs = { version = "12", default-features = true, optional = true }
 pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "main" }
 rfd = "0.15"
 base64 = "0.23"
