@@ -773,9 +773,8 @@ function CodeBlock({
   const source = code ?? ""
   const resolvedLanguage = resolveCodeBlockLanguage(language)
 
-  /* The deferred copy is what a fast stream tokenises against. React keeps the
-     previous render on screen while the new one is prepared, so the block never
-     blanks and the main thread is never blocked by a chunk. */
+  /* Deferring keeps urgent input ahead of rendering; tokenization itself is
+     synchronous, so the effect below also coalesces growing stream chunks. */
   const deferredSource = useDeferredValue(source)
 
   const plainLines = useMemo(
@@ -856,21 +855,29 @@ function CodeBlock({
     }
 
     let active = true
-    void highlightCode(deferredSource, {
-      language,
-      instanceKey: contentId,
-      ...highlightOptions,
-      transformers,
-    }).then((next) => {
-      if (active) {
-        setHighlighted({ source: deferredSource, spec: specKey, lines: next })
-      }
-    }).catch((error: unknown) => {
-      ignoreExpectedFailure(error, "highlight code block")
-    })
+    const run = () => {
+      if (!active) return
+      void highlightCode(deferredSource, {
+        language,
+        instanceKey: contentId,
+        ...highlightOptions,
+        transformers,
+      }).then((next) => {
+        if (active) {
+          setHighlighted({ source: deferredSource, spec: specKey, lines: next })
+        }
+      }).catch((error: unknown) => {
+        ignoreExpectedFailure(error, "highlight code block")
+      })
+    }
+    // Readable plain text is already rendered. Avoid tokenizing every prefix
+    // of a growing fence; a pause or completion gives it a single grammar pass.
+    const timer = streaming ? setTimeout(run, 150) : undefined
+    if (!streaming) run()
 
     return () => {
       active = false
+      clearTimeout(timer)
     }
   }, [
     contentId,
@@ -879,6 +886,7 @@ function CodeBlock({
     language,
     shouldHighlight,
     specKey,
+    streaming,
     transformers,
   ])
 
@@ -898,8 +906,11 @@ function CodeBlock({
     ) {
       return plainLines
     }
-    if (highlighted.lines.length >= plainLines.length) return highlighted.lines
-    return [...highlighted.lines, ...plainLines.slice(highlighted.lines.length)]
+    if (highlighted.source === deferredSource) return highlighted.lines
+    // The last highlighted line may still be growing. Always render that tail
+    // from current text while waiting, even when no new newline has arrived.
+    const settledLines = Math.max(0, highlighted.lines.length - 1)
+    return [...highlighted.lines.slice(0, settledLines), ...plainLines.slice(settledLines)]
   }, [
     linesProp,
     shouldHighlight,

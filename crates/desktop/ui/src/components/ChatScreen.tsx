@@ -49,6 +49,7 @@ import { ToolCallRow } from "@/components/ToolCallRow";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { ThinkingReasoning } from "@/components/ThinkingReasoning";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
+import { visibleInterval } from "@/lib/visibleInterval";
 import {
   Attachment,
   AttachmentContent,
@@ -1160,10 +1161,10 @@ export function ChatScreen({
         // The last rendered snapshot stays visible when Git is temporarily unavailable.
       }
     };
-    const interval = window.setInterval(tick, 2500);
+    const stopPolling = visibleInterval(document, () => void tick(), 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      stopPolling();
     };
   }, [branchTarget, refreshWorkspaceChanges, openBranchChangeId]);
 
