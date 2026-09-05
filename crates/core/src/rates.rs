@@ -220,13 +220,10 @@ pub async fn refresh(force: bool) -> RateCatalog {
 ///
 /// Tests keep the static empty so occupancy arithmetic stays deterministic.
 pub fn published_context_window(model: &str) -> Option<u64> {
-    #[cfg(test)]
-    {
+    if cfg!(test) {
         let _ = model;
-        return None;
-    }
-    #[cfg(not(test))]
-    {
+        None
+    } else {
         let Ok(slot) = PUBLISHED_WINDOWS.read() else {
             return None;
         };
