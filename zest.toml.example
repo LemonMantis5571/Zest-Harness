@@ -115,6 +115,9 @@ timeout_secs = 120
 # `mode = "headless"` means this worker is an external CLI. It is not
 # `zest serve` and not `zest run --jsonl`.
 #
+# An ACP agent is trusted inside its worktree and never asked on the way, so
+# `workspace = "isolated"` is required: the diff is the review gate.
+#
 # [agents.gemini]
 # mode = "acp"
 # command = "gemini"

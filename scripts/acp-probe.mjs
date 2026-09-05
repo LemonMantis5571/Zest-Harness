@@ -51,7 +51,10 @@ const cwd = path.resolve(process.env.ZEST_ACP_CWD || root);
 // agent asks Zest to do the reading and writing. Mirroring that here is how we
 // find out whether Cursor takes the offer or keeps using its own tools.
 const clientFs = process.env.ZEST_ACP_CLIENT_FS === "1";
-const allow = process.env.ZEST_ACP_ALLOW === "1";
+// "1" answers allow-once, "always" answers allow-always — the difference
+// decides whether a worker asks once per session or once per command.
+const allowMode = process.env.ZEST_ACP_ALLOW || "";
+const allow = allowMode === "1" || allowMode === "always";
 const attemptLogin = process.env.ZEST_ACP_LOGIN === "1";
 const budgetMs = Number(process.env.ZEST_ACP_TIMEOUT_MS || 120_000);
 const prompt =
@@ -74,6 +77,7 @@ const seen = {
   serverRequests: new Set(),
   updateKinds: new Set(),
   permissionOptions: new Set(),
+  answered: [],
   errors: [],
 };
 
@@ -190,11 +194,13 @@ function permissionResult(params) {
     const id = optionIdOf(option);
     if (id) seen.permissionOptions.add(id);
   }
+  const preferred = allowMode === "always" ? "allow-always" : allow ? "allow-once" : "reject-once";
   const wanted = allow ? "allow" : "reject";
   const match =
-    options.find((option) => optionIdOf(option)?.startsWith(`${wanted}-once`)) ??
+    options.find((option) => optionIdOf(option) === preferred) ??
     options.find((option) => optionIdOf(option)?.startsWith(wanted));
-  const optionId = optionIdOf(match) ?? (allow ? "allow-once" : "reject-once");
+  const optionId = optionIdOf(match) ?? preferred;
+  seen.answered.push(optionId);
   // Documented as an outcome envelope; if the agent rejects this body the error
   // it returns tells us the real field names, which is the point of the probe.
   return { outcome: { outcome: "selected", optionId } };
@@ -405,7 +411,7 @@ await new Promise((resolve) => transcript.end(resolve));
 // --- what we learned -------------------------------------------------------
 
 const list = (set) => (set.size ? [...set].sort().join(", ") : "(none observed)");
-const permissions = allow ? "allow-once" : "refused";
+const permissions = allow ? (allowMode === "always" ? "allow-always" : "allow-once") : "refused";
 console.log(`acp probe: transcript ${path.relative(root, transcriptPath)}`);
 console.log(`  cwd                  ${cwd}`);
 console.log(`  mode requested       ${mode} (permissions: ${permissions}, client fs: ${clientFs})`);
@@ -413,6 +419,7 @@ console.log(`  server requests      ${list(seen.serverRequests)}`);
 console.log(`  server notifications ${list(seen.serverNotifications)}`);
 console.log(`  session/update kinds ${list(seen.updateKinds)}`);
 console.log(`  permission options   ${list(seen.permissionOptions)}`);
+console.log(`  permission requests  ${seen.answered.length} -> ${seen.answered.join(", ") || "(none)"}`);
 if (seen.errors.length > 0) {
   console.log("  errors");
   for (const error of seen.errors) console.log(`    - ${error}`);
