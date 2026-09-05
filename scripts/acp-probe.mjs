@@ -325,10 +325,39 @@ if (failed("session/new", session) || !sessionId) {
   }
 }
 
-child.stdin.end();
-await Promise.race([new Promise((resolve) => child.once("exit", resolve)), timeout(5_000)]);
-if (child.exitCode === null) child.kill();
-transcript.end();
+/**
+ * Stop the agent, including anything it spawned.
+ *
+ * On Windows the `.cmd` shim means our child is `cmd.exe`, and the real agent
+ * is its grandchild: `child.kill()` reaps the wrapper and leaves the agent
+ * holding the stdout pipe, which both orphans a process per run and keeps our
+ * own event loop alive forever. `taskkill /t` is what actually ends the tree.
+ */
+async function stopAgent() {
+  child.stdin.end();
+  const exited = await Promise.race([
+    new Promise((resolve) => child.once("exit", () => resolve(true))),
+    timeout(5_000).then(() => false),
+  ]);
+  if (exited) return;
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    await new Promise((resolve) => {
+      killer.once("exit", resolve);
+      killer.once("error", resolve);
+    });
+  } else {
+    child.kill("SIGKILL");
+  }
+}
+
+await stopAgent();
+// Flush before exiting: the transcript is the whole point of a run, and an
+// unflushed tail is exactly the part that describes how the run ended.
+await new Promise((resolve) => transcript.end(resolve));
 
 // --- what we learned -------------------------------------------------------
 
@@ -344,3 +373,6 @@ if (seen.errors.length > 0) {
   console.log("  errors");
   for (const error of seen.errors) console.log(`    - ${error}`);
 }
+
+// An agent that survived the kill would keep stdout open and hold the loop.
+process.exit(0);
