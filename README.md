@@ -9,42 +9,17 @@
 [![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest-Harness?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest-Harness/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**A local-first coding harness for agent orchestration, with explicit delegation.**
+**A local-first coding workspace for your preferred AI providers.**
 
-Keep the parent session on one provider. Hand bounded work to a worker. Review the result in a fresh workspace.
+Work on a repository, review changes, and delegate scoped tasks to separate workers when you need them.
 
 [Install the beta](https://github.com/LemonMantis5571/Zest-Harness/releases) · [Build from source](#build-from-source) · [Docs](#docs)
 
-<img src="./crates/desktop/ui/src/assets/hero.png" alt="Zest desktop with project sidebar, composer, and parent session" width="880" />
+<img src="./docs/images/first-task.png" alt="Zest showing a completed conversation beside the branch diff" width="880" />
+
+*Offline demo with synthetic conversation and changes.*
 
 </div>
-
-## What Zest is
-
-Zest is a coding harness. The parent session stays with the provider you picked. It reads the project, runs the agent loop, and keeps that transcript recoverable. Desktop and terminal share the same core.
-
-When a task belongs elsewhere, Zest writes a feature card and the coordinator runs it.
-
-## Delegation
-
-A feature card holds objective, scope, selected context, dependencies, acceptance checks, worker target, and reviewer target. The coordinator owns that card, the queue, retries, and apply.
-
-Two lanes share those records:
-
-- **Native provider workers** run through Zest's own provider runtime.
-- **External workers** run through a configured ACP session or a signed-in CLI.
-
-The parent conversation stays with its provider. External CLIs keep their own credentials and sessions. Review happens in a fresh workspace. A validated review report makes a job ready to apply.
-
-A VM or editor host runs [`zest serve`](docs/SERVE.md) as the coordinator without a display.
-
-Delegation is opt-in. Set the worker and reviewer on the card.
-
-## Local-first
-
-Config lives at `~/.zest`. Provider credentials use the OS credential manager when available. Usage is recorded per provider.
-
-The parent can be a native API, an OpenAI-compatible endpoint, or an authenticated coding CLI. Optional plugins install as separate processes. See [Plugins](docs/PLUGINS.md) and [quota](docs/QUOTA.md).
 
 ## Install the beta
 
@@ -57,12 +32,58 @@ Packages live on [GitHub Releases](https://github.com/LemonMantis5571/Zest-Harne
 
 Each release includes `SHA256SUMS` and third-party notices.
 
-### First session
+## Your first task
 
-1. Launch Zest.
-2. Choose a parent provider in **Settings**.
-3. Open a project folder.
-4. Work in the parent session, or create a feature card and delegate.
+1. Launch Zest and use **Choose a provider** to connect an existing sign-in or API key.
+2. Open your repository with **Open** beside **Project folder**.
+3. Continue into the chat and try:
+
+   > Explain this repository and suggest one small improvement. Do not change files yet.
+
+4. Once you understand the suggestion, ask Zest to implement it. Respond to any
+   approval requests, then open the branch changes bar above the composer to
+   review the diff. Ask it to run the relevant tests before you keep the change.
+
+See [Getting started](docs/GETTING_STARTED.md) for connection choices, an example
+workflow, and help with setup.
+
+## Choose your connection
+
+| Connection | What you bring |
+| --- | --- |
+| Coding CLI | An installed, supported CLI and its existing sign-in |
+| Native API | Your provider's API credentials |
+| OpenAI-compatible endpoint | A base URL, model ID, and credentials required by that endpoint |
+
+The model control in the composer selects from your connected providers. Your
+main conversation stays with its selected provider; delegation is optional.
+Desktop and terminal share the same core and recoverable conversations.
+
+## Delegate a scoped task
+
+Use a **feature card** when you want a separate worker to handle part of the
+project. Give it an objective, scope, selected context and acceptance checks,
+then select a worker and reviewer. The coordinator manages the queue and retries.
+
+- **Native provider workers** run through Zest's provider runtime.
+- **External workers** use a configured ACP session or a signed-in CLI, keeping
+  their own credentials and sessions.
+
+Review happens in a fresh workspace. A validated review report makes a job ready
+to apply. Your main conversation stays with its provider.
+
+A VM or editor host can run [`zest serve`](docs/SERVE.md) as the coordinator
+without a display.
+
+## Local-first
+
+Config lives at `~/.zest`. Provider credentials use the OS credential manager
+when available, and usage is recorded per provider. Requests and selected
+context are sent to the provider you connect; local-first does not mean every
+model runs on your machine.
+
+Optional plugins install as separate processes. See [Plugins](docs/PLUGINS.md)
+and [provider quota](docs/QUOTA.md).
 
 ## Build from source
 
@@ -83,6 +104,7 @@ Writes, commands, and delegated jobs are gated before they run. An approved comm
 
 ## Docs
 
+- [Getting started](docs/GETTING_STARTED.md). Connect a provider and complete your first task.
 - [Plugins](docs/PLUGINS.md). Install, build, protocol, and review standard.
 - [Skills](docs/SKILLS.md). Personal skills and install locations.
 - [MCP servers](docs/MCP.md). Outbound servers the parent chat can call.
