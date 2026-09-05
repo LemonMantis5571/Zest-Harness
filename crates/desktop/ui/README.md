@@ -16,10 +16,31 @@ npm run desktop:dev   # Tauri + Vite HMR
 npm run ui:dev        # browser-only UI preview; Tauri APIs are unavailable
 ```
 
-For a reproducible checkout, use `npm ci` from the repository root. A full
-source-build and installer walkthrough is in [`README.md`](../../../README.md).
+For a reproducible checkout, use `npm ci` from the repository root. Toolchains,
+source builds and verification are documented in
+[`CONTRIBUTING.md`](../../../CONTRIBUTING.md).
 
 From this directory: `npm run build` / `npm test` / `npm run lint`.
+
+## Browser regression tests
+
+After `npm ci`, install the test browser once with
+`npm exec -w ui -- playwright install chromium`. From the repository root, run
+`npm run test:e2e -w ui`. Playwright starts Vite on port 1420 (or uses an existing
+local dev server). Tests use synthetic fixture data and do not call live providers.
+Traces and screenshots for failures are written to `test-results/`.
+
+The growing-code benchmark is opt-in. In PowerShell:
+
+```powershell
+$env:ZEST_PERF = "1"
+npm run test:e2e -w ui -- streaming-performance.spec.ts --workers=1
+Remove-Item Env:ZEST_PERF
+```
+
+In Bash, prefix the command with `ZEST_PERF=1`. The report contains five runs
+each at 20 and 100 KiB, with 40 updates at a requested 25 ms cadence. These are
+browser development-build measurements, not native release performance guarantees.
 
 ## Layout notes
 

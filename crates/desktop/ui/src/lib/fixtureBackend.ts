@@ -53,6 +53,16 @@ const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
   supportsTools: true,
   supportsVision: false,
 }));
+const CATALOGUE_MODELS = [
+  ...FIXTURE_MODELS,
+  ...Array.from({ length: 54 }, (_, index) => ({
+    id: `research-model-${String(index + 1).padStart(2, "0")}-with-a-long-descriptive-name`,
+    efforts: index === 0 ? [] : ["low", "high"],
+    contextWindow: index === 0 ? 0 : 128_000,
+    supportsTools: index !== 0,
+    supportsVision: index === 1,
+  })),
+];
 const FIXTURE_ARTWORK_DATA_URL =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%235e6ad2'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='96' height='96' rx='16' fill='url(%23g)'/%3E%3Ccircle cx='48' cy='48' r='22' fill='%23010102' opacity='.8'/%3E%3Ccircle cx='48' cy='48' r='7' fill='%23f4f4f5'/%3E%3C/svg%3E";
 /** One stand-in per look, so the fixture UI shows a real difference. */
@@ -137,7 +147,8 @@ function longThreadMessages(): ChatMessage[] {
 
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
-export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error";
+export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -149,7 +160,8 @@ function scenarioFromLocation(): FixtureScenario | undefined {
   return value === "approval" ||
     value === "question" ||
     value === "cancel" ||
-    value === "tool-error"
+    value === "tool-error" || value === "options-delayed" ||
+    value === "options-failing" || value === "provider-picker" || value === "model-catalogue"
     ? value
     : undefined;
 }
@@ -165,6 +177,19 @@ type FixturePendingScenario = {
 
 export function createFixtureBackend(options: FixtureBackendOptions = {}): DesktopBackend {
   const scenario = options.scenario ?? scenarioFromLocation();
+  const safetyScenario = scenario === "approval" || scenario === "question" ||
+    scenario === "cancel" || scenario === "tool-error";
+  let optionAttempts = 0;
+  let sessionAttempts = 0;
+  const sessionModels = scenario === "model-catalogue" ? CATALOGUE_MODELS : FIXTURE_MODELS;
+  async function saveFixtureOptions() {
+    if (scenario === "options-delayed" || scenario === "options-failing") {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      if (scenario === "options-failing" && optionAttempts++ === 0) {
+        throw new Error("Fixture could not save selection. Try again.");
+      }
+    }
+  }
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
@@ -584,7 +609,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   }
 
   return {
-    mode: "fixture",
+    // Exercise normal onboarding with entirely synthetic I/O in this dev-only module.
+    mode: scenario === "provider-picker" || scenario === "model-catalogue" ? "tauri" : "fixture",
     async listExternalAgents() {
       return [
         {
@@ -705,8 +731,38 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           configured: true,
           ownsAgentLoop: false,
           defaultModel: DEFAULT_CODEX_MODEL,
-          models: FIXTURE_MODELS,
+          models: sessionModels,
         },
+        ...(scenario === "provider-picker" || scenario === "model-catalogue" ? [
+          {
+            id: "fixture-research",
+            label: "Research provider with a long descriptive organization name",
+            method: "offline",
+            statusKind: "ready" as const,
+            statusLabel: "Ready",
+            detail: "Synthetic research catalogue",
+            selectable: true,
+            canConnect: false,
+            configured: true,
+            ownsAgentLoop: false,
+            defaultModel: "research-vision",
+            models: [{ id: "research-vision", efforts: [], contextWindow: 1_000_000, supportsTools: true, supportsVision: true }],
+          },
+          {
+            id: "fixture-unconfigured",
+            label: "Unconfigured fixture",
+            method: "offline",
+            statusKind: "unconfigured" as const,
+            statusLabel: "Configure",
+            detail: "Synthetic unavailable provider",
+            selectable: false,
+            canConnect: false,
+            configured: false,
+            ownsAgentLoop: false,
+            defaultModel: "",
+            models: [],
+          },
+        ] : []),
       ];
     },
     async usageSnapshot() {
@@ -1158,9 +1214,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       /* fixture: no child process to stop */
     },
     async startSession() {
+      if (scenario === "provider-picker" && sessionAttempts++ === 0) {
+        throw new Error("Fixture session requires provider selection.");
+      }
       clearFixtureScenario();
       fixturePinned = false;
-      session = { ...FIXTURE_SESSION, messages: [] };
+      session = { ...FIXTURE_SESSION, models: sessionModels, messages: [] };
       return { ...session };
     },
     async switchSessionProvider(providerId, model) {
@@ -1174,6 +1233,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return { ...session };
     },
     async updateSessionOptions(options) {
+      await saveFixtureOptions();
       session = {
         ...session,
         model: options.model ?? session.model,
@@ -1185,6 +1245,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return meta;
     },
     async resetSessionOptions() {
+      await saveFixtureOptions();
       session = {
         ...session,
         model: session.defaultModel ?? DEFAULT_CODEX_MODEL,
@@ -1540,7 +1601,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         });
         return;
       }
-      if (scenario) {
+      if (safetyScenario) {
         startFixtureScenario(text, attachments);
         return;
       }
@@ -1594,7 +1655,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         thread_id: session.threadId,
         input_id: input.id,
       });
-      if (scenario) {
+      if (safetyScenario) {
         startFixtureScenario(input.text, input.attachments);
       } else {
         emitFixtureEcho(input.text, input.attachments);
@@ -2029,7 +2090,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async boot(handler) {
       chatHandlerGeneration += 1;
       chatHandler = handler;
-      await runFixtureStream(handler);
+      if (!scenario || safetyScenario) await runFixtureStream(handler);
     },
   };
 }
