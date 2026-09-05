@@ -105,14 +105,17 @@ pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
             "gemini-2.5-pro",
             "gemini-2.5-flash",
         ],
-        // Cursor resolves a short name to its own parameterized id — passing
-        // `composer-2.5` comes back from `session/new` as
-        // `composer-2.5[fast=true]` — so the short names are what belongs here.
+        // A worker has no effort axis, so these are Cursor's flat ids with the
+        // effort suffix already on them — what `--model` takes verbatim. It is
+        // a starting shortlist, not the catalogue: `cursor-agent models` prints
+        // over two hundred, and any of them can be written into zest.toml.
+        // The *provider* never uses this list; it discovers instead.
         "cursor" => &[
             "composer-2.5",
-            "claude-opus-5",
-            "claude-sonnet-4-5",
-            "gpt-5.6-sol",
+            "cursor-grok-4.6-high",
+            "claude-opus-5-thinking-high",
+            "claude-sonnet-5-thinking-high",
+            "gpt-5.6-sol-high",
             "gemini-3.1-pro",
         ],
         _ => &[],
@@ -1050,6 +1053,37 @@ mod tests {
         input.args.push("{prompt}".into());
         let error = upsert_external_agent(&path, &input).unwrap_err();
         assert!(error.contains("over stdio"));
+    }
+
+    #[test]
+    fn enabling_cursor_writes_no_model_allow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        let input = CursorProviderInput {
+            id: "cursor".into(),
+            command: "cursor-agent".into(),
+            model: "composer-2.5".into(),
+            models: Vec::new(),
+            allow_mcp: false,
+            mode: CursorMode::Agent,
+            timeout_secs: 900,
+        };
+        add_cursor_provider(&path, &input).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        // An allow-list is taken literally and suppresses discovery, so writing
+        // one here would pin the picker to whatever was hard-coded that day.
+        assert!(!written.contains("models"), "{written}");
+        assert!(written.contains("mode = \"agent\""), "{written}");
+
+        // A stale list from an older build is cleared rather than preserved.
+        let stale = CursorProviderInput {
+            models: vec!["composer-2.5".into(), "gpt-5.6-sol".into()],
+            ..input.clone()
+        };
+        add_cursor_provider(&path, &stale).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("models"));
+        add_cursor_provider(&path, &input).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("models"));
     }
 
     #[test]

@@ -2727,10 +2727,12 @@ fn configure_cursor_provider(
             id,
             command: "cursor-agent".into(),
             model,
-            models: zest_core::config_edit::external_agent_model_options("cursor")
-                .iter()
-                .map(|model| (*model).to_string())
-                .collect(),
+            // Empty on purpose, and `add_cursor_provider` removes any stale key
+            // it finds. A written-out list is an allow-list: it is taken
+            // literally and suppresses discovery, so enabling Cursor used to
+            // pin whichever five models happened to be hard-coded here and hide
+            // every other one the account owns.
+            models: Vec::new(),
             allow_mcp: false,
             // `agent` on purpose, and the reason is worth stating where someone
             // enabling this will read it: Cursor never asks before editing a
