@@ -33,9 +33,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::cursor_models;
 use super::session::JsonlProcess;
 use super::{
-    catalogue, Completion, EffortPolicy, ModelSpec, Provider, ProviderCommandRequest,
+    context_window_for_model, Completion, ModelSpec, Provider, ProviderCommandRequest,
     ProviderInteractionHost, ProviderQuestionRequest, StreamEvent, SystemPrompt, TurnRequest,
 };
 use crate::anthropic::types::Usage;
@@ -57,18 +58,50 @@ const PROTOCOL_VERSION: u64 = 1;
 /// for Auto, which is what `session/new` reports on a fresh session.
 pub const DEFAULT_CURSOR_MODEL: &str = "composer-2.5";
 
-/// Models Cursor accepts without discovery.
+/// What the catalogue offers, shared with the driver so the picker and the live
+/// provider cannot disagree about which models exist.
 ///
-/// Short names on purpose: Cursor resolves `composer-2.5` to its parameterized
-/// id `composer-2.5[fast=true]`, so the short form is the stable thing to
-/// configure and the one its `--model` flag documents.
-pub(crate) const BUILTIN_MODELS: &[&str] = &[
-    "composer-2.5",
-    "claude-opus-5",
-    "claude-sonnet-4-5",
-    "gpt-5.6-sol",
-    "gemini-3.1-pro",
-];
+/// An explicit `models` allow-list in `zest.toml` wins; otherwise the account's
+/// own catalogue is discovered from the CLI and cached. A hand-written list is
+/// wrong for everyone but its author — see [`cursor_models`].
+pub(crate) fn model_catalogue(
+    command: &str,
+    default_model: &str,
+    configured: &[String],
+) -> Vec<ModelSpec> {
+    let mut models = if configured.is_empty() {
+        cursor_models::catalogue(command)
+    } else {
+        configured
+            .iter()
+            .map(|id| ModelSpec {
+                context_window: context_window_for_model(id),
+                id: id.clone(),
+                // Cursor bakes effort into the flat id, so a hand-pinned entry
+                // is taken exactly as written rather than being offered a
+                // ladder that would be appended to a name that already has one.
+                efforts: Vec::new(),
+                supports_tools: true,
+                supports_vision: true,
+            })
+            .collect()
+    };
+    // A configured default the catalogue rejects is a startup failure, so it is
+    // always present and always first.
+    if !models.iter().any(|model| model.id == default_model) {
+        models.insert(
+            0,
+            ModelSpec {
+                context_window: context_window_for_model(default_model),
+                id: default_model.to_string(),
+                efforts: Vec::new(),
+                supports_tools: true,
+                supports_vision: true,
+            },
+        );
+    }
+    models
+}
 
 pub struct CursorAcpProvider {
     id: String,
@@ -109,8 +142,8 @@ impl CursorAcpProvider {
         Ok(Self {
             id: id.into(),
             root: root.into(),
+            models: model_catalogue(&command, &default_model, &models),
             command,
-            models: model_catalogue(&default_model, &models),
             default_model,
             allow_mcp,
             mode,
@@ -123,15 +156,20 @@ impl CursorAcpProvider {
         Duration::from_secs(self.timeout_secs.max(1))
     }
 
-    async fn spawn(&self, model: &str) -> Result<JsonlProcess> {
+    async fn spawn(&self, model: &str, effort: Option<&str>) -> Result<JsonlProcess> {
         // Cursor reads its options *before* the subcommand, the way its own
         // docs write `agent --api-key "$KEY" acp`. The model is pinned here
         // because ACP has no per-session model parameter: `session/new`
         // reports the model back, it does not accept one.
+        //
+        // Effort is folded back into the id: Cursor spells it as a suffix
+        // (`cursor-grok-4.6-high`), and the catalogue split it off so Zest's
+        // own effort selector could drive it.
         let mut args = Vec::new();
-        if !model.trim().is_empty() {
+        let wire = cursor_models::wire_model(model.trim(), effort);
+        if !wire.is_empty() {
             args.push("--model".to_string());
-            args.push(model.to_string());
+            args.push(wire);
         }
         args.push("acp".to_string());
 
@@ -156,7 +194,7 @@ impl CursorAcpProvider {
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
-        let mut process = self.spawn(&req.model).await?;
+        let mut process = self.spawn(&req.model, req.effort.as_deref()).await?;
         let mut next_id = 1_u64;
         let mut state = TurnState::default();
 
@@ -303,23 +341,6 @@ impl Provider for CursorAcpProvider {
     ) -> Result<Completion> {
         self.run_turn(req, on_event).await
     }
-}
-
-/// What the catalogue offers, shared by the driver so the picker and the live
-/// provider cannot disagree about which models exist.
-pub(crate) fn model_catalogue(default_model: &str, configured: &[String]) -> Vec<ModelSpec> {
-    catalogue(
-        default_model,
-        configured,
-        if configured.is_empty() {
-            BUILTIN_MODELS
-        } else {
-            &[]
-        },
-        // Cursor encodes effort inside the model id — `[effort=high]` — rather
-        // than as a separate parameter, so there is no effort axis to offer.
-        EffortPolicy::Standard(&[]),
-    )
 }
 
 #[derive(Default)]
@@ -626,13 +647,16 @@ mod tests {
     use super::*;
     use crate::anthropic::types::Message;
 
+    /// Always built with an explicit model list. An empty one would send
+    /// `model_catalogue` off to discover the real account catalogue, making the
+    /// test depend on whoever is signed in on the machine running it.
     fn provider() -> CursorAcpProvider {
         CursorAcpProvider::new(
             "cursor",
             std::env::temp_dir(),
             "cursor-agent",
             None,
-            Vec::new(),
+            vec!["composer-2.5".into(), "cursor-grok-4.6-high".into()],
             false,
             CursorMode::Agent,
             900,
@@ -646,14 +670,15 @@ mod tests {
     }
 
     #[test]
-    fn the_catalogue_offers_the_builtin_models_until_one_is_configured() {
-        let ids = provider()
-            .models()
-            .into_iter()
-            .map(|model| model.id)
-            .collect::<Vec<_>>();
-        assert!(ids.contains(&"composer-2.5".to_string()));
-        assert!(ids.contains(&"claude-opus-5".to_string()));
+    fn a_configured_list_is_taken_literally_and_offered_no_effort_ladder() {
+        // A hand-pinned id already carries its own effort suffix, so appending
+        // one would produce `cursor-grok-4.6-high-high`.
+        let models = provider().models();
+        let grok = models
+            .iter()
+            .find(|model| model.id == "cursor-grok-4.6-high")
+            .expect("configured id is offered verbatim");
+        assert!(grok.efforts.is_empty());
 
         let pinned = CursorAcpProvider::new(
             "cursor",

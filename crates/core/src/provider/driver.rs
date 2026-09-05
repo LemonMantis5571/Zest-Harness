@@ -343,14 +343,20 @@ struct CursorAcpDriver;
 
 impl CursorAcpDriver {
     fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
-        let ProviderConfig::CursorAcp { model, models, .. } = config else {
+        let ProviderConfig::CursorAcp {
+            command,
+            model,
+            models,
+            ..
+        } = config
+        else {
             unreachable!("driver_for routes only CursorAcp entries here");
         };
         let default_model = model
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| super::cursor_acp::DEFAULT_CURSOR_MODEL.to_string());
-        let catalogue = super::cursor_acp::model_catalogue(&default_model, models);
+        let catalogue = super::cursor_acp::model_catalogue(command, &default_model, models);
         (default_model, catalogue)
     }
 }

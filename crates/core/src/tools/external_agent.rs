@@ -1431,6 +1431,24 @@ pub fn prepare_external_command(command: &mut Command) {
     }
 }
 
+/// [`prepare_external_command`] for a blocking `std::process::Command`.
+///
+/// Model discovery is a short synchronous probe off the async path, so it needs
+/// the same Windows PATH repair without dragging in a tokio command.
+pub fn prepare_sync_external_command(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        if let Some(path) = effective_search_path() {
+            command.env("PATH", path);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
 /// Resolve a bare CLI name into something the platform can actually spawn.
 ///
 /// Windows resolves a bare program name through `CreateProcessW`, which only
