@@ -50,6 +50,8 @@ a replacement for the commit history.
 
 ### Fixed
 
+- Hovering a dash on the chat rail shows that turn's preview. The card used
+  viewport coordinates inside a translated wrapper, so it drew off-screen.
 - Reviewers that wrap the verdict in prose, a markdown fence, or code samples
   before the JSON still count as a parseable report. DeepSeek-style
   "here is JSON" replies no longer block apply when the object itself is valid.
