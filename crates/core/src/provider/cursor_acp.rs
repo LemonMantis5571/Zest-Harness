@@ -33,6 +33,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::claude_control::{preview_permission, remember_session_grant, Surface};
 use super::cursor_models;
 use super::session::JsonlProcess;
 use super::{
@@ -44,7 +45,7 @@ use crate::auth::{detect_cursor_cli, AuthStatus};
 use crate::config::CursorMode;
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
-use crate::tools::approval::ToolRisk;
+use crate::tools::approval::{ApprovalDecision, PolicyOutcome, ToolRisk};
 use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
@@ -479,13 +480,11 @@ async fn permission_result(
     on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
 ) -> Value {
     let tool_call = params.get("toolCall");
-    let approval_id = tool_call
-        .and_then(|call| call.get("toolCallId"))
-        .and_then(Value::as_str)
-        // Cursor's ids embed a newline, which is not something to carry into a
-        // card id that the desktop matches on.
-        .map(|id| id.replace(['\n', '\r'], " "))
-        .unwrap_or_else(|| new_id("provider-approval"));
+    // A fresh id per request rather than Cursor's own. Its `toolCallId` embeds a
+    // literal newline (`call-…-3\nfc_…_1`), and an id that has to survive the
+    // IPC round trip to match a waiter is the wrong place to find out whether
+    // every hop preserves that byte.
+    let approval_id = new_id("provider-approval");
     let summary = tool_call
         .and_then(|call| call.get("title"))
         .and_then(Value::as_str)
@@ -496,45 +495,77 @@ async fn permission_result(
         .and_then(Value::as_array)
         .and_then(|items| items.first())
         .and_then(|item| content_text(item.get("content")));
+    let risk = risk_for_kind(
+        tool_call
+            .and_then(|call| call.get("kind"))
+            .and_then(Value::as_str),
+    );
 
+    // Ask the session policy first. Without this every command draws a card even
+    // when Auto or an earlier "Allow for session" already answered it, which is
+    // what makes a second request appear the moment the first is allowed.
+    let policy = interaction.as_ref().and_then(|host| host.approval_policy());
+    match preview_permission(policy.as_ref(), CURSOR_TOOL, &summary, risk) {
+        PolicyOutcome::Allow => return selected(params, "allow-once"),
+        PolicyOutcome::Block(_) => return selected(params, "reject-once"),
+        PolicyOutcome::Ask => {}
+    }
+
+    // Register the waiter before the card is drawn. Drawing first leaves a
+    // window where Allow finds no pending approval and the card retires as
+    // expired — the same ordering bug fixed for Claude Code.
     if let Some(host) = interaction.as_ref() {
         host.prepare_command_approval(&approval_id).await;
     }
     on_event(StreamEvent::ApprovalNeeded {
         approval_id: approval_id.clone(),
-        tool_name: "cursor_command".into(),
+        tool_name: CURSOR_TOOL.into(),
         tool_call_id: approval_id.clone(),
-        risk: ToolRisk::Exec,
+        risk,
         path: String::new(),
         summary: summary.clone(),
         diff: String::new(),
     });
 
-    let approved = match interaction {
+    let decision = match interaction {
         Some(host) => {
-            host.approve_command(ProviderCommandRequest {
+            host.decide_command(ProviderCommandRequest {
                 approval_id,
-                command: summary,
+                command: summary.clone(),
                 cwd: None,
                 reason,
             })
             .await
         }
-        None => false,
+        None => ApprovalDecision::Deny,
     };
+    // "Allow for session" has to be recorded, or the next command asks again and
+    // the button silently means "allow once".
+    if decision == ApprovalDecision::AllowSession {
+        if let Some(policy) = &policy {
+            if let Ok(mut guard) = policy.lock() {
+                remember_session_grant(&mut guard, Surface::Command(risk), CURSOR_TOOL, &summary);
+            }
+        }
+    }
+    let approved = matches!(
+        decision,
+        ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+    );
 
-    // Only ever allow *once*. `allow-always` is not ours to grant: Cursor
-    // persists it into the user's own `~/.cursor/cli-config.json` allowlist,
-    // where it silently outlives this turn, this chat, and Zest itself.
-    let option_id = pick_option(
+    // Always `allow-once` on the wire, even for a session grant. `allow-always`
+    // is not ours to give: Cursor persists it into the user's own
+    // `~/.cursor/cli-config.json` allowlist, where it outlives this turn, this
+    // chat, and Zest. A session grant is remembered on Zest's side instead,
+    // which is the scope the button actually promises.
+    selected(
         params,
         if approved {
             "allow-once"
         } else {
             "reject-once"
         },
-    );
-    json!({"outcome": {"outcome": "selected", "optionId": option_id}})
+    )
 }
 
 async fn question_result(
@@ -580,6 +611,29 @@ async fn question_result(
         Some(value) => json!({"answer": value}),
         None => Value::Null,
     }
+}
+
+/// The tool name every Cursor approval is filed under.
+///
+/// One name on purpose: a session grant is per tool, so a per-call name would
+/// make "Allow for session" grant nothing it could ever match again.
+const CURSOR_TOOL: &str = "cursor_command";
+
+/// What the session policy should treat this call as.
+///
+/// Cursor only ever asks about commands, so the choice is how dangerous the
+/// command is, not whether it writes. `read` and `search` are its own words for
+/// the calls that cannot change anything.
+fn risk_for_kind(kind: Option<&str>) -> ToolRisk {
+    match kind {
+        Some("read") | Some("search") | Some("fetch") => ToolRisk::Read,
+        _ => ToolRisk::Exec,
+    }
+}
+
+/// The ACP answer envelope, with the option id checked against what was offered.
+fn selected(params: &Value, wanted: &str) -> Value {
+    json!({"outcome": {"outcome": "selected", "optionId": pick_option(params, wanted)}})
 }
 
 /// Choose an offered option by id, falling back to the id we wanted.
@@ -751,6 +805,125 @@ mod tests {
         assert!(prompt.starts_with("be brief"), "{prompt}");
         assert!(prompt.ends_with("second"), "{prompt}");
         assert!(!prompt.contains("first"), "{prompt}");
+    }
+
+    /// A host that records what it was asked and answers with a fixed decision.
+    struct RecordingHost {
+        policy: Arc<std::sync::Mutex<crate::tools::approval::ApprovalPolicy>>,
+        decision: ApprovalDecision,
+        prepared: std::sync::Mutex<Vec<String>>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingHost {
+        fn new(
+            mode: crate::tools::approval::ApprovalMode,
+            decision: ApprovalDecision,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                policy: Arc::new(std::sync::Mutex::new(
+                    crate::tools::approval::ApprovalPolicy::new(mode),
+                )),
+                decision,
+                prepared: std::sync::Mutex::new(Vec::new()),
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderInteractionHost for RecordingHost {
+        fn approval_policy(
+            &self,
+        ) -> Option<Arc<std::sync::Mutex<crate::tools::approval::ApprovalPolicy>>> {
+            Some(self.policy.clone())
+        }
+
+        async fn prepare_command_approval(&self, approval_id: &str) {
+            self.prepared.lock().unwrap().push(approval_id.to_string());
+        }
+
+        async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+            // The waiter must already exist, or Allow lands on nothing and the
+            // card retires as expired.
+            assert!(
+                self.prepared.lock().unwrap().contains(&request.approval_id),
+                "decide_command reached an unprepared approval"
+            );
+            self.asked.lock().unwrap().push(request.command);
+            self.decision
+        }
+    }
+
+    fn request(title: &str) -> Value {
+        json!({
+            "toolCall": {"toolCallId": "call-a-1\nfc_b_0", "title": title, "kind": "execute"},
+            "options": [
+                {"optionId": "allow-once"},
+                {"optionId": "allow-always"},
+                {"optionId": "reject-once"}
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn allow_for_session_sticks_so_the_next_command_does_not_ask_again() {
+        let host = RecordingHost::new(
+            crate::tools::approval::ApprovalMode::Manual,
+            ApprovalDecision::AllowSession,
+        );
+        let interaction: Arc<dyn ProviderInteractionHost> = host.clone();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        let first =
+            permission_result(&request("`ls -la`"), Some(interaction.clone()), &mut sink).await;
+        assert_eq!(first.pointer("/outcome/optionId").unwrap(), "allow-once");
+        assert_eq!(host.asked.lock().unwrap().len(), 1);
+
+        // The grant is per tool, so a *different* command is covered too. Without
+        // remember_session_grant this asked again and the button meant nothing.
+        let second =
+            permission_result(&request("`git status`"), Some(interaction), &mut sink).await;
+        assert_eq!(second.pointer("/outcome/optionId").unwrap(), "allow-once");
+        assert_eq!(
+            host.asked.lock().unwrap().len(),
+            1,
+            "the session grant was not remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denial_is_answered_and_never_reaches_the_wire_as_an_allow() {
+        let host = RecordingHost::new(
+            crate::tools::approval::ApprovalMode::Manual,
+            ApprovalDecision::Deny,
+        );
+        let interaction: Arc<dyn ProviderInteractionHost> = host.clone();
+        let mut sink = |_: StreamEvent<'_>| {};
+        let answer = permission_result(&request("`rm -rf /`"), Some(interaction), &mut sink).await;
+        assert_eq!(answer.pointer("/outcome/optionId").unwrap(), "reject-once");
+    }
+
+    #[tokio::test]
+    async fn the_card_id_is_ours_because_cursors_own_id_contains_a_newline() {
+        let host = RecordingHost::new(
+            crate::tools::approval::ApprovalMode::Manual,
+            ApprovalDecision::AllowOnce,
+        );
+        let interaction: Arc<dyn ProviderInteractionHost> = host.clone();
+        let mut seen = Vec::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::ApprovalNeeded { approval_id, .. } = event {
+                seen.push(approval_id);
+            }
+        };
+        permission_result(&request("`ls`"), Some(interaction), &mut sink).await;
+        let id = seen.first().expect("a card was drawn");
+        assert!(!id.contains('\n'), "{id}");
+        assert_eq!(
+            host.prepared.lock().unwrap().as_slice(),
+            std::slice::from_ref(id)
+        );
     }
 
     #[test]
