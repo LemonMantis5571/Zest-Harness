@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::claude_control::{preview_permission, remember_session_grant, Surface};
 use super::session::JsonlProcess;
 use super::{
     catalogue, Completion, EffortPolicy, ModelSpec, Provider, ProviderCommandRequest,
@@ -23,7 +24,7 @@ use crate::auth::{detect_codex_cli, AuthStatus};
 use crate::config::DEFAULT_CODEX_MODEL;
 use crate::error::{HarnessError, Result, PROVIDER_MESSAGE_PREFIX};
 use crate::thread::new_id;
-use crate::tools::approval::ToolRisk;
+use crate::tools::approval::{ApprovalDecision, ApprovalPolicy, PolicyOutcome, ToolRisk};
 use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
@@ -39,6 +40,40 @@ const TURN_SANDBOX_READ_ONLY: &str = "readOnly";
 const CLIENT_NAME: &str = "zest";
 const CLIENT_TITLE: &str = "Zest";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Tool names the session policy files Codex approvals under. Stable strings,
+/// because a session grant is keyed on them: a per-call name would make "Allow
+/// for session" grant something nothing can ever match again.
+const COMMAND_TOOL: &str = "codex_command";
+const FILE_CHANGE_TOOL: &str = "codex_file_change";
+
+fn allowed(decision: ApprovalDecision) -> bool {
+    matches!(
+        decision,
+        ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+    )
+}
+
+/// Record "Allow for session" so the next call does not ask again.
+///
+/// Without this the button was indistinguishable from Allow once, which is the
+/// bug `2ebb00a` fixed for Claude Code and this provider never picked up.
+fn remember(
+    policy: &Option<Arc<std::sync::Mutex<ApprovalPolicy>>>,
+    decision: ApprovalDecision,
+    surface: Surface,
+    tool_name: &str,
+    target: &str,
+) {
+    if decision != ApprovalDecision::AllowSession {
+        return;
+    }
+    if let Some(policy) = policy {
+        if let Ok(mut guard) = policy.lock() {
+            remember_session_grant(&mut guard, surface, tool_name, target);
+        }
+    }
+}
 
 /// How Zest launches a Codex turn.
 ///
@@ -604,30 +639,47 @@ async fn server_request_result(
                 .unwrap_or_else(|| new_id("provider-approval"));
             let command = command_line(&params);
             let cwd = string_field(&params, &["cwd"]);
+            // Ask the session policy before drawing anything. Codex is launched
+            // with `approvalPolicy: "on-request"` whenever a host exists, so it
+            // routes *everything* here — without this, Auto and an earlier
+            // "Allow for session" both drew a card anyway.
+            let policy = interaction.as_ref().and_then(|host| host.approval_policy());
+            match preview_permission(policy.as_ref(), COMMAND_TOOL, &command, ToolRisk::Exec) {
+                PolicyOutcome::Allow => return json!({"decision": "accept"}),
+                PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
+                PolicyOutcome::Ask => {}
+            }
             if let Some(host) = interaction.as_ref() {
                 host.prepare_command_approval(&approval_id).await;
             }
             on_event(StreamEvent::ApprovalNeeded {
                 approval_id: approval_id.clone(),
-                tool_name: "codex_command".into(),
+                tool_name: COMMAND_TOOL.into(),
                 tool_call_id: approval_id.clone(),
                 risk: ToolRisk::Exec,
                 path: cwd.clone().unwrap_or_default(),
                 summary: command.clone(),
                 diff: String::new(),
             });
-            let approved = if let Some(host) = interaction {
-                host.approve_command(ProviderCommandRequest {
+            let decision = if let Some(host) = interaction {
+                host.decide_command(ProviderCommandRequest {
                     approval_id,
-                    command,
+                    command: command.clone(),
                     cwd,
                     reason: string_field(&params, &["reason"]),
                 })
                 .await
             } else {
-                false
+                ApprovalDecision::Deny
             };
-            json!({"decision": if approved { "accept" } else { "decline" }})
+            remember(
+                &policy,
+                decision,
+                Surface::Command(ToolRisk::Exec),
+                COMMAND_TOOL,
+                &command,
+            );
+            json!({"decision": if allowed(decision) { "accept" } else { "decline" }})
         }
         "item/fileChange/requestApproval" => {
             let approval_id = string_field(&params, &["approvalId", "id"])
@@ -648,30 +700,46 @@ async fn server_request_result(
             if params.get("grantRoot").is_some() && path.is_empty() {
                 return json!({"decision": "decline"});
             }
+            // A file-change grant is per path, so the policy is asked about this
+            // file rather than about writing in general — trusting `notes.txt`
+            // must never be trusting `.env`.
+            let policy = interaction.as_ref().and_then(|host| host.approval_policy());
+            match preview_permission(policy.as_ref(), FILE_CHANGE_TOOL, &path, ToolRisk::Write) {
+                PolicyOutcome::Allow => return json!({"decision": "accept"}),
+                PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
+                PolicyOutcome::Ask => {}
+            }
             if let Some(host) = interaction.as_ref() {
                 host.prepare_file_change_approval(&approval_id).await;
             }
             on_event(StreamEvent::ApprovalNeeded {
                 approval_id: approval_id.clone(),
-                tool_name: "codex_file_change".into(),
+                tool_name: FILE_CHANGE_TOOL.into(),
                 tool_call_id: approval_id.clone(),
                 risk: ToolRisk::Write,
                 path: path.clone(),
                 summary: "Codex requested a file change".into(),
                 diff: diff.clone(),
             });
-            let approved = if let Some(host) = interaction {
-                host.approve_file_change(ProviderFileChangeRequest {
+            let decision = if let Some(host) = interaction {
+                host.decide_file_change(ProviderFileChangeRequest {
                     approval_id,
-                    path: (!path.is_empty()).then_some(path),
+                    path: (!path.is_empty()).then_some(path.clone()),
                     diff: (!diff.is_empty()).then_some(diff),
                     reason: string_field(&params, &["reason"]),
                 })
                 .await
             } else {
-                false
+                ApprovalDecision::Deny
             };
-            json!({"decision": if approved { "accept" } else { "decline" }})
+            remember(
+                &policy,
+                decision,
+                Surface::FileChange,
+                FILE_CHANGE_TOOL,
+                &path,
+            );
+            json!({"decision": if allowed(decision) { "accept" } else { "decline" }})
         }
         "item/permissions/requestApproval" => {
             // A workspace-root write grant would let later edits skip the
@@ -1357,6 +1425,110 @@ mod tests {
             ));
             self.allow
         }
+    }
+
+    /// A host with a real session policy, answering with a fixed decision.
+    struct SessionHost {
+        policy: Arc<std::sync::Mutex<ApprovalPolicy>>,
+        decision: ApprovalDecision,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SessionHost {
+        fn new(decision: ApprovalDecision) -> Arc<Self> {
+            Arc::new(Self {
+                policy: Arc::new(std::sync::Mutex::new(ApprovalPolicy::new(
+                    crate::tools::approval::ApprovalMode::Manual,
+                ))),
+                decision,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderInteractionHost for SessionHost {
+        fn approval_policy(&self) -> Option<Arc<std::sync::Mutex<ApprovalPolicy>>> {
+            Some(self.policy.clone())
+        }
+
+        async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+            self.asked.lock().unwrap().push(request.command);
+            self.decision
+        }
+
+        async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(request.path.unwrap_or_default());
+            self.decision
+        }
+    }
+
+    async fn ask_command(host: Arc<SessionHost>, command: &str) -> Value {
+        server_request_result(
+            "item/commandExecution/requestApproval",
+            Some(&json!({"approvalId": "c", "command": [command], "cwd": "/w"})),
+            &mut StreamState::default(),
+            Some(host),
+            &mut |_| {},
+        )
+        .await
+    }
+
+    async fn ask_write(host: Arc<SessionHost>, path: &str) -> Value {
+        server_request_result(
+            "item/fileChange/requestApproval",
+            Some(&json!({"approvalId": "f", "changes": [{"path": path, "diff": "x"}]})),
+            &mut StreamState::default(),
+            Some(host),
+            &mut |_| {},
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn allow_for_session_on_a_command_covers_the_next_one() {
+        let host = SessionHost::new(ApprovalDecision::AllowSession);
+        assert_eq!(
+            ask_command(host.clone(), "cargo test").await["decision"],
+            "accept"
+        );
+        assert_eq!(host.asked.lock().unwrap().len(), 1);
+
+        // A command grant is per tool, so a different command is covered too.
+        // Before this the button meant "allow once" and every call asked again.
+        assert_eq!(
+            ask_command(host.clone(), "cargo build").await["decision"],
+            "accept"
+        );
+        assert_eq!(
+            host.asked.lock().unwrap().len(),
+            1,
+            "the session grant was not remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_grant_is_per_path_so_it_never_covers_dot_env() {
+        let host = SessionHost::new(ApprovalDecision::AllowSession);
+        assert_eq!(
+            ask_write(host.clone(), "notes.txt").await["decision"],
+            "accept"
+        );
+        assert_eq!(
+            ask_write(host.clone(), "notes.txt").await["decision"],
+            "accept"
+        );
+        assert_eq!(host.asked.lock().unwrap().len(), 1, "same path re-asked");
+
+        // Trusting `notes.txt` is not trusting `.env`: a second path still asks.
+        ask_write(host.clone(), ".env").await;
+        assert_eq!(
+            host.asked.lock().unwrap().as_slice(),
+            &["notes.txt".to_string(), ".env".to_string()]
+        );
     }
 
     #[tokio::test]
