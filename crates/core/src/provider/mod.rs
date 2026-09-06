@@ -426,6 +426,7 @@ pub struct TurnRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderSessionRef {
     CodexAppServer { thread_id: String },
+    CursorAcp { session_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
