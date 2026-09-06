@@ -13,6 +13,7 @@
 pub mod anthropic;
 pub mod claude_code;
 pub(crate) mod claude_control;
+pub mod claude_stream;
 pub mod codex_app_server;
 pub mod codex_oauth;
 pub mod cursor_acp;
@@ -21,6 +22,8 @@ pub mod driver;
 pub mod openai_compatible;
 pub mod registry;
 pub mod session;
+pub mod stream_contract;
+pub mod turn_spec;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -425,8 +428,22 @@ pub struct TurnRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderSessionRef {
-    CodexAppServer { thread_id: String },
-    CursorAcp { session_id: String },
+    CodexAppServer {
+        thread_id: String,
+    },
+    CursorAcp {
+        session_id: String,
+    },
+    /// A Claude Code session, plus the model it was opened under.
+    ///
+    /// The model is part of the reference rather than checked elsewhere because
+    /// a session holds a history *and* the model that produced it. Resuming one
+    /// under a different model would answer from a conversation that model
+    /// never had, and the CLI would do it without complaining.
+    ClaudeCode {
+        session_id: String,
+        model: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

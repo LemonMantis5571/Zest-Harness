@@ -46,13 +46,28 @@ enabled = true
 # Claude Code can also be the parent provider for the whole Zest session. Run
 # `claude login`, then uncomment this block and set `default.provider = "claude"`.
 # It uses the Claude Code subscription and does not delegate through `[agents]`.
+#
+# Zest narrows Claude Code to the tools that make sense inside a Zest turn, so
+# it cannot schedule cron jobs, open its own git worktrees, or notify anything
+# outside this window. Its own subagents stay available: they run in the same
+# session, the same tool scope, and behind the same approval card.
+#
+# permission_mode decides who approves a tool call. Under `auto`, writing a
+# file raises Zest's approval card and reading one does not.
+#   auto                Routine work runs; the rest reaches the card. Default.
+#   manual              Stricter, so more reaches the card.
+#   plan                Read-only planning.
+#   accept_edits        Apply edits without asking; commands still ask.
+#   bypass_permissions  Never ask, and never tell Zest. A throwaway tree only.
 # [providers.claude]
 # kind = "claude_code"
 # command = "claude"
 # model = "sonnet"
 # models = ["sonnet", "opus"]
 # allow_mcp = false
-# permission_mode = "default"
+# permission_mode = "auto"
+# Optional: take something else away on top of Zest's scope.
+# disallowed_tools = ["Bash"]
 # timeout_secs = 900
 #
 # [providers.deepseek]
