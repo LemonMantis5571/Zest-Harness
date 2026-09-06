@@ -320,7 +320,7 @@ impl CodexAppServerProvider {
                     }
                 }
             }
-            None => String::new(),
+            _ => String::new(),
         };
         let thread_id = if requested_thread.is_empty() {
             let response = rpc_request(
