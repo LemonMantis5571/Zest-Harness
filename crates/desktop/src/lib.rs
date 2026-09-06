@@ -64,6 +64,7 @@ use zest_core::{
 use attachments::{
     build_user_content, format_display_message, has_images, has_usable_attachment,
     prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
+    MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES,
 };
 use browser::BrowserHost;
 use context_meter::{estimate_context, CompactionResultView, ContextUsageView};
@@ -8020,7 +8021,14 @@ fn prepare_pasted_image(
     let raw = data_base64
         .split(',')
         .next_back()
-        .unwrap_or(data_base64.as_str());
+        .unwrap_or(data_base64.as_str())
+        .trim();
+    if raw.len() > MAX_IMAGE_BASE64_CHARS {
+        return Err(format!(
+            "image too large (max {} MB)",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(raw.trim())

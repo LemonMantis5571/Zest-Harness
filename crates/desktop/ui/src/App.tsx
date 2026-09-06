@@ -5,7 +5,7 @@ import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDia
 import { ProviderPicker } from "@/components/ProviderPicker";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
-import { admitAttachments } from "@/lib/attachmentLimits";
+import { admitAttachments, MAX_IMAGE_BYTES } from "@/lib/attachmentLimits";
 import { getBackend } from "@/lib/backend";
 import {
   fallbackOnFailure,
@@ -2400,6 +2400,14 @@ export default function App() {
       try {
         const prepared: PreparedAttachment[] = [];
         for (const file of files) {
+          if (file.size > MAX_IMAGE_BYTES) {
+            toast.add({
+              type: "error",
+              title: "Could not paste image",
+              description: `Image is too large (max ${MAX_IMAGE_BYTES / (1024 * 1024)} MB).`,
+            });
+            continue;
+          }
           const dataUrl = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () =>
