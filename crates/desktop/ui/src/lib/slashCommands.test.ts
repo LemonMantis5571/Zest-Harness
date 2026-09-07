@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   filterSlashCommands,
   isModelSlash,
+  slashTokenAt,
   splitSlashMatch,
 } from "./slashCommands.ts";
 import type { CommandView } from "./types.ts";
@@ -47,5 +48,30 @@ describe("slash command matching", () => {
       match: "supa",
       suffix: "base",
     });
+  });
+
+  it("finds the command token at the caret anywhere in a draft", () => {
+    const draft = "review this /plan then /hai";
+    assert.deepEqual(slashTokenAt(draft, draft.length), {
+      query: "hai",
+      start: draft.lastIndexOf("/hai"),
+      end: draft.length,
+    });
+    assert.deepEqual(slashTokenAt(draft, draft.indexOf("/plan") + "/plan".length), {
+      query: "plan",
+      start: draft.indexOf("/plan"),
+      end: draft.indexOf("/plan") + "/plan".length,
+    });
+  });
+
+  it("opens for an empty token but ignores paths and embedded slashes", () => {
+    const draft = "look at /etc/hosts and ";
+    assert.deepEqual(slashTokenAt(`${draft}/`, `${draft}/`.length), {
+      query: "",
+      start: draft.length,
+      end: draft.length + 1,
+    });
+    assert.equal(slashTokenAt("/etc/hosts", "/etc/hosts".length), null);
+    assert.equal(slashTokenAt("hello/plan", "hello/plan".length), null);
   });
 });

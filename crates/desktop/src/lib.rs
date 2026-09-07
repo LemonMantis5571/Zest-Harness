@@ -1272,9 +1272,9 @@ enum ChatEvent {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        /// Slash command that produced this turn, when one did. The UI titles
-        /// the answer with it — Rust decides, because only Rust knows whether
-        /// a leading `/token` matched a real skill.
+        /// Slash command(s) that produced this turn, when any did. The UI
+        /// titles the answer with it — Rust decides which tokens matched real
+        /// skills or enabled MCP servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },

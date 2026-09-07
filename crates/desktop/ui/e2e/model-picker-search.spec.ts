@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("search preserves selection, exposes capabilities and has a clear empty state", async ({ page }) => {
   await page.goto("/?fixture=1&scenario=model-catalogue");
-  const trigger = page.getByTitle("Model and provider", { exact: true });
+  const trigger = page.getByTitle("Select model", { exact: true });
   await trigger.click();
   const models = page.getByRole("listbox", { name: "Model", exact: true });
   await expect(models.getByRole("option")).toHaveCount(61);
@@ -11,7 +11,10 @@ test("search preserves selection, exposes capabilities and has a clear empty sta
   await expect(models.getByRole("option")).toHaveCount(1);
   await expect(models).toContainText("128k context");
   await expect(models).toContainText("Vision");
-  await expect(trigger).toHaveText("5.6 Sol · High");
+  await expect(trigger).toHaveText("5.6 Sol");
+  await expect(
+    page.getByRole("listbox", { name: "Effort" }).getByRole("option", { name: "High", exact: true })
+  ).toHaveAttribute("aria-selected", "true");
   await search.fill("research provider");
   await expect(models.getByRole("option")).toHaveCount(1);
   await expect(models).toContainText("1.0M context");
@@ -21,12 +24,15 @@ test("search preserves selection, exposes capabilities and has a clear empty sta
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await expect(search).toHaveValue("");
   await expect(models.getByRole("option")).toHaveCount(61);
-  await expect(trigger).toHaveText("5.6 Sol · High");
+  await expect(trigger).toHaveText("5.6 Sol");
+  await expect(
+    page.getByRole("listbox", { name: "Effort" }).getByRole("option", { name: "High", exact: true })
+  ).toHaveAttribute("aria-selected", "true");
 });
 
 test("search arrows select a no-effort model without inventing unknown context", async ({ page }) => {
   await page.goto("/?fixture=1&scenario=model-catalogue");
-  const trigger = page.getByTitle("Model and provider", { exact: true });
+  const trigger = page.getByTitle("Select model", { exact: true });
   await trigger.click();
   await page.getByRole("searchbox").fill("research-model-01");
   const option = page.getByRole("listbox", { name: "Model", exact: true }).getByRole("option");
@@ -45,7 +51,7 @@ for (const width of [1280, 720]) {
   test(`long catalogue stays bounded at ${width}px and effort remains visible`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 720 });
     await page.goto("/?fixture=1&scenario=model-catalogue");
-    await page.getByTitle("Model and provider", { exact: true }).click();
+    await page.getByTitle("Select model", { exact: true }).click();
     const panel = page.getByRole("dialog", { name: "Model and provider", exact: true });
     await expect(page.getByRole("listbox", { name: "Effort" })).toBeInViewport();
     await expect(page.getByRole("button", { name: "Reset model and effort to default" })).toBeInViewport();

@@ -29,6 +29,7 @@ use crate::config::{
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
 use crate::tools::approval::{ApprovalDecision, PolicyOutcome, ToolRisk};
+use crate::tools::bash::auto_eligible_for_external_provider;
 use crate::tools::external_agent::{
     run_headless_command_streaming, ControlResponder, ExternalAgentEvent,
 };
@@ -412,7 +413,19 @@ impl ControlResponder for ClaudePermissions {
         // tools do not. Consult the session policy before drawing a card so
         // Auto and "Allow for session" are not no-ops that re-ask on the next
         // slightly different path.
-        match preview_permission(policy.as_ref(), &request.tool_name, &target, risk) {
+        let auto_eligible = request.tool_name == "Bash"
+            && request
+                .input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(auto_eligible_for_external_provider);
+        match preview_permission(
+            policy.as_ref(),
+            &request.tool_name,
+            &target,
+            risk,
+            auto_eligible,
+        ) {
             PolicyOutcome::Allow => {
                 return Some(control_response(&request.request_id, true, ""));
             }

@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
  * very little about who is being talked to, while the id is exactly the thing
  * the user configured.
  *
- * The four branded paths are the monochrome paths from lobe-icons, vendored
+ * The five branded paths are the monochrome paths from lobe-icons, vendored
  * here so a small sidebar mark does not pull that package's UI peer
  * dependencies into the desktop bundle. The generic endpoint uses Lucide's
  * server icon because it has no provider brand to identify.

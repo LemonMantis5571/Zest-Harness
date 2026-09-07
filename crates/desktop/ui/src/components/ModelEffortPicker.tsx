@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
 
+import { ModelIcon } from "@/components/ModelIcon";
+import { ProviderIcon } from "@/components/ProviderIcon";
 import {
   DEFAULT_EFFORT,
   capabilityForModel,
-  chipLabel,
   effortsForModel,
   formatContextWindow,
   filterModelPickerGroups,
@@ -37,6 +38,8 @@ type Props = {
   /** Reset both values through one backend transaction. */
   onReset?: () => void;
 };
+
+type PickerTarget = "model" | "effort";
 
 /**
  * Plain positioned panel. Portal-based menus have been crashing the desktop
@@ -71,6 +74,7 @@ export function ModelEffortPicker({
   const searchRef = useRef<HTMLInputElement>(null);
   const effortListRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
+  const [openTarget, setOpenTarget] = useState<PickerTarget>("model");
   const groups: ModelPickerGroup[] = currentProviderId
     ? modelPickerGroups(
         {
@@ -107,10 +111,21 @@ export function ModelEffortPicker({
   );
   const effortNavigation = useOptionNavigation(effortOptions.map((item) => item.id), effort, disabled, "horizontal");
 
+  function focusSelectedEffort() {
+    requestAnimationFrame(() => {
+      const selected = effortListRef.current?.querySelector("[aria-selected='true']");
+      if (selected instanceof HTMLElement) selected.focus();
+    });
+  }
+
   useEffect(() => {
     if (!open) return;
+    if (openTarget === "effort" && supportsEffort) {
+      const frame = window.requestAnimationFrame(() => focusSelectedEffort());
+      return () => window.cancelAnimationFrame(frame);
+    }
     searchRef.current?.focus();
-  }, [open]);
+  }, [open, openTarget, supportsEffort]);
 
   useEffect(() => {
     if (!open) return;
@@ -137,26 +152,25 @@ export function ModelEffortPicker({
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open, setOpen]);
+  }, [open, openTarget, setOpen]);
 
   useEffect(() => {
-    if (!open) focusEffortAfterSave.current = false;
-    if (open && !disabled && focusEffortAfterSave.current) {
+    if (!open) {
+      focusEffortAfterSave.current = false;
+      if (!restoreTriggerAfterSave.current && openTarget !== "model") {
+        setOpenTarget("model");
+      }
+    } else if (!disabled && focusEffortAfterSave.current) {
       focusEffortAfterSave.current = false;
       focusSelectedEffort();
     }
-    if (!open && !disabled && restoreTriggerAfterSave.current) {
-      restoreTriggerAfterSave.current = false;
-      if (document.activeElement === document.body) triggerRef.current?.focus();
+    if (open || disabled || !restoreTriggerAfterSave.current) return;
+    restoreTriggerAfterSave.current = false;
+    if (document.activeElement === document.body) {
+      triggerRef.current?.focus();
     }
-  }, [open, disabled]);
-
-  function focusSelectedEffort() {
-    requestAnimationFrame(() => {
-      const selected = effortListRef.current?.querySelector("[aria-selected='true']");
-      if (selected instanceof HTMLElement) selected.focus();
-    });
-  }
+    if (openTarget !== "model") setOpenTarget("model");
+  }, [disabled, open, openTarget]);
 
   function applyModel(
     providerId: string,
@@ -165,26 +179,29 @@ export function ModelEffortPicker({
   ) {
     if (disabled) return;
     const keepOpen = effortsForModel(groupModels, next).length > 0;
+    focusEffortAfterSave.current = false;
     if (!keepOpen) {
       restoreTriggerAfterSave.current = true;
       setOpen(false);
       triggerRef.current?.focus();
     }
-    focusEffortAfterSave.current = keepOpen;
     if (currentProviderId && providerId !== currentProviderId) {
+      setOpenTarget("model");
       onSwitchProvider?.(providerId, next);
       return;
     }
     if (next !== model) onModelChange(next);
-    if (keepOpen && next === model) {
-      focusEffortAfterSave.current = false;
-      focusSelectedEffort();
+    if (keepOpen) {
+      setOpenTarget("effort");
+      focusEffortAfterSave.current = true;
     }
   }
 
   function applyEffort(next: EffortId) {
     if (disabled) return;
+    focusEffortAfterSave.current = false;
     restoreTriggerAfterSave.current = true;
+    setOpenTarget("model");
     setOpen(false);
     triggerRef.current?.focus();
     if (next !== effort) onEffortChange(next);
@@ -193,6 +210,7 @@ export function ModelEffortPicker({
   function reset() {
     if (disabled) return;
     restoreTriggerAfterSave.current = true;
+    setOpenTarget("model");
     setOpen(false);
     triggerRef.current?.focus();
     if (onReset) {
@@ -203,8 +221,14 @@ export function ModelEffortPicker({
     if (DEFAULT_EFFORT !== effort) onEffortChange(DEFAULT_EFFORT);
   }
 
+  function togglePicker() {
+    if (disabled) return;
+    setOpenTarget("model");
+    setOpen(!open);
+  }
+
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative flex min-w-0 items-center">
       <button
         ref={triggerRef}
         type="button"
@@ -212,18 +236,20 @@ export function ModelEffortPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        title={pickerLabel}
+        aria-label={`Select model, currently ${modelLabel(model)}`}
+        title="Select model"
         className={cn(
-          "inline-flex min-h-8 max-w-[260px] cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground/85 outline-none transition-colors",
+          "inline-flex min-h-7 min-w-0 max-w-[min(180px,34vw)] cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-foreground/85 outline-none transition-colors",
           "hover:bg-secondary/50 hover:text-foreground",
           "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
           open && "bg-secondary/60 text-foreground",
           "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
         )}
-        onClick={() => setOpen(!open)}
+        onClick={togglePicker}
       >
-        <span className="truncate">{supportsEffort ? chipLabel(model, effort) : modelLabel(model)}</span>
-        <ChevronDownIcon className="size-3 shrink-0 opacity-60" />
+        <ModelIcon modelId={model} providerId={currentProviderId} className="size-4 rounded-sm" />
+        <span className="min-w-0 truncate">{modelLabel(model)}</span>
+        <ChevronDownIcon className="size-3 shrink-0 opacity-60" aria-hidden="true" />
       </button>
 
       {open ? (
@@ -239,8 +265,15 @@ export function ModelEffortPicker({
             <div className="text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
               {grouped ? "Model and provider" : "Model"}
             </div>
-            <div className="mt-1 truncate text-xs font-medium" title={`${currentProviderLabel ?? ""} · ${modelLabel(model)}`}>
-              {currentProviderLabel ? `${currentProviderLabel} · ` : ""}{modelLabel(model)}
+            <div
+              className="mt-1 flex min-w-0 items-center gap-1.5 text-xs font-medium"
+              title={`${currentProviderLabel ?? ""} · ${modelLabel(model)}`}
+            >
+              <ModelIcon modelId={model} providerId={currentProviderId} />
+              <span className="min-w-0 truncate">
+                {currentProviderLabel ? `${currentProviderLabel} · ` : ""}
+                {modelLabel(model)}
+              </span>
             </div>
             {capability ? (
               <div className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
@@ -279,7 +312,8 @@ export function ModelEffortPicker({
               return (
                 <div key={group.providerId || group.label}>
                   {grouped ? (
-                    <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
+                    <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
+                      <ProviderIcon providerId={group.providerId} className="size-3.5" />
                       {group.label}
                     </div>
                   ) : null}
@@ -301,6 +335,7 @@ export function ModelEffortPicker({
                         )}
                         onClick={() => applyModel(group.providerId, item.id, group.models)}
                       >
+                        <ModelIcon modelId={item.id} providerId={group.providerId} />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate">{modelLabel(item.id)}</span>
                           <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">

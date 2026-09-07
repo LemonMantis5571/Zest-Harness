@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("search, model and effort lists support keyboard navigation and restore focus", async ({ page }) => {
   await page.goto("/?fixture=1&scenario=options-delayed");
-  const trigger = page.getByTitle("Model and effort", { exact: true });
+  const trigger = page.getByTitle("Select model", { exact: true });
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("searchbox")).toBeFocused();
@@ -18,7 +18,7 @@ test("search, model and effort lists support keyboard navigation and restore foc
   await page.keyboard.press("Home");
   await page.keyboard.press("ArrowDown");
   await expect(models.nth(1)).toBeFocused();
-  await expect(trigger).toHaveText("5.6 Sol · High");
+  await expect(trigger).toHaveText("5.6 Sol");
   await page.keyboard.press("Enter");
   await expect(models.nth(1)).toBeDisabled();
   const efforts = page.getByRole("listbox", { name: "Effort" }).getByRole("option");
@@ -31,7 +31,7 @@ test("search, model and effort lists support keyboard navigation and restore foc
   await page.keyboard.press("Home");
   await expect(efforts.first()).toBeFocused();
   await page.keyboard.press(" ");
-  await expect(trigger).toHaveText("5.6 Terra · Low");
+  await expect(trigger).toHaveText("5.6 Terra");
   await expect(trigger).toBeEnabled();
   await expect(trigger).toBeFocused();
   await page.keyboard.press(" ");
@@ -42,7 +42,7 @@ test("search, model and effort lists support keyboard navigation and restore foc
 
 test("Tab reaches effort and reset; outside dismissal preserves clicked focus", async ({ page }) => {
   await page.goto("/?fixture=1&scenario=options-delayed");
-  await page.getByTitle("Model and effort", { exact: true }).click();
+  await page.getByTitle("Select model", { exact: true }).click();
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Tab");
   await expect(page.getByRole("listbox", { name: "Effort" }).getByRole("option", { name: "High", exact: true })).toBeFocused();

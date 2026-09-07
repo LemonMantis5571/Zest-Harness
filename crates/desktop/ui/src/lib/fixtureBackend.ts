@@ -1726,6 +1726,16 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           description: "Switch model or provider",
           kind: "builtin" as const,
         },
+        {
+          name: "browse-x",
+          description: "Browse and verify sources",
+          kind: "skill" as const,
+        },
+        {
+          name: "plan",
+          description: "Write an implementation plan",
+          kind: "skill" as const,
+        },
         ...[...fixtureMcpServers.values()]
           .filter((server) => server.enabled)
           .map((server) => ({

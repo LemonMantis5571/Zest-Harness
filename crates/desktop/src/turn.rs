@@ -283,7 +283,7 @@ async fn run_with_sink_internal<S: EventSink>(
         .unwrap_or(false);
 
     // Slash commands resolve against the session's skills and the workspace
-    // MCP list. An unknown command expands to itself.
+    // MCP list. Every recognised token expands; unknown slash text stays typed.
     let (prompt, command) = match session.skills.read() {
         Ok(skills) => {
             let config = load_workspace_config(state);

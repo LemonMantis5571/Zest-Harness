@@ -82,6 +82,7 @@ import {
   modelPickerHasChoices,
   type EffortId,
 } from "@/lib/models";
+import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import type { SendTurnRequest } from "@/lib/sendTurn";
 import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
@@ -841,6 +842,7 @@ export function ChatScreen({
    */
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteFilter, setPaletteFilter] = useState<PaletteFilter>("all");
   useEffect(() => {
     void ensureFontLoaded("jetbrains-mono");
   }, []);
@@ -1329,7 +1331,8 @@ export function ChatScreen({
     [onOpenSettings]
   );
 
-  const openPalette = useCallback(() => {
+  const openPalette = useCallback((filter: PaletteFilter = "all") => {
+    setPaletteFilter(filter);
     setPaletteOpen(true);
   }, []);
 
@@ -1691,7 +1694,7 @@ export function ChatScreen({
               title="Command palette (Ctrl+K)"
               aria-label="Open command palette"
               aria-expanded={paletteOpen}
-              onClick={openPalette}
+              onClick={() => openPalette()}
             >
               <CommandIcon />
             </Button>
@@ -2131,6 +2134,7 @@ export function ChatScreen({
         <CommandPalette
           open={paletteOpen}
           actions={paletteActions}
+          initialFilter={paletteFilter}
           onClose={() => setPaletteOpen(false)}
           onOpenChat={(options) => {
             void onOpenProjectChat(options).catch((error) =>

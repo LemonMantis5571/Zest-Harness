@@ -40,6 +40,7 @@ function Highlight({ text, query }: { text: string; query: string }) {
 type Props = {
   open: boolean;
   actions: PaletteAction[];
+  initialFilter?: PaletteFilter;
   onClose: () => void;
   onCommand: (name: string) => void;
   onOpenChat?: (options: {
@@ -52,6 +53,7 @@ type Props = {
 export function CommandPalette({
   open,
   actions,
+  initialFilter = "all",
   onClose,
   onCommand,
   onOpenChat,
@@ -68,7 +70,7 @@ export function CommandPalette({
     if (!open) return;
     setQuery("");
     setIndex(0);
-    setFilter("all");
+    setFilter(initialFilter);
     setSearchHits([]);
     inputRef.current?.focus();
     const backend = getBackend();
@@ -83,7 +85,7 @@ export function CommandPalette({
       setCommands(nextCommands);
       setChats(flattenChats(projects));
     });
-  }, [open]);
+  }, [initialFilter, open]);
 
   useEffect(() => {
     if (!open) return;

@@ -46,6 +46,7 @@ use crate::config::CursorMode;
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
 use crate::tools::approval::{ApprovalDecision, PolicyOutcome, ToolRisk};
+use crate::tools::bash::auto_eligible_for_external_provider;
 use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
@@ -667,7 +668,9 @@ async fn permission_result(
     // when Auto or an earlier "Allow for session" already answered it, which is
     // what makes a second request appear the moment the first is allowed.
     let policy = interaction.as_ref().and_then(|host| host.approval_policy());
-    match preview_permission(policy.as_ref(), CURSOR_TOOL, &summary, risk) {
+    let auto_eligible = risk == ToolRisk::Exec
+        && auto_eligible_for_external_provider(cursor_command_from_title(&summary));
+    match preview_permission(policy.as_ref(), CURSOR_TOOL, &summary, risk, auto_eligible) {
         PolicyOutcome::Allow => return selected(params, "allow-once"),
         PolicyOutcome::Block(_) => return selected(params, "reject-once"),
         PolicyOutcome::Ask => {}
@@ -780,6 +783,14 @@ async fn question_result(
 /// One name on purpose: a session grant is per tool, so a per-call name would
 /// make "Allow for session" grant nothing it could ever match again.
 const CURSOR_TOOL: &str = "cursor_command";
+
+fn cursor_command_from_title(title: &str) -> &str {
+    let trimmed = title.trim();
+    trimmed
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+        .unwrap_or(trimmed)
+}
 
 /// What the session policy should treat this call as.
 ///
@@ -1418,6 +1429,24 @@ mod tests {
             host.asked.lock().unwrap().len(),
             1,
             "the session grant was not remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_skips_the_card_for_a_safe_command_title() {
+        let host = RecordingHost::new(
+            crate::tools::approval::ApprovalMode::Auto,
+            ApprovalDecision::Deny,
+        );
+        let interaction: Arc<dyn ProviderInteractionHost> = host.clone();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        let answer =
+            permission_result(&request("`git status`"), Some(interaction), &mut sink).await;
+        assert_eq!(answer.pointer("/outcome/optionId").unwrap(), "allow-once");
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "Auto should not draw a card for a safe command"
         );
     }
 

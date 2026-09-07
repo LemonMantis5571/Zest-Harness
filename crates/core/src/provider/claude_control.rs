@@ -143,13 +143,14 @@ pub(crate) fn preview_permission(
     tool_name: &str,
     target: &str,
     risk: ToolRisk,
+    auto_eligible: bool,
 ) -> PolicyOutcome {
     if let Some(policy) = policy {
         if let Ok(guard) = policy.lock() {
-            return guard.decide(tool_name, target, risk, false);
+            return guard.decide(tool_name, target, risk, auto_eligible);
         }
     }
-    ApprovalPolicy::new(ApprovalMode::Manual).decide(tool_name, target, risk, false)
+    ApprovalPolicy::new(ApprovalMode::Manual).decide(tool_name, target, risk, auto_eligible)
 }
 
 /// "Allow for session" on a command-class tool covers the next string too.
@@ -556,7 +557,8 @@ mod tests {
                 Some(&locked),
                 "Read",
                 r"C:\Users\brite\AppData\Local\Temp\frutiger-aero.png",
-                ToolRisk::Read
+                ToolRisk::Read,
+                false,
             ),
             PolicyOutcome::Allow
         );
@@ -565,12 +567,19 @@ mod tests {
                 Some(&locked),
                 "WebFetch",
                 "https://example.com",
-                ToolRisk::Read
+                ToolRisk::Read,
+                false,
             ),
             PolicyOutcome::Allow
         );
         assert_eq!(
-            preview_permission(Some(&locked), "Bash", "curl example.com", ToolRisk::Exec),
+            preview_permission(
+                Some(&locked),
+                "Bash",
+                "curl example.com",
+                ToolRisk::Exec,
+                false,
+            ),
             PolicyOutcome::Ask
         );
     }

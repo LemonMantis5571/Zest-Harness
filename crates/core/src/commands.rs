@@ -6,9 +6,10 @@
 //! `/haiku` means "use that MCP server for this request", so a new server
 //! command is an enabled `[mcp.<id>]` entry.
 //!
-//! Parsing is deliberately narrow. Only a token at the very start of the
-//! message counts, and only `[a-z0-9-_]`, because everything else people type
-//! at the start of a line — a path, a regex, a URL — must survive untouched.
+//! Parsing is deliberately narrow. Commands are whitespace-delimited tokens,
+//! and only `[a-z0-9-_]` is accepted, because paths, regexes, and URLs must
+//! survive untouched. The composer can therefore combine several commands in
+//! one draft without treating an embedded slash as an invocation.
 
 use std::collections::BTreeMap;
 
@@ -190,55 +191,157 @@ pub struct Expansion {
     /// typed. Storing the expansion instead would make every `/plan` chat look
     /// identical in the sidebar and bloat persisted history.
     pub display: String,
-    /// `Some` when a command was recognised and applied.
+    /// `Some` when one or more commands were recognised and applied. Multiple
+    /// names are joined with ` + ` for the transcript metadata.
     pub command: Option<String>,
 }
 
-/// Expand a leading command against the available skills and MCP servers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandToken {
+    name: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedCommand {
+    token: CommandToken,
+    name: String,
+    body: String,
+}
+
+/// Find whitespace-delimited `/token`s anywhere in a draft.
+fn command_tokens(input: &str) -> Vec<CommandToken> {
+    let mut tokens = Vec::new();
+
+    for (start, character) in input.char_indices() {
+        if character != '/' {
+            continue;
+        }
+
+        let preceded_by_whitespace = input[..start]
+            .chars()
+            .next_back()
+            .map_or(true, char::is_whitespace);
+        if !preceded_by_whitespace {
+            continue;
+        }
+
+        let Some(after_slash) = input[start + 1..].chars().next() else {
+            continue;
+        };
+        if after_slash == '/' {
+            continue;
+        }
+
+        let name_start = start + 1;
+        let mut end = name_start;
+        for (offset, character) in input[name_start..].char_indices() {
+            if !is_name_char(character) {
+                break;
+            }
+            end = name_start + offset + character.len_utf8();
+        }
+        if end == name_start {
+            continue;
+        }
+
+        let followed_by_whitespace = input[end..]
+            .chars()
+            .next()
+            .map_or(true, char::is_whitespace);
+        if !followed_by_whitespace {
+            continue;
+        }
+
+        tokens.push(CommandToken {
+            name: input[name_start..end].to_string(),
+            start,
+            end,
+        });
+    }
+
+    tokens
+}
+
+fn command_removal_end(input: &str, end: usize) -> usize {
+    input[end..]
+        .char_indices()
+        .next()
+        .filter(|(_, character)| character.is_whitespace())
+        .map_or(end, |(offset, character)| {
+            end + offset + character.len_utf8()
+        })
+}
+
+/// Remove only recognised command tokens, keeping all other user text.
+fn remove_resolved_commands(input: &str, commands: &[ResolvedCommand]) -> String {
+    let mut rest = input.to_string();
+    for command in commands.iter().rev() {
+        let end = command_removal_end(input, command.token.end);
+        rest.replace_range(command.token.start..end, "");
+    }
+    rest
+}
+
+/// Expand every recognised command against the available skills and MCP
+/// servers, regardless of where the token appears in the draft.
 ///
 /// An unrecognised `/token` is passed through unchanged rather than rejected: a
 /// typo should not swallow the message, and the model can say it did not
 /// understand far more usefully than an error dialog can. A skill with the
 /// same name as an MCP server wins, because `/plan` is already a skill.
 pub fn expand(input: &str, skills: &SkillSet, mcp: &[McpSlash]) -> Expansion {
-    let Some(parsed) = parse_command(input) else {
+    let mut resolved = Vec::new();
+    for token in command_tokens(input) {
+        // Reserved names are UI actions, not skills. A file named `model`
+        // must not steal `/model` from the picker.
+        if is_reserved_command(&token.name) {
+            continue;
+        }
+
+        if let Some(skill) = skills.command(&token.name) {
+            resolved.push(ResolvedCommand {
+                token,
+                name: skill.name.clone(),
+                body: skill.body.clone(),
+            });
+            continue;
+        }
+
+        if let Some(server) = lookup_mcp(mcp, &token.name) {
+            resolved.push(ResolvedCommand {
+                name: server.id.clone(),
+                body: compose_mcp(&server.id, &server.tools, ""),
+                token,
+            });
+        }
+    }
+
+    if resolved.is_empty() {
         return Expansion {
             prompt: unescape(input),
             display: input.to_string(),
             command: None,
         };
-    };
-
-    // Reserved names are UI actions, not skills. A file named `model`
-    // must not steal `/model` from the picker.
-    if is_reserved_command(parsed.name) {
-        return Expansion {
-            prompt: input.to_string(),
-            display: input.to_string(),
-            command: None,
-        };
     }
 
-    if let Some(skill) = skills.command(parsed.name) {
-        return Expansion {
-            prompt: compose(&skill.body, parsed.rest),
-            display: input.to_string(),
-            command: Some(skill.name.clone()),
-        };
+    let mut prompt = unescape(&remove_resolved_commands(input, &resolved))
+        .trim()
+        .to_string();
+    for command in resolved.iter().rev() {
+        prompt = compose(&command.body, &prompt);
     }
 
-    if let Some(server) = lookup_mcp(mcp, parsed.name) {
-        return Expansion {
-            prompt: compose_mcp(&server.id, &server.tools, parsed.rest),
-            display: input.to_string(),
-            command: Some(server.id.clone()),
-        };
-    }
-
+    let command = resolved
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" + ");
     Expansion {
-        prompt: input.to_string(),
+        prompt,
         display: input.to_string(),
-        command: None,
+        command: Some(command),
     }
 }
 
@@ -375,6 +478,27 @@ mod tests {
         );
         // The transcript keeps what was typed, not the expansion.
         assert_eq!(out.display, "/plan add auth");
+    }
+
+    #[test]
+    fn expands_multiple_known_commands_anywhere_in_the_draft() {
+        let mut skills = skills_with("plan", "Research first, then write a plan.");
+        let review = parse_skill_markdown(
+            "---\nname: review\ndescription: does review things\n---\n\nReview the result.\n",
+            Path::new("/x/review/SKILL.md"),
+        )
+        .unwrap();
+        skills.insert(review);
+
+        let out = expand("first /plan /review inspect this", &skills, &[]);
+
+        assert_eq!(out.command.as_deref(), Some("plan + review"));
+        assert!(out.prompt.starts_with("Research first, then write a plan."));
+        assert!(out.prompt.contains("Review the result."));
+        assert!(out.prompt.trim_end().ends_with("first inspect this"));
+        assert!(!out.prompt.contains("/plan"));
+        assert!(!out.prompt.contains("/review"));
+        assert_eq!(out.display, "first /plan /review inspect this");
     }
 
     #[test]
