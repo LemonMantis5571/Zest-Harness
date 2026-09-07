@@ -222,7 +222,7 @@ fn command_tokens(input: &str) -> Vec<CommandToken> {
         let preceded_by_whitespace = input[..start]
             .chars()
             .next_back()
-            .map_or(true, char::is_whitespace);
+            .is_none_or(char::is_whitespace);
         if !preceded_by_whitespace {
             continue;
         }
@@ -246,10 +246,7 @@ fn command_tokens(input: &str) -> Vec<CommandToken> {
             continue;
         }
 
-        let followed_by_whitespace = input[end..]
-            .chars()
-            .next()
-            .map_or(true, char::is_whitespace);
+        let followed_by_whitespace = input[end..].chars().next().is_none_or(char::is_whitespace);
         if !followed_by_whitespace {
             continue;
         }
