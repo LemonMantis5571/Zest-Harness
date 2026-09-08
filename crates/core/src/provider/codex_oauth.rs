@@ -22,11 +22,20 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::codex_oauth::{refresh_and_store, CodexOAuthSession, BACKEND_URL, ORIGINATOR};
 use crate::error::{HarnessError, Result};
 
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 const MAX_ATTEMPTS: u32 = 3;
 
 pub struct CodexOAuthProvider {
@@ -241,7 +250,10 @@ fn message_item(role: &str, part_type: &str, text: &str) -> Value {
     })
 }
 
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 async fn stream_responses(
     session: &CodexOAuthSession,
     body: &Value,
@@ -309,7 +321,10 @@ async fn stream_responses(
     Ok(accumulator.finish())
 }
 
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 async fn send_once(
     client: &reqwest::Client,
     session: &CodexOAuthSession,
@@ -341,7 +356,10 @@ async fn send_once(
 }
 
 #[derive(Default)]
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 struct ResponsesAccumulator {
     text: String,
     tools: BTreeMap<String, ToolAccum>,
@@ -352,7 +370,10 @@ struct ResponsesAccumulator {
 }
 
 #[derive(Default)]
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 struct ToolAccum {
     id: String,
     item_id: String,
@@ -361,7 +382,10 @@ struct ToolAccum {
     emitted: bool,
 }
 
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 impl ResponsesAccumulator {
     fn push(
         &mut self,
@@ -600,7 +624,10 @@ fn json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 fn merge_tool(dest: &mut ToolAccum, src: ToolAccum) {
     if dest.id.is_empty() {
         dest.id = src.id;
@@ -619,7 +646,10 @@ fn merge_tool(dest: &mut ToolAccum, src: ToolAccum) {
 
 /// ChatGPT's own stream text, tagged so the desktop can show it. A missing
 /// message stays untagged: that fallback is ours, not theirs.
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 fn chatgpt_stream_error(error: &Value) -> HarnessError {
     if let Some(message) = error
         .as_str()
@@ -650,7 +680,10 @@ fn chatgpt_stream_error(error: &Value) -> HarnessError {
 
 /// Saturate rather than wrap. A provider that reports a nonsense token count
 /// should show as an implausibly large one, not as a small one.
-#[allow(dead_code, reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape")]
+#[allow(
+    dead_code,
+    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
+)]
 fn bounded_u32(value: u64) -> u32 {
     value.min(u64::from(u32::MAX)) as u32
 }

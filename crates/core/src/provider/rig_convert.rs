@@ -54,7 +54,11 @@ impl ConvertError {
 
 impl std::fmt::Display for ConvertError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "cannot convert `{}` block: {}", self.block_type, self.reason)
+        write!(
+            f,
+            "cannot convert `{}` block: {}",
+            self.block_type, self.reason
+        )
     }
 }
 
@@ -128,7 +132,10 @@ fn assistant_content(blocks: &[Value]) -> Result<Vec<AssistantContent>, ConvertE
             }
             "thinking" => out.push(AssistantContent::Reasoning(reasoning(block))),
             "redacted_thinking" => {
-                let data = block.get("data").and_then(Value::as_str).unwrap_or_default();
+                let data = block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 out.push(AssistantContent::Reasoning(Reasoning {
                     id: None,
                     content: vec![ReasoningContent::Redacted { data: data.into() }],
@@ -138,7 +145,10 @@ fn assistant_content(blocks: &[Value]) -> Result<Vec<AssistantContent>, ConvertE
             // reasoning item. It exists only so that payload survives a round
             // trip through Zest's history, so it has to be read back here.
             "reasoning_encrypted" => {
-                let data = block.get("data").and_then(Value::as_str).unwrap_or_default();
+                let data = block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 out.push(AssistantContent::Reasoning(Reasoning {
                     id: None,
                     content: vec![ReasoningContent::Encrypted(data.into())],
@@ -208,14 +218,21 @@ fn reasoning(block: &Value) -> Reasoning {
 
 fn tool_call(block: &Value) -> Result<ToolCall, ConvertError> {
     let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
-    let name = block.get("name").and_then(Value::as_str).unwrap_or_default();
+    let name = block
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let arguments = block.get("input").cloned().unwrap_or(Value::Null);
 
     // `ToolCallId::new` rejects an empty string. An id-less tool call cannot be
     // answered, so this is a real error rather than something to paper over
     // with a minted handle that no `tool_result` will ever match.
-    let call = ToolCallId::new(id)
-        .ok_or_else(|| ConvertError::new("tool_use", "tool call has no id, so no result can answer it"))?;
+    let call = ToolCallId::new(id).ok_or_else(|| {
+        ConvertError::new(
+            "tool_use",
+            "tool call has no id, so no result can answer it",
+        )
+    })?;
 
     Ok(ToolCall {
         id: call,
