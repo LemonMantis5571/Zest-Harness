@@ -370,12 +370,7 @@ pub fn add_claude_code_provider(
     provider["command"] = toml_edit::value(command);
     provider["model"] = toml_edit::value(model);
     provider["allow_mcp"] = toml_edit::value(input.allow_mcp);
-    provider["permission_mode"] = toml_edit::value(match input.permission_mode {
-        ClaudeCodePermissionMode::Default => "default",
-        ClaudeCodePermissionMode::AcceptEdits => "accept_edits",
-        ClaudeCodePermissionMode::Plan => "plan",
-        ClaudeCodePermissionMode::BypassPermissions => "bypass_permissions",
-    });
+    provider["permission_mode"] = toml_edit::value(input.permission_mode.config_value());
     provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
 
     let mut models = Array::new();

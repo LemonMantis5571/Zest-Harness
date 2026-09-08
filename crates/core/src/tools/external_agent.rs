@@ -36,6 +36,7 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
 use crate::orchestration::ExternalSessionEvidence;
+use crate::provider::stream_contract::StreamNormalizer;
 use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
 use crate::tools::isolated_workspace;
 use crate::usage::{ExternalCost, ExternalUsageReport};
@@ -564,6 +565,11 @@ async fn run_external(
 /// The sink is used only for provider-owned parent loops. Explicit delegated
 /// workers continue through the non-streaming wrapper so their tool lifecycle
 /// remains represented by Zest's single delegation card.
+///
+/// `normalizer` lets a provider that knows its CLI's schema read the stream
+/// itself. Passing `None` keeps [`absorb_headless_value`], the schema-agnostic
+/// reader every worker shares: it is lossy by construction, and that is the
+/// right trade for a path that must accept a CLI nobody has modelled.
 pub(crate) async fn run_headless_command_streaming(
     cwd: &Path,
     config: &ExternalAgentConfig,
@@ -571,6 +577,7 @@ pub(crate) async fn run_headless_command_streaming(
     cancel: Option<&CancelToken>,
     on_event: &mut ExternalEventSink<'_>,
     control: Option<&mut dyn ControlResponder>,
+    normalizer: Option<&mut dyn StreamNormalizer>,
 ) -> Result<ExternalAgentRun, crate::error::HarnessError> {
     validate_config(config).map_err(crate::error::HarnessError::Other)?;
     if config.mode != ExternalAgentMode::Headless {
@@ -578,17 +585,26 @@ pub(crate) async fn run_headless_command_streaming(
             "parent CLI provider must use headless mode".into(),
         ));
     }
-    spawn_headless_with_session(cwd, config, prompt, cancel, Some(on_event), control)
-        .await
-        .map_err(|error| {
-            if error == EXTERNAL_RUN_CANCELLED {
-                crate::error::HarnessError::Cancelled
-            } else {
-                crate::error::HarnessError::from_provider_stream("cli", error)
-            }
-        })
+    spawn_headless_with_session(
+        cwd,
+        config,
+        prompt,
+        cancel,
+        Some(on_event),
+        control,
+        normalizer,
+    )
+    .await
+    .map_err(|error| {
+        if error == EXTERNAL_RUN_CANCELLED {
+            crate::error::HarnessError::Cancelled
+        } else {
+            crate::error::HarnessError::from_provider_stream("cli", error)
+        }
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_headless_with_session(
     cwd: &Path,
     config: &ExternalAgentConfig,
@@ -596,6 +612,7 @@ async fn spawn_headless_with_session(
     cancel: Option<&CancelToken>,
     on_event: Option<&mut ExternalEventSink<'_>>,
     control: Option<&mut dyn ControlResponder>,
+    normalizer: Option<&mut dyn StreamNormalizer>,
 ) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(resolve_program(&config.command));
@@ -620,7 +637,7 @@ async fn spawn_headless_with_session(
     }
     let timeout = Duration::from_secs(config.timeout_secs.min(MAX_TIMEOUT_SECS));
     let run_result = tokio::select! {
-        result = read_headless_with_session(&mut process, on_event, control, timeout) => result,
+        result = read_headless_with_session(&mut process, on_event, control, normalizer, timeout) => result,
         _ = wait_cancel(cancel) => Err(EXTERNAL_RUN_CANCELLED.to_string()),
     };
 
@@ -649,6 +666,7 @@ async fn read_headless_with_session(
     process: &mut JsonlProcess,
     mut on_event: Option<&mut ExternalEventSink<'_>>,
     mut control: Option<&mut dyn ControlResponder>,
+    mut normalizer: Option<&mut dyn StreamNormalizer>,
     timeout: Duration,
 ) -> Result<ExternalAgentRun, String> {
     let started = Instant::now();
@@ -692,7 +710,22 @@ async fn read_headless_with_session(
                     human_wait += paused.elapsed();
                 }
                 let event_start = run.events.len();
-                absorb_headless_value(&value, &mut run);
+                match normalizer.as_deref_mut() {
+                    // Usage and rate limits stay out here on purpose: their
+                    // shapes are shared across CLIs, so a per-provider
+                    // normalizer would be re-deriving an answer this path
+                    // already gets right.
+                    Some(normalizer) => {
+                        if let Some(limits) = external_limits_from_value(&value) {
+                            run.merge_limits(limits);
+                        }
+                        if let Some(report) = external_usage_from_value(&value) {
+                            run.merge_usage(report);
+                        }
+                        run.events.extend(normalizer.normalize(&value));
+                    }
+                    None => absorb_headless_value(&value, &mut run),
+                }
                 if let Some(on_event) = on_event.as_deref_mut() {
                     for event in run.events[event_start..].iter().cloned() {
                         on_event(event);
@@ -708,6 +741,14 @@ async fn read_headless_with_session(
             }
             Err(_) => {
                 run.malformed_lines += 1;
+                // A worker's CLI may legitimately print prose, so an unparsed
+                // line is treated as output there. A normalized provider was
+                // told to emit JSON on every line; splicing a stray line into
+                // the answer would put CLI chatter in the user's transcript.
+                if let Some(normalizer) = normalizer.as_deref_mut() {
+                    normalizer.parse_error();
+                    continue;
+                }
                 let text = line.to_string();
                 run.events.push(ExternalAgentEvent::Text(text.clone()));
                 if let Some(on_event) = on_event.as_deref_mut() {
@@ -3386,10 +3427,17 @@ mod tests {
         let config = fixture_config("fail_stdout", false);
         let mut events = Vec::new();
         let mut sink = |event| events.push(event);
-        let error =
-            run_headless_command_streaming(temp.path(), &config, "task", None, &mut sink, None)
-                .await
-                .expect_err("exit 1 must fail the turn");
+        let error = run_headless_command_streaming(
+            temp.path(),
+            &config,
+            "task",
+            None,
+            &mut sink,
+            None,
+            None,
+        )
+        .await
+        .expect_err("exit 1 must fail the turn");
         match error {
             crate::error::HarnessError::Stream { message, .. } => {
                 assert!(
@@ -3417,6 +3465,7 @@ mod tests {
             "stream task",
             None,
             &mut sink,
+            None,
             None,
         )
         .await
@@ -3474,6 +3523,7 @@ mod tests {
                 None,
                 &mut sink,
                 Some(&mut handshake),
+                None,
             ),
         )
         .await
@@ -3520,6 +3570,7 @@ mod tests {
                 None,
                 &mut sink,
                 Some(&mut allow),
+                None,
             ),
         )
         .await
@@ -3545,6 +3596,7 @@ mod tests {
                 "terminal task",
                 None,
                 &mut sink,
+                None,
                 None,
             ),
         )

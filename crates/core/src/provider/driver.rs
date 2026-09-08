@@ -274,12 +274,7 @@ impl ClaudeCodeDriver {
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_CODE_MODEL.to_string());
-        let catalogue = catalogue(
-            &default_model,
-            models,
-            super::claude_code::BUILTIN_MODELS,
-            EffortPolicy::Unsupported,
-        );
+        let catalogue = super::claude_code::effort_catalogue(&default_model, models);
         (default_model, catalogue)
     }
 }
@@ -317,6 +312,7 @@ impl ProviderDriver for ClaudeCodeDriver {
             models,
             allow_mcp,
             permission_mode,
+            disallowed_tools,
             timeout_secs,
         } = config
         else {
@@ -330,6 +326,7 @@ impl ProviderDriver for ClaudeCodeDriver {
             models.clone(),
             *allow_mcp,
             *permission_mode,
+            disallowed_tools.clone(),
             *timeout_secs,
         )
         .map_err(|error| format!("could not build Claude Code provider: {error}"))?;

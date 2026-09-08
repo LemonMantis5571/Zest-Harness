@@ -2700,13 +2700,19 @@ fn configure_claude_code_provider(
             id,
             command: "claude".into(),
             model,
-            models: vec!["sonnet".into(), "opus".into(), "haiku".into()],
+            models: vec![
+                "sonnet".into(),
+                "opus".into(),
+                "haiku".into(),
+                "fable".into(),
+            ],
             allow_mcp: false,
             // Not `accept_edits`: that auto-approves inside the CLI before zest
             // is consulted, so edits would land with no approval card and no
-            // diff. The provider downgrades it anyway — writing it here would
-            // only mislead someone reading their own zest.toml.
-            permission_mode: zest_core::ClaudeCodePermissionMode::Default,
+            // diff. `auto` approves routine work and still refers everything it
+            // is unsure about to the card, which is the behaviour the old
+            // `default` value was standing in for.
+            permission_mode: zest_core::ClaudeCodePermissionMode::Auto,
             timeout_secs: 900,
         },
     )?;
@@ -9829,6 +9835,7 @@ model = "gpt-5.6-sol"
                 models: vec!["sonnet".into()],
                 allow_mcp: false,
                 permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+                disallowed_tools: Vec::new(),
                 timeout_secs: 900,
             }),
             "Claude Code subscription"
