@@ -9475,46 +9475,57 @@ mod export_bindings {
 
     #[test]
     fn export_bindings() {
-        ChatEvent::export_all().expect("export ChatEvent bindings");
-        SessionInfo::export_all().expect("export SessionInfo bindings");
-        OlderThreadMessages::export_all().expect("export OlderThreadMessages bindings");
-        SessionMeta::export_all().expect("export SessionMeta bindings");
-        ProviderView::export_all().expect("export ProviderView bindings");
-        ExternalAgentView::export_all().expect("export ExternalAgentView bindings");
-        ExternalAgentCheckView::export_all().expect("export ExternalAgentCheckView bindings");
-        ModelCapability::export_all().expect("export ModelCapability bindings");
-        WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
-        WorkspaceFileChangeView::export_all().expect("export WorkspaceFileChange bindings");
-        WorkspaceChangeView::export_all().expect("export WorkspaceChange bindings");
-        PullRequestView::export_all().expect("export PullRequestView bindings");
-        GitContextView::export_all().expect("export GitContext bindings");
-        ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
-        PendingInputAttachmentView::export_all().expect("export PendingInputAttachment bindings");
-        PendingInputView::export_all().expect("export PendingInput bindings");
-        TurnRecoveryView::export_all().expect("export TurnRecovery bindings");
-        ToolMetaView::export_all().expect("export ToolMetaView bindings");
-        delegation::DelegationStatus::export_all().expect("export DelegationStatus bindings");
-        delegation::ReviewSeverity::export_all().expect("export ReviewSeverity bindings");
-        delegation::AcceptanceCheckStatus::export_all()
+        let config = ts_rs::Config::from_env();
+
+        ChatEvent::export_all(&config).expect("export ChatEvent bindings");
+        SessionInfo::export_all(&config).expect("export SessionInfo bindings");
+        OlderThreadMessages::export_all(&config).expect("export OlderThreadMessages bindings");
+        SessionMeta::export_all(&config).expect("export SessionMeta bindings");
+        ProviderView::export_all(&config).expect("export ProviderView bindings");
+        ExternalAgentView::export_all(&config).expect("export ExternalAgentView bindings");
+        ExternalAgentCheckView::export_all(&config)
+            .expect("export ExternalAgentCheckView bindings");
+        ModelCapability::export_all(&config).expect("export ModelCapability bindings");
+        WorkspaceReview::export_all(&config).expect("export WorkspaceReview bindings");
+        WorkspaceFileChangeView::export_all(&config).expect("export WorkspaceFileChange bindings");
+        WorkspaceChangeView::export_all(&config).expect("export WorkspaceChange bindings");
+        PullRequestView::export_all(&config).expect("export PullRequestView bindings");
+        GitContextView::export_all(&config).expect("export GitContext bindings");
+        ThreadCheckpointView::export_all(&config).expect("export ThreadCheckpoint bindings");
+        PendingInputAttachmentView::export_all(&config)
+            .expect("export PendingInputAttachment bindings");
+        PendingInputView::export_all(&config).expect("export PendingInput bindings");
+        TurnRecoveryView::export_all(&config).expect("export TurnRecovery bindings");
+        ToolMetaView::export_all(&config).expect("export ToolMetaView bindings");
+        delegation::DelegationStatus::export_all(&config)
+            .expect("export DelegationStatus bindings");
+        delegation::ReviewSeverity::export_all(&config).expect("export ReviewSeverity bindings");
+        delegation::AcceptanceCheckStatus::export_all(&config)
             .expect("export AcceptanceCheckStatus bindings");
-        delegation::ReviewFinding::export_all().expect("export ReviewFinding bindings");
-        delegation::AcceptanceCheckView::export_all().expect("export AcceptanceCheckView bindings");
-        delegation::DelegationTargetView::export_all().expect("export DelegationTarget bindings");
-        delegation::ReviewerTargetView::export_all().expect("export ReviewerTarget bindings");
-        delegation::AttemptUsageView::export_all().expect("export AttemptUsageView bindings");
-        delegation::DelegationAttemptView::export_all()
+        delegation::ReviewFinding::export_all(&config).expect("export ReviewFinding bindings");
+        delegation::AcceptanceCheckView::export_all(&config)
+            .expect("export AcceptanceCheckView bindings");
+        delegation::DelegationTargetView::export_all(&config)
+            .expect("export DelegationTarget bindings");
+        delegation::ReviewerTargetView::export_all(&config)
+            .expect("export ReviewerTarget bindings");
+        delegation::AttemptUsageView::export_all(&config)
+            .expect("export AttemptUsageView bindings");
+        delegation::DelegationAttemptView::export_all(&config)
             .expect("export DelegationAttemptView bindings");
-        delegation::DelegationOriginView::export_all()
+        delegation::DelegationOriginView::export_all(&config)
             .expect("export DelegationOriginView bindings");
-        delegation::DelegationJobView::export_all().expect("export DelegationJobView bindings");
-        delegation::DelegationEvent::export_all().expect("export DelegationEvent bindings");
-        delegation::CreateDelegationJobRequest::export_all()
+        delegation::DelegationJobView::export_all(&config)
+            .expect("export DelegationJobView bindings");
+        delegation::DelegationEvent::export_all(&config).expect("export DelegationEvent bindings");
+        delegation::CreateDelegationJobRequest::export_all(&config)
             .expect("export DelegationCreateRequest bindings");
-        delegation::UpdateDelegationJobRequest::export_all()
+        delegation::UpdateDelegationJobRequest::export_all(&config)
             .expect("export DelegationUpdateRequest bindings");
-        delegation::DelegationTargetOption::export_all()
+        delegation::DelegationTargetOption::export_all(&config)
             .expect("export DelegationTargetOption bindings");
-        delegation::DelegationHandoff::export_all().expect("export DelegationHandoff bindings");
+        delegation::DelegationHandoff::export_all(&config)
+            .expect("export DelegationHandoff bindings");
     }
 }
 
