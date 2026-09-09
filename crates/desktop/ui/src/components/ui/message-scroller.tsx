@@ -97,11 +97,16 @@ function MessageScrollerButton({
   className,
   children,
   render,
+  messageCount = 0,
   variant = "secondary",
   size = "icon-sm",
   ...props
 }: React.ComponentProps<typeof MessageScrollerPrimitive.Button> &
-  Pick<React.ComponentProps<typeof Button>, "variant" | "size">) {
+  Pick<React.ComponentProps<typeof Button>, "variant" | "size"> & {
+    messageCount?: number;
+  }) {
+  const showMessageCount = direction === "end" && messageCount > 0;
+  const messageLabel = messageCount === 1 ? "1 message" : `${messageCount} messages`;
   return (
     <MessageScrollerPrimitive.Button
       data-slot="message-scroller-button"
@@ -109,19 +114,31 @@ function MessageScrollerButton({
       data-variant={variant}
       data-size={size}
       direction={direction}
+      aria-label={
+        direction === "end"
+          ? showMessageCount
+            ? `Scroll to latest messages, ${messageLabel} below`
+            : "Scroll to latest messages"
+          : "Scroll to earlier messages"
+      }
       className={cn(
-        "absolute inset-s-1/2 z-20 -translate-x-1/2 border-border bg-background text-foreground shadow-md transition-[translate,scale,opacity] duration-200 hover:bg-muted hover:text-foreground data-[active=false]:pointer-events-none data-[active=false]:scale-95 data-[active=false]:opacity-0 data-[active=false]:duration-400 data-[active=false]:ease-[cubic-bezier(0.7,0,0.84,0)] data-[active=true]:translate-y-0 data-[active=true]:scale-100 data-[active=true]:opacity-100 data-[active=true]:ease-[cubic-bezier(0.23,1,0.32,1)] data-[direction=end]:bottom-36 data-[direction=end]:data-[active=false]:translate-y-3 data-[direction=start]:top-4 data-[direction=start]:data-[active=false]:-translate-y-full rtl:translate-x-1/2 data-[direction=start]:[&_svg]:rotate-180",
+        "absolute inset-s-1/2 z-20 -translate-x-1/2 rounded-full border-border/80 bg-background/95 text-foreground shadow-md backdrop-blur-sm transition-[translate,scale,opacity] duration-200 hover:bg-muted hover:text-foreground data-[active=false]:pointer-events-none data-[active=false]:scale-95 data-[active=false]:opacity-0 data-[active=false]:duration-400 data-[active=false]:ease-[cubic-bezier(0.7,0,0.84,0)] data-[active=true]:translate-y-0 data-[active=true]:scale-100 data-[active=true]:opacity-100 data-[active=true]:ease-[cubic-bezier(0.23,1,0.32,1)] data-[direction=end]:bottom-36 data-[direction=end]:data-[active=false]:translate-y-3 data-[direction=start]:top-4 data-[direction=start]:data-[active=false]:-translate-y-full rtl:translate-x-1/2 data-[direction=start]:[&_svg]:rotate-180",
+        showMessageCount && "gap-1.5 px-3 text-xs font-medium",
         className
       )}
-      render={render ?? <Button variant={variant} size={size} />}
+      render={
+        render ?? (
+          <Button variant={variant} size={showMessageCount ? "sm" : size} />
+        )
+      }
       {...props}
     >
       {children ?? (
         <>
-          <ArrowDownIcon
-          />
+          <ArrowDownIcon aria-hidden="true" />
+          {showMessageCount ? <span aria-hidden="true">{messageLabel}</span> : null}
           <span className="sr-only">
-            {direction === "end" ? "Scroll to end" : "Scroll to start"}
+            {direction === "end" ? "Scroll to latest messages" : "Scroll to earlier messages"}
           </span>
         </>
       )}

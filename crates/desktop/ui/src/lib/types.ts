@@ -304,7 +304,7 @@ export type NowPlayingView = {
 };
 
 /** Background looks the wallpaper add-on can render. Mirrors WALLPAPER_FILTERS. */
-export type WallpaperFilterId = "none" | "print" | "frosted" | "noir";
+export type WallpaperFilterId = "none" | "print" | "frosted" | "noir" | "sepia" | "warm" | "cool" | "muted";
 
 export type WallpaperView = {
   status: "disabled" | "unavailable" | "empty" | "ready";

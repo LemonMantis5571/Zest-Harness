@@ -167,6 +167,7 @@ fn render(source: &Path, filter: &str) -> Result<String, String> {
         "print" => apply_print_look(&mut rgb),
         "noir" => apply_noir(&mut rgb),
         "frosted" => rgb = frosted(&rgb),
+        "sepia" | "warm" | "cool" | "muted" => apply_color_look(&mut rgb, filter),
         _ => {}
     }
 
@@ -190,6 +191,28 @@ fn render(source: &Path, filter: &str) -> Result<String, String> {
     };
     let _ = fs::remove_file(stale);
     Ok(output.to_string())
+}
+
+/// Color-only looks preserve the image geometry and need no extra image buffer.
+fn apply_color_look(image: &mut RgbImage, filter: &str) {
+    for pixel in image.pixels_mut() {
+        let [r, g, b] = pixel.0.map(f32::from);
+        let tones = match filter {
+            "sepia" => [
+                0.393 * r + 0.769 * g + 0.189 * b,
+                0.349 * r + 0.686 * g + 0.168 * b,
+                0.272 * r + 0.534 * g + 0.131 * b,
+            ],
+            "warm" => [r * 1.08 + 6.0, g * 1.02, b * 0.88],
+            "cool" => [r * 0.88, g * 1.02, b * 1.08 + 6.0],
+            "muted" => {
+                let grey = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                [r, g, b].map(|channel| (channel * 0.45 + grey * 0.55) * 0.85 + 19.2)
+            }
+            _ => continue,
+        };
+        pixel.0 = tones.map(|channel| channel.round().clamp(0.0, 255.0) as u8);
+    }
 }
 
 /// Bounds the long edge *and* the pixel count.
@@ -399,11 +422,33 @@ mod tests {
 
     #[test]
     fn an_unknown_filter_falls_back_to_none() {
+        for filter in zest_plugin_api::WALLPAPER_FILTERS {
+            assert_eq!(wallpaper_filter(filter), filter);
+        }
         assert_eq!(wallpaper_filter("frosted"), "frosted");
         assert_eq!(wallpaper_filter("noir"), "noir");
         assert_eq!(wallpaper_filter("print"), "print");
         assert_eq!(wallpaper_filter(""), "none");
         assert_eq!(wallpaper_filter("kaleidoscope"), "none");
+    }
+
+    #[test]
+    fn color_looks_preserve_size_and_deliver_their_tones() {
+        for filter in ["sepia", "warm", "cool", "muted"] {
+            let mut image = RgbImage::from_pixel(3, 2, image::Rgb([120, 100, 80]));
+            apply_color_look(&mut image, filter);
+            assert_eq!(image.dimensions(), (3, 2));
+            let [r, g, b] = image.get_pixel(0, 0).0;
+            assert_ne!([r, g, b], [120, 100, 80]);
+            match filter {
+                "sepia" => assert!(r > g && g > b),
+                "warm" => assert!(r > 120 && b < 80),
+                "cool" => assert!(r < 120 && b > 80),
+                "muted" => assert!(r - b < 40),
+                _ => unreachable!(),
+            }
+            assert_eq!(output_name(filter), OUTPUT_JPG);
+        }
     }
 
     #[test]
@@ -574,5 +619,14 @@ mod tests {
         assert_eq!(view.image_file.as_deref(), Some("wallpaper.jpg"));
         assert!(root.path().join("wallpaper.jpg").is_file());
         assert!(!root.path().join("wallpaper.png").exists());
+        for filter in ["sepia", "warm", "cool", "muted"] {
+            let view = handle(PluginRequest::SetWallpaperFilter {
+                filter: filter.into(),
+            })
+            .expect("the new look should render");
+            assert_eq!(view.filter, filter);
+            assert_eq!(view.image_file.as_deref(), Some("wallpaper.jpg"));
+            assert!(image::open("wallpaper.jpg").is_ok());
+        }
     }
 }

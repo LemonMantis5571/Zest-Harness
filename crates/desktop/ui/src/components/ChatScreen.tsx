@@ -70,6 +70,7 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
   useMessageScroller,
+  useMessageScrollerVisibility,
 } from "@/components/ui/message-scroller";
 import { ZestPulse } from "@/components/ZestPulse";
 import { toast } from "@/components/ui/toast";
@@ -700,6 +701,23 @@ function TranscriptScrollRegistration({
   return null;
 }
 
+function ConversationScrollButton({ messageIds }: { messageIds: string[] }) {
+  const { visibleMessageIds } = useMessageScrollerVisibility();
+  const messageIndexes = useMemo(
+    () => new Map(messageIds.map((messageId, index) => [messageId, index])),
+    [messageIds]
+  );
+  let lastVisibleIndex = -1;
+  for (const messageId of visibleMessageIds) {
+    const index = messageIndexes.get(messageId);
+    if (index !== undefined) lastVisibleIndex = Math.max(lastVisibleIndex, index);
+  }
+  const messageCount =
+    lastVisibleIndex < 0 ? 0 : messageIds.length - lastVisibleIndex - 1;
+
+  return <MessageScrollerButton messageCount={messageCount} />;
+}
+
 export function ChatScreen({
   onOpenSplit,
   onOpenPullRequests,
@@ -879,6 +897,10 @@ export function ChatScreen({
         windowed: hasOlderMessages || hasNewerMessages,
       }),
     [hasNewerMessages, hasOlderMessages, hiddenUserTurns, messages, session.checkpoints]
+  );
+  const conversationMessageIds = useMemo(
+    () => messages.map((message) => message.id),
+    [messages]
   );
   const pendingScrollRestore = useRef<{ height: number; top: number } | null>(
     null
@@ -1979,7 +2001,7 @@ export function ChatScreen({
               <TranscriptScrollRegistration
                 onRegisterScrollToMessage={registerScrollToTranscriptMessage}
               />
-              <MessageScrollerButton />
+              <ConversationScrollButton messageIds={conversationMessageIds} />
             </MessageScroller>
           </MessageScrollerProvider>
 

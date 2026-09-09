@@ -254,7 +254,7 @@ Wallpaper actions (the `wallpaper` kind only):
 {"action":"clearWallpaper"}
 ```
 
-`filter` is one of `none`, `print`, `frosted`, or `noir`. Zest normalises the
+`filter` is one of `none`, `print`, `frosted`, `noir`, `sepia`, `warm`, `cool`, or `muted`. Zest normalises the
 value before it sends the request, and a plugin should treat anything it does
 not recognise as `none` rather than failing.
 

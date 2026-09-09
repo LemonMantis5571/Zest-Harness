@@ -2888,10 +2888,17 @@ export default function App() {
   );
 
   const authMode = screen !== "chat";
+  // Customize and the other shell panels stay inside the chat screen, but
+  // replace the transcript. Give those panels the full-page wallpaper layer;
+  // the transcript owns its clipped layer when no shell panel is open.
+  const showGlobalWallpaper =
+    wallpaper?.status === "ready" &&
+    Boolean(wallpaper.imageDataUrl) &&
+    (authMode || shellPanel !== null);
 
   return (
     <>
-      {authMode && wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+      {showGlobalWallpaper ? (
         <div
           aria-hidden
           className="zest-wallpaper"

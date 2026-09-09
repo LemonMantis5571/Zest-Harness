@@ -177,7 +177,7 @@ describe("fixture plugins and workspace files", () => {
     assert.equal(paper.filter, "none");
     assert.equal(paper.imageDataUrl?.startsWith("data:image/"), true);
     // Each look is its own preview, so switching is visible in the fixture UI.
-    for (const filter of ["print", "frosted", "noir"] as const) {
+    for (const filter of ["print", "frosted", "noir", "sepia", "warm", "cool", "muted"] as const) {
       const filtered = await backend.setWallpaperFilter(filter);
       assert.equal(filtered.filter, filter);
       assert.notEqual(filtered.imageDataUrl, paper.imageDataUrl);
