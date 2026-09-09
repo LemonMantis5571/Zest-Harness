@@ -64,6 +64,7 @@ use zest_core::{
 use attachments::{
     build_user_content, format_display_message, has_images, has_usable_attachment,
     prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
+    MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES,
 };
 use browser::BrowserHost;
 use context_meter::{estimate_context, CompactionResultView, ContextUsageView};
@@ -1271,9 +1272,9 @@ enum ChatEvent {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        /// Slash command that produced this turn, when one did. The UI titles
-        /// the answer with it — Rust decides, because only Rust knows whether
-        /// a leading `/token` matched a real skill.
+        /// Slash command(s) that produced this turn, when any did. The UI
+        /// titles the answer with it — Rust decides which tokens matched real
+        /// skills or enabled MCP servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
@@ -2699,13 +2700,19 @@ fn configure_claude_code_provider(
             id,
             command: "claude".into(),
             model,
-            models: vec!["sonnet".into(), "opus".into(), "haiku".into()],
+            models: vec![
+                "sonnet".into(),
+                "opus".into(),
+                "haiku".into(),
+                "fable".into(),
+            ],
             allow_mcp: false,
             // Not `accept_edits`: that auto-approves inside the CLI before zest
             // is consulted, so edits would land with no approval card and no
-            // diff. The provider downgrades it anyway — writing it here would
-            // only mislead someone reading their own zest.toml.
-            permission_mode: zest_core::ClaudeCodePermissionMode::Default,
+            // diff. `auto` approves routine work and still refers everything it
+            // is unsure about to the card, which is the behaviour the old
+            // `default` value was standing in for.
+            permission_mode: zest_core::ClaudeCodePermissionMode::Auto,
             timeout_secs: 900,
         },
     )?;
@@ -8020,7 +8027,14 @@ fn prepare_pasted_image(
     let raw = data_base64
         .split(',')
         .next_back()
-        .unwrap_or(data_base64.as_str());
+        .unwrap_or(data_base64.as_str())
+        .trim();
+    if raw.len() > MAX_IMAGE_BASE64_CHARS {
+        return Err(format!(
+            "image too large (max {} MB)",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(raw.trim())
@@ -9821,6 +9835,7 @@ model = "gpt-5.6-sol"
                 models: vec!["sonnet".into()],
                 allow_mcp: false,
                 permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+                disallowed_tools: Vec::new(),
                 timeout_secs: 900,
             }),
             "Claude Code subscription"

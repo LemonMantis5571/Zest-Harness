@@ -31,6 +31,7 @@ tokio.workspace = true
 toml.workspace = true
 toml_edit = "0.25"
 tempfile = "3"
+rig-core = { version = "0.42", default-features = false }
 
 # keyring ships NO credential store unless a backend feature is enabled — it
 # silently falls back to an in-memory mock, where `set` succeeds and a later

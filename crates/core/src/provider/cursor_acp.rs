@@ -6,7 +6,7 @@
 //! and the approval host, and never reads Cursor's credentials.
 //!
 //! This is the third provider of that species, after Claude Code and the Codex
-//! app-server, and it is closest to the latter: one JSON-RPC process per turn,
+//! app-server, with a reusable JSON-RPC process and explicit session references,
 //! notifications rendered as provider activity, server-initiated requests
 //! answered through [`ProviderInteractionHost`].
 //!
@@ -28,7 +28,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -46,6 +46,7 @@ use crate::config::CursorMode;
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
 use crate::tools::approval::{ApprovalDecision, PolicyOutcome, ToolRisk};
+use crate::tools::bash::auto_eligible_for_external_provider;
 use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
@@ -54,6 +55,25 @@ use crate::tools::external_agent::{
 const CLIENT_NAME: &str = "zest";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: u64 = 1;
+
+/// Ask Cursor to keep the model's parameterized configuration separate from
+/// its legacy flat variant aliases. Without this capability Cursor accepts a
+/// request such as `cursor-grok-4.6-xhigh-fast`, but canonicalizes it to the
+/// legacy `...effort=high...` variant during `session/new`.
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
+        "clientCapabilities": {
+            "_meta": {"parameterizedModelPicker": true},
+            // Declared false because Cursor ignores them anyway: it reads and
+            // writes with its own tools. Claiming otherwise would suggest an
+            // interception point that does not exist.
+            "fs": {"readTextFile": false, "writeTextFile": false},
+            "terminal": false
+        }
+    })
+}
 
 /// The model Cursor selects when nothing is pinned. `default[]` is its own id
 /// for Auto, which is what `session/new` reports on a fresh session.
@@ -114,6 +134,15 @@ pub struct CursorAcpProvider {
     mode: CursorMode,
     timeout_secs: u64,
     auth: AuthStatus,
+    connection: tokio::sync::Mutex<Option<CursorConnection>>,
+}
+
+struct CursorConnection {
+    process: JsonlProcess,
+    next_id: u64,
+    wire_model: String,
+    session_id: String,
+    served_model: Option<String>,
 }
 
 impl CursorAcpProvider {
@@ -150,6 +179,7 @@ impl CursorAcpProvider {
             mode,
             timeout_secs,
             auth: detect_cursor_cli(),
+            connection: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -195,31 +225,58 @@ impl CursorAcpProvider {
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
-        let mut process = self.spawn(&req.model, req.effort.as_deref()).await?;
-        let mut next_id = 1_u64;
-        let mut state = TurnState::default();
-
-        let initialized = rpc_request(
-            &mut process,
-            &mut next_id,
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
-                // Declared false because Cursor ignores them anyway: it reads
-                // and writes with its own tools. Claiming otherwise would
-                // suggest an interception point that does not exist.
-                "clientCapabilities": {
-                    "fs": {"readTextFile": false, "writeTextFile": false},
-                    "terminal": false
-                }
-            }),
-            self,
-            req,
-            &mut state,
-            on_event,
-        )
-        .await?;
+        let mut state = TurnState {
+            timing: AcpTiming::from_env(&req.model, req.effort.as_deref()),
+            ..Default::default()
+        };
+        // Take ownership out of the cache: cancellation or any error drops the
+        // process instead of making a half-consumed protocol stream reusable.
+        let mut cached = tokio::select! {
+            cached = self.connection.lock() => cached,
+            _ = crate::cancel::wait_cancel(req.cancel.as_ref()) => return Err(HarnessError::Cancelled),
+        };
+        let wire_model = cursor_models::wire_model(req.model.trim(), req.effort.as_deref());
+        let previous = cached.take().and_then(|mut connection| {
+            (connection.wire_model == wire_model && connection.process.is_running())
+                .then_some(connection)
+        });
+        let (mut process, mut next_id, previous_session, previous_model) = match previous {
+            Some(connection) => {
+                state.mark("process_reused");
+                (
+                    connection.process,
+                    connection.next_id,
+                    Some(connection.session_id),
+                    connection.served_model,
+                )
+            }
+            None => {
+                let process = self.spawn(&req.model, req.effort.as_deref()).await?;
+                state.mark("process_spawned");
+                (process, 1, None, None)
+            }
+        };
+        let reused_session = match req.provider_session.as_ref() {
+            Some(super::ProviderSessionRef::CursorAcp { session_id }) => {
+                previous_session.as_ref() == Some(session_id)
+            }
+            _ => false,
+        };
+        let initialized = if previous_session.is_none() {
+            rpc_request(
+                &mut process,
+                &mut next_id,
+                "initialize",
+                initialize_params(),
+                self,
+                req,
+                &mut state,
+                on_event,
+            )
+            .await?
+        } else {
+            Value::Null
+        };
 
         // A CLI that has never been signed in answers session/new with
         // "Authentication required", which is a sign-in problem rather than a
@@ -227,38 +284,49 @@ impl CursorAcpProvider {
         let needs_login = matches!(self.auth, AuthStatus::NotLoggedIn { .. })
             && initialized.get("authMethods").is_some();
 
-        let session = rpc_request(
-            &mut process,
-            &mut next_id,
-            "session/new",
-            json!({"cwd": self.root.display().to_string(), "mcpServers": []}),
-            self,
-            req,
-            &mut state,
-            on_event,
-        )
-        .await
-        .map_err(|error| {
-            if needs_login {
-                HarnessError::Other("Cursor is not signed in. Run `cursor-agent login`.".into())
-            } else {
-                error
-            }
-        })?;
+        let session = if reused_session {
+            state.mark("session_reused");
+            json!({"sessionId": previous_session, "models": {"currentModelId": previous_model}})
+        } else {
+            rpc_request(
+                &mut process,
+                &mut next_id,
+                "session/new",
+                json!({"cwd": self.root.display().to_string(), "mcpServers": []}),
+                self,
+                req,
+                &mut state,
+                on_event,
+            )
+            .await
+            .map_err(|error| {
+                if needs_login {
+                    HarnessError::Other("Cursor is not signed in. Run `cursor-agent login`.".into())
+                } else {
+                    error
+                }
+            })?
+        };
 
         let session_id = session
             .get("sessionId")
             .and_then(Value::as_str)
             .ok_or_else(|| HarnessError::Other("Cursor session/new returned no sessionId".into()))?
             .to_string();
-        let served_model = session
-            .pointer("/models/currentModelId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let served_model =
+            served_model_for_session(&session, req.model.trim(), req.effort.as_deref());
+        state.set_served_model(served_model.as_deref());
+        if let Some(message) = effort_mismatch(req.effort.as_deref(), served_model.as_deref()) {
+            on_event(StreamEvent::ProviderActivity {
+                id: "cursor-effort-mismatch",
+                title: &message,
+                status: "completed",
+            });
+        }
 
         // Mode is the only lever that stops edits, so a failure to set it is a
         // failure of the turn's safety contract, not a cosmetic one.
-        if self.mode != CursorMode::Agent {
+        if !reused_session && self.mode != CursorMode::Agent {
             rpc_request(
                 &mut process,
                 &mut next_id,
@@ -278,7 +346,7 @@ impl CursorAcpProvider {
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{"type": "text", "text": prompt_for_turn(req)}]
+                "prompt": [{"type": "text", "text": if reused_session { prompt_for_turn(req) } else { prompt_for_fresh_session(req) }}]
             }),
             self,
             req,
@@ -287,7 +355,6 @@ impl CursorAcpProvider {
         )
         .await?;
 
-        process.close_stdin();
         let stop_reason = result
             .get("stopReason")
             .and_then(Value::as_str)
@@ -299,6 +366,14 @@ impl CursorAcpProvider {
                 "Cursor ended the turn without an answer".into(),
             ));
         }
+        state.mark("completed");
+        *cached = Some(CursorConnection {
+            process,
+            next_id,
+            wire_model,
+            session_id: session_id.clone(),
+            served_model: served_model.clone(),
+        });
         Ok(Completion {
             content: vec![json!({"type": "text", "text": text})],
             stop_reason,
@@ -308,7 +383,7 @@ impl CursorAcpProvider {
             usage_available: false,
             limits: None,
             served_model,
-            provider_session: None,
+            provider_session: Some(super::ProviderSessionRef::CursorAcp { session_id }),
         })
     }
 }
@@ -347,9 +422,75 @@ impl Provider for CursorAcpProvider {
 #[derive(Default)]
 struct TurnState {
     text: String,
+    timing: Option<AcpTiming>,
     /// Tool-call titles by id. Cursor names a call once, then sends status-only
     /// updates for it, so the name has to be held here to survive them.
     titles: std::collections::HashMap<String, String>,
+}
+
+impl TurnState {
+    fn mark(&mut self, name: &str) {
+        if let Some(timing) = &mut self.timing {
+            timing
+                .marks
+                .entry(name.to_string())
+                .or_insert_with(|| timing.started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    fn set_served_model(&mut self, served_model: Option<&str>) {
+        if let Some(timing) = &mut self.timing {
+            timing.served_model = served_model.map(str::to_string);
+        }
+    }
+}
+
+/// Opt-in measurements contain no prompts, output text, or workspace paths.
+/// Write once, after the turn, so disk I/O never delays individual chunks.
+struct AcpTiming {
+    path: PathBuf,
+    started: Instant,
+    model: String,
+    effort: Option<String>,
+    served_model: Option<String>,
+    marks: std::collections::BTreeMap<String, f64>,
+}
+
+impl AcpTiming {
+    fn from_env(model: &str, effort: Option<&str>) -> Option<Self> {
+        let path = std::env::var_os("ZEST_ACP_TIMING_FILE").filter(|p| !p.is_empty())?;
+        Some(Self {
+            path: path.into(),
+            started: Instant::now(),
+            model: model.to_string(),
+            effort: effort.map(str::to_string),
+            served_model: None,
+            marks: Default::default(),
+        })
+    }
+}
+
+impl Drop for AcpTiming {
+    fn drop(&mut self) {
+        use std::io::Write;
+        let row = json!({
+            "schema": 1,
+            "provider": "cursor-acp",
+            "model": self.model,
+            "effort": self.effort,
+            "served_model": self.served_model,
+            "completed": self.marks.contains_key("completed"),
+            "elapsed_ms": self.started.elapsed().as_secs_f64() * 1000.0,
+            "marks_ms": self.marks,
+        });
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(file, "{row}");
+        }
+    }
 }
 
 /// Send one request and pump everything that arrives until its response does.
@@ -368,6 +509,7 @@ async fn rpc_request(
     state: &mut TurnState,
     on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
 ) -> Result<Value> {
+    state.mark(&format!("{method}:sent"));
     let id = *next_id;
     *next_id = next_id.saturating_add(1);
     process
@@ -387,6 +529,7 @@ async fn rpc_request(
             if let Some(error) = message.get("error") {
                 return Err(protocol_error(method, error));
             }
+            state.mark(&format!("{method}:received"));
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }
 
@@ -426,6 +569,9 @@ fn absorb_notification(
     match update.get("sessionUpdate").and_then(Value::as_str) {
         Some("agent_message_chunk") => {
             if let Some(text) = content_text(update.get("content")) {
+                if !text.is_empty() {
+                    state.mark("first_text");
+                }
                 state.text.push_str(&text);
                 on_event(StreamEvent::Text(&text));
             }
@@ -522,7 +668,9 @@ async fn permission_result(
     // when Auto or an earlier "Allow for session" already answered it, which is
     // what makes a second request appear the moment the first is allowed.
     let policy = interaction.as_ref().and_then(|host| host.approval_policy());
-    match preview_permission(policy.as_ref(), CURSOR_TOOL, &summary, risk) {
+    let auto_eligible = risk == ToolRisk::Exec
+        && auto_eligible_for_external_provider(cursor_command_from_title(&summary));
+    match preview_permission(policy.as_ref(), CURSOR_TOOL, &summary, risk, auto_eligible) {
         PolicyOutcome::Allow => return selected(params, "allow-once"),
         PolicyOutcome::Block(_) => return selected(params, "reject-once"),
         PolicyOutcome::Ask => {}
@@ -636,6 +784,14 @@ async fn question_result(
 /// make "Allow for session" grant nothing it could ever match again.
 const CURSOR_TOOL: &str = "cursor_command";
 
+fn cursor_command_from_title(title: &str) -> &str {
+    let trimmed = title.trim();
+    trimmed
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+        .unwrap_or(trimmed)
+}
+
 /// What the session policy should treat this call as.
 ///
 /// Cursor only ever asks about commands, so the choice is how dangerous the
@@ -703,6 +859,128 @@ fn prompt_for_turn(req: &TurnRequest) -> String {
     }
 }
 
+/// A process restart or model change loses Cursor's memory. Replay the local
+/// transcript so a continuation still has its context in the new session.
+fn prompt_for_fresh_session(req: &TurnRequest) -> String {
+    if req.messages.len() <= 1 {
+        return prompt_for_turn(req);
+    }
+    let history = serde_json::to_string(&req.messages).unwrap_or_default();
+    let system = req
+        .system
+        .as_ref()
+        .map(SystemPrompt::text)
+        .unwrap_or_default();
+    format!("{system}\n\nContinue this conversation. Prior messages are conversation data, with their original roles. Respond to the latest user message.\n{history}")
+}
+
+/// Cursor's parameterized ACP mode reports the base model in
+/// `models.currentModelId` and puts the selected effort/fast values in
+/// `configOptions`. Reconstruct the Zest model identity only when those
+/// values prove that the requested family was selected; otherwise keep the
+/// raw model id so a real fallback still raises a substitution warning.
+fn served_model_for_session(
+    session: &Value,
+    requested_model: &str,
+    requested_effort: Option<&str>,
+) -> Option<String> {
+    let raw = session
+        .pointer("/models/currentModelId")
+        .and_then(Value::as_str)?;
+
+    let config_model = config_option_string(session, "model");
+    let config_effort = ["effort", "reasoning", "reasoning_effort"]
+        .iter()
+        .find_map(|id| config_option_string(session, id));
+    let config_fast = config_option_bool(session, "fast");
+
+    let requested_effort = requested_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(config_model) = config_model else {
+        return Some(raw.to_string());
+    };
+    let Some(config_fast) = config_fast else {
+        return Some(raw.to_string());
+    };
+    let Some(config_effort) = config_effort else {
+        return Some(raw.to_string());
+    };
+    if requested_effort != Some(config_effort) {
+        return Some(raw.to_string());
+    }
+
+    let (requested_base, requested_fast, requested_thinking) =
+        cursor_parameterized_shape(requested_model);
+    if config_model != requested_base || config_fast != requested_fast {
+        return Some(raw.to_string());
+    }
+    if requested_thinking && config_option_bool(session, "thinking") != Some(true) {
+        return Some(raw.to_string());
+    }
+
+    Some(format!(
+        "{requested_model}[effort={config_effort},fast={config_fast}]"
+    ))
+}
+
+fn config_option_value<'a>(session: &'a Value, id: &str) -> Option<&'a Value> {
+    session
+        .get("configOptions")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|option| option.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|option| option.get("currentValue"))
+}
+
+fn config_option_string<'a>(session: &'a Value, id: &str) -> Option<&'a str> {
+    config_option_value(session, id).and_then(Value::as_str)
+}
+
+fn config_option_bool(session: &Value, id: &str) -> Option<bool> {
+    match config_option_value(session, id)? {
+        Value::Bool(value) => Some(*value),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Turn Zest's Cursor family id into the base id used by parameterized ACP.
+/// The `cursor-` namespace and the `-fast`/`-thinking` family modifiers are
+/// represented as ACP model parameters instead of part of the base id.
+fn cursor_parameterized_shape(model: &str) -> (String, bool, bool) {
+    let mut base = model.strip_prefix("cursor-").unwrap_or(model);
+    let fast = base.ends_with("-fast");
+    if fast {
+        base = base.strip_suffix("-fast").unwrap_or(base);
+    }
+    let thinking = base.ends_with("-thinking");
+    if thinking {
+        base = base.strip_suffix("-thinking").unwrap_or(base);
+    }
+    (base.to_string(), fast, thinking)
+}
+
+fn effort_mismatch(requested: Option<&str>, served: Option<&str>) -> Option<String> {
+    let requested = requested?;
+    let reported = served?
+        .split_once("effort=")?
+        .1
+        .split([',', ']'])
+        .next()?
+        .trim();
+    if requested == reported || reported.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Cursor reports {reported} effort; requested {requested}"
+    ))
+}
+
 fn protocol_error(method: &str, error: &Value) -> HarnessError {
     let message = error
         .get("data")
@@ -715,6 +993,247 @@ fn protocol_error(method: &str, error: &Value) -> HarnessError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    #[ignore = "offline ACP fixture requires Node.js"]
+    async fn reused_connection_isolates_sessions_and_discards_failed_turns() {
+        let fixture = r#"
+            const rl = require('readline').createInterface({input: process.stdin});
+            const sessions = new Map([['existing', []]]);
+            const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+            rl.on('line', line => {
+                const m = JSON.parse(line);
+                if (m.method === 'session/new') {
+                    const id = 'fresh-' + sessions.size;
+                    sessions.set(id, []);
+                    send({id:m.id, result:{sessionId:id, models:{currentModelId:'fixture'}}});
+                } else if (m.method === 'session/prompt') {
+                    const text = m.params.prompt[0].text;
+                    if (text === 'fail') { send({id:m.id,error:{message:'fixture failure'}}); return; }
+                    if (text === 'hang') return;
+                    const history = sessions.get(m.params.sessionId);
+                    history.push(text);
+                    send({method:'session/update',params:{update:{sessionUpdate:'agent_message_chunk',content:{text:JSON.stringify(history)}}}});
+                    send({id:m.id,result:{stopReason:'end_turn'}});
+                } else { throw new Error('Unexpected method: ' + m.method); }
+            });
+        "#;
+        let mut command = tokio::process::Command::new("node");
+        command.arg("-e").arg(fixture);
+        let process = JsonlProcess::spawn_command(command, "offline fixture")
+            .await
+            .unwrap();
+        let provider = provider();
+        *provider.connection.lock().await = Some(CursorConnection {
+            process,
+            next_id: 1,
+            wire_model: "composer-2.5".into(),
+            session_id: "existing".into(),
+            served_model: Some("fixture".into()),
+        });
+        let mut req = TurnRequest {
+            model: "composer-2.5".into(),
+            system: None,
+            messages: vec![Message::user_text("secret-one")],
+            tools: Vec::new(),
+            allow_tool_use: false,
+            max_tokens: 64,
+            effort: None,
+            thinking: false,
+            provider_session: Some(super::super::ProviderSessionRef::CursorAcp {
+                session_id: "existing".into(),
+            }),
+            interaction: None,
+            cancel: None,
+        };
+        let first = provider.run_turn(&req, &mut |_| {}).await.unwrap();
+        req.provider_session = first.provider_session;
+        req.messages = vec![Message::user_text("followup")];
+        let second = provider.run_turn(&req, &mut |_| {}).await.unwrap();
+        assert!(second.content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("secret-one"));
+        req.provider_session = None;
+        req.messages = vec![Message::user_text("new-conversation")];
+        let fresh = provider.run_turn(&req, &mut |_| {}).await.unwrap();
+        assert!(!fresh.content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("secret-one"));
+        req.provider_session = fresh.provider_session;
+        req.messages = vec![Message::user_text("fail")];
+        assert!(provider.run_turn(&req, &mut |_| {}).await.is_err());
+        assert!(provider.connection.lock().await.is_none());
+
+        let mut command = tokio::process::Command::new("node");
+        command.arg("-e").arg(fixture);
+        *provider.connection.lock().await = Some(CursorConnection {
+            process: JsonlProcess::spawn_command(command, "offline fixture")
+                .await
+                .unwrap(),
+            next_id: 1,
+            wire_model: "composer-2.5".into(),
+            session_id: "existing".into(),
+            served_model: None,
+        });
+        req.provider_session = Some(super::super::ProviderSessionRef::CursorAcp {
+            session_id: "existing".into(),
+        });
+        req.messages = vec![Message::user_text("hang")];
+        assert!(tokio::time::timeout(
+            Duration::from_millis(200),
+            provider.run_turn(&req, &mut |_| {})
+        )
+        .await
+        .is_err());
+        assert!(provider.connection.lock().await.is_none());
+    }
+
+    #[test]
+    fn reports_effort_differences_without_guessing_missing_metadata() {
+        assert!(effort_mismatch(Some("xhigh"), Some("grok[effort=high,fast=true]")).is_some());
+        assert!(effort_mismatch(Some("high"), Some("grok[effort=high]")).is_none());
+        assert!(effort_mismatch(Some("xhigh"), Some("grok")).is_none());
+        assert!(effort_mismatch(None, Some("grok[effort=high]")).is_none());
+    }
+
+    #[test]
+    fn initialize_enables_parameterized_cursor_models() {
+        let params = initialize_params();
+        assert_eq!(
+            params.pointer("/clientCapabilities/_meta/parameterizedModelPicker"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn parameterized_session_preserves_a_honored_fast_xhigh_selection() {
+        let session = json!({
+            "models": {"currentModelId": "grok-4.6"},
+            "configOptions": [
+                {"id": "model", "currentValue": "grok-4.6"},
+                {"id": "effort", "currentValue": "xhigh"},
+                {"id": "fast", "currentValue": "true"}
+            ]
+        });
+
+        assert_eq!(
+            served_model_for_session(&session, "cursor-grok-4.6-fast", Some("xhigh")),
+            Some("cursor-grok-4.6-fast[effort=xhigh,fast=true]".into())
+        );
+    }
+
+    #[test]
+    fn parameterized_session_keeps_a_real_effort_fallback_visible() {
+        let session = json!({
+            "models": {"currentModelId": "grok-4.6"},
+            "configOptions": [
+                {"id": "model", "currentValue": "grok-4.6"},
+                {"id": "effort", "currentValue": "high"},
+                {"id": "fast", "currentValue": "true"}
+            ]
+        });
+
+        assert_eq!(
+            served_model_for_session(&session, "cursor-grok-4.6-fast", Some("xhigh")),
+            Some("grok-4.6".into())
+        );
+    }
+    /// Explicitly opt-in: consumes the signed-in Cursor account's usage.
+    #[tokio::test]
+    #[ignore = "live Cursor latency measurement; requires authentication"]
+    async fn live_cursor_latency() {
+        let root = std::env::var("ZEST_BENCH_ROOT").expect("set ZEST_BENCH_ROOT");
+        assert!(std::env::var_os("ZEST_ACP_TIMING_FILE").is_some());
+        let prompt = std::env::var("ZEST_BENCH_PROMPT")
+            .unwrap_or_else(|_| "what is this project about".into());
+        let provider = CursorAcpProvider::new(
+            "cursor",
+            root,
+            "cursor-agent",
+            None,
+            vec!["cursor-grok-4.6-fast".into()],
+            false,
+            CursorMode::Ask,
+            90,
+        )
+        .unwrap();
+        let warm = std::env::var("ZEST_BENCH_REUSE_SESSION").as_deref() == Ok("1");
+        let mut session = None;
+        let mut messages = Vec::new();
+        for run in 1..=5 {
+            if !warm {
+                messages.clear();
+            }
+            messages.push(Message::user_text(&prompt));
+            let req = TurnRequest {
+                model: "cursor-grok-4.6-fast".into(),
+                system: None,
+                messages: messages.clone(),
+                tools: Vec::new(),
+                allow_tool_use: false,
+                max_tokens: 1024,
+                effort: Some("xhigh".into()),
+                thinking: true,
+                provider_session: if warm { session.clone() } else { None },
+                interaction: None,
+                cancel: None,
+            };
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                provider.run_turn(&req, &mut |_| {}),
+            )
+            .await
+            .expect("turn exceeded 120 seconds")
+            .expect("live Cursor turn failed");
+            println!(
+                "run {run}: {:.3}s served_model={:?}",
+                started.elapsed().as_secs_f64(),
+                result.served_model
+            );
+            assert!(!result.content.is_empty());
+            session = result.provider_session;
+            messages.push(Message::assistant(result.content));
+        }
+    }
+
+    #[test]
+    fn timing_preserves_first_mark_and_records_incomplete_turns_without_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("timings.jsonl");
+        for complete in [false, true] {
+            let mut state = super::TurnState {
+                timing: Some(super::AcpTiming {
+                    path: path.clone(),
+                    started: std::time::Instant::now(),
+                    model: "test-model".into(),
+                    effort: None,
+                    served_model: None,
+                    marks: Default::default(),
+                }),
+                text: "private response".into(),
+                ..Default::default()
+            };
+            state.mark("first_text");
+            let first = state.timing.as_ref().unwrap().marks["first_text"];
+            state.mark("first_text");
+            assert_eq!(state.timing.as_ref().unwrap().marks["first_text"], first);
+            if complete {
+                state.mark("completed");
+            }
+        }
+        let output = std::fs::read_to_string(path).unwrap();
+        assert!(!output.contains("private response"));
+        let rows: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["completed"], false);
+        assert_eq!(rows[1]["completed"], true);
+    }
+
     use super::*;
     use crate::anthropic::types::Message;
 
@@ -822,6 +1341,10 @@ mod tests {
         assert!(prompt.starts_with("be brief"), "{prompt}");
         assert!(prompt.ends_with("second"), "{prompt}");
         assert!(!prompt.contains("first"), "{prompt}");
+        let fresh = prompt_for_fresh_session(&req);
+        assert!(fresh.contains("first"));
+        assert!(fresh.contains("answer"));
+        assert!(fresh.contains("second"));
     }
 
     /// A host that records what it was asked and answers with a fixed decision.
@@ -906,6 +1429,24 @@ mod tests {
             host.asked.lock().unwrap().len(),
             1,
             "the session grant was not remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_skips_the_card_for_a_safe_command_title() {
+        let host = RecordingHost::new(
+            crate::tools::approval::ApprovalMode::Auto,
+            ApprovalDecision::Deny,
+        );
+        let interaction: Arc<dyn ProviderInteractionHost> = host.clone();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        let answer =
+            permission_result(&request("`git status`"), Some(interaction), &mut sink).await;
+        assert_eq!(answer.pointer("/outcome/optionId").unwrap(), "allow-once");
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "Auto should not draw a card for a safe command"
         );
     }
 

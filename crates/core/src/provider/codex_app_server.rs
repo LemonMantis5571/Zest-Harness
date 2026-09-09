@@ -25,6 +25,7 @@ use crate::config::DEFAULT_CODEX_MODEL;
 use crate::error::{HarnessError, Result, PROVIDER_MESSAGE_PREFIX};
 use crate::thread::new_id;
 use crate::tools::approval::{ApprovalDecision, ApprovalPolicy, PolicyOutcome, ToolRisk};
+use crate::tools::bash::auto_eligible_for_external_provider;
 use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
@@ -320,7 +321,7 @@ impl CodexAppServerProvider {
                     }
                 }
             }
-            None => String::new(),
+            _ => String::new(),
         };
         let thread_id = if requested_thread.is_empty() {
             let response = rpc_request(
@@ -644,7 +645,14 @@ async fn server_request_result(
             // routes *everything* here — without this, Auto and an earlier
             // "Allow for session" both drew a card anyway.
             let policy = interaction.as_ref().and_then(|host| host.approval_policy());
-            match preview_permission(policy.as_ref(), COMMAND_TOOL, &command, ToolRisk::Exec) {
+            let auto_eligible = auto_eligible_for_external_provider(&command);
+            match preview_permission(
+                policy.as_ref(),
+                COMMAND_TOOL,
+                &command,
+                ToolRisk::Exec,
+                auto_eligible,
+            ) {
                 PolicyOutcome::Allow => return json!({"decision": "accept"}),
                 PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
                 PolicyOutcome::Ask => {}
@@ -704,7 +712,13 @@ async fn server_request_result(
             // file rather than about writing in general — trusting `notes.txt`
             // must never be trusting `.env`.
             let policy = interaction.as_ref().and_then(|host| host.approval_policy());
-            match preview_permission(policy.as_ref(), FILE_CHANGE_TOOL, &path, ToolRisk::Write) {
+            match preview_permission(
+                policy.as_ref(),
+                FILE_CHANGE_TOOL,
+                &path,
+                ToolRisk::Write,
+                false,
+            ) {
                 PolicyOutcome::Allow => return json!({"decision": "accept"}),
                 PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
                 PolicyOutcome::Ask => {}

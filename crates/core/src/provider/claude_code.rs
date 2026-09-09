@@ -16,9 +16,12 @@ use super::claude_control::{
     prepare_approval, preview_permission, remember_session_grant, render_diff, risk_for,
     stream_json_user_message, summarize, surface_for, Surface, ToolPermissionRequest,
 };
+use super::claude_stream::ClaudeNormalizer;
+use super::stream_contract::{RunOutcome, StreamNormalizer};
+use super::turn_spec::{compose, AgentProfile, CompositionCapabilities, ToolScope, TurnSpec};
 use super::{
-    catalogue, Completion, EffortPolicy, ModelSpec, Provider, StreamEvent, SystemPrompt,
-    TurnRequest,
+    catalogue, Completion, EffortPolicy, ModelSpec, Provider, ProviderSessionRef, StreamEvent,
+    SystemPrompt, TurnRequest,
 };
 use crate::anthropic::types::Usage;
 use crate::auth::{detect_claude_code, AuthStatus};
@@ -29,6 +32,7 @@ use crate::config::{
 use crate::error::{HarnessError, Result};
 use crate::thread::new_id;
 use crate::tools::approval::{ApprovalDecision, PolicyOutcome, ToolRisk};
+use crate::tools::bash::auto_eligible_for_external_provider;
 use crate::tools::external_agent::{
     run_headless_command_streaming, ControlResponder, ExternalAgentEvent,
 };
@@ -40,7 +44,56 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 /// provider accepts. It was private, and the driver passed an empty builtin list
 /// instead: an entry with no `models` offered `[sonnet]` in the picker while the
 /// provider accepted `[sonnet, opus, haiku]`.
-pub(crate) const BUILTIN_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
+pub(crate) const BUILTIN_MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+
+/// The model family the CLI does not accept an `--effort` for.
+const NO_EFFORT_FAMILY: &str = "haiku";
+
+/// What Claude Code may reach while it is standing in as Zest's parent agent.
+///
+/// Passed on `--tools`, which narrows the built-in set. This is a scope
+/// boundary, not a permission decision: `--permission-mode` still decides who
+/// approves what is inside it. Deliberately *not* `--allowedTools`, which means
+/// "run without asking" and would route straight around the approval card.
+///
+/// Everything left out acts outside the turn or outside Zest's window:
+/// `CronCreate` / `CronDelete` / `CronList` / `ScheduleWakeup` schedule work
+/// that outlives the chat, `RemoteTrigger` starts cloud agents, `SendMessage`
+/// and `PushNotification` talk to things that are not this conversation,
+/// `DesignSync` and `ReportFindings` render in Claude Code's own host UI, and
+/// `Workflow` fans out to dozens of agents Zest has no way to show. The two
+/// worktree tools are excluded for a different reason: Zest already owns
+/// worktree isolation through `isolated_workspace`, and a second one opened
+/// behind its back is a checkout nothing is tracking.
+///
+/// `Task` *is* included. A Claude Code subagent stays inside the same session,
+/// the same tool scope, and the same approval callback, so it is ordinary work
+/// rather than an escape from any of them. Note that the CLI calls the same
+/// tool two things: `--tools` and `system:init` name it `Task`, and the
+/// `tool_use` block in the stream names it `Agent`. Both have to be spelled
+/// correctly in the place that uses them.
+pub(crate) const ZEST_TOOL_SCOPE: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+    "Bash",
+    "PowerShell",
+    "WebSearch",
+    "WebFetch",
+    "Task",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TaskUpdate",
+    "Skill",
+    "ToolSearch",
+    "Monitor",
+];
 
 pub struct ClaudeCodeProvider {
     id: String,
@@ -50,6 +103,7 @@ pub struct ClaudeCodeProvider {
     models: Vec<ModelSpec>,
     allow_mcp: bool,
     permission_mode: ClaudeCodePermissionMode,
+    disallowed_tools: Vec<String>,
     timeout_secs: u64,
     auth: AuthStatus,
 }
@@ -64,6 +118,7 @@ impl ClaudeCodeProvider {
         models: Vec<String>,
         allow_mcp: bool,
         permission_mode: ClaudeCodePermissionMode,
+        disallowed_tools: Vec<String>,
         timeout_secs: u64,
     ) -> Result<Self> {
         let command = command.into();
@@ -95,9 +150,10 @@ impl ClaudeCodeProvider {
             root: root.into(),
             command,
             default_model: default_model.clone(),
-            models: catalogue(&default_model, &models, &[], EffortPolicy::Unsupported),
+            models: effort_catalogue(&default_model, &models),
             allow_mcp,
             permission_mode,
+            disallowed_tools,
             timeout_secs,
             auth: detect_claude_code(),
         })
@@ -105,51 +161,138 @@ impl ClaudeCodeProvider {
 
     /// The mode the CLI actually runs in.
     ///
-    /// `AcceptEdits` and `BypassPermissions` auto-approve *before* the callback
-    /// is consulted, so either would silently defeat the approval card. Both
-    /// become `Default` — the mode that actually asks.
+    /// This used to collapse every configured mode except `Plan` down to
+    /// `default`, because `acceptEdits` and `bypassPermissions` both approve
+    /// *before* the permission callback is consulted and would have silently
+    /// defeated the approval card. The coercion made the setting a lie: a user
+    /// who asked for `accept_edits` got manual approval anyway.
     ///
-    /// This does not depend on whether a front-end is attached. Who gets asked
-    /// is the responder's business: a host renders a card, and no host denies.
-    /// The mode only has to guarantee the CLI asks at all.
+    /// It is no longer needed. CLI 2.1.220 ships `auto`, a classifier that
+    /// approves ordinary work and still routes everything it is unsure about to
+    /// the callback, so the card survives without overriding the user. Each
+    /// configured mode now means what it says, and the legacy `default` value
+    /// maps onto `auto` because that is the mode it was standing in for.
     fn effective_permission_mode(&self) -> ClaudeCodePermissionMode {
         match self.permission_mode {
-            ClaudeCodePermissionMode::Plan => ClaudeCodePermissionMode::Plan,
-            _ => ClaudeCodePermissionMode::Default,
+            ClaudeCodePermissionMode::Default => ClaudeCodePermissionMode::Auto,
+            mode => mode,
         }
     }
 
-    fn config_for(&self, model: &str) -> ExternalAgentConfig {
+    /// The tools Claude Code may reach, plus whatever the user vetoed.
+    fn tool_scope(&self) -> ToolScope {
+        ToolScope::new(ZEST_TOOL_SCOPE.iter().copied()).with_deny(self.disallowed_tools.clone())
+    }
+
+    /// Claude Code keeps its own conversation, so instructions and transcript
+    /// travel once and `--resume` carries them afterwards.
+    fn capabilities() -> CompositionCapabilities {
+        CompositionCapabilities::SESSION_OWNING
+    }
+
+    /// The session to continue, when the stored one still describes this turn.
+    ///
+    /// A session holds a model as well as a history: resuming one under a
+    /// different model would silently answer from a conversation the new model
+    /// never had. The check is made here, before the process starts, so there
+    /// is no failed `--resume` to recover from.
+    fn resumable_session<'a>(&self, req: &'a TurnRequest) -> Option<&'a str> {
+        match req.provider_session.as_ref()? {
+            ProviderSessionRef::ClaudeCode { session_id, model } if model == &req.model => {
+                Some(session_id.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn args(&self, req: &TurnRequest, scope: &ToolScope, resume: Option<&str>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "--print".into(),
+            "--verbose".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--include-partial-messages".into(),
+            // Bidirectional stream-json plus `stdio` is what routes the
+            // CLI's permission prompts to us instead of letting it decide
+            // locally. Without the flag it silently denies whatever it
+            // cannot auto-approve.
+            "--input-format".into(),
+            "stream-json".into(),
+            "--permission-prompt-tool".into(),
+            "stdio".into(),
+            "--permission-mode".into(),
+            self.effective_permission_mode().cli_value().into(),
+            "--model".into(),
+            "{model}".into(),
+            // The prompt is a stdin JSON user message. `--input-format
+            // stream-json` waits for that line and ignores a leftover argv
+            // prompt, which left the child idle until the turn timed out.
+        ];
+
+        if !scope.allow.is_empty() {
+            args.push("--tools".into());
+            args.push(scope.allow.join(","));
+        }
+        if !scope.deny.is_empty() {
+            args.push("--disallowedTools".into());
+            args.push(scope.deny.join(","));
+        }
+
+        // `Task` is in scope, so subagents run. Without this their text never
+        // reaches the stream and the tool row sits silent for however long the
+        // subagent takes.
+        if scope.allow.iter().any(|tool| tool == "Task") {
+            args.push("--forward-subagent-text".into());
+        }
+
+        // The CLI rejects an effort for the small model rather than ignoring it.
+        if let Some(effort) = req.effort.as_deref().filter(|effort| !effort.is_empty()) {
+            if !req.model.contains(NO_EFFORT_FAMILY) {
+                args.push("--effort".into());
+                args.push(effort.to_string());
+            }
+        }
+
+        if let Some(session_id) = resume {
+            args.push("--resume".into());
+            args.push(session_id.to_string());
+        }
+
+        args
+    }
+
+    fn config_for(&self, model: &str, args: Vec<String>) -> ExternalAgentConfig {
         ExternalAgentConfig {
             mode: ExternalAgentMode::Headless,
             command: self.command.clone(),
-            args: vec![
-                "--print".into(),
-                "--output-format".into(),
-                "stream-json".into(),
-                "--include-partial-messages".into(),
-                // Bidirectional stream-json plus `stdio` is what routes the
-                // CLI's permission prompts to us instead of letting it decide
-                // locally. Without the flag it silently denies whatever it
-                // cannot auto-approve.
-                "--input-format".into(),
-                "stream-json".into(),
-                "--permission-prompt-tool".into(),
-                "stdio".into(),
-                "--permission-mode".into(),
-                self.effective_permission_mode().cli_value().into(),
-                "--model".into(),
-                "{model}".into(),
-                // The prompt is a stdin JSON user message. `--input-format
-                // stream-json` waits for that line and ignores a leftover argv
-                // prompt, which left the child idle until the turn timed out.
-            ],
+            args,
             allow_mcp: self.allow_mcp,
             model: Some(model.to_string()),
             workspace: ExternalWorkspace::Current,
             timeout_secs: self.timeout_secs,
         }
     }
+}
+
+/// Claude Code's catalogue, with efforts where the CLI accepts them.
+///
+/// The provider used to declare [`EffortPolicy::Unsupported`], which was true
+/// when it was written and is not now: CLI 2.1.220 takes `--effort` with the
+/// same five levels Zest already calls standard. Haiku is the exception and
+/// keeps an empty list, so the picker cannot offer a control that model rejects.
+pub(crate) fn effort_catalogue(default_model: &str, models: &[String]) -> Vec<ModelSpec> {
+    let mut catalogue = catalogue(
+        default_model,
+        models,
+        BUILTIN_MODELS,
+        EffortPolicy::Standard(&[]),
+    );
+    for model in &mut catalogue {
+        if model.id.contains(NO_EFFORT_FAMILY) {
+            model.efforts.clear();
+        }
+    }
+    catalogue
 }
 
 #[async_trait]
@@ -187,8 +330,38 @@ impl Provider for ClaudeCodeProvider {
             return Err(HarnessError::Cancelled);
         }
 
-        let prompt = parent_prompt(req);
-        let config = self.config_for(&req.model);
+        let resume = self.resumable_session(req);
+        let profile = AgentProfile::parent(self.tool_scope());
+        let scope = &profile.tools;
+        let system = req.system.as_ref().map(SystemPrompt::text);
+        let composed = compose(
+            &TurnSpec {
+                profile: &profile,
+                system: system.as_deref(),
+                messages: &req.messages,
+                model: &req.model,
+                effort: req.effort.as_deref(),
+                resumed: resume.is_some(),
+                policy_override: None,
+            },
+            &Self::capabilities(),
+        );
+        if diagnostics_enabled() {
+            for entry in &composed.trace {
+                eprintln!(
+                    "[claude_code] composition {}={} ({})",
+                    entry.step, entry.value, entry.reason
+                );
+            }
+        }
+
+        let prompt = composed.prompt;
+        let config = self.config_for(&req.model, self.args(req, scope, resume));
+        let mut normalizer =
+            ClaudeNormalizer::new(self.root.clone()).requesting_tools(&scope.allow);
+        if let Some(session_id) = resume {
+            normalizer = normalizer.expecting_session(session_id);
+        }
         let mut streamed_text = false;
 
         // Everything the turn wants to show the user goes through one channel.
@@ -218,7 +391,7 @@ impl Provider for ClaudeCodeProvider {
         // Dropped so the channel closes when the runner and responder are done.
         drop(tx);
 
-        let run = {
+        let outcome = {
             let runner = run_headless_command_streaming(
                 &self.root,
                 &config,
@@ -226,6 +399,7 @@ impl Provider for ClaudeCodeProvider {
                 req.cancel.as_ref(),
                 &mut on_external_event,
                 Some(&mut responder),
+                Some(&mut normalizer),
             );
             tokio::pin!(runner);
             loop {
@@ -239,11 +413,17 @@ impl Provider for ClaudeCodeProvider {
                         while let Ok(turn_event) = rx.try_recv() {
                             emit(turn_event, on_event, &mut streamed_text);
                         }
-                        break result?;
+                        break result;
                     }
                 }
             }
         };
+
+        // The report is the only place a schema change shows up. Take it on
+        // every ending, because a stream that lost a record it needed is a more
+        // likely explanation for a failure than for a success.
+        report_stream_health(&normalizer, &outcome);
+        let run = outcome?;
 
         if req
             .cancel
@@ -253,12 +433,37 @@ impl Provider for ClaudeCodeProvider {
             return Err(HarnessError::Cancelled);
         }
 
+        // Resuming into a conversation the CLI substituted would answer from a
+        // history nobody asked for, so the session is not carried forward.
+        let session = match normalizer.session_mismatch() {
+            Some(_) => None,
+            None => normalizer
+                .session_id()
+                .map(|session_id| ProviderSessionRef::ClaudeCode {
+                    session_id: session_id.to_string(),
+                    model: req.model.clone(),
+                }),
+        };
+
         let answer = run.text();
         if answer.trim().is_empty() {
             // Tag these so the desktop shows Claude's words. `Other` is
             // treated as internal and becomes "Try again."
+            if let Some(error) = normalizer.result_error() {
+                return Err(HarnessError::from_provider_stream("claude_code", error));
+            }
             if let Some(error) = run.errors().first() {
                 return Err(HarnessError::from_provider_stream("claude_code", *error));
+            }
+            // "No answer" and "stopped before answering" are different failures
+            // and want different next steps, so they should not read the same.
+            // The stream always ends in a `result` record when the turn really
+            // finished; reaching here without one means the CLI stopped early.
+            if !normalizer.has_finish() {
+                return Err(HarnessError::from_provider_stream(
+                    "claude_code",
+                    "Claude Code stopped before finishing this turn.",
+                ));
             }
             return Err(HarnessError::from_provider_stream(
                 "claude_code",
@@ -292,8 +497,45 @@ impl Provider for ClaudeCodeProvider {
             usage_available,
             limits: run.limits(),
             served_model: None,
-            provider_session: None,
+            provider_session: session,
         })
+    }
+}
+
+/// Opt-in diagnostics, matching the ACP timing switch: no prompts, no output
+/// text, no workspace paths.
+fn diagnostics_enabled() -> bool {
+    std::env::var_os("ZEST_CLAUDE_CODE_DIAGNOSTICS").is_some_and(|value| !value.is_empty())
+}
+
+/// Report what the stream looked like, when it did not look like the contract.
+///
+/// Always on rather than behind the diagnostics switch: silent schema drift is
+/// exactly the failure this cannot afford to hide, and the message names record
+/// kinds only.
+fn report_stream_health(
+    normalizer: &ClaudeNormalizer,
+    outcome: &Result<crate::tools::external_agent::ExternalAgentRun>,
+) {
+    let run_outcome = match outcome {
+        Ok(_) => RunOutcome::Success,
+        Err(HarnessError::Cancelled) => RunOutcome::Abort,
+        Err(_) => RunOutcome::Error,
+    };
+    if let Some(message) = normalizer.report(run_outcome).describe() {
+        eprintln!("[claude_code] {message}");
+    }
+    if !normalizer.dropped_tools().is_empty() {
+        eprintln!(
+            "[claude_code] the CLI did not recognise these tools: {}",
+            normalizer.dropped_tools().join(", ")
+        );
+    }
+    if let Some(session_id) = normalizer.session_mismatch() {
+        eprintln!(
+            "[claude_code] the CLI answered from session {session_id}, which is not the one \
+             requested; the session was not carried forward"
+        );
     }
 }
 
@@ -412,7 +654,19 @@ impl ControlResponder for ClaudePermissions {
         // tools do not. Consult the session policy before drawing a card so
         // Auto and "Allow for session" are not no-ops that re-ask on the next
         // slightly different path.
-        match preview_permission(policy.as_ref(), &request.tool_name, &target, risk) {
+        let auto_eligible = request.tool_name == "Bash"
+            && request
+                .input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(auto_eligible_for_external_provider);
+        match preview_permission(
+            policy.as_ref(),
+            &request.tool_name,
+            &target,
+            risk,
+            auto_eligible,
+        ) {
             PolicyOutcome::Allow => {
                 return Some(control_response(&request.request_id, true, ""));
             }
@@ -466,130 +720,85 @@ impl ControlResponder for ClaudePermissions {
     }
 }
 
-fn parent_prompt(req: &TurnRequest) -> String {
-    let mut prompt = String::new();
-    prompt.push_str(
-        "You are the parent coding agent running inside Zest through an authenticated \
-         provider runtime. Work directly in the active project. Do not delegate this \
-         request to another agent. Use the project instructions and the tools available \
-         in this provider session.\n\n",
-    );
-
-    if let Some(system) = req
-        .system
-        .as_ref()
-        .map(SystemPrompt::text)
-        .filter(|value| !value.trim().is_empty())
-    {
-        prompt.push_str("# Zest operating context\n\n");
-        prompt.push_str(&system);
-        prompt.push_str("\n\n");
-    }
-
-    prompt.push_str("# Conversation\n");
-    for message in &req.messages {
-        let role = match message.role.as_str() {
-            "assistant" => "Assistant",
-            "user" => "User",
-            other => other,
-        };
-        prompt.push('\n');
-        prompt.push_str(role);
-        prompt.push_str(":\n");
-        let text = render_content(&message.content);
-        if text.is_empty() {
-            prompt.push_str("[non-text content]\n");
-        } else {
-            prompt.push_str(&text);
-            prompt.push('\n');
-        }
-    }
-    prompt.push_str(
-        "\nContinue from the conversation above and complete the latest user request. \
-         Report the result clearly when the work is finished.",
-    );
-    prompt
-}
-
-fn render_content(content: &[Value]) -> String {
-    let mut output = String::new();
-    for block in content {
-        if let Some(text) = text_value(block) {
-            if !output.is_empty() {
-                output.push('\n');
-            }
-            output.push_str(&text);
-            continue;
-        }
-        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-            output.push_str(&format!("[Zest tool call: {name}]\n"));
-        }
-    }
-    output
-}
-
-fn text_value(value: &Value) -> Option<String> {
-    if let Some(text) = value.get("text").and_then(Value::as_str) {
-        return Some(text.to_string());
-    }
-    if let Some(text) = value.as_str() {
-        return Some(text.to_string());
-    }
-    if let Some(items) = value.as_array() {
-        let mut output = String::new();
-        for item in items {
-            if let Some(text) = text_value(item) {
-                output.push_str(&text);
-            }
-        }
-        return (!output.is_empty()).then_some(output);
-    }
-    value
-        .get("content")
-        .and_then(text_value)
-        .filter(|text| !text.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::anthropic::types::Message;
 
-    #[test]
-    fn default_model_and_aliases_are_available() {
-        let provider = ClaudeCodeProvider::new(
+    fn provider(permission_mode: ClaudeCodePermissionMode) -> ClaudeCodeProvider {
+        ClaudeCodeProvider::new(
             "claude",
             ".",
             "claude",
             None,
             Vec::new(),
             false,
-            ClaudeCodePermissionMode::AcceptEdits,
+            permission_mode,
+            Vec::new(),
             900,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn request(model: &str) -> TurnRequest {
+        TurnRequest {
+            model: model.into(),
+            system: Some("Follow the project rules.".into()),
+            messages: vec![
+                Message::user_text("Inspect the loader."),
+                Message::assistant(vec![json!({"type": "text", "text": "I will inspect it."})]),
+                Message::user_text("Now implement the fix."),
+            ],
+            tools: Vec::new(),
+            allow_tool_use: true,
+            max_tokens: 100,
+            effort: None,
+            thinking: false,
+            provider_session: None,
+            interaction: None,
+            cancel: None,
+        }
+    }
+
+    fn args(provider: &ClaudeCodeProvider, req: &TurnRequest) -> String {
+        let scope = provider.tool_scope();
+        let resume = provider.resumable_session(req);
+        provider.args(req, &scope, resume).join(" ")
+    }
+
+    fn prompt(provider: &ClaudeCodeProvider, req: &TurnRequest, resumed: bool) -> String {
+        let system = req.system.as_ref().map(SystemPrompt::text);
+        let profile = AgentProfile::parent(provider.tool_scope());
+        compose(
+            &TurnSpec {
+                profile: &profile,
+                system: system.as_deref(),
+                messages: &req.messages,
+                model: &req.model,
+                effort: req.effort.as_deref(),
+                resumed,
+                policy_override: None,
+            },
+            &ClaudeCodeProvider::capabilities(),
+        )
+        .prompt
+    }
+
+    #[test]
+    fn default_model_and_aliases_are_available() {
+        let provider = provider(ClaudeCodePermissionMode::AcceptEdits);
 
         assert_eq!(provider.default_model(), "sonnet");
         assert!(provider.models().iter().any(|model| model.id == "opus"));
+        assert!(provider.models().iter().any(|model| model.id == "fable"));
         assert!(provider.owns_agent_loop());
     }
 
     #[test]
     fn config_requests_live_claude_stream_events() {
-        let provider = ClaudeCodeProvider::new(
-            "claude",
-            ".",
-            "claude",
-            None,
-            Vec::new(),
-            false,
-            ClaudeCodePermissionMode::AcceptEdits,
-            900,
-        )
-        .unwrap();
+        let provider = provider(ClaudeCodePermissionMode::AcceptEdits);
+        let interactive = args(&provider, &request("sonnet"));
 
-        let interactive = provider.config_for("sonnet").args.join(" ");
         assert!(interactive.contains("--include-partial-messages"));
         // The flag that routes permission prompts to us. Without it the CLI
         // decides locally and denies whatever it cannot auto-approve.
@@ -605,45 +814,310 @@ mod tests {
             !interactive.contains("{prompt}"),
             "stream-json input carries the prompt on stdin, not argv: {interactive}"
         );
-        // Configured `accept_edits` auto-approves before the callback is
-        // consulted, so an interactive turn must not run in it.
-        assert!(
-            !interactive.contains("acceptEdits"),
-            "accept_edits would silently bypass the approval card: {interactive}"
-        );
+    }
 
-        // Plan mode is the one configured value that survives, because it does
-        // not auto-approve.
+    /// The provider used to collapse every mode except `plan` onto `default`,
+    /// because `acceptEdits` approved before the callback was consulted. That
+    /// override made the setting a lie: asking for `accept_edits` still got
+    /// manual approval. `auto` refers what it is unsure about back to the
+    /// callback, so each mode can now mean what it says.
+    #[test]
+    fn a_configured_permission_mode_reaches_the_cli() {
+        for (configured, expected) in [
+            (ClaudeCodePermissionMode::Auto, "auto"),
+            (ClaudeCodePermissionMode::Manual, "manual"),
+            (ClaudeCodePermissionMode::AcceptEdits, "acceptEdits"),
+            (ClaudeCodePermissionMode::Plan, "plan"),
+            (
+                ClaudeCodePermissionMode::BypassPermissions,
+                "bypassPermissions",
+            ),
+        ] {
+            let provider = provider(configured);
+            let interactive = args(&provider, &request("sonnet"));
+            assert!(
+                interactive.contains(&format!("--permission-mode {expected}")),
+                "{configured:?}: {interactive}"
+            );
+        }
+    }
+
+    /// `default` is not among the CLI's documented choices. It is still taken
+    /// today, but it stands for what `auto` now names, so nothing passes it on.
+    #[test]
+    fn the_legacy_default_mode_resolves_to_auto() {
+        let provider = provider(ClaudeCodePermissionMode::Default);
         assert_eq!(
             provider.effective_permission_mode(),
-            ClaudeCodePermissionMode::Default
+            ClaudeCodePermissionMode::Auto
         );
+        assert!(args(&provider, &request("sonnet")).contains("--permission-mode auto"));
+    }
+
+    /// The scope boundary. `--allowedTools` means "run without asking" and must
+    /// never appear: it would route straight around the approval card.
+    #[test]
+    fn the_tool_scope_narrows_the_cli_without_auto_approving() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let interactive = args(&provider, &request("sonnet"));
+
+        assert!(interactive.contains("--tools "), "{interactive}");
+        assert!(
+            !interactive.contains("--allowedTools"),
+            "an allow-list bypasses the approval card: {interactive}"
+        );
+        for inside in ["Read", "Write", "Edit", "Bash", "PowerShell", "Task"] {
+            assert!(
+                ZEST_TOOL_SCOPE.contains(&inside),
+                "{inside} should be in scope"
+            );
+        }
+        for outside in [
+            "CronCreate",
+            "ScheduleWakeup",
+            "RemoteTrigger",
+            "PushNotification",
+            "SendMessage",
+            "DesignSync",
+            "ReportFindings",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Workflow",
+        ] {
+            assert!(
+                !ZEST_TOOL_SCOPE.contains(&outside),
+                "{outside} acts outside the turn and should be out of scope"
+            );
+        }
+    }
+
+    /// `--tools` drops names it does not recognise in silence, so a wrong entry
+    /// narrows the agent with nothing to show for it. Anygent's list carries
+    /// `LS` and `TodoWrite`, which CLI 2.1.220 does not ship, and `Agent`, which
+    /// is the name of the *call* in the stream rather than a name `--tools`
+    /// accepts. The scope has to use `Task`, which is what `--tools` takes.
+    #[test]
+    fn the_scope_uses_the_names_the_tools_flag_accepts() {
+        for wrong in ["LS", "TodoWrite", "Agent"] {
+            assert!(
+                !ZEST_TOOL_SCOPE.contains(&wrong),
+                "`--tools` does not accept {wrong} and would drop it in silence"
+            );
+        }
+        assert!(ZEST_TOOL_SCOPE.contains(&"Task"));
     }
 
     #[test]
-    fn parent_prompt_keeps_system_and_latest_conversation() {
-        let request = TurnRequest {
-            model: "sonnet".into(),
-            system: Some("Follow the project rules.".into()),
-            messages: vec![
-                Message::user_text("Inspect the loader."),
-                Message::assistant(vec![json!({"type": "text", "text": "I will inspect it."})]),
-                Message::user_text("Now implement the fix."),
-            ],
-            tools: Vec::new(),
-            allow_tool_use: true,
-            max_tokens: 100,
-            effort: None,
-            thinking: false,
-            provider_session: None,
-            interaction: None,
-            cancel: None,
+    fn a_configured_deny_list_is_layered_on_the_scope() {
+        let provider = ClaudeCodeProvider::new(
+            "claude",
+            ".",
+            "claude",
+            None,
+            Vec::new(),
+            false,
+            ClaudeCodePermissionMode::Auto,
+            vec!["Bash".to_string()],
+            900,
+        )
+        .unwrap();
+
+        let interactive = args(&provider, &request("sonnet"));
+        assert!(
+            interactive.contains("--disallowedTools Bash"),
+            "{interactive}"
+        );
+        assert!(interactive.contains("--tools "), "{interactive}");
+    }
+
+    /// `Task` is in scope, so subagents run. Without this flag their text never
+    /// reaches the stream and the tool row sits silent for as long as they take.
+    #[test]
+    fn subagent_output_is_forwarded_because_task_is_in_scope() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        assert!(args(&provider, &request("sonnet")).contains("--forward-subagent-text"));
+    }
+
+    #[test]
+    fn effort_reaches_the_cli_except_on_the_model_that_rejects_it() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+
+        let mut sonnet = request("sonnet");
+        sonnet.effort = Some("xhigh".into());
+        assert!(args(&provider, &sonnet).contains("--effort xhigh"));
+
+        let mut haiku = request("haiku");
+        haiku.effort = Some("xhigh".into());
+        assert!(!args(&provider, &haiku).contains("--effort"));
+    }
+
+    /// The picker must not offer a control the model rejects.
+    #[test]
+    fn the_catalogue_offers_effort_only_where_the_cli_takes_it() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let efforts = |id: &str| {
+            provider
+                .models()
+                .into_iter()
+                .find(|model| model.id == id)
+                .map(|model| model.efforts)
+                .expect(id)
         };
 
-        let prompt = parent_prompt(&request);
-        assert!(prompt.contains("Follow the project rules."));
-        assert!(prompt.contains("Inspect the loader."));
-        assert!(prompt.contains("Now implement the fix."));
-        assert!(prompt.contains("Do not delegate"));
+        assert!(efforts("sonnet").contains(&"xhigh".to_string()));
+        assert!(efforts("opus").contains(&"low".to_string()));
+        assert!(efforts("haiku").is_empty());
+    }
+
+    #[test]
+    fn a_fresh_turn_carries_the_whole_conversation() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let req = request("sonnet");
+
+        assert!(provider.resumable_session(&req).is_none());
+        assert!(!args(&provider, &req).contains("--resume"));
+
+        let opening = prompt(&provider, &req, false);
+        assert!(opening.contains("Follow the project rules."));
+        assert!(opening.contains("Inspect the loader."));
+        assert!(opening.contains("Now implement the fix."));
+    }
+
+    #[test]
+    fn a_stored_session_is_resumed_instead_of_replayed() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let mut req = request("sonnet");
+        req.provider_session = Some(ProviderSessionRef::ClaudeCode {
+            session_id: "session-a".into(),
+            model: "sonnet".into(),
+        });
+
+        assert_eq!(provider.resumable_session(&req), Some("session-a"));
+        assert!(args(&provider, &req).contains("--resume session-a"));
+        // The whole point: the operating context and the transcript were
+        // delivered when the session opened and are not sent again.
+        assert_eq!(prompt(&provider, &req, true), "Now implement the fix.");
+    }
+
+    /// A session holds the model that produced it. Resuming one under another
+    /// model would answer from a conversation that model never had, and the CLI
+    /// would do it without complaining.
+    #[test]
+    fn a_session_from_another_model_is_not_resumed() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let mut req = request("opus");
+        req.provider_session = Some(ProviderSessionRef::ClaudeCode {
+            session_id: "session-a".into(),
+            model: "sonnet".into(),
+        });
+
+        assert_eq!(provider.resumable_session(&req), None);
+        assert!(!args(&provider, &req).contains("--resume"));
+    }
+
+    #[test]
+    fn another_providers_session_is_never_resumed_here() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let mut req = request("sonnet");
+        req.provider_session = Some(ProviderSessionRef::CursorAcp {
+            session_id: "session-a".into(),
+        });
+
+        assert_eq!(provider.resumable_session(&req), None);
+    }
+
+    /// The old prompt told Claude not to delegate. Subagents are now inside the
+    /// tool scope, so that instruction would forbid work the scope allows.
+    #[test]
+    fn the_prompt_no_longer_forbids_subagents() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let opening = prompt(&provider, &request("sonnet"), false);
+
+        assert!(!opening.contains("Do not delegate"), "{opening}");
+    }
+
+    /// Explicitly opt-in: consumes the signed-in Claude Code subscription.
+    ///
+    /// Two turns, so the thing this pass is actually about gets exercised: the
+    /// first opens a session and the second has to resume it and send only the
+    /// new message. Everything below the CLI boundary is covered by the unit
+    /// tests; this is the part where the CLI has to agree.
+    #[tokio::test]
+    #[ignore = "live Claude Code turn; requires `claude auth login`"]
+    async fn live_claude_code_session_survives_a_second_turn() {
+        let root = std::env::var("ZEST_LIVE_ROOT").unwrap_or_else(|_| ".".into());
+        let provider = ClaudeCodeProvider::new(
+            "claude",
+            root,
+            "claude",
+            Some("haiku".into()),
+            Vec::new(),
+            false,
+            ClaudeCodePermissionMode::Auto,
+            Vec::new(),
+            120,
+        )
+        .unwrap();
+
+        let mut messages = vec![Message::user_text(
+            "Reply with exactly the word ALPHA and nothing else.",
+        )];
+        let mut session = None;
+
+        for (turn, expected) in [(1, "ALPHA"), (2, "BETA")] {
+            let req = TurnRequest {
+                model: "haiku".into(),
+                system: Some("You are being driven by an automated test.".into()),
+                messages: messages.clone(),
+                tools: Vec::new(),
+                allow_tool_use: false,
+                max_tokens: 256,
+                effort: None,
+                thinking: false,
+                provider_session: session.clone(),
+                interaction: None,
+                cancel: None,
+            };
+
+            let mut text = String::new();
+            let completion = tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                provider.stream_turn(&req, &mut |event| {
+                    if let StreamEvent::Text(chunk) = event {
+                        text.push_str(chunk);
+                    }
+                }),
+            )
+            .await
+            .expect("turn exceeded 180 seconds")
+            .expect("live Claude Code turn failed");
+
+            let answer = completion.content[0]["text"].as_str().unwrap_or_default();
+            println!("turn {turn}: session={session:?} answer={answer:?}");
+            assert!(
+                answer.contains(expected),
+                "turn {turn} should say {expected}: {answer}"
+            );
+
+            let next = completion.provider_session.clone();
+            assert!(
+                matches!(next, Some(ProviderSessionRef::ClaudeCode { .. })),
+                "turn {turn} must carry a session forward: {next:?}"
+            );
+            if turn == 1 {
+                messages.push(Message::assistant(vec![
+                    json!({"type": "text", "text": answer}),
+                ]));
+                messages.push(Message::user_text(
+                    "Now reply with exactly the word BETA and nothing else.",
+                ));
+            } else {
+                assert_eq!(
+                    session, next,
+                    "the second turn must resume the first turn's session"
+                );
+            }
+            session = next;
+        }
     }
 }

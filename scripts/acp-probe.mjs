@@ -32,6 +32,8 @@
 //                       which is what crates/core's own ACP client does
 //   ZEST_ACP_ALLOW      1 to answer permission requests with allow-once
 //   ZEST_ACP_LOGIN      1 to attempt `authenticate` (may open a browser)
+//   ZEST_ACP_PARAMETERIZED 1 to advertise Cursor's parameterized model picker
+//   ZEST_ACP_NO_PROMPT    1 to stop after session/new (handshake-only probe)
 //   ZEST_ACP_TIMEOUT_MS overall budget in ms (default: 120000)
 //   ZEST_ACP_OUT        transcript path (default: outputs/acp-probe/<stamp>.jsonl)
 
@@ -56,6 +58,8 @@ const clientFs = process.env.ZEST_ACP_CLIENT_FS === "1";
 const allowMode = process.env.ZEST_ACP_ALLOW || "";
 const allow = allowMode === "1" || allowMode === "always";
 const attemptLogin = process.env.ZEST_ACP_LOGIN === "1";
+const parameterizedModelPicker = process.env.ZEST_ACP_PARAMETERIZED === "1";
+const handshakeOnly = process.env.ZEST_ACP_NO_PROMPT === "1";
 const budgetMs = Number(process.env.ZEST_ACP_TIMEOUT_MS || 120_000);
 const prompt =
   process.env.ZEST_ACP_PROMPT ||
@@ -334,6 +338,9 @@ const initialize = await within(
   request("initialize", {
     protocolVersion: 1,
     clientCapabilities: {
+      ...(parameterizedModelPicker
+        ? { _meta: { parameterizedModelPicker: true } }
+        : {}),
       fs: { readTextFile: clientFs, writeTextFile: clientFs },
       terminal: false,
     },
@@ -357,20 +364,22 @@ if (failed("session/new", session) || !sessionId) {
     );
   }
 } else {
-  const setMode = await within(request("session/set_mode", { sessionId, modeId: mode }), 15_000);
-  // Optional: an error here only tells us the mode must be set at session/new.
-  if (setMode?.error) seen.errors.push(`session/set_mode: ${setMode.error.message}`);
+  if (!handshakeOnly) {
+    const setMode = await within(request("session/set_mode", { sessionId, modeId: mode }), 15_000);
+    // Optional: an error here only tells us the mode must be set at session/new.
+    if (setMode?.error) seen.errors.push(`session/set_mode: ${setMode.error.message}`);
 
-  const turn = await within(
-    request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] }),
-    budgetMs
-  );
-  if (turn) {
-    failed("session/prompt", turn);
-  } else {
-    seen.errors.push(`session/prompt: exceeded ${budgetMs}ms budget, cancelling`);
-    write({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
-    await timeout(5_000);
+    const turn = await within(
+      request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] }),
+      budgetMs
+    );
+    if (turn) {
+      failed("session/prompt", turn);
+    } else {
+      seen.errors.push(`session/prompt: exceeded ${budgetMs}ms budget, cancelling`);
+      write({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+      await timeout(5_000);
+    }
   }
 }
 
@@ -414,7 +423,9 @@ const list = (set) => (set.size ? [...set].sort().join(", ") : "(none observed)"
 const permissions = allow ? (allowMode === "always" ? "allow-always" : "allow-once") : "refused";
 console.log(`acp probe: transcript ${path.relative(root, transcriptPath)}`);
 console.log(`  cwd                  ${cwd}`);
-console.log(`  mode requested       ${mode} (permissions: ${permissions}, client fs: ${clientFs})`);
+console.log(
+  `  mode requested       ${mode} (permissions: ${permissions}, client fs: ${clientFs}, parameterized picker: ${parameterizedModelPicker}, handshake only: ${handshakeOnly})`
+);
 console.log(`  server requests      ${list(seen.serverRequests)}`);
 console.log(`  server notifications ${list(seen.serverNotifications)}`);
 console.log(`  session/update kinds ${list(seen.updateKinds)}`);

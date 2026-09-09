@@ -211,6 +211,13 @@ pub enum ProviderConfig {
         /// Permission mode passed to Claude Code's non-interactive runtime.
         #[serde(default)]
         permission_mode: ClaudeCodePermissionMode,
+        /// Tools to deny on top of Zest's own scope, by built-in tool name.
+        ///
+        /// An escape hatch, not the policy: the scope Claude Code runs in is
+        /// already narrowed to what makes sense inside Zest. This exists for a
+        /// project that wants one more thing off, such as `Bash`.
+        #[serde(default)]
+        disallowed_tools: Vec<String>,
         /// Parent process limit, capped at the same bound as delegated workers.
         #[serde(default = "default_external_timeout_secs")]
         timeout_secs: u64,
@@ -333,27 +340,69 @@ impl CursorMode {
     }
 }
 
+/// Who decides whether a Claude Code tool call may run.
+///
+/// The values track the CLI's own `--permission-mode`, which as of 2.1.220
+/// documents `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeCodePermissionMode {
-    /// Let Claude Code apply its own interactive/default permission policy.
+    /// Claude Code's classifier approves routine work and refers the rest to
+    /// Zest's approval card.
+    ///
+    /// The default. Measured against CLI 2.1.220: a `Write` inside the project
+    /// reaches the approval card, and an ordinary `Read` or a read-only shell
+    /// command does not. See `claude auto-mode defaults` for the rule set the
+    /// classifier applies.
     #[default]
-    Default,
+    Auto,
+    /// Claude Code's stricter classifier, which refers more to the card.
+    ///
+    /// Not "ask about everything": reads and read-only shell commands inside the
+    /// project are allowed here too, the same as under `Auto`.
+    Manual,
     /// Allow file edits while retaining Claude Code's command safeguards.
     AcceptEdits,
     /// Keep the parent session read-only and plan-oriented.
     Plan,
+    /// Run tools without asking, and without telling Zest.
+    DontAsk,
     /// Disable Claude Code permission prompts. Use only in a throwaway tree.
     BypassPermissions,
+    /// Accepted for configs written before `auto` existed.
+    ///
+    /// `default` is not among the CLI's documented choices. It is still taken
+    /// today, but it stands for the behaviour `auto` now names, so the provider
+    /// resolves it there rather than passing on an undocumented value.
+    Default,
 }
 
 impl ClaudeCodePermissionMode {
     pub fn cli_value(self) -> &'static str {
         match self {
-            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::Manual => "manual",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
+            Self::DontAsk => "dontAsk",
             Self::BypassPermissions => "bypassPermissions",
+            Self::Default => "auto",
+        }
+    }
+
+    /// The `permission_mode` value in `zest.toml`, matching what serde reads.
+    ///
+    /// The desktop's config writer used to invert the `snake_case` derive by
+    /// hand, so adding a variant here silently required a matching edit there.
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+            Self::AcceptEdits => "accept_edits",
+            Self::Plan => "plan",
+            Self::DontAsk => "dont_ask",
+            Self::BypassPermissions => "bypass_permissions",
+            Self::Default => "default",
         }
     }
 }
@@ -1110,6 +1159,7 @@ permission_mode = "accept_edits"
                 models,
                 allow_mcp,
                 permission_mode,
+                disallowed_tools,
                 timeout_secs,
             } => {
                 assert_eq!(command, "claude");
@@ -1117,6 +1167,7 @@ permission_mode = "accept_edits"
                 assert!(models.is_empty());
                 assert!(!allow_mcp);
                 assert_eq!(*permission_mode, ClaudeCodePermissionMode::AcceptEdits);
+                assert!(disallowed_tools.is_empty());
                 assert_eq!(*timeout_secs, 900);
             }
             other => panic!("expected Claude Code provider, got {other:?}"),

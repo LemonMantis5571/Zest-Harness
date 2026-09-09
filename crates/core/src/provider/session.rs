@@ -20,6 +20,11 @@ const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 pub struct JsonlProcess {
     child: Child,
+    #[cfg(windows)]
+    pid: Option<u32>,
+    #[cfg(windows)]
+    tree_owned: bool,
+    job: Option<crate::process_job::ProcessJob>,
     /// Held open for the life of the turn, then dropped.
     ///
     /// An `Option` because closing stdin is a protocol act for some providers,
@@ -32,15 +37,33 @@ pub struct JsonlProcess {
 }
 
 impl JsonlProcess {
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     pub async fn spawn_command(mut command: Command, label: &str) -> Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(crate::process_job::windows_creation_flags());
+        #[cfg(windows)]
+        let job = crate::process_job::ProcessJob::new();
+        #[cfg(not(windows))]
+        let job = None;
         let mut child = command
             .spawn()
             .map_err(|error| HarnessError::Other(format!("could not start `{label}`: {error}")))?;
+        #[cfg(windows)]
+        let (pid, tree_owned) = if let Some(pid) = child.id() {
+            let tree_owned = job.as_ref().map(|job| job.assign(pid)).unwrap_or(false);
+            crate::process_job::resume_process(pid);
+            (Some(pid), tree_owned)
+        } else {
+            (None, false)
+        };
         let stdin = child
             .stdin
             .take()
@@ -64,6 +87,11 @@ impl JsonlProcess {
 
         Ok(Self {
             child,
+            #[cfg(windows)]
+            pid,
+            #[cfg(windows)]
+            tree_owned,
+            job,
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr: Some(stderr),
@@ -140,6 +168,15 @@ impl JsonlProcess {
     }
 
     pub async fn kill(&mut self) {
+        #[cfg(windows)]
+        if !self.tree_owned {
+            if let Some(pid) = self.pid {
+                crate::process_job::terminate_process_tree(pid);
+            }
+        }
+        if let Some(job) = self.job.as_ref() {
+            job.terminate();
+        }
         let _ = self.child.kill().await;
     }
 
@@ -149,10 +186,43 @@ impl JsonlProcess {
             .await
             .map_err(|error| HarnessError::Other(format!("provider process failed: {error}")))
     }
+
+    /// Close the request stream, reap a normally exiting provider, and fall
+    /// back to process-tree termination if it does not exit promptly.
+    pub async fn shutdown(&mut self, grace: Duration) {
+        self.close_stdin();
+        #[cfg(windows)]
+        if !self.tree_owned {
+            if let Some(pid) = self.pid {
+                crate::process_job::terminate_process_tree(pid);
+            }
+        }
+        if !matches!(timeout(grace, self.child.wait()).await, Ok(Ok(_))) {
+            self.kill().await;
+        }
+        #[cfg(windows)]
+        if !self.tree_owned {
+            if let Some(pid) = self.pid {
+                crate::process_job::terminate_process_tree(pid);
+            }
+        }
+        if let Some(job) = self.job.as_ref() {
+            job.terminate();
+        }
+    }
 }
 
 impl Drop for JsonlProcess {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if !self.tree_owned {
+            if let Some(pid) = self.pid {
+                crate::process_job::terminate_process_tree(pid);
+            }
+        }
+        if let Some(job) = self.job.as_ref() {
+            job.terminate();
+        }
         let _ = self.child.start_kill();
         if let Some(stderr) = self.stderr.take() {
             stderr.abort();
