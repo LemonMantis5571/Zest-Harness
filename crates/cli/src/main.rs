@@ -663,6 +663,7 @@ fn provider_kind_method(config: &zest_core::ProviderConfig) -> &'static str {
         zest_core::ProviderConfig::ClaudeCode { .. } => "Claude sign-in",
         zest_core::ProviderConfig::CodexCli { .. } => "Codex CLI",
         zest_core::ProviderConfig::CodexOAuth { .. } => "ChatGPT sign-in",
+        zest_core::ProviderConfig::CursorAcp { .. } => "Cursor subscription",
     }
 }
 
@@ -901,7 +902,7 @@ impl Approver for PromptApprover {
 
 #[async_trait::async_trait]
 impl ProviderInteractionHost for PromptApprover {
-    async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
         let approval = ApprovalRequest {
             approval_id: request.approval_id.clone(),
             tool_name: "provider_command".into(),
@@ -916,13 +917,17 @@ impl ProviderInteractionHost for PromptApprover {
                     .unwrap_or_default(),
             },
         };
+        prompt_approval(&approval).await
+    }
+
+    async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
         matches!(
-            prompt_approval(&approval).await,
+            self.decide_command(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
 
-    async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
         let approval = ApprovalRequest {
             approval_id: request.approval_id.clone(),
             tool_name: "provider_file_change".into(),
@@ -936,8 +941,12 @@ impl ProviderInteractionHost for PromptApprover {
                 diff: request.diff.unwrap_or_default(),
             },
         };
+        prompt_approval(&approval).await
+    }
+
+    async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
         matches!(
-            prompt_approval(&approval).await,
+            self.decide_file_change(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }

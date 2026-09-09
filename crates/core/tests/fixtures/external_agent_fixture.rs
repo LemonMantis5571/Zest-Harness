@@ -33,6 +33,11 @@ fn stream() {
     send(r#"{"type":"result","response":"hello"}"#);
 }
 
+fn fail_stdout() {
+    send(r#"{"type":"result","is_error":true,"result":"You've hit your usage limit. Try again later."}"#);
+    std::process::exit(1);
+}
+
 fn wait_for_eof() {
     send(r#"{"type":"result","response":"finished"}"#);
     let stdin = io::stdin();
@@ -59,6 +64,20 @@ fn stream_json_input() {
         }
     }
     send(r#"{"type":"result","response":"got user"}"#);
+}
+
+/// Ask permission, wait for the host reply, then finish. Used to prove that
+/// time spent in `respond()` is not counted against `timeout_secs`.
+fn ask_then_result() {
+    send(r#"{"type":"control_request","request_id":"tool-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hi"}}}"#);
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let line = receive(&mut reader);
+    assert!(
+        line.contains("control_response"),
+        "expected a permission reply, got {line}"
+    );
+    send(r#"{"type":"result","response":"ran"}"#);
 }
 
 fn acp() {
@@ -103,8 +122,10 @@ fn main() {
     match args.nth(1).as_deref() {
         Some("headless") => headless(),
         Some("stream") => stream(),
+        Some("fail_stdout") => fail_stdout(),
         Some("wait_for_eof") => wait_for_eof(),
         Some("stream_json_input") => stream_json_input(),
+        Some("ask_then_result") => ask_then_result(),
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         other => panic!("unknown external-agent fixture mode: {other:?}"),

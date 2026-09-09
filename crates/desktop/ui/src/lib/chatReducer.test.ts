@@ -398,6 +398,51 @@ describe("reduceChatEvent characterization", () => {
     }
   });
 
+  it("settles a Claude approval so the next card is not shadowed", () => {
+    const state = reduceAll([
+      {
+        kind: "approval_needed",
+        ...ID,
+        message_id: "a1",
+        approval_id: "claude-approval-1",
+        tool_name: "Bash",
+        tool_call_id: "claude-approval-1",
+        risk: "exec",
+        path: "",
+        summary: "PowerShell: check image",
+        diff: "",
+      },
+      {
+        kind: "tool_call_result",
+        ...ID,
+        message_id: "a1",
+        name: "Bash",
+        id: "claude-approval-1",
+        summary: "PowerShell: check image",
+        isError: false,
+      },
+      {
+        kind: "approval_needed",
+        ...ID,
+        message_id: "a1",
+        approval_id: "claude-approval-2",
+        tool_name: "Read",
+        tool_call_id: "claude-approval-2",
+        risk: "read",
+        path: "img.png",
+        summary: "Read: img.png",
+        diff: "",
+      },
+    ]);
+    const tools = assistant(state).tools;
+    assert.equal(tools[0].status, "done");
+    assert.equal(tools[1].status, "awaiting_approval");
+    assert.equal(
+      tools.filter((tool) => tool.status === "awaiting_approval").length,
+      1
+    );
+  });
+
   it("creates a tool card from approval_needed when start was missed", () => {
     const state = reduceAll([
       {

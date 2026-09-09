@@ -13,12 +13,19 @@
 pub mod anthropic;
 pub mod claude_code;
 pub(crate) mod claude_control;
+pub mod claude_stream;
 pub mod codex_app_server;
 pub mod codex_oauth;
+pub mod codex_rig;
+pub mod cursor_acp;
+pub mod cursor_models;
 pub mod driver;
 pub mod openai_compatible;
 pub mod registry;
+pub mod rig_convert;
 pub mod session;
+pub mod stream_contract;
+pub mod turn_spec;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -29,6 +36,7 @@ use crate::anthropic::types::{Message, ToolDef, Usage, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
 use crate::config::ProviderConfig;
 use crate::error::Result;
+use crate::tools::approval::{ApprovalDecision, ApprovalPolicy};
 
 /// Build a picker/validation catalogue from config without loading credentials.
 ///
@@ -50,6 +58,10 @@ pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
         "codex" | "codex-chatgpt" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
         "claude" | "anthropic" => (DEFAULT_MODEL.to_string(), &[][..]),
         "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
+        "cursor" => (
+            cursor_acp::DEFAULT_CURSOR_MODEL.to_string(),
+            cursor_models::BUILTIN_MODELS,
+        ),
         _ => (DEFAULT_MODEL.to_string(), &[][..]),
     };
     ProviderDescriptor {
@@ -85,18 +97,76 @@ fn default_true() -> bool {
     true
 }
 
+/// Window used when no family is recognised and the published table has no row.
+pub const FALLBACK_CONTEXT_WINDOW: u64 = 128_000;
+
+const CLAUDE_WINDOW: u64 = 1_000_000;
+const CLAUDE_HAIKU_WINDOW: u64 = 200_000;
+const GEMINI_WINDOW: u64 = 1_048_576;
+const GPT_LONG_WINDOW: u64 = 1_050_000;
+const GPT_STANDARD_WINDOW: u64 = 272_000;
+const COMPOSER_WINDOW: u64 = 200_000;
+const GROK_WINDOW: u64 = 256_000;
+const OPEN_WEIGHT_LONG_WINDOW: u64 = 1_000_000;
+
 /// Conservative built-in capacities for the models Zest knows without model
 /// discovery. Explicit provider catalogues remain authoritative for model ids;
 /// these values only keep the UI honest when no capacity was configured.
+///
+/// Recognised families use published API (or Cursor-product) windows. An
+/// unrecognised id stays at [`FALLBACK_CONTEXT_WINDOW`] unless the LiteLLM
+/// cache, loaded at rate refresh, has a larger `max_input_tokens`.
 pub fn context_window_for_model(model: &str) -> u64 {
-    let model = model.to_ascii_lowercase();
-    if model.contains("gpt-5.6") || model.contains("luna") || model.contains("codex") {
-        256_000
-    } else if model.contains("claude") {
-        200_000
-    } else {
-        128_000
+    let heuristic = heuristic_context_window(model);
+    if heuristic > FALLBACK_CONTEXT_WINDOW {
+        return heuristic;
     }
+    crate::rates::published_context_window(model)
+        .filter(|window| *window > heuristic)
+        .unwrap_or(heuristic)
+}
+
+fn heuristic_context_window(model: &str) -> u64 {
+    let raw = model.to_ascii_lowercase();
+    let model = raw.strip_prefix("cursor-").unwrap_or(raw.as_str());
+
+    if model.contains("haiku") {
+        return CLAUDE_HAIKU_WINDOW;
+    }
+    if model.contains("claude") || model == "sonnet" || model == "opus" {
+        return CLAUDE_WINDOW;
+    }
+    if model.contains("gemini") {
+        return GEMINI_WINDOW;
+    }
+    if model.contains("composer") {
+        return COMPOSER_WINDOW;
+    }
+    if model.contains("grok") {
+        // Cursor serves 256K; the xAI API is 500K. Overflowing the host is
+        // worse than compacting a little early on a direct Grok endpoint.
+        return GROK_WINDOW;
+    }
+    if model.contains("gpt-5.6")
+        || model.contains("gpt-5.5")
+        || (model.contains("gpt-5.4") && !model.contains("mini") && !model.contains("nano"))
+    {
+        return GPT_LONG_WINDOW;
+    }
+    if model.contains("gpt-5.4-mini")
+        || model.contains("gpt-5.4-nano")
+        || model.contains("gpt-5.3")
+        || model.contains("gpt-5.2")
+        || model.contains("gpt-5.1")
+        || model.contains("gpt-5-mini")
+        || model.contains("codex")
+    {
+        return GPT_STANDARD_WINDOW;
+    }
+    if model.contains("kimi") || model.contains("glm") || model.contains("deepseek") {
+        return OPEN_WEIGHT_LONG_WINDOW;
+    }
+    FALLBACK_CONTEXT_WINDOW
 }
 
 fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
@@ -360,7 +430,22 @@ pub struct TurnRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderSessionRef {
-    CodexAppServer { thread_id: String },
+    CodexAppServer {
+        thread_id: String,
+    },
+    CursorAcp {
+        session_id: String,
+    },
+    /// A Claude Code session, plus the model it was opened under.
+    ///
+    /// The model is part of the reference rather than checked elsewhere because
+    /// a session holds a history *and* the model that produced it. Resuming one
+    /// under a different model would answer from a conversation that model
+    /// never had, and the CLI would do it without complaining.
+    ClaudeCode {
+        session_id: String,
+        model: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,16 +477,38 @@ pub struct ProviderQuestionRequest {
 /// represented safely; providers must never guess an approval.
 #[async_trait]
 pub trait ProviderInteractionHost: Send + Sync {
+    /// Shared session policy, when the front-end has one. Claude Code consults
+    /// this before drawing a card so "Allow for session" and Auto actually stick.
+    fn approval_policy(&self) -> Option<Arc<std::sync::Mutex<ApprovalPolicy>>> {
+        None
+    }
+
     async fn prepare_command_approval(&self, _approval_id: &str) {}
 
     async fn approve_command(&self, _request: ProviderCommandRequest) -> bool {
         false
     }
 
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+        if self.approve_command(request).await {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
+    }
+
     async fn prepare_file_change_approval(&self, _approval_id: &str) {}
 
     async fn approve_file_change(&self, _request: ProviderFileChangeRequest) -> bool {
         false
+    }
+
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+        if self.approve_file_change(request).await {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
     }
 
     async fn prepare_question(&self, _question_id: &str) {}
@@ -941,5 +1048,63 @@ model = "deepseek-v4-flash"
             serde_json::from_value::<ResumeHandle>(encoded).unwrap(),
             handle
         );
+    }
+
+    #[test]
+    fn context_windows_follow_published_family_capacities() {
+        for (id, window) in [
+            ("claude-opus-5-thinking", CLAUDE_WINDOW),
+            ("claude-sonnet-5", CLAUDE_WINDOW),
+            ("opus", CLAUDE_WINDOW),
+            ("sonnet", CLAUDE_WINDOW),
+            ("haiku", CLAUDE_HAIKU_WINDOW),
+            ("claude-haiku-5", CLAUDE_HAIKU_WINDOW),
+            ("gemini-3.1-pro", GEMINI_WINDOW),
+            ("gemini-3.8-flash", GEMINI_WINDOW),
+            ("composer-2.5", COMPOSER_WINDOW),
+            ("composer-2.5-fast", COMPOSER_WINDOW),
+            ("cursor-grok-4.6", GROK_WINDOW),
+            ("cursor-grok-4.6-fast", GROK_WINDOW),
+            ("gpt-5.6-sol", GPT_LONG_WINDOW),
+            ("gpt-5.6-luna-fast", GPT_LONG_WINDOW),
+            ("gpt-5.5", GPT_LONG_WINDOW),
+            ("gpt-5.4", GPT_LONG_WINDOW),
+            ("gpt-5.4-fast", GPT_LONG_WINDOW),
+            ("gpt-5.4-mini", GPT_STANDARD_WINDOW),
+            ("gpt-5.4-nano", GPT_STANDARD_WINDOW),
+            ("gpt-5.3-codex", GPT_STANDARD_WINDOW),
+            ("gpt-5.2", GPT_STANDARD_WINDOW),
+            ("gpt-5.1", GPT_STANDARD_WINDOW),
+            ("gpt-5-mini", GPT_STANDARD_WINDOW),
+            ("kimi-k3", OPEN_WEIGHT_LONG_WINDOW),
+            ("glm-5.2", OPEN_WEIGHT_LONG_WINDOW),
+            ("deepseek-v4-flash", OPEN_WEIGHT_LONG_WINDOW),
+            ("auto", FALLBACK_CONTEXT_WINDOW),
+            ("local", FALLBACK_CONTEXT_WINDOW),
+        ] {
+            assert_eq!(context_window_for_model(id), window, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_codex_catalogue_carries_the_long_windows() {
+        let cat = catalogue(
+            "gpt-5.6-sol",
+            &[],
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(&[]),
+        );
+        let window = |id: &str| {
+            cat.iter()
+                .find(|model| model.id == id)
+                .map(|model| model.context_window)
+                .expect(id)
+        };
+        assert_eq!(window("gpt-5.6-sol"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.6-terra"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.6-luna"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.5"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.4"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.4-mini"), GPT_STANDARD_WINDOW);
     }
 }
