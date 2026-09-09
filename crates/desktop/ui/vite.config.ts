@@ -8,6 +8,10 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Workbench loads lazily; prepare its avatar entry before the first click.
+  optimizeDeps: {
+    include: ["blobatar/react"],
+  },
   resolve: {
     alias: {
       "@": path.resolve(root, "./src"),

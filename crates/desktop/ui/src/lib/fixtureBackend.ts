@@ -148,7 +148,7 @@ function longThreadMessages(): ChatMessage[] {
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -161,7 +161,7 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "question" ||
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
-    value === "options-failing" || value === "provider-picker" || value === "model-catalogue"
+    value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed"
     ? value
     : undefined;
 }
@@ -211,6 +211,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const fixtureTranscripts = new Map<string, ChatMessage[]>([
     [LONG_THREAD_ID, longThreadMessages()],
   ]);
+  const splitStreams = new Map<string, () => void>();
 
   function windowSessionFor(
     threadId: string,
@@ -1381,6 +1382,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return hits.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 24);
     },
     async openProjectChat(options) {
+      if (!session.hasOlderMessages && !session.hasNewerMessages) {
+        fixtureTranscripts.set(session.threadId, [...session.messages]);
+      }
       const targetRoot = options.root;
       const openingFreeChat = targetRoot === null;
       if (targetRoot !== null) {
@@ -1401,6 +1405,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         return { ...session };
       }
       const nextId = options.threadId || session.threadId;
+      const knownThread = fixtureTranscripts.has(nextId) ||
+        nextId === "fixture-local" || nextId === "fixture-free";
+      if (options.threadId && !knownThread && nextId !== session.threadId) {
+        throw new Error(`thread '${nextId}' not found`);
+      }
       if (fixtureTranscripts.has(nextId)) {
         session = windowSessionFor(
           nextId,
@@ -1488,6 +1497,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return { ...session };
     },
     async forkThread() {
+      if (!session.hasOlderMessages && !session.hasNewerMessages) {
+        fixtureTranscripts.set(session.threadId, [...session.messages]);
+      }
       fixturePinned = false;
       session = {
         ...session,
@@ -1573,6 +1585,25 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       attachments?: AttachmentInput[],
       target?: InputTarget,
     ) {
+      if (scenario === "split-streaming") {
+        const { turnId, userId, assistantId } = fixtureIds();
+        const id = { session_id: session.sessionId, thread_id: session.threadId, turn_id: turnId };
+        session = { ...session, messages: [...session.messages, { id: userId, role: "user", text }] };
+        fixtureTranscripts.set(session.threadId, [...session.messages]);
+        return new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            chatHandler?.({ kind: "text_delta", ...id, message_id: assistantId, text: `Live response to ${text}` });
+          }, 100);
+          splitStreams.set(id.thread_id, () => {
+            clearTimeout(timer);
+            chatHandler?.({ kind: "cancelled", ...id, message_id: assistantId });
+            splitStreams.delete(id.thread_id);
+            resolve();
+          });
+          chatHandler?.({ kind: "user", ...id, message_id: userId, text });
+          chatHandler?.({ kind: "assistant_start", ...id, message_id: assistantId });
+        });
+      }
       if (target === "followup" || target === "steer" || target === "inject") {
         const input = {
           id: `input-${crypto.randomUUID()}`,
@@ -1681,7 +1712,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       URL.revokeObjectURL(url);
       return filename;
     },
-    async cancelTurn() {
+    async cancelTurn(threadId?: string) {
+      splitStreams.get(threadId ?? session.threadId)?.();
       if (pendingScenario?.kind === "cancel") {
         finishScenario("cancel");
       }
@@ -1912,6 +1944,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async pullRequestDiff(number = 13): Promise<WorkspaceChange> {
+      if (scenario === "pull-request-delayed") {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
       return {
         changeId: `pr:${number}`,
         repository: "pull_request",

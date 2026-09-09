@@ -12,6 +12,7 @@ import {
   ChevronDownIcon,
   GitBranchIcon,
   GitPullRequestIcon,
+  LoaderCircleIcon,
   XIcon,
 } from "lucide-react";
 
@@ -28,6 +29,7 @@ export type DiffViewerTarget = {
   diff: string;
   source?: "tool" | "branch" | "pull_request";
   changeId?: string;
+  loading?: boolean;
 };
 
 type Props = {
@@ -78,7 +80,10 @@ export function DiffViewer({
   const resizeCleanup = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    if (!target) return;
+    if (!target || target.loading) {
+      setReading(null);
+      return;
+    }
     setCollapsed(new Set());
     const fallback = makeReadingDiff(target.diff);
     setReading(fallback);
@@ -228,7 +233,9 @@ export function DiffViewer({
                 className="mt-1 truncate font-mono text-[10px] text-muted-foreground"
                 title={hasBranchContext ? `${baseBranch ?? "base"} → ${branch ?? "current"}` : target.path}
               >
-                {hasBranchContext
+                {target.loading
+                  ? "Loading pull request changes…"
+                  : hasBranchContext
                   ? `${baseBranch ?? "base"} → ${branch ?? "current"}`
                   : `${sections.length} ${sections.length === 1 ? "file" : "files"} changed`}
               </div>
@@ -241,8 +248,10 @@ export function DiffViewer({
                     "rounded px-2 py-1 text-[10px] transition-colors",
                     view === "reading"
                       ? "bg-secondary text-foreground"
-                      : "text-muted-foreground hover:text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                    target.loading && "cursor-not-allowed opacity-50"
                   )}
+                  disabled={target.loading}
                   onClick={() => setView("reading")}
                 >
                   Clean
@@ -253,8 +262,10 @@ export function DiffViewer({
                     "rounded px-2 py-1 text-[10px] transition-colors",
                     view === "full"
                       ? "bg-secondary text-foreground"
-                      : "text-muted-foreground hover:text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                    target.loading && "cursor-not-allowed opacity-50"
                   )}
+                  disabled={target.loading}
                   onClick={() => setView("full")}
                 >
                   Raw
@@ -272,13 +283,20 @@ export function DiffViewer({
               </Button>
             </div>
           </div>
-          <div className="flex items-center gap-2 border-t border-border/50 px-3 py-1.5 text-[11px]">
-            <span className="text-muted-foreground">
-              {sections.length} {sections.length === 1 ? "file" : "files"}
-            </span>
-            <span className="text-primary">+{totalAdded}</span>
-            <span className="text-destructive">−{totalRemoved}</span>
-          </div>
+          {target.loading ? (
+            <div role="status" className="flex items-center gap-2 border-t border-border/50 px-3 py-1.5 text-[11px] text-muted-foreground">
+              <LoaderCircleIcon className="size-3 animate-spin" aria-hidden="true" />
+              Fetching the pull request diff…
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 border-t border-border/50 px-3 py-1.5 text-[11px]">
+              <span className="text-muted-foreground">
+                {sections.length} {sections.length === 1 ? "file" : "files"}
+              </span>
+              <span className="text-primary">+{totalAdded}</span>
+              <span className="text-destructive">−{totalRemoved}</span>
+            </div>
+          )}
           {view === "reading" && reading && (hiddenCount > 0 || foldedCount > 0) ? (
             <div className="border-t border-border/50 px-3 py-1.5 text-[10px] text-muted-foreground/75">
               Clean view
@@ -289,7 +307,12 @@ export function DiffViewer({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto bg-background">
-          {sections.length > 0 ? (
+          {target.loading ? (
+            <div role="status" className="flex min-h-32 items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
+              <LoaderCircleIcon className="size-4 animate-spin" aria-hidden="true" />
+              Loading changes…
+            </div>
+          ) : sections.length > 0 ? (
             sections.map((section, index) => {
               const key = sectionKey(section, index);
               const isCollapsed = collapsed.has(key);

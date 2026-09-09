@@ -9,6 +9,7 @@ export type CustomizeTab = "mcp" | "skills" | "plugins" | "rules" | "shortcuts";
  * from that nav belongs here rather than replacing the window.
  */
 export type ShellPanel =
+  | { kind: "pullRequests" }
   | { kind: "customize"; tab: CustomizeTab }
   | { kind: "profile" }
   | { kind: "usage" };

@@ -11,12 +11,14 @@ import {
 } from "react";
 import {
   CheckCircle2Icon,
+  Columns2Icon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
   CommandIcon,
   LoaderCircleIcon,
+  PanelRightCloseIcon,
   PanelRightOpenIcon,
   PencilIcon,
   SettingsIcon,
@@ -108,6 +110,7 @@ import type {
   ThreadSummary,
   SessionWarning,
   UserProfile,
+  WallpaperView,
   WorkspaceChange,
   WorkspaceReview,
 } from "@/lib/types";
@@ -119,6 +122,9 @@ measureStartup("chat-chunk", "boot-effect");
 
 const CustomizePanel = lazy(() =>
   import("@/components/CustomizePanel").then((m) => ({ default: m.CustomizePanel }))
+);
+const PullRequestsPanel = lazy(() =>
+  import("@/components/PullRequestsPanel").then((m) => ({ default: m.PullRequestsPanel }))
 );
 const ProfileScreen = lazy(() =>
   import("@/components/ProfileScreen").then((m) => ({ default: m.ProfileScreen }))
@@ -144,6 +150,9 @@ function shortRoot(root: string): string {
   return parts.slice(-2).join("/");
 }
 type Props = {
+  onOpenSplit?: () => void;
+  onOpenPullRequests?: () => void;
+  wallpaper?: WallpaperView | null;
   session: SessionInfo;
   messages: ChatMessage[];
   hasOlderMessages?: boolean;
@@ -692,6 +701,9 @@ function TranscriptScrollRegistration({
 }
 
 export function ChatScreen({
+  onOpenSplit,
+  onOpenPullRequests,
+  wallpaper,
   session,
   messages,
   hasOlderMessages = false,
@@ -790,6 +802,7 @@ export function ChatScreen({
   const pendingPullRequestRef = useRef<{ number: number; url: string } | null>(
     null
   );
+  const pullRequestLoadRef = useRef(0);
   const ignoreBranchRestoreRef = useRef(false);
   const workspaceRefreshRef = useRef<{
     threadId: string;
@@ -985,8 +998,18 @@ export function ChatScreen({
         await openExternalUrl(link.url);
         return;
       }
+      const requestId = ++pullRequestLoadRef.current;
+      const loadingTarget: DiffViewerTarget = {
+        path: `Pull request #${link.number}`,
+        diff: "",
+        source: "pull_request",
+        changeId: `pr:${link.number}`,
+        loading: true,
+      };
+      setDiffTarget(loadingTarget);
       try {
         const change = await getBackend().pullRequestDiff(link.number);
+        if (requestId !== pullRequestLoadRef.current) return;
         if (
           change.unavailable ||
           (!change.changedFiles.length && !change.diff.trim())
@@ -995,13 +1018,14 @@ export function ChatScreen({
           return;
         }
         setDiffTarget({
-          path: `Pull request #${link.number}`,
+          ...loadingTarget,
+          loading: false,
           diff: change.diff,
-          source: "pull_request",
-          changeId: `pr:${link.number}`,
         });
       } catch (error) {
+        if (requestId !== pullRequestLoadRef.current) return;
         ignoreExpectedFailure(error, "open pull request diff");
+        setDiffTarget(null);
         await openExternalUrl(link.url);
       }
     },
@@ -1011,6 +1035,7 @@ export function ChatScreen({
   useEffect(() => {
     const pending = pendingPullRequestRef.current;
     pendingPullRequestRef.current = null;
+    pullRequestLoadRef.current += 1;
     setDiffTarget(null);
     if (typeof window === "undefined") {
       setDiffWidth(520);
@@ -1064,13 +1089,26 @@ export function ChatScreen({
   const requestPullRequest = useCallback(
     (link: { number: number; url: string }, switchTo?: { root: string | null; threadId: string }) => {
       if (switchTo && switchTo.threadId !== session.threadId) {
+        setDiffTarget({
+          path: `Pull request #${link.number}`,
+          diff: "",
+          source: "pull_request",
+          changeId: `pr:${link.number}`,
+          loading: true,
+        });
         ignoreBranchRestoreRef.current = true;
         pendingPullRequestRef.current = link;
-        void onOpenProjectChat({
-          root: switchTo.root,
-          threadId: switchTo.threadId,
-        }).catch((error) =>
-          ignoreExpectedFailure(error, "open chat for pull request")
+        void onOpenProjectChat({ root: switchTo.root, threadId: switchTo.threadId }).then(
+          (opened) => {
+            if (opened) return;
+            pendingPullRequestRef.current = null;
+            setDiffTarget(null);
+          },
+          (error) => {
+            pendingPullRequestRef.current = null;
+            setDiffTarget(null);
+            ignoreExpectedFailure(error, "open chat for pull request");
+          }
         );
         return;
       }
@@ -1179,6 +1217,7 @@ export function ChatScreen({
   );
 
   const closeDiff = useCallback(() => {
+    pullRequestLoadRef.current += 1;
     rememberDiffOpen(false);
     if (diffTarget?.source === "branch" && diffTarget.changeId) {
       setDismissedChangeId(diffTarget.changeId);
@@ -1603,8 +1642,10 @@ export function ChatScreen({
   });
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--chat-canvas)]">
+    <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--canvas-solid)]">
       <ChatHistorySidebar
+        onOpenPullRequests={onOpenPullRequests}
+        pullRequestsActive={shellPanel?.kind === "pullRequests"}
         open={sidebarOpen}
         activeThreadId={session.threadId}
         activeProjectPath={session.isFreeChat ? null : session.root}
@@ -1667,6 +1708,7 @@ export function ChatScreen({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {onOpenSplit ? <Button type="button" variant="ghost" size="icon-sm" title="Split view" aria-label="Open split view" disabled={compacting} onClick={onOpenSplit}><Columns2Icon aria-hidden="true" /></Button> : null}
             {/* Branch changes moved out of this row and into BranchChangesBar
                 below the header, where the counts can say which project and
                 branch they belong to. */}
@@ -1710,7 +1752,7 @@ export function ChatScreen({
                 id="workbench-toggle"
                 onClick={toggleWorkbench}
               >
-                <PanelRightOpenIcon aria-hidden="true" />
+                {workbenchOpen ? <PanelRightCloseIcon aria-hidden="true" /> : <PanelRightOpenIcon aria-hidden="true" />}
               </Button>
             ) : null}
             <Button
@@ -1763,7 +1805,12 @@ export function ChatScreen({
          */}
         {shellPanel ? (
           <Suspense fallback={null}>
-          {shellPanel.kind === "customize" ? (
+          {shellPanel.kind === "pullRequests" ? (
+            <PullRequestsPanel onOpen={(project, thread) => {
+              const link = thread.gitContext?.pullRequest;
+              if (link) requestPullRequest(link, { root: project.path, threadId: thread.id });
+            }} />
+          ) : shellPanel.kind === "customize" ? (
             <CustomizePanel
               tab={shellPanel.tab}
               sending={sending}
@@ -1793,7 +1840,15 @@ export function ChatScreen({
           )}
           </Suspense>
         ) : (
-        <div className="relative min-h-0 flex-1">
+        <div className="zest-wallpaper-frame relative min-h-0 flex-1">
+          {wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+            <div
+              aria-hidden="true"
+              className="zest-wallpaper zest-chat-wallpaper"
+              data-filter={wallpaper.filter}
+              style={{ backgroundImage: `url("${wallpaper.imageDataUrl}")` }}
+            />
+          ) : null}
           {/* The rail needs a gutter of its own; a narrow window has none to
               spare, so it steps aside and the transcript takes the width. */}
           {narrow ? null : (

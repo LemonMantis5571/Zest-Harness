@@ -4,8 +4,8 @@ import {
   ArrowRightIcon,
   Clock3Icon,
   ChevronRightIcon,
-  ChevronsLeftIcon,
-  ChevronsRightIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
   FolderIcon,
   FolderOpenIcon,
   GitBranchIcon,
@@ -43,6 +43,8 @@ import {
 } from "@/lib/pullRequestLink";
 
 type Props = {
+  onOpenPullRequests?: () => void;
+  pullRequestsActive?: boolean;
   open: boolean;
   activeThreadId: string;
   activeProjectPath: string | null;
@@ -189,6 +191,8 @@ type WorkspaceAction = {
 };
 
 export const ChatHistorySidebar = memo(function ChatHistorySidebar({
+  onOpenPullRequests,
+  pullRequestsActive = false,
   open,
   activeThreadId,
   activeProjectPath,
@@ -743,10 +747,11 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               variant="ghost"
               size="icon-sm"
               title="Collapse sidebar"
+              aria-label="Collapse sidebar"
               aria-expanded={open}
               onClick={() => onOpenChange(false)}
             >
-              <ChevronsLeftIcon />
+              <PanelLeftCloseIcon aria-hidden="true" />
             </Button>
           </div>
         ) : (
@@ -759,13 +764,18 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
             aria-expanded={open}
             onClick={() => onOpenChange(true)}
           >
-            <ChevronsRightIcon aria-hidden="true" />
+            <PanelLeftOpenIcon aria-hidden="true" />
           </Button>
         )}
       </div>
 
       {!open ? (
         <div className="flex flex-col items-center gap-1 px-1 py-2">
+          {onOpenPullRequests ? (
+            <Button type="button" variant="ghost" size="icon-sm" title="Pull requests" aria-label="Pull requests" aria-current={pullRequestsActive ? "page" : undefined} onClick={onOpenPullRequests}>
+              <GitPullRequestIcon aria-hidden="true" />
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="ghost"
@@ -820,6 +830,14 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
               <span>Search</span>
             </button>
+            {onOpenPullRequests ? (
+              <button type="button" onClick={onOpenPullRequests}
+                aria-current={pullRequestsActive ? "page" : undefined}
+                className={navItemClass(pullRequestsActive)}>
+                <GitPullRequestIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span>Pull requests</span>
+              </button>
+            ) : null}
             {onOpenCustomize ? (
               <button
                 type="button"

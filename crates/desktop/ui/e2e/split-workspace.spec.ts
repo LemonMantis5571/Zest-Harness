@@ -1,0 +1,70 @@
+import { expect, test } from "@playwright/test";
+
+test("both panes stream together and stopping one leaves the other running", async ({ page }) => {
+  await page.goto("/?fixture=1&scenario=split-streaming");
+  await page.getByRole("button", { name: "Open split view" }).click();
+  const left = page.getByRole("region", { name: "Left chat", exact: true });
+  const right = page.getByRole("region", { name: "Right chat", exact: true });
+  await left.getByRole("button", { name: "Fork into other pane" }).click();
+  await left.getByRole("textbox", { name: "Message", exact: true }).fill("left running");
+  await left.getByRole("button", { name: "Send message" }).click();
+  await expect(left.getByRole("button", { name: "Stop response" })).toBeEnabled();
+  await right.getByRole("textbox", { name: "Message", exact: true }).fill("right running");
+  await right.getByRole("button", { name: "Send message" }).click();
+  await expect(left.getByText("Live response to left running", { exact: true })).toBeVisible();
+  await expect(right.getByText("Live response to right running", { exact: true })).toBeVisible();
+  await left.getByRole("button", { name: "Stop response" }).click();
+  await expect(left.getByRole("button", { name: "Stop response" })).toHaveCount(0);
+  await expect(right.getByRole("button", { name: "Stop response" })).toBeEnabled();
+  await right.getByRole("button", { name: "Stop response" }).click();
+  await expect(right.getByRole("button", { name: "Stop response" })).toHaveCount(0);
+});
+
+test("split chats keep drafts and messages separate, resize, and return to single view", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/?fixture=1");
+  await page.getByRole("button", { name: "Open split view" }).click();
+  const left = page.getByRole("region", { name: "Left chat", exact: true });
+  const right = page.getByRole("region", { name: "Right chat", exact: true });
+  await left.getByRole("button", { name: "Fork into other pane" }).click();
+  await expect(right.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+  await left.getByRole("textbox", { name: "Message", exact: true }).fill("left independent draft");
+  await right.getByRole("textbox", { name: "Message", exact: true }).fill("right independent message");
+  await right.getByRole("button", { name: "Send message" }).click();
+  await expect(right.getByText("right independent message", { exact: true })).toBeVisible();
+  await expect(left.getByText("right independent message", { exact: true })).toHaveCount(0);
+  await expect(left.getByRole("textbox", { name: "Message", exact: true })).toHaveValue("left independent draft");
+  await left.getByRole("button", { name: "Send message" }).click();
+  await expect(left.getByText("left independent draft", { exact: true })).toBeVisible();
+  await expect(right.getByText("left independent draft", { exact: true })).toHaveCount(0);
+  await expect(left.getByText("right independent message", { exact: true })).toHaveCount(0);
+  const divider = page.getByRole("separator", { name: "Resize split panes" });
+  await divider.focus();
+  await divider.press("ArrowLeft");
+  await expect(divider).toHaveAttribute("aria-valuenow", "48");
+  await page.screenshot({ path: "test-results/split-desktop.png" });
+  await page.setViewportSize({ width: 650, height: 900 });
+  await expect(divider).toBeHidden();
+  await expect(right.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+  await page.screenshot({ path: "test-results/split-narrow.png" });
+  await right.getByRole("textbox", { name: "Message", exact: true }).fill("keep this draft");
+  await right.getByRole("button", { name: "Continue in single view" }).click();
+  await expect(page.getByRole("region", { name: "Split workspace", exact: true })).toHaveCount(0);
+  await expect(page.getByText("right independent message", { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("a fresh split chat can send without reopening a missing thread", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/?fixture=1");
+  await page.getByRole("button", { name: "Open split view" }).click();
+  const right = page.getByRole("region", { name: "Right chat", exact: true });
+  await right.getByRole("button", { name: "New chat in this project", exact: true }).click();
+  await right.getByRole("textbox", { name: "Message", exact: true }).fill("fresh split message");
+  await right.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(right.getByText("fresh split message", { exact: true })).toBeVisible();
+  await expect(page.getByText("Could not open project chat", { exact: true })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

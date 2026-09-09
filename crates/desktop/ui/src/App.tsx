@@ -22,6 +22,7 @@ import {
   type ChatUiState,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { createSerialActions } from "@/lib/serialActions";
 import { loginSessionIsNew } from "@/lib/loginWait";
 import { sendOwnsComposer, type SendTurnRequest } from "@/lib/sendTurn";
 import {
@@ -110,6 +111,7 @@ import { cn } from "@/lib/utils";
 const ChatScreen = lazy(() =>
   import("@/components/ChatScreen").then((m) => ({ default: m.ChatScreen }))
 );
+const SplitWorkspace = lazy(() => import("@/components/SplitWorkspace").then((module) => ({ default: module.SplitWorkspace })));
 
 type Screen =
   | "boot"
@@ -459,6 +461,12 @@ export default function App() {
   const [waitingError, setWaitingError] = useState<string | null>(null);
 
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const [splitInitial, setSplitInitial] = useState<SessionInfo | null>(null);
+  const splitInitialRef = useRef<SessionInfo | null>(null);
+  const splitDraftRef = useRef("");
+  const [, publishSplit] = useState(0);
+  const splitActions = useRef(createSerialActions());
+  const splitSendAcks = useRef(new Map<string, () => void>());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [hasNewerMessages, setHasNewerMessages] = useState(false);
@@ -505,6 +513,7 @@ export default function App() {
         // Profile, Usage, and Customize are all reached from the sidebar, so
         // they render inside the chat shell rather than replacing it.
         case "profile":
+        case "pullRequests":
         case "usage":
         case "customize":
           setShellPanel(destination);
@@ -583,8 +592,15 @@ export default function App() {
    * panel.
    */
   const showTranscript = useCallback(() => {
+    // Navigation history can already say "chat" when a panel was opened by
+    // another control. In that case pushNavigation correctly returns the same
+    // history object, but the shell still needs the panel cleared.
+    if (navigationRef.current.current?.kind === "chat") {
+      applyNavigationDestination({ kind: "chat" });
+      return;
+    }
     navigateTo({ kind: "chat" });
-  }, [navigateTo]);
+  }, [applyNavigationDestination, navigateTo]);
 
   // The first loaded chat establishes the root of the app-view history. Boot,
   // provider selection, and sign-in progress are lifecycle states, not places
@@ -975,6 +991,7 @@ export default function App() {
   }, []);
 
   const maybeAutoCompact = useCallback(() => {
+    if (splitInitialRef.current) return;
     const targetSessionId = sessionIdRef.current;
     if (!targetSessionId || compactionInFlightRef.current || sendingRef.current) {
       return;
@@ -993,7 +1010,7 @@ export default function App() {
         .contextUsage()
         .then((usage) => {
           if (
-            targetSessionId !== sessionIdRef.current ||
+            splitInitialRef.current || targetSessionId !== sessionIdRef.current ||
             compactionInFlightRef.current ||
             sendingRef.current
           ) {
@@ -1160,6 +1177,8 @@ export default function App() {
       threadId: threadKey,
     };
     chatStatesRef.current.set(threadKey, state);
+    if (splitInitialRef.current) publishSplit((revision) => revision + 1);
+    if (event.kind === "user") splitSendAcks.current.get(threadKey)?.();
 
     if (isCurrent) {
       const prevSending = sendingRef.current;
@@ -1271,6 +1290,7 @@ export default function App() {
       if (threadKey === currentThread) currentState = state;
     }
 
+    if (splitInitialRef.current) publishSplit((revision) => revision + 1);
     if (!currentState) return;
     messagesRef.current = currentState.messages;
     activeAssistantId.current = currentState.activeAssistantId;
@@ -2871,7 +2891,7 @@ export default function App() {
 
   return (
     <>
-      {wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+      {authMode && wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
         <div
           aria-hidden
           className="zest-wallpaper"
@@ -2930,7 +2950,95 @@ export default function App() {
 
         {screen === "chat" && session ? (
           <Suspense fallback={<ChatSkeleton />}>
-          <ChatScreen
+          {splitInitial ? <SplitWorkspace
+            initial={splitInitial}
+            initialDraft={splitDraftRef.current}
+            states={chatStatesRef.current}
+            onOpen={(target, fork = false) => splitActions.current(async () => {
+              let info = await backend.openProjectChat(target);
+              if (fork) info = await backend.forkThread();
+              applySession(info);
+              return info;
+            })}
+            onSend={(targetSession, target, text) => splitActions.current(async () => {
+              const current = sessionRef.current;
+              let info: SessionInfo;
+              if (current?.threadId === targetSession.threadId) {
+                // New split chats are intentionally not persisted until their
+                // first message. Reuse the live draft instead of asking Rust
+                // to load a history row that does not exist yet.
+                info = current;
+              } else if (target.newThread) {
+                // An untouched draft in the other pane has no durable ID to
+                // reopen. Create its replacement immediately before sending;
+                // the returned session becomes durable with this turn.
+                info = await backend.openProjectChat({
+                  root: target.root,
+                  newThread: true,
+                  providerId: target.providerId ?? targetSession.provider,
+                });
+              } else {
+                info = await backend.openProjectChat({
+                  root: target.root,
+                  threadId: targetSession.threadId,
+                });
+                if (info.threadId !== targetSession.threadId) throw new Error("The chat changed. Open it again before sending.");
+              }
+              applySession(info);
+              // The command lasts for the entire turn. Release the activation lock
+              // once the user event confirms that the worker owns this chat.
+              await new Promise<void>((resolve, reject) => {
+                let acknowledged = false;
+                splitSendAcks.current.set(info.threadId, () => {
+                  acknowledged = true;
+                  splitSendAcks.current.delete(info.threadId);
+                  resolve();
+                });
+                void backend.sendMessage(text).then(() => {
+                  splitSendAcks.current.delete(info.threadId);
+                  resolve();
+                }, (error: unknown) => {
+                  splitSendAcks.current.delete(info.threadId);
+                  if (acknowledged) toast.add({ type: "error", title: "Chat response failed", description: formatInvokeError(error) });
+                  reject(error);
+                });
+              });
+              return info;
+            })}
+            onClose={(targetSession, nextDraft, target) => splitActions.current(async () => {
+              const current = sessionRef.current;
+              let activeThreadId = targetSession.threadId;
+              if (current?.threadId === targetSession.threadId) {
+                // The active session may be a never-saved split draft. It is
+                // already the session we want to reveal, so do not reopen it.
+                applySession(current);
+              } else if (target.newThread) {
+                const info = await backend.openProjectChat({
+                  root: target.root,
+                  newThread: true,
+                  providerId: target.providerId ?? targetSession.provider,
+                });
+                activeThreadId = info.threadId;
+                applySession(info, { clearDraft: true });
+              } else {
+                const opened = await onOpenProjectChat({ root: target.root, threadId: targetSession.threadId });
+                if (!opened) throw new Error("Reconnect this chat's provider before continuing in single view.");
+              }
+              setDraft(nextDraft);
+              draftRef.current = nextDraft;
+              saveDraft(activeThreadId, nextDraft);
+              splitInitialRef.current = null;
+              setSplitInitial(null);
+            })}
+          /> : <ChatScreen
+            onOpenSplit={() => {
+              if (compacting) return;
+              splitDraftRef.current = draftRef.current;
+              const initial = { ...session, messages };
+              splitInitialRef.current = initial;
+              setSplitInitial(initial);
+            }}
+            wallpaper={wallpaper}
             session={session}
             messages={messages}
             hasOlderMessages={hasOlderMessages}
@@ -3009,6 +3117,7 @@ export default function App() {
             onApprovalModeChange={onApprovalModeChange}
             onBuildPlan={onBuildPlan}
             onOpenProfile={() => navigateTo({ kind: "profile" })}
+            onOpenPullRequests={() => navigateTo({ kind: "pullRequests" })}
             onOpenUsage={() => navigateTo({ kind: "usage" })}
             onOpenCustomize={() =>
               navigateTo({
@@ -3037,7 +3146,7 @@ export default function App() {
             settingsRequest={settingsRequest}
             sessionWarning={sessionWarning}
             onDismissWarning={() => setSessionWarning(null)}
-          />
+          />}
           </Suspense>
         ) : null}
 
