@@ -115,6 +115,7 @@ function statusDotClass(status: string) {
 function subagentLabel(id: string) {
   if (id === "claude") return "Claude Code";
   if (id === "gemini") return "Gemini CLI";
+  if (id === "cursor") return "Cursor CLI";
   return id
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());

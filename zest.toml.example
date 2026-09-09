@@ -46,13 +46,28 @@ enabled = true
 # Claude Code can also be the parent provider for the whole Zest session. Run
 # `claude login`, then uncomment this block and set `default.provider = "claude"`.
 # It uses the Claude Code subscription and does not delegate through `[agents]`.
+#
+# Zest narrows Claude Code to the tools that make sense inside a Zest turn, so
+# it cannot schedule cron jobs, open its own git worktrees, or notify anything
+# outside this window. Its own subagents stay available: they run in the same
+# session, the same tool scope, and behind the same approval card.
+#
+# permission_mode decides who approves a tool call. Under `auto`, writing a
+# file raises Zest's approval card and reading one does not.
+#   auto                Routine work runs; the rest reaches the card. Default.
+#   manual              Stricter, so more reaches the card.
+#   plan                Read-only planning.
+#   accept_edits        Apply edits without asking; commands still ask.
+#   bypass_permissions  Never ask, and never tell Zest. A throwaway tree only.
 # [providers.claude]
 # kind = "claude_code"
 # command = "claude"
 # model = "sonnet"
 # models = ["sonnet", "opus"]
 # allow_mcp = false
-# permission_mode = "default"
+# permission_mode = "auto"
+# Optional: take something else away on top of Zest's scope.
+# disallowed_tools = ["Bash"]
 # timeout_secs = 900
 #
 # [providers.deepseek]
@@ -71,6 +86,10 @@ enabled = true
 
 # Zest's own MCP servers are optional, and are reached by the chat provider
 # itself. Add them from Customize > MCPs, or here.
+#
+# These are not `zest serve`. That command is an inbound coordinator MCP for
+# feature cards. Its policy (`gated` or `trusted`) is a CLI flag / env var,
+# not a key here. `[mcp.*]` is outbound: Zest calls those servers from a chat.
 #
 # These are not the same thing as `allow_mcp` above: that lets a CLI use the MCP
 # servers configured in *its* own settings, which Zest never sees. A Claude Code
@@ -107,6 +126,12 @@ timeout_secs = 120
 # allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900
+#
+# `mode = "headless"` means this worker is an external CLI. It is not
+# `zest serve` and not `zest run --jsonl`.
+#
+# An ACP agent is trusted inside its worktree and never asked on the way, so
+# `workspace = "isolated"` is required: the diff is the review gate.
 #
 # [agents.gemini]
 # mode = "acp"

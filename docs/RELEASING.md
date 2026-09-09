@@ -1,8 +1,9 @@
 # Releasing Zest
 
 Zest releases are tag-driven. A `v*` tag starts one workflow that verifies the
-source on Windows and Linux, builds the native packages, uploads checksums,
-and creates a GitHub prerelease only after both platforms pass.
+source on Windows and Linux, builds the native packages and standalone `zest`
+CLI binaries, uploads checksums, and creates a GitHub prerelease only after
+both platforms pass.
 
 ## Before tagging
 
@@ -48,6 +49,8 @@ match. It then builds:
 
 - Windows `.msi` and `.exe` installers;
 - Linux `.deb`, `.rpm`, and AppImage packages;
+- standalone `zest` CLI binaries for Linux and Windows, without WebKit, for
+  `zest serve` and the terminal client;
 - one SHA256 manifest per platform;
 - `LICENSE.txt` and `THIRD_PARTY_NOTICES.md`.
 

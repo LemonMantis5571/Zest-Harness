@@ -36,6 +36,7 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
 use crate::orchestration::ExternalSessionEvidence;
+use crate::provider::stream_contract::StreamNormalizer;
 use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
 use crate::tools::isolated_workspace;
 use crate::usage::{ExternalCost, ExternalUsageReport};
@@ -564,6 +565,11 @@ async fn run_external(
 /// The sink is used only for provider-owned parent loops. Explicit delegated
 /// workers continue through the non-streaming wrapper so their tool lifecycle
 /// remains represented by Zest's single delegation card.
+///
+/// `normalizer` lets a provider that knows its CLI's schema read the stream
+/// itself. Passing `None` keeps [`absorb_headless_value`], the schema-agnostic
+/// reader every worker shares: it is lossy by construction, and that is the
+/// right trade for a path that must accept a CLI nobody has modelled.
 pub(crate) async fn run_headless_command_streaming(
     cwd: &Path,
     config: &ExternalAgentConfig,
@@ -571,6 +577,7 @@ pub(crate) async fn run_headless_command_streaming(
     cancel: Option<&CancelToken>,
     on_event: &mut ExternalEventSink<'_>,
     control: Option<&mut dyn ControlResponder>,
+    normalizer: Option<&mut dyn StreamNormalizer>,
 ) -> Result<ExternalAgentRun, crate::error::HarnessError> {
     validate_config(config).map_err(crate::error::HarnessError::Other)?;
     if config.mode != ExternalAgentMode::Headless {
@@ -578,17 +585,26 @@ pub(crate) async fn run_headless_command_streaming(
             "parent CLI provider must use headless mode".into(),
         ));
     }
-    spawn_headless_with_session(cwd, config, prompt, cancel, Some(on_event), control)
-        .await
-        .map_err(|error| {
-            if error == EXTERNAL_RUN_CANCELLED {
-                crate::error::HarnessError::Cancelled
-            } else {
-                crate::error::HarnessError::Other(error)
-            }
-        })
+    spawn_headless_with_session(
+        cwd,
+        config,
+        prompt,
+        cancel,
+        Some(on_event),
+        control,
+        normalizer,
+    )
+    .await
+    .map_err(|error| {
+        if error == EXTERNAL_RUN_CANCELLED {
+            crate::error::HarnessError::Cancelled
+        } else {
+            crate::error::HarnessError::from_provider_stream("cli", error)
+        }
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_headless_with_session(
     cwd: &Path,
     config: &ExternalAgentConfig,
@@ -596,6 +612,7 @@ async fn spawn_headless_with_session(
     cancel: Option<&CancelToken>,
     on_event: Option<&mut ExternalEventSink<'_>>,
     control: Option<&mut dyn ControlResponder>,
+    normalizer: Option<&mut dyn StreamNormalizer>,
 ) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(resolve_program(&config.command));
@@ -620,8 +637,7 @@ async fn spawn_headless_with_session(
     }
     let timeout = Duration::from_secs(config.timeout_secs.min(MAX_TIMEOUT_SECS));
     let run_result = tokio::select! {
-        result = read_headless_with_session(&mut process, on_event, control, timeout) => result,
-        _ = sleep(timeout) => Err(format!("timed out after {} seconds", timeout.as_secs())),
+        result = read_headless_with_session(&mut process, on_event, control, normalizer, timeout) => result,
         _ = wait_cancel(cancel) => Err(EXTERNAL_RUN_CANCELLED.to_string()),
     };
 
@@ -638,12 +654,7 @@ async fn spawn_headless_with_session(
     let status = process.wait().await.map_err(|error| error.to_string())?;
     let stderr = process.stderr_text().await;
     if !status.success() {
-        let detail = if stderr.is_empty() {
-            format!("process exited with {status}")
-        } else {
-            format!("process exited with {status}: {}", clip(&stderr))
-        };
-        return Err(detail);
+        return Err(failed_process_detail(&run, status, &stderr));
     }
     if !stderr.is_empty() {
         run.events.push(ExternalAgentEvent::Error(clip(&stderr)));
@@ -655,12 +666,18 @@ async fn read_headless_with_session(
     process: &mut JsonlProcess,
     mut on_event: Option<&mut ExternalEventSink<'_>>,
     mut control: Option<&mut dyn ControlResponder>,
+    mut normalizer: Option<&mut dyn StreamNormalizer>,
     timeout: Duration,
 ) -> Result<ExternalAgentRun, String> {
     let started = Instant::now();
     let mut run = ExternalAgentRun::default();
+    // Time spent waiting on a human approval is not CLI work. Counting it
+    // against the turn budget made the card appear and then die: the outer
+    // deadline fired, the waiter was dropped, and Allow came back as
+    // "approval expired".
+    let mut human_wait = Duration::ZERO;
     loop {
-        let remaining = timeout.saturating_sub(started.elapsed());
+        let remaining = timeout.saturating_sub(started.elapsed().saturating_sub(human_wait));
         if remaining.is_zero() {
             return Err(format!("timed out after {} seconds", timeout.as_secs()));
         }
@@ -681,16 +698,34 @@ async fn read_headless_with_session(
                 // the responder answers it on stdin and the line never
                 // reaches the accumulator.
                 if let Some(responder) = control.as_deref_mut() {
+                    let paused = Instant::now();
                     if let Some(reply) = responder.respond(&value).await {
+                        human_wait += paused.elapsed();
                         process
                             .send(&reply)
                             .await
                             .map_err(|error| error.to_string())?;
                         continue;
                     }
+                    human_wait += paused.elapsed();
                 }
                 let event_start = run.events.len();
-                absorb_headless_value(&value, &mut run);
+                match normalizer.as_deref_mut() {
+                    // Usage and rate limits stay out here on purpose: their
+                    // shapes are shared across CLIs, so a per-provider
+                    // normalizer would be re-deriving an answer this path
+                    // already gets right.
+                    Some(normalizer) => {
+                        if let Some(limits) = external_limits_from_value(&value) {
+                            run.merge_limits(limits);
+                        }
+                        if let Some(report) = external_usage_from_value(&value) {
+                            run.merge_usage(report);
+                        }
+                        run.events.extend(normalizer.normalize(&value));
+                    }
+                    None => absorb_headless_value(&value, &mut run),
+                }
                 if let Some(on_event) = on_event.as_deref_mut() {
                     for event in run.events[event_start..].iter().cloned() {
                         on_event(event);
@@ -706,6 +741,14 @@ async fn read_headless_with_session(
             }
             Err(_) => {
                 run.malformed_lines += 1;
+                // A worker's CLI may legitimately print prose, so an unparsed
+                // line is treated as output there. A normalized provider was
+                // told to emit JSON on every line; splicing a stray line into
+                // the answer would put CLI chatter in the user's transcript.
+                if let Some(normalizer) = normalizer.as_deref_mut() {
+                    normalizer.parse_error();
+                    continue;
+                }
                 let text = line.to_string();
                 run.events.push(ExternalAgentEvent::Text(text.clone()));
                 if let Some(on_event) = on_event.as_deref_mut() {
@@ -726,6 +769,31 @@ fn with_stderr(error: String, stderr: String) -> String {
     }
 }
 
+/// Claude Code (and other stream-json CLIs) write the real reason on stdout,
+/// then exit 1 with an empty stderr. Dropping the accumulated stream left the
+/// chat with only "process exited with exit code: 1".
+fn failed_process_detail(
+    run: &ExternalAgentRun,
+    status: impl std::fmt::Display,
+    stderr: &str,
+) -> String {
+    if let Some(error) = run
+        .errors()
+        .into_iter()
+        .find(|error| !error.trim().is_empty())
+    {
+        return error.to_string();
+    }
+    if !stderr.is_empty() {
+        return format!("process exited with {status}: {}", clip(stderr));
+    }
+    let answer = run.text();
+    if !answer.trim().is_empty() {
+        return answer;
+    }
+    format!("process exited with {status}")
+}
+
 fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
     if config.command.trim().is_empty() {
         return Err("the configured command is empty".to_string());
@@ -743,6 +811,20 @@ fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
     {
         return Err(
             "ACP agent args cannot contain {prompt}; prompts are sent over JSON-RPC".into(),
+        );
+    }
+    // An ACP agent is trusted inside its worktree and asked nothing on the way,
+    // because `respond_acp_permission` answers allow so the worker never blocks
+    // on a queue with nobody watching. That trade only holds while the diff is
+    // the review gate. Measured against `cursor-agent acp`: it edits files
+    // without sending `session/request_permission` at all — the request only
+    // covers commands outside its shell allowlist — so on the real checkout
+    // there would be no gate anywhere. Isolation is what earns the trust.
+    if config.mode == ExternalAgentMode::Acp && config.workspace == ExternalWorkspace::Current {
+        return Err(
+            "ACP agents require workspace = \"isolated\"; their edits are reviewed as a diff, \
+             not approved call by call"
+                .into(),
         );
     }
     Ok(())
@@ -1142,12 +1224,7 @@ async fn spawn_and_run_with_cancel(
     };
 
     if !status.success() {
-        let detail = if stderr.is_empty() {
-            format!("process exited with {status}")
-        } else {
-            format!("process exited with {status}: {}", clip(&stderr))
-        };
-        return Err(detail);
+        return Err(failed_process_detail(&result, status, &stderr));
     }
 
     if !stderr.is_empty() {
@@ -1391,6 +1468,24 @@ pub fn prepare_external_command(command: &mut Command) {
     {
         // Unix inherits the already-current environment; keep the shared
         // function's argument explicit so strict clippy stays clean there.
+        let _ = command;
+    }
+}
+
+/// [`prepare_external_command`] for a blocking `std::process::Command`.
+///
+/// Model discovery is a short synchronous probe off the async path, so it needs
+/// the same Windows PATH repair without dragging in a tokio command.
+pub fn prepare_sync_external_command(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        if let Some(path) = effective_search_path() {
+            command.env("PATH", path);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
         let _ = command;
     }
 }
@@ -2742,8 +2837,26 @@ mod tests {
     fn acp_args_do_not_receive_prompt() {
         let mut config = config(ExternalAgentMode::Acp);
         config.args = vec!["--acp".into()];
+        config.workspace = ExternalWorkspace::Isolated;
         assert_eq!(expanded_args(&config, "task"), vec!["--acp"]);
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn an_acp_agent_may_not_run_in_the_current_workspace() {
+        let mut config = config(ExternalAgentMode::Acp);
+        config.args = vec!["--acp".into()];
+        config.workspace = ExternalWorkspace::Current;
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.contains("isolated"), "{error}");
+
+        // The restriction is about the ACP path only: a headless CLI keeps its
+        // own permission handshake, which is why Claude Code runs on the real
+        // checkout as a parent provider.
+        let mut headless = config.clone();
+        headless.mode = ExternalAgentMode::Headless;
+        headless.args = vec!["--print".into()];
+        assert!(validate_config(&headless).is_ok());
     }
 
     #[test]
@@ -3287,6 +3400,59 @@ mod tests {
         assert!(run.errors().is_empty());
     }
 
+    #[test]
+    fn failed_cli_prefers_streamed_error_over_bare_exit_code() {
+        let mut run = ExternalAgentRun::default();
+        run.events.push(ExternalAgentEvent::Error(
+            "You've hit your usage limit.".into(),
+        ));
+        assert_eq!(
+            failed_process_detail(&run, "exit code: 1", ""),
+            "You've hit your usage limit."
+        );
+    }
+
+    #[test]
+    fn failed_cli_falls_back_to_exit_code_when_the_stream_was_silent() {
+        let run = ExternalAgentRun::default();
+        assert_eq!(
+            failed_process_detail(&run, "exit code: 1", ""),
+            "process exited with exit code: 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cli_keeps_the_stdout_error_instead_of_the_exit_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = fixture_config("fail_stdout", false);
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        let error = run_headless_command_streaming(
+            temp.path(),
+            &config,
+            "task",
+            None,
+            &mut sink,
+            None,
+            None,
+        )
+        .await
+        .expect_err("exit 1 must fail the turn");
+        match error {
+            crate::error::HarnessError::Stream { message, .. } => {
+                assert!(
+                    message.contains("usage limit"),
+                    "expected the streamed reason, got {message}"
+                );
+                assert!(
+                    !message.contains("exit code"),
+                    "exit code should not hide the streamed reason: {message}"
+                );
+            }
+            other => panic!("expected a provider stream error, got {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn forwards_headless_partial_events_before_the_final_result() {
         let temp = tempfile::tempdir().unwrap();
@@ -3299,6 +3465,7 @@ mod tests {
             "stream task",
             None,
             &mut sink,
+            None,
             None,
         )
         .await
@@ -3356,6 +3523,7 @@ mod tests {
                 None,
                 &mut sink,
                 Some(&mut handshake),
+                None,
             ),
         )
         .await
@@ -3363,6 +3531,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(run.text(), "got user");
+    }
+
+    #[tokio::test]
+    async fn a_slow_approval_does_not_eat_the_turn_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = fixture_config("ask_then_result", false);
+        config.timeout_secs = 1;
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        struct SlowAllow;
+        #[async_trait]
+        impl ControlResponder for SlowAllow {
+            async fn respond(&mut self, message: &Value) -> Option<Value> {
+                let request_id = message.get("request_id")?.as_str()?.to_string();
+                let subtype = message
+                    .get("request")
+                    .and_then(|request| request.get("subtype"))
+                    .and_then(Value::as_str)?;
+                if subtype != "can_use_tool" {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                Some(crate::provider::claude_control::control_response(
+                    &request_id,
+                    true,
+                    "",
+                ))
+            }
+        }
+        let mut allow = SlowAllow;
+        let run = tokio::time::timeout(
+            Duration::from_secs(4),
+            run_headless_command_streaming(
+                temp.path(),
+                &config,
+                "run after allow",
+                None,
+                &mut sink,
+                Some(&mut allow),
+                None,
+            ),
+        )
+        .await
+        .expect("approval wait must not hang the runner")
+        .expect("time spent waiting for Allow is not turn timeout");
+
+        assert_eq!(run.text(), "ran");
     }
 
     #[tokio::test]
@@ -3381,6 +3596,7 @@ mod tests {
                 "terminal task",
                 None,
                 &mut sink,
+                None,
                 None,
             ),
         )

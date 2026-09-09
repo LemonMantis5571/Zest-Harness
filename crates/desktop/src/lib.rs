@@ -40,8 +40,8 @@ use ts_rs::TS;
 use zest_core::{
     can_start_login, codex_cli_on_path, compose_system_with_docs, contains_ignore_ascii_case,
     derive_profile_stats, descriptor_for_picker_id, descriptor_from_config, detect_all,
-    detect_claude_code, detect_codex_cli, detect_codex_oauth, display_path, driver_for,
-    env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
+    detect_claude_code, detect_codex_cli, detect_codex_oauth, detect_cursor_cli, display_path,
+    driver_for, env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
     save_custom_system, start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
@@ -64,6 +64,7 @@ use zest_core::{
 use attachments::{
     build_user_content, format_display_message, has_images, has_usable_attachment,
     prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
+    MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES,
 };
 use browser::BrowserHost;
 use context_meter::{estimate_context, CompactionResultView, ContextUsageView};
@@ -81,7 +82,7 @@ use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 ///
 /// Claude Code is available as a first-class parent and remains separately
 /// configurable as a delegated worker. Gemini remains worker-only.
-const PICKER_IDS: &[&str] = &["codex", "claude"];
+const PICKER_IDS: &[&str] = &["codex", "claude", "cursor"];
 
 /// Sign-in flows Zest can launch from the desktop. Claude here means the
 /// first-class parent provider; worker authentication remains CLI-owned.
@@ -337,17 +338,26 @@ impl Questioner for HubQuestioner {
 struct DesktopProviderInteraction {
     approval_hub: Arc<ApprovalHub>,
     question_hub: Arc<QuestionHub>,
+    policy: Arc<Mutex<ApprovalPolicy>>,
 }
 
 #[async_trait]
 impl ProviderInteractionHost for DesktopProviderInteraction {
+    fn approval_policy(&self) -> Option<Arc<Mutex<ApprovalPolicy>>> {
+        Some(self.policy.clone())
+    }
+
     async fn prepare_command_approval(&self, approval_id: &str) {
         self.approval_hub.prepare(approval_id);
     }
 
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+        self.approval_hub.wait(&request.approval_id).await
+    }
+
     async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
         matches!(
-            self.approval_hub.wait(&request.approval_id).await,
+            self.decide_command(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
@@ -356,9 +366,13 @@ impl ProviderInteractionHost for DesktopProviderInteraction {
         self.approval_hub.prepare(approval_id);
     }
 
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+        self.approval_hub.wait(&request.approval_id).await
+    }
+
     async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
         matches!(
-            self.approval_hub.wait(&request.approval_id).await,
+            self.decide_file_change(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
@@ -776,6 +790,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     let auth_status = match configured_provider {
         Some(ProviderConfig::ClaudeCode { .. }) => detect_claude_code(),
         Some(ProviderConfig::CodexCli { .. }) => detect_codex_cli(),
+        Some(ProviderConfig::CursorAcp { .. }) => detect_cursor_cli(),
         Some(ProviderConfig::CodexOAuth { credential, .. }) => detect_codex_oauth(
             credential
                 .as_deref()
@@ -1257,9 +1272,9 @@ enum ChatEvent {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        /// Slash command that produced this turn, when one did. The UI titles
-        /// the answer with it — Rust decides, because only Rust knows whether
-        /// a leading `/token` matched a real skill.
+        /// Slash command(s) that produced this turn, when any did. The UI
+        /// titles the answer with it — Rust decides which tokens matched real
+        /// skills or enabled MCP servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
@@ -1716,8 +1731,11 @@ fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     list_providers(state)
 }
 
-const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] =
-    &[("claude", "Claude Code"), ("gemini", "Gemini CLI")];
+const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("gemini", "Gemini CLI"),
+    ("cursor", "Cursor CLI"),
+];
 
 #[tauri::command]
 fn list_external_agents(state: State<'_, AppState>) -> Vec<ExternalAgentView> {
@@ -2682,13 +2700,53 @@ fn configure_claude_code_provider(
             id,
             command: "claude".into(),
             model,
-            models: vec!["sonnet".into(), "opus".into(), "haiku".into()],
+            models: vec![
+                "sonnet".into(),
+                "opus".into(),
+                "haiku".into(),
+                "fable".into(),
+            ],
             allow_mcp: false,
             // Not `accept_edits`: that auto-approves inside the CLI before zest
             // is consulted, so edits would land with no approval card and no
-            // diff. The provider downgrades it anyway — writing it here would
-            // only mislead someone reading their own zest.toml.
-            permission_mode: zest_core::ClaudeCodePermissionMode::Default,
+            // diff. `auto` approves routine work and still refers everything it
+            // is unsure about to the card, which is the behaviour the old
+            // `default` value was standing in for.
+            permission_mode: zest_core::ClaudeCodePermissionMode::Auto,
+            timeout_secs: 900,
+        },
+    )?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn configure_cursor_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let _edit_guard = lock_config_edit(&state);
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_cursor_provider(
+        &path,
+        &zest_core::config_edit::CursorProviderInput {
+            id,
+            command: "cursor-agent".into(),
+            model,
+            // Empty on purpose, and `add_cursor_provider` removes any stale key
+            // it finds. A written-out list is an allow-list: it is taken
+            // literally and suppresses discovery, so enabling Cursor used to
+            // pin whichever five models happened to be hard-coded here and hide
+            // every other one the account owns.
+            models: Vec::new(),
+            allow_mcp: false,
+            // `agent` on purpose, and the reason is worth stating where someone
+            // enabling this will read it: Cursor never asks before editing a
+            // file — `session/request_permission` covers shell commands only —
+            // so this chat can edit the checkout without an approval card. Set
+            // `mode = "plan"` in zest.toml for a read-only Cursor instead.
+            mode: zest_core::CursorMode::Agent,
             timeout_secs: 900,
         },
     )?;
@@ -3198,9 +3256,14 @@ fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
                         detail: Some(detail),
                     });
                 }
+                return Ok(LoginStatus {
+                    state: "running".into(),
+                    detail: None,
+                });
             }
+            *active = None;
             Ok(LoginStatus {
-                state: "running".into(),
+                state: "succeeded".into(),
                 detail: None,
             })
         }
@@ -4292,6 +4355,7 @@ async fn start_session_inner(
     agent.provider_interaction = Some(Arc::new(DesktopProviderInteraction {
         approval_hub: approval_hub.clone(),
         question_hub: question_hub.clone(),
+        policy: state.policy.clone(),
     }));
 
     // A legacy thread is claimed only after the target provider has built a
@@ -7963,7 +8027,14 @@ fn prepare_pasted_image(
     let raw = data_base64
         .split(',')
         .next_back()
-        .unwrap_or(data_base64.as_str());
+        .unwrap_or(data_base64.as_str())
+        .trim();
+    if raw.len() > MAX_IMAGE_BASE64_CHARS {
+        return Err(format!(
+            "image too large (max {} MB)",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(raw.trim())
@@ -8365,12 +8436,9 @@ async fn verify_workspace(state: State<'_, AppState>) -> Result<WorkspaceReview,
 }
 
 #[tauri::command]
-fn list_delegation_jobs(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<DelegationJobView>, String> {
+fn list_delegation_jobs(state: State<'_, AppState>) -> Result<Vec<DelegationJobView>, String> {
     let root = resolve_workspace_root(&state)?;
-    let _ = state.delegations.reconcile(&app, &root)?;
+    let _ = state.delegations.reconcile(&root)?;
     list_delegation_views(&root)
 }
 
@@ -8402,12 +8470,11 @@ fn update_delegation_job(
 
 #[tauri::command]
 fn approve_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.approve(&app, &root, &job_id)
+    state.delegations.approve(&root, &job_id, None)
 }
 
 #[tauri::command]
@@ -8430,32 +8497,29 @@ fn get_delegation_job(
 
 #[tauri::command]
 fn cancel_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.cancel(&app, &root, &job_id)
+    state.delegations.cancel(&root, &job_id, None)
 }
 
 #[tauri::command]
 fn retry_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.retry(&app, &root, &job_id)
+    state.delegations.retry(&root, &job_id, None)
 }
 
 #[tauri::command]
 fn apply_delegation_job(
-    app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<DelegationJobView, String> {
     let root = resolve_workspace_root(&state)?;
-    state.delegations.apply(&app, &root, &job_id)
+    state.delegations.apply(&root, &job_id, None)
 }
 
 #[tauri::command]
@@ -8698,6 +8762,22 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_oauth_expiry_keeps_the_cli_words_and_offers_reconnect() {
+        let failure = HarnessError::from_provider_stream(
+            "cli",
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+        );
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "claude"),
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&failure, "claude"),
+            Some("claude".into())
+        );
+    }
+
+    #[test]
     fn auth_failures_offer_the_right_recovery_path() {
         let failure = HarnessError::Api {
             status: 401,
@@ -8808,6 +8888,18 @@ mod tests {
         assert_eq!(
             format_turn_error(&internal),
             "The provider could not complete the request. Try again."
+        );
+    }
+
+    #[test]
+    fn a_claude_code_cli_error_is_shown_instead_of_try_again() {
+        let failure = HarnessError::from_provider_stream(
+            "claude_code",
+            "process exited with exit status: 1: Rate limit reached",
+        );
+        assert_eq!(
+            format_turn_error(&failure),
+            "process exited with exit status: 1: Rate limit reached"
         );
     }
 
@@ -8923,11 +9015,19 @@ pub fn run() {
                 ledger: ledger.clone(),
                 config_edit: Mutex::new(()),
                 chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
-                delegations: Arc::new(DelegationCoordinator::with_ledger(ledger)),
+                delegations: Arc::new(DelegationCoordinator::with_runtime(
+                    ledger,
+                    Arc::new(crate::delegation::TauriSpawner),
+                    Arc::new(zest_coordinator::NoopNotifier),
+                )),
             }
         })
         .setup(|app| {
             app.state::<AppState>().browser.attach(app.handle().clone());
+            crate::delegation::bind_tauri(
+                app.state::<AppState>().delegations.as_ref(),
+                app.handle().clone(),
+            );
             let jobs = app.state::<AppState>().jobs.clone();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(forward_job_events(app_handle, jobs));
@@ -8953,6 +9053,7 @@ pub fn run() {
             configure_api_provider,
             configure_anthropic_provider,
             configure_claude_code_provider,
+            configure_cursor_provider,
             configure_codex_cli_provider,
             configure_codex_oauth_provider,
             codex_cli_available,
@@ -9618,11 +9719,15 @@ mod characterization {
 
     #[test]
     fn desktop_exposes_claude_as_a_parent_login_choice() {
-        assert_eq!(PICKER_IDS, &["codex", "claude"]);
+        assert_eq!(PICKER_IDS, &["codex", "claude", "cursor"]);
         assert!(desktop_can_start_login("codex"));
         assert!(desktop_can_start_login("claude"));
         assert!(desktop_can_start_login("codex-chatgpt"));
         assert!(!desktop_can_start_login("antigravity"));
+        // Cursor is pickable but its sign-in is not ours to drive: the CLI
+        // opens its own browser flow, so the row points at `cursor-agent
+        // login` rather than offering a Connect button Zest cannot honour.
+        assert!(!desktop_can_start_login("cursor"));
     }
 
     #[test]
@@ -9730,6 +9835,7 @@ model = "gpt-5.6-sol"
                 models: vec!["sonnet".into()],
                 allow_mcp: false,
                 permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+                disallowed_tools: Vec::new(),
                 timeout_secs: 900,
             }),
             "Claude Code subscription"

@@ -137,23 +137,13 @@ impl HarnessError {
     /// for an account it holds but cannot use, which is indistinguishable from
     /// "temporarily overloaded" unless the body is read.
     pub fn is_auth_problem(&self) -> bool {
-        let Self::Api { status, body } = self.root() else {
-            return false;
-        };
-        if matches!(status, 401 | 403) {
-            return true;
+        match self.root() {
+            Self::Api { status, body } => matches!(status, 401 | 403) || looks_like_auth(body),
+            // Claude Code writes this on stdout and exits 1. That becomes a
+            // tagged stream error, not an HTTP 401, and used to miss Reconnect.
+            Self::Stream { message, .. } => looks_like_auth(message),
+            _ => false,
         }
-        let body = body.to_ascii_lowercase();
-        [
-            "auth_unavailable",
-            "authentication_error",
-            "invalid_api_key",
-            "no auth available",
-            "unauthorized",
-            "invalid x-api-key",
-        ]
-        .iter()
-        .any(|needle| body.contains(needle))
     }
 
     /// Whether the provider rejected the request because its context window
@@ -199,6 +189,23 @@ impl HarnessError {
             _ => false,
         }
     }
+}
+
+fn looks_like_auth(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "auth_unavailable",
+        "authentication_error",
+        "invalid_api_key",
+        "no auth available",
+        "unauthorized",
+        "invalid x-api-key",
+        "oauth session expired",
+        "failed to authenticate",
+        "not logged in",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn extract_api_error_message(body: &str) -> Option<String> {
@@ -411,6 +418,23 @@ mod tests {
         }
         assert!(!HarnessError::Cancelled.is_auth_problem());
         assert!(!HarnessError::StreamIdleTimeout.is_auth_problem());
+        assert!(
+            !HarnessError::from_provider_stream("cli", "process exited with exit code: 1")
+                .is_auth_problem()
+        );
+    }
+
+    #[test]
+    fn a_claude_oauth_expiry_on_stdout_is_an_auth_problem() {
+        let failure = HarnessError::from_provider_stream(
+            "cli",
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+        );
+        assert!(failure.is_auth_problem());
+        assert_eq!(
+            failure.provider_user_message(),
+            Some("Failed to authenticate: OAuth session expired and could not be refreshed")
+        );
     }
 
     #[test]

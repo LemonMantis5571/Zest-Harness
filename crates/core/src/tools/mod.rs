@@ -599,15 +599,26 @@ mod characterization {
             .expect("the locator must be readable, with no approval needed");
         assert!(back.body.contains("needle"), "retrieved nothing useful");
 
-        // And grep it, the other half of the hint.
+        // Grep keeps the first 100 matches in walk order. Linux CI does not
+        // visit `f41.txt` before that cap, so the spilled file may not contain
+        // "needle 41". Search for a line that is actually in the spill.
+        let pattern = back
+            .body
+            .lines()
+            .find_map(|line| {
+                let start = line.find("needle ")?;
+                let words: Vec<&str> = line[start..].split_whitespace().take(2).collect();
+                (words.len() == 2).then(|| format!("{} {}", words[0], words[1]))
+            })
+            .expect("spill contains a needle line");
         let searched = reg
             .run(
                 "grep",
-                serde_json::json!({ "pattern": "needle 41", "path": locator }),
+                serde_json::json!({ "pattern": pattern, "path": locator }),
             )
             .await
             .expect("the locator must be greppable");
-        assert!(searched.body.contains("needle 41"), "{}", searched.body);
+        assert!(searched.body.contains(&pattern), "{}", searched.body);
     }
 
     #[tokio::test]

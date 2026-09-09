@@ -9,6 +9,8 @@ use zest_core::{
     ToolRisk, DEFAULT_SYSTEM,
 };
 
+mod serve;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -65,6 +67,11 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             run_headless(args).await?;
+            return Ok(());
+        }
+        Some("serve") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            serve::run(args).await?;
             return Ok(());
         }
         _ => {}
@@ -148,11 +155,13 @@ USAGE
   zest usage                   Show local usage totals
   zest doctor --live           Run the opt-in live read-only check
   zest run --jsonl -- PROMPT   Run one deny-only JSONL/headless turn
+  zest serve --project PATH [--policy trusted] [--init]
 
 OPTIONS
   -h, --help                  Show this help
 
-Run `zest doctor --help` or `zest run --jsonl --help` for command details.
+Run `zest doctor --help`, `zest run --jsonl --help`, or `zest serve --help`
+for command details.
 "
     );
 }
@@ -654,6 +663,7 @@ fn provider_kind_method(config: &zest_core::ProviderConfig) -> &'static str {
         zest_core::ProviderConfig::ClaudeCode { .. } => "Claude sign-in",
         zest_core::ProviderConfig::CodexCli { .. } => "Codex CLI",
         zest_core::ProviderConfig::CodexOAuth { .. } => "ChatGPT sign-in",
+        zest_core::ProviderConfig::CursorAcp { .. } => "Cursor subscription",
     }
 }
 
@@ -892,7 +902,7 @@ impl Approver for PromptApprover {
 
 #[async_trait::async_trait]
 impl ProviderInteractionHost for PromptApprover {
-    async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
         let approval = ApprovalRequest {
             approval_id: request.approval_id.clone(),
             tool_name: "provider_command".into(),
@@ -907,13 +917,17 @@ impl ProviderInteractionHost for PromptApprover {
                     .unwrap_or_default(),
             },
         };
+        prompt_approval(&approval).await
+    }
+
+    async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
         matches!(
-            prompt_approval(&approval).await,
+            self.decide_command(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
 
-    async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
         let approval = ApprovalRequest {
             approval_id: request.approval_id.clone(),
             tool_name: "provider_file_change".into(),
@@ -927,8 +941,12 @@ impl ProviderInteractionHost for PromptApprover {
                 diff: request.diff.unwrap_or_default(),
             },
         };
+        prompt_approval(&approval).await
+    }
+
+    async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
         matches!(
-            prompt_approval(&approval).await,
+            self.decide_file_change(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }

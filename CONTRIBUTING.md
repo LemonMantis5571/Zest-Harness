@@ -44,9 +44,14 @@ Run the terminal client with:
 cargo run -p zest
 ```
 
-The shared Rust library is in `crates/core`, the terminal client is in
+The shared Rust library is in `crates/core`, the shared delegation coordinator
+is in `crates/coordinator`, the terminal client and `zest serve` daemon are in
 `crates/cli`, and the desktop application is in `crates/desktop`. The desktop
 web UI lives in `crates/desktop/ui`.
+
+`zest serve` is a coordinator-only process. It must not depend on the desktop
+crate or WebKit. Linux CI builds and tests it without WebKitGTK. See
+[docs/SERVE.md](docs/SERVE.md).
 
 Optional desktop add-ons are separate processes and are not part of the normal
 desktop build. Read [docs/PLUGINS.md](docs/PLUGINS.md) for the plugin standard,
@@ -95,6 +100,35 @@ npm run verify
 ```
 
 The same command works in Bash.
+
+### While you are still working
+
+`npm run verify` is a pre-commit gate, not a test command. It runs UI tests, UI
+lint, `cargo fmt --check`, `clippy --workspace --all-targets`, and
+`cargo test --workspace --lib`. Clippy and the test build have different
+fingerprints, so the workspace is compiled twice, `zest-desktop` included. That
+is minutes per run, and almost none of it is spent running tests: a full
+`cargo test -p zest-core --lib` executes in about 15 seconds once it is built.
+
+Work the inner loop instead, and save the gate for the end:
+
+```bash
+cargo check -p zest-core                      # types only, no test build
+cargo test -p zest-core --lib -- provider::   # one module's tests
+cargo test -p zest-core --lib                 # the crate's tests
+npm run verify                                # once, before you commit
+```
+
+Two things that waste the most time:
+
+- Running `cargo fmt` while a build is in flight. The build reads files the
+  formatter is rewriting and fails in ways that do not reproduce.
+- Reaching for `cargo build` when `cargo check` answers the question. Only build
+  when you are about to run something.
+
+Tests that spawn child processes (`tools::external_agent`) carry real timeouts,
+so they are the first to flake when the machine is already busy compiling. Rerun
+them alone before believing a failure.
 
 Add a focused regression test for behavior changes. For UI changes, update the
 relevant characterization tests under `crates/desktop/ui/src`.

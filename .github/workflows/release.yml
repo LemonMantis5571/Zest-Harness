@@ -176,9 +176,92 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  package-cli-windows:
+    name: Package Windows zest CLI
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check release version
+        run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Build zest CLI
+        run: cargo build -p zest --release
+
+      - name: Stage CLI and checksums
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "release-artifacts"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release/zest.exe" (Join-Path $stage "zest.exe")
+          node scripts/release-checksums.mjs --root $stage --out (Join-Path $stage "SHA256SUMS-windows-cli.txt")
+          Copy-Item LICENSE (Join-Path $stage "LICENSE.txt")
+
+      - name: Upload Windows CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cli
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package-cli-linux:
+    name: Package Linux zest CLI
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev cmake \
+            libdbus-1-dev curl wget file tar
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check release version
+        run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Build zest CLI
+        run: cargo build -p zest --release
+
+      - name: Stage CLI and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$PWD/release-artifacts"
+          mkdir -p "$stage"
+          cp target/release/zest "$stage/zest"
+          cp LICENSE "$stage/LICENSE.txt"
+          node scripts/release-checksums.mjs --root "$stage" --out "$stage/SHA256SUMS-linux-cli.txt"
+
+      - name: Upload Linux CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-cli
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Publish GitHub Release
-    needs: [package-windows, package-linux]
+    needs: [package-windows, package-linux, package-cli-windows, package-cli-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -188,7 +271,7 @@ jobs:
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-installers"
+          pattern: "*"
           path: release-assets
           merge-multiple: true
 

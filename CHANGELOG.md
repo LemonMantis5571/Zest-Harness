@@ -7,6 +7,15 @@ a replacement for the commit history.
 
 ### Added
 
+- `zest serve --project PATH`, a windowless coordinator daemon with authenticated
+  loopback MCP. Default policy is gated: create, then `delegation_approve` and
+  `delegation_apply` after confirmation. `--policy trusted` lets a token holder
+  run a card through worker, review, and apply without those extra calls.
+  `--init` creates a missing directory, `git init`, and an empty HEAD commit so
+  a bot can serve a project that does not exist yet. See
+  [docs/SERVE.md](docs/SERVE.md).
+- Standalone `zest` CLI artifacts on Linux and Windows releases, so a VM does
+  not need the WebKit desktop bundle.
 - Enabled MCP servers are slash commands. `/haiku` (or any server id) tells the
   model to use that server for the rest of the message, and the composer list
   matches by prefix the same way skills already did.
@@ -16,6 +25,34 @@ a replacement for the commit history.
 
 ### Changed
 
+- A Claude Code chat keeps one CLI session for its whole life. The first turn
+  sends the operating context and the transcript; every turn after it resumes
+  that session and sends only the new message. Changing model opens a fresh
+  session rather than answering from a conversation the new model never had.
+- Claude Code runs with an effort selector (`low` through `max`), which the CLI
+  has accepted for some time and Zest was still declaring unsupported. Haiku is
+  the exception and keeps no selector, because it rejects the flag. `fable` is
+  now offered alongside `sonnet`, `opus`, and `haiku`.
+- Claude Code is narrowed to the tools that mean something inside a Zest turn.
+  Cron, scheduled wakeups, remote triggers, push notifications, cross-session
+  messages, its own git worktrees, and multi-agent workflows are out of scope.
+  Its subagents stay in: they run in the same session, the same tool scope, and
+  behind the same approval card. This is a scope boundary, not an auto-approval
+  list, so nothing gained the right to run unasked.
+- Claude Code's permission mode now means what it says. Every configured value
+  except `plan` used to be silently rewritten, because the modes that existed
+  then approved edits before Zest was consulted. The default is `auto`, which
+  approves routine work and still refers everything else to the approval card;
+  `manual`, `accept_edits`, `plan`, `dont_ask`, and `bypass_permissions` are
+  passed through. A new `disallowed_tools` list takes more away when a project
+  wants it. Verified against Claude Code CLI 2.1.220.
+- Claude Code tool rows carry the tool's real name and target, such as
+  `Read src/provider/mod.rs`, instead of `External tool`. A completed edit
+  reports the file it changed, and a subagent reports progress on the row of the
+  `Task` that started it.
+- Hovering a dash on the chat turn rail lengthens the mark and shows that
+  turn's preview beside it.
+- The README states what Zest does and drops the "what it is not" asides.
 - Clicking a pull-request chip opens the review pane on that patch. Cmd/Ctrl-click,
   Shift-click, or middle-click still opens the host page.
 - The desktop app icon is a rounded dark tile with transparent corners, so
@@ -38,6 +75,9 @@ a replacement for the commit history.
 
 ### Fixed
 
+- Reviewers that wrap the verdict in prose, a markdown fence, or code samples
+  before the JSON still count as a parseable report. DeepSeek-style
+  "here is JSON" replies no longer block apply when the object itself is valid.
 - Opening a long chat shipped the whole transcript into the window. The
   first paint is now the last ten user turns; earlier turns load on scroll
   up. Search opens on the page that contains the match instead of the

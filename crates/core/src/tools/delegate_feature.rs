@@ -1,8 +1,9 @@
 //! Coordinator-only feature-card creation tool.
 //!
-//! The tool owns validation and durable card creation.  Execution is deliberately
-//! handed to the desktop coordinator after the normal Zest approval gate; this
-//! keeps the parent turn responsive and lets the scheduler survive navigation.
+//! The tool owns validation and durable card creation. After the parent
+//! approval gate, it writes a dispatch receipt next to the card so any live
+//! coordinator can enqueue the job. Implementation still does not start until
+//! that receipt is consumed.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -230,13 +231,21 @@ impl Tool for FeatureDelegator {
                 ));
             }
         }
-        let job = store
+        let mut job = store
             .create(
                 &self.parent_thread_id,
                 card.clone(),
                 crate::delegation::capture_workspace_snapshot(&self.root),
             )
             .map_err(|error| error.to_string())?;
+        job.origin = Some(crate::delegation::DelegationOrigin {
+            coordinator: "interactive_tool".into(),
+            chat_id: None,
+            thread_id: Some(self.parent_thread_id.clone()),
+            idempotency_key: None,
+        });
+        job.grant_dispatch_receipt("delegate_feature");
+        let job = store.update(job).map_err(|error| error.to_string())?;
         let model = self
             .agents
             .get(&card.agent)
@@ -245,7 +254,7 @@ impl Tool for FeatureDelegator {
             .unwrap_or_else(|| "CLI default".into());
         Ok(ToolOutcome::with_metadata(
             format!(
-                "Feature card `{}` created in lane `{}`. Its isolated worker and independent reviewer are queued on the Workbench.",
+                "Feature card `{}` created in lane `{}` and is waiting for the coordinator to pick up the recorded approval.",
                 job.job_id, card.lane
             ),
             ToolMetadata::Delegation {

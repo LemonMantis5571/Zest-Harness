@@ -55,9 +55,9 @@ pub use anthropic::types::{
 };
 pub use auth::{
     can_start_login, codex_cli_on_path, detect_all, detect_claude_code, detect_codex_cli,
-    detect_codex_oauth, resolve_claude_code_login, resolve_codex_cli_login, resolve_login,
-    start_claude_code_login, start_codex_cli_login, start_codex_oauth_login, start_login,
-    AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
+    detect_codex_oauth, detect_cursor_cli, resolve_claude_code_login, resolve_codex_cli_login,
+    resolve_login, start_claude_code_login, start_codex_cli_login, start_codex_oauth_login,
+    start_login, AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -71,7 +71,7 @@ pub use commands::{
     parse_command, Expansion, McpSlash, ParsedCommand, SlashCommand, SlashKind,
 };
 pub use config::{
-    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
+    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config, CursorMode,
     ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, McpServerConfig, ProviderConfig,
     Target, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
@@ -84,9 +84,10 @@ pub use delegation::{
     diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths,
     AcceptanceCheckResult, AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts,
     DelegationAttempt, DelegationJob, DelegationOrigin, DelegationStatus, DelegationStore,
-    DelegationTarget, FeatureCard, ResolvedTargetMetadata, ReviewDecision, ReviewFinding,
-    ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
+    DelegationTarget, DispatchReceipt, FeatureCard, ResolvedTargetMetadata, ReviewDecision,
+    ReviewFinding, ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
     WorkspaceSnapshot, DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION,
+    V2_DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -95,6 +96,8 @@ pub use inbox::InputInbox;
 pub use jobs::{JobEvent, JobOutput, JobRead, JobRegistry, JobSnapshot, JobStatus};
 pub use mcp::{
     probe_server as probe_mcp_server, register_mcp_tools, McpCatalog, McpServer, McpToolDef,
+    LEGACY_PROTOCOL_VERSION as LEGACY_MCP_PROTOCOL_VERSION,
+    MODERN_PROTOCOL_VERSION as MODERN_MCP_PROTOCOL_VERSION,
 };
 pub use orchestration::{
     DecisionGate, DispatchRole, DispatchState, DispatchStatus, ExternalSessionEvidence, GateStatus,
@@ -128,7 +131,7 @@ pub use provider::{
     Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
     ProviderInteractionHost, ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot,
     ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt, ThreadProviderHandoff, TurnRequest,
-    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    CODEX_KNOWN_MODELS, FALLBACK_CONTEXT_WINDOW, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,

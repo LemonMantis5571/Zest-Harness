@@ -14,8 +14,16 @@ path = "src/main.rs"
 
 [dependencies]
 zest-core = { path = "../core" }
+zest-coordinator = { path = "../coordinator" }
 anyhow.workspace = true
 async-trait.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 mimalloc.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json.workspace = true
+tempfile = "3"
