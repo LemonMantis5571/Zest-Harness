@@ -49,6 +49,7 @@ import { ToolCallRow } from "@/components/ToolCallRow";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { ThinkingReasoning } from "@/components/ThinkingReasoning";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
+import { visibleInterval } from "@/lib/visibleInterval";
 import {
   Attachment,
   AttachmentContent,
@@ -81,9 +82,11 @@ import {
   modelPickerHasChoices,
   type EffortId,
 } from "@/lib/models";
+import type { PaletteFilter } from "@/lib/commandPaletteSearch";
+import type { SendTurnRequest } from "@/lib/sendTurn";
 import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
-import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
+import { groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import { escapeAction } from "@/lib/escapeStack";
@@ -165,7 +168,7 @@ type Props = {
   model: string;
   effort: EffortId;
   onDraftChange: (value: string) => void;
-  onSend: (text?: string) => void;
+  onSend: (request?: SendTurnRequest) => void;
   onEditMessage: (messageId: string, text: string) => Promise<void>;
   onStop?: () => void;
   onNewChat: () => void;
@@ -271,6 +274,8 @@ type ChatMessageRowProps = {
   isLast: boolean;
   sending: boolean;
   approvalMode: ApprovalMode;
+  /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
+  providerLabel: string;
   isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
   onResolveApproval: (
@@ -280,7 +285,7 @@ type ChatMessageRowProps = {
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
   onOpenProviderSwitch?: () => void;
-  onSend: (text?: string) => void;
+  onSend: (request?: SendTurnRequest) => void;
   editing: boolean;
   editingText: string;
   editingBusy: boolean;
@@ -364,14 +369,17 @@ function MessageEditForm({
 
 function ProviderActivityTrace({
   activities,
+  providerLabel,
 }: {
   activities: ProviderActivityPart[];
+  /** Whose loop ran these. Hard-coding one vendor mislabelled every other. */
+  providerLabel: string;
 }) {
   if (activities.length === 0) return null;
   return (
     <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground" aria-label="Provider activity">
       <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
-        Claude Code
+        {providerLabel}
       </div>
       {activities.map((activity) => {
         const icon =
@@ -406,6 +414,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   isLast,
   sending,
   approvalMode,
+  providerLabel,
   isPlanToBuild = false,
   onBuildPlan,
   onResolveApproval,
@@ -513,7 +522,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const submitQuestion = structuredQuestion?.questionId
     ? (answer: string) =>
         onResolveQuestion(structuredQuestion.questionId as string, answer)
-    : onSend;
+    : (answer: string) => onSend({ origin: "answer", text: answer });
 
   return (
     <MessageScrollerItem
@@ -529,7 +538,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
 
           {msg.tools.length > 0 ? (
             <div className="flex w-full max-w-full flex-col gap-0.5">
-              {groupToolRuns(msg.tools, collapseThresholdFor(msg.tools)).map((run) =>
+              {groupToolRuns(msg.tools).map((run) =>
                 run.kind === "group" ? (
                   <ToolRunGroup
                     key={`group-${run.tools[0].id}`}
@@ -551,7 +560,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
           ) : null}
 
           {msg.providerActivity ? (
-            <ProviderActivityTrace activities={msg.providerActivity} />
+            <ProviderActivityTrace
+              activities={msg.providerActivity}
+              providerLabel={providerLabel}
+            />
           ) : null}
 
           {msg.thinking ? (
@@ -830,6 +842,7 @@ export function ChatScreen({
    */
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteFilter, setPaletteFilter] = useState<PaletteFilter>("all");
   useEffect(() => {
     void ensureFontLoaded("jetbrains-mono");
   }, []);
@@ -1150,10 +1163,10 @@ export function ChatScreen({
         // The last rendered snapshot stays visible when Git is temporarily unavailable.
       }
     };
-    const interval = window.setInterval(tick, 2500);
+    const stopPolling = visibleInterval(document, () => void tick(), 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      stopPolling();
     };
   }, [branchTarget, refreshWorkspaceChanges, openBranchChangeId]);
 
@@ -1318,7 +1331,8 @@ export function ChatScreen({
     [onOpenSettings]
   );
 
-  const openPalette = useCallback(() => {
+  const openPalette = useCallback((filter: PaletteFilter = "all") => {
+    setPaletteFilter(filter);
     setPaletteOpen(true);
   }, []);
 
@@ -1680,7 +1694,7 @@ export function ChatScreen({
               title="Command palette (Ctrl+K)"
               aria-label="Open command palette"
               aria-expanded={paletteOpen}
-              onClick={openPalette}
+              onClick={() => openPalette()}
             >
               <CommandIcon />
             </Button>
@@ -1839,6 +1853,7 @@ export function ChatScreen({
                         isLast={isLast}
                         sending={sending}
                         approvalMode={approvalMode}
+                        providerLabel={providerLabel}
                         isPlanToBuild={planToBuild === msg.id}
                         onBuildPlan={onBuildPlan}
                         onResolveApproval={onResolveApproval}
@@ -1972,7 +1987,7 @@ export function ChatScreen({
                 setModelPickerOpen(true);
                 return;
               }
-              onSend(text);
+              onSend({ origin: "composer", text });
             }}
             onStop={onStop}
             onModelChange={onModelChange}
@@ -2119,6 +2134,7 @@ export function ChatScreen({
         <CommandPalette
           open={paletteOpen}
           actions={paletteActions}
+          initialFilter={paletteFilter}
           onClose={() => setPaletteOpen(false)}
           onOpenChat={(options) => {
             void onOpenProjectChat(options).catch((error) =>

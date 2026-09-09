@@ -51,15 +51,16 @@ check_toolchain() {
 }
 
 check_bindings() {
-  local snapshot
+  local snapshot=""
   snapshot="$(mktemp -d)"
   cleanup() {
+    if [ -z "${snapshot:-}" ] || [ ! -d "$snapshot" ]; then
+      return
+    fi
     rm -rf "$BINDING_DIR"
     mkdir -p "$BINDING_DIR"
-    if [ -d "$snapshot" ]; then
-      cp -a "$snapshot"/. "$BINDING_DIR"/ 2>/dev/null || true
-      rm -rf "$snapshot"
-    fi
+    cp -a "$snapshot"/. "$BINDING_DIR"/ 2>/dev/null || true
+    rm -rf "$snapshot"
   }
   trap cleanup EXIT
   mkdir -p "$BINDING_DIR"

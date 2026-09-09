@@ -4,6 +4,8 @@
 //! extraction (no OCR). Images become Messages API image blocks. Other files
 //! are read as UTF-8 text when possible.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -13,9 +15,11 @@ use zest_core::truncate_chars;
 
 /// Soft cap so a single text attach cannot blow the context window.
 const MAX_ATTACHMENT_CHARS: usize = 100_000;
+const MAX_TEXT_READ_BYTES: usize = MAX_ATTACHMENT_CHARS * 4;
 
 /// Per-image ceiling.
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_IMAGE_BASE64_CHARS: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 /// Ceiling across everything attached to one message.
 ///
@@ -343,7 +347,7 @@ fn prepare_image_path(
     display: String,
     ext: &str,
 ) -> PreparedAttachment {
-    match std::fs::read(path) {
+    match read_bounded_file(path, MAX_IMAGE_BYTES) {
         Ok(bytes) => {
             let mut att = prepare_image_bytes(&bytes, media_type_for_ext(ext), &name);
             att.id = id;
@@ -414,11 +418,34 @@ fn prepare_pdf(path: &Path, id: String, name: String, display: String) -> Prepar
 }
 
 fn read_text_file(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut bytes = read_bounded_file(path, MAX_TEXT_READ_BYTES)?;
+    let truncated = bytes.len() > MAX_TEXT_READ_BYTES;
+    if truncated {
+        bytes.truncate(MAX_TEXT_READ_BYTES);
+    }
     if bytes.iter().take(8192).any(|&b| b == 0) {
         return Err("binary file — only text, images, and PDF are supported".into());
     }
-    String::from_utf8(bytes).map_err(|_| "not valid UTF-8 text".into())
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if truncated && error.utf8_error().error_len().is_none() => {
+            let valid_up_to = error.utf8_error().valid_up_to();
+            let bytes = error.into_bytes();
+            String::from_utf8(bytes[..valid_up_to].to_vec())
+                .map_err(|_| "not valid UTF-8 text".into())
+        }
+        Err(_) => Err("not valid UTF-8 text".into()),
+    }
+}
+
+fn read_bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(limit.saturating_add(1));
+    File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 fn media_type_for_ext(ext: &str) -> &'static str {
@@ -692,6 +719,26 @@ mod limit_tests {
         let refused =
             refuse_over_budget(&ok, 1, just_under + 1, MAX_IMAGE_BYTES).expect("over total");
         assert!(refused.detail.contains("in total"), "{}", refused.detail);
+    }
+
+    #[test]
+    fn bounded_file_reads_only_one_byte_past_the_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+
+        let bytes = read_bounded_file(&path, 4).unwrap();
+        assert_eq!(bytes, b"01234");
+    }
+
+    #[test]
+    fn oversized_utf8_text_is_trimmed_without_a_partial_character() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.txt");
+        std::fs::write(&path, "🦀".repeat(MAX_ATTACHMENT_CHARS + 1)).unwrap();
+
+        let text = read_text_file(&path).unwrap();
+        assert_eq!(text.chars().count(), MAX_ATTACHMENT_CHARS);
     }
 }
 

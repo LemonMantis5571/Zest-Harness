@@ -80,6 +80,8 @@ Desktop.ini
 /docs/CODEBASE_AUDIT.md
 
 # --- Scratch / local experiments ---
+# ACP probe transcripts: local captures that quote workspace content.
+/outputs/acp-probe/
 /tmp/
 *.log
 *.tmp

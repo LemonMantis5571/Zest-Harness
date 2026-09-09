@@ -49,18 +49,23 @@ const DEFAULT_BACKGROUND_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
 const MAX_BACKGROUND_PROCESSES: usize = 8;
 
-/// Characters that hand control back to a shell. Presence of any one of these
-/// disqualifies a command from the auto-run path — no exceptions, no escaping
-/// analysis, because getting that analysis subtly wrong is the entire class of
-/// bug this check exists to avoid.
+/// Characters that hand control back to a shell when they are outside an
+/// argument quote. The normal allowlist still rejects them outright; the one
+/// fixed-host HTTP read below parses quotes and spawns argv directly so URLs
+/// and query values do not need an approval card just because they contain
+/// `?`, `&`, or `=`.
 const SHELL_METACHARACTERS: &[char] = &[
     '|', '&', ';', '<', '>', '(', ')', '$', '`', '\\', '"', '\'', '\n', '\r', '{', '}', '[', ']',
-    '*', '?', '!', '#', '~', '=',
+    '*', '?', '!', '#', '~', '=', '^',
 ];
+
+const BROWSE_X_HOST: &str = "x.pcstyle.dev";
 
 /// Commands that only report. Commands that compile or execute repository code
 /// are intentionally absent: Auto mode must not turn a source change into an
-/// implicit execution grant.
+/// implicit execution grant. The fixed-host `curl` path is handled separately
+/// so a skill can read public X data without turning arbitrary networking into
+/// an unattended shell capability.
 const READ_ONLY_PREFIXES: &[&[&str]] = &[
     &["cargo", "fmt"],
     &["cargo", "tree"],
@@ -97,6 +102,168 @@ fn subverts_read_only(tokens: &[&str]) -> bool {
     false
 }
 
+/// Parse the small command language that is safe to pass as an argv vector.
+///
+/// This is deliberately not a shell parser. Quotes only group an argument;
+/// every shell operator outside quotes rejects the command. Backslashes are
+/// rejected too because their meaning differs between `cmd.exe` and `sh`, and
+/// accepting an escape without reproducing both shells exactly would make the
+/// safety check depend on the host platform.
+fn parse_auto_argv(command: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut token_started = false;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for ch in command.chars() {
+        if matches!(ch, '\\' | '\n' | '\r') {
+            return None;
+        }
+
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                token_started = true;
+            }
+            '"' => {
+                in_double = true;
+                token_started = true;
+            }
+            ch if ch.is_whitespace() => {
+                if token_started {
+                    args.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            ch if SHELL_METACHARACTERS.contains(&ch) => return None,
+            ch => {
+                current.push(ch);
+                token_started = true;
+            }
+        }
+    }
+
+    if in_single || in_double {
+        return None;
+    }
+    if token_started {
+        args.push(current);
+    }
+    (!args.is_empty()).then_some(args)
+}
+
+fn is_browse_x_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case(BROWSE_X_HOST))
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn is_browse_x_accept_header(raw: &str) -> bool {
+    let Some((name, value)) = raw.split_once(':') else {
+        return false;
+    };
+    name.trim().eq_ignore_ascii_case("accept")
+        && matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "text/markdown" | "application/json"
+        )
+}
+
+/// Recognise the exact read-only HTTP shape used by the local `browse-x`
+/// skill. It is intentionally narrower than a generic `curl` allowlist:
+/// fixed HTTPS host, one URL, no redirects or file access, GET only, and only
+/// the two response formats the skill requests.
+fn browse_x_argv(command: &str) -> Option<Vec<String>> {
+    let args = parse_auto_argv(command)?;
+    let executable = args[0]
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(args[0].as_str())
+        .to_ascii_lowercase();
+    if !matches!(executable.as_str(), "curl" | "curl.exe") {
+        return None;
+    }
+
+    let mut has_get = false;
+    let mut has_data = false;
+    let mut url = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-s" | "-S" | "-sS" | "-Ss" | "--silent" | "--show-error" | "-g" | "--globoff"
+            | "--compressed" | "-G" | "--get" => {
+                has_get |= matches!(args[index].as_str(), "-G" | "--get");
+            }
+            "--data-urlencode" => {
+                has_data = true;
+                index += 1;
+                let value = args.get(index)?;
+                // `curl name@file` and `curl @file` read local data. The skill
+                // only needs a query string, so file syntax is never valid.
+                if value.is_empty() || value.len() > 4096 || value.contains('@') {
+                    return None;
+                }
+            }
+            "-H" | "--header" => {
+                index += 1;
+                if !is_browse_x_accept_header(args.get(index)?) {
+                    return None;
+                }
+            }
+            "--max-time" | "--connect-timeout" => {
+                index += 1;
+                let seconds = args.get(index)?.parse::<u64>().ok()?;
+                if !(1..=600).contains(&seconds) {
+                    return None;
+                }
+            }
+            arg if arg.starts_with('-') => return None,
+            arg => {
+                if url.is_some() || !is_browse_x_url(arg) {
+                    return None;
+                }
+                url = Some(arg);
+            }
+        }
+        index += 1;
+    }
+
+    (url.is_some() && (!has_data || has_get)).then_some(args)
+}
+
+/// Eligibility for provider-owned shells. Unlike native `bash`, these
+/// providers execute the command in their own shell after we answer their
+/// permission request, so the fixed-host quoted HTTP exception is deliberately
+/// not carried across that boundary.
+pub(crate) fn auto_eligible_for_external_provider(command: &str) -> bool {
+    !command.contains(SHELL_METACHARACTERS) && classify(command, &[], &[]) == Clearance::AutoRun
+}
+
 /// How a command may be executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Clearance {
@@ -123,6 +290,13 @@ pub fn classify(command: &str, extra_allowlist: &[Vec<String>], denylist: &[Stri
         .any(|d| !d.trim().is_empty() && lowered.contains(&d.trim().to_ascii_lowercase()))
     {
         return Clearance::NeedsApproval;
+    }
+
+    // `browse-x` is the only allowlisted command whose read-only arguments
+    // legitimately contain quoted shell characters. It is still parsed and
+    // executed directly from argv, never through a shell.
+    if browse_x_argv(trimmed).is_some() {
+        return Clearance::AutoRun;
     }
 
     // The load-bearing check. Without it, `cargo check && <anything>` auto-runs.
@@ -335,7 +509,8 @@ impl Tool for Bash {
         "Run a command in an explicit working directory and return its combined output. \
          Use this to verify your work — build, lint, run tests, inspect git \
          state — rather than assuming a change compiles. Read-only commands \
-         (cargo fmt --check, git status/diff/log, and toolchain version checks) \
+         (cargo fmt --check, git status/diff/log, toolchain version checks, and \
+         fixed-host browse-x GET requests) \
          run immediately; commands that compile or execute repository code \
          still ask the user first, showing the \
          exact command. Every call must set `cwd`: use `.` for the active project \
@@ -460,12 +635,13 @@ impl Tool for Bash {
 
         let mut cmd = match clearance {
             // Auto-run commands never touch a shell: the metacharacter check
-            // already proved there is nothing for one to interpret, and argv
-            // spawning means there is no parser to fool.
+            // or fixed-host parser already proved there is nothing for one to
+            // interpret, and argv spawning means there is no shell to fool.
             Clearance::AutoRun => {
-                let tokens: Vec<&str> = command.split_whitespace().collect();
-                let mut cmd = tokio::process::Command::new(tokens[0]);
-                cmd.args(&tokens[1..]);
+                let tokens = parse_auto_argv(&command)
+                    .ok_or_else(|| "auto-run command could not be tokenized safely".to_string())?;
+                let mut cmd = tokio::process::Command::new(&tokens[0]);
+                cmd.args(tokens.iter().skip(1));
                 cmd
             }
             // Approved commands may legitimately need pipes and redirection.
@@ -791,6 +967,31 @@ mod tests {
             "npm test",
             "npm run ui:test",
             "npm run ui:build",
+        ] {
+            assert_eq!(clear(command), Clearance::NeedsApproval, "{command}");
+        }
+    }
+
+    #[test]
+    fn browse_x_get_requests_auto_run_with_quoted_query_arguments() {
+        for command in [
+            r#"curl.exe -sS -G "https://x.pcstyle.dev/search" --data-urlencode "q=jennie videos" -H "Accept: text/markdown""#,
+            r#"curl.exe -sS "https://x.pcstyle.dev/search?q=jennie+videos&feed=top" -H "Accept: text/markdown""#,
+            r#"curl -sS -G "https://x.pcstyle.dev/api/convert" --data-urlencode "url=https://x.com/example/status/1" -H "Accept: application/json""#,
+        ] {
+            assert_eq!(clear(command), Clearance::AutoRun, "{command}");
+        }
+    }
+
+    #[test]
+    fn browse_x_auto_run_stays_fixed_host_get_only_and_shell_free() {
+        for command in [
+            r#"curl.exe -sS "https://evil.example/search""#,
+            r#"curl.exe -sS -L "https://x.pcstyle.dev/search""#,
+            r#"curl.exe -sS -G "https://x.pcstyle.dev/search" --data "q=jennie""#,
+            r#"curl.exe -sS -G "https://x.pcstyle.dev/search" --data-urlencode "q=jennie" -H "Authorization: secret""#,
+            r#"curl.exe -sS -G "https://x.pcstyle.dev/search" --data-urlencode "@secret.txt""#,
+            r#"curl.exe -sS -G "https://x.pcstyle.dev/search" --data-urlencode "q=jennie" && del marker"#,
         ] {
             assert_eq!(clear(command), Clearance::NeedsApproval, "{command}");
         }

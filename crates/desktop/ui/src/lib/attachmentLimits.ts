@@ -13,6 +13,7 @@ import type { PreparedAttachment } from "./types";
  * call cannot be checked before the expensive part has already happened.
  */
 export const MAX_IMAGES = 8;
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 
 /**

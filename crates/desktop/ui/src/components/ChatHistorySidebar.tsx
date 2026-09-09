@@ -27,6 +27,7 @@ import { UserAvatar, UserAvatarButton } from "@/components/UserAvatarButton";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
+import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import { isBooleanRecord, parseJson } from "@/lib/json";
 import { formatChord } from "@/lib/keybindings";
 import {
@@ -78,8 +79,8 @@ type Props = {
   profileActive?: boolean;
   providers: ProviderRow[];
   quotaRefreshKey: string | number;
-  /** Open the command palette (Search in the sidebar). */
-  onSearch: () => void;
+  /** Open the command palette, optionally scoped to chat history. */
+  onSearch: (filter?: PaletteFilter) => void;
   /** Show the transcript when a shell panel is covering the active chat. */
   onRevealTranscript: () => void;
   canNavigateBack: boolean;
@@ -780,7 +781,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
             size="icon-sm"
             title={`Search (${formatChord("Mod+K")})`}
             aria-label="Search"
-            onClick={onSearch}
+            onClick={() => onSearch()}
           >
             <SearchIcon />
           </Button>
@@ -813,7 +814,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
             <button
               type="button"
               title={`Search (${formatChord("Mod+K")})`}
-              onClick={onSearch}
+              onClick={() => onSearch()}
               className={navItemClass()}
             >
               <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
@@ -854,16 +855,28 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                       {visibleProjects.length}
                     </span>
                   </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    title="Open project folder"
-                    aria-label="Open project folder"
-                    onClick={onOpenFolder}
-                  >
-                    <PlusIcon aria-hidden="true" />
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title={`Search chats (${formatChord("Mod+K")})`}
+                      aria-label="Search chats"
+                      onClick={() => onSearch("chats")}
+                    >
+                      <SearchIcon aria-hidden="true" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title="Open project folder"
+                      aria-label="Open project folder"
+                      onClick={onOpenFolder}
+                    >
+                      <PlusIcon aria-hidden="true" />
+                    </Button>
+                  </div>
                 </div>
                 {projectError ? (
                   <p className="px-2 pb-1 text-[11px] text-destructive">{projectError}</p>
