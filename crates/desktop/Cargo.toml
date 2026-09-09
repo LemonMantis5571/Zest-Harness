@@ -35,7 +35,7 @@ dirs = { workspace = true }
 tokio = { workspace = true }
 ts-rs = { version = "11", default-features = true, optional = true }
 pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "main" }
-rfd = "0.15"
+rfd = "0.17"
 base64 = "0.23"
 mimalloc = { workspace = true }
 
