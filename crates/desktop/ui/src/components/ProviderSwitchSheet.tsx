@@ -41,6 +41,11 @@ const PARENT_CLI_DEFAULTS: Record<
     model: "gpt-5.6-sol",
     configure: (id, model) => getBackend().configureCodexCliProvider({ id, model }),
   },
+  cursor: {
+    label: "Enable Cursor CLI",
+    model: "composer-2.5",
+    configure: (id, model) => getBackend().configureCursorProvider({ id, model }),
+  },
 };
 
 function statusLabel(row: ProviderRow): string {

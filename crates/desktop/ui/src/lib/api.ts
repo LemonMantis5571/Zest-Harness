@@ -141,6 +141,10 @@ export function configureClaudeCodeProvider(input: { id: string; model: string }
   return invoke<void>("configure_claude_code_provider", input);
 }
 
+export function configureCursorProvider(input: { id: string; model: string }) {
+  return invoke<void>("configure_cursor_provider", input);
+}
+
 export function configureCodexCliProvider(input: { id: string; model: string }) {
   return invoke<void>("configure_codex_cli_provider", input);
 }

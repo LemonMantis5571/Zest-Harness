@@ -289,13 +289,24 @@ fn call_tool(state: &AppState, params: &Value) -> Result<Value, (i64, String, St
     Ok(tool_content(payload))
 }
 
+const TRUNCATION_SUFFIX: &str = "\n…truncated";
+
+fn bounded_tool_text(text: String) -> String {
+    if text.len() <= MAX_RESPONSE_BYTES {
+        return text;
+    }
+    let mut end = MAX_RESPONSE_BYTES
+        .saturating_sub(TRUNCATION_SUFFIX.len())
+        .min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], TRUNCATION_SUFFIX)
+}
+
 fn tool_content(payload: Value) -> Value {
     let text = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
-    let text = if text.len() > MAX_RESPONSE_BYTES {
-        format!("{}\n…truncated", &text[..MAX_RESPONSE_BYTES])
-    } else {
-        text
-    };
+    let text = bounded_tool_text(text);
     json!({
         "content": [{ "type": "text", "text": text }]
     })
@@ -476,4 +487,17 @@ fn json_response(status: StatusCode, body: Value) -> Response {
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_content_truncation_is_utf8_safe_and_bounded() {
+        let text = bounded_tool_text("€".repeat(MAX_RESPONSE_BYTES));
+
+        assert!(text.ends_with(TRUNCATION_SUFFIX));
+        assert!(text.len() <= MAX_RESPONSE_BYTES);
+    }
 }
