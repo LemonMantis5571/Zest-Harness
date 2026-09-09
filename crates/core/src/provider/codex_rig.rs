@@ -130,10 +130,7 @@ pub async fn stream_turn(
             StreamedAssistantContent::Final(final_record) => {
                 usage = map_usage(&final_record.usage);
                 usage_available = true;
-                stop_reason = final_record
-                    .finish_reason
-                    .as_ref()
-                    .map(|reason| stop_reason_of(reason));
+                stop_reason = final_record.finish_reason.as_ref().map(stop_reason_of);
                 served_model = final_record.model.clone();
             }
             // Reasoning replaces its deltas rather than adding to them, and the
