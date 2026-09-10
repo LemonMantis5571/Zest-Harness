@@ -7,6 +7,7 @@
 
 mod attachments;
 mod browser;
+mod btw;
 mod context_meter;
 mod delegation;
 mod plugins;
@@ -1456,6 +1457,9 @@ enum ChatEvent {
         #[cfg_attr(feature = "export-bindings", ts(optional))]
         turn_id: Option<String>,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        title: Option<String>,
     },
 }
 
@@ -6755,6 +6759,12 @@ async fn send_message(
     attachments: Option<Vec<AttachmentInput>>,
     target: Option<String>,
 ) -> Result<(), String> {
+    if zest_core::commands::btw_question(&text).is_some() {
+        return Err(desktop_err(
+            "invalid",
+            "Open /btw from the main chat composer to ask a side question.",
+        ));
+    }
     let explicit_target = target.is_some();
     let target = parse_input_target(target.as_deref())?;
     let requested_text = text.clone();
@@ -9104,6 +9114,10 @@ pub fn run() {
             set_thread_pinned,
             rename_thread,
             send_message,
+            btw::start_btw,
+            btw::send_btw,
+            btw::cancel_btw,
+            btw::close_btw,
             update_queued_input,
             remove_queued_input,
             resume_queued_inputs,
@@ -9164,6 +9178,7 @@ mod persist_event_tests {
             thread_id: "t".into(),
             turn_id: None,
             message: "x".into(),
+            title: None,
         }
     }
 

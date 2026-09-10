@@ -117,11 +117,16 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("tools: {}", agent.tool_names().join(", "));
     println!("note: writes and non-read-only commands prompt here for y/N");
+    println!("/btw [question] for a temporary side conversation; /back to return");
     println!("ctrl-c to quit\n");
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut side: Option<zest_core::btw::SideConversation> = None;
     loop {
-        print!("\x1b[1m>\x1b[0m ");
+        print!(
+            "\x1b[1m{}>\x1b[0m ",
+            if side.is_some() { "btw " } else { "" }
+        );
         std::io::stdout().flush()?;
 
         let Some(line) = lines.next_line().await? else {
@@ -132,8 +137,34 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
+        if side.is_some() && line.eq_ignore_ascii_case("/back") {
+            side = None;
+            println!("Returned to the main conversation.\n");
+            continue;
+        }
+        let question = zest_core::commands::btw_question(line);
+        if question.is_some() && side.is_none() {
+            side = Some(agent.side_conversation());
+            println!("Temporary side conversation. /back discards it and returns.\n");
+        }
+        let line = question.unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+
         let mut render = Renderer::default();
         let mut on_event = |ev: StreamEvent<'_>| render.handle(ev);
+
+        if let Some(side) = side.as_mut() {
+            if let Err(error) = side
+                .send(line, &zest_core::CancelToken::new(), &mut on_event)
+                .await
+            {
+                eprintln!("\n\x1b[31merror:\x1b[0m {error}");
+            }
+            println!("\n");
+            continue;
+        }
 
         if let Err(e) = agent.send(line, &mut on_event).await {
             eprintln!("\n\x1b[31merror:\x1b[0m {e}");

@@ -180,6 +180,8 @@ type FixturePendingScenario = {
 };
 
 export function createFixtureBackend(options: FixtureBackendOptions = {}): DesktopBackend {
+  const sideConversations = new Map<string, { questions: string[]; cancelled: boolean; busy: boolean }>();
+  const fixtureEpochSeconds = Math.floor(Date.now() / 1000);
   const scenario = options.scenario ?? scenarioFromLocation();
   const safetyScenario = scenario === "approval" || scenario === "question" ||
     scenario === "cancel" || scenario === "tool-error";
@@ -1270,7 +1272,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         threads.push({
           id: session.threadId,
           createdAt: 0,
-          updatedAt: Math.floor(Date.now() / 1000),
+          updatedAt: fixtureEpochSeconds,
           title: fixtureThreadTitles.get(session.threadId) || "Fixture",
           pinned: fixturePinned,
           providerId: "codex",
@@ -1286,8 +1288,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (session.threadId !== "fixture-local") {
         threads.push({
           id: "fixture-local",
-          createdAt: Math.floor(Date.now() / 1000) - 3600,
-          updatedAt: Math.floor(Date.now() / 1000) - 3600,
+          createdAt: fixtureEpochSeconds - 3600,
+          updatedAt: fixtureEpochSeconds - 3600,
           title: fixtureThreadTitles.get("fixture-local") || "Local model chat",
           pinned: false,
           providerId: "ollama",
@@ -1298,8 +1300,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (session.threadId !== LONG_THREAD_ID) {
         threads.push({
           id: LONG_THREAD_ID,
-          createdAt: Math.floor(Date.now() / 1000) - 7200,
-          updatedAt: Math.floor(Date.now() / 1000) - 7200,
+          createdAt: fixtureEpochSeconds - 7200,
+          updatedAt: fixtureEpochSeconds - 7200,
           title: fixtureThreadTitles.get(LONG_THREAD_ID) || "Fifteen turns",
           pinned: false,
           providerId: "codex",
@@ -1330,8 +1332,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
             : [
                 {
                   id: "fixture-free",
-                  createdAt: Math.floor(Date.now() / 1000) - 1800,
-                  updatedAt: Math.floor(Date.now() / 1000) - 1800,
+                  createdAt: fixtureEpochSeconds - 1800,
+                  updatedAt: fixtureEpochSeconds - 1800,
                   title: fixtureThreadTitles.get("fixture-free") || "Free chat",
                   pinned: false,
                   providerId: "codex",
@@ -1757,6 +1759,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async listCommands() {
       return [
+        { name: "btw", description: "Ask in a temporary side conversation", kind: "builtin" as const },
         {
           name: "model",
           description: "Switch model or provider",
@@ -1783,6 +1786,41 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async endSession() {
       /* no-op */
+    },
+    async startBtw(sessionId) {
+      if (sessionId !== session.sessionId) throw new Error("This chat is no longer active.");
+      const id = `btw-${crypto.randomUUID()}`;
+      sideConversations.set(id, { questions: [], cancelled: false, busy: false });
+      return id;
+    },
+    async sendBtw(id, text, onDelta) {
+      const side = sideConversations.get(id);
+      if (!side) throw new Error("This side conversation is closed.");
+      if (side.busy) throw new Error("This side conversation is still answering.");
+      if (!text.trim()) throw new Error("Write a question.");
+      side.busy = true;
+      side.cancelled = false;
+      try {
+        const answer = side.questions.length
+          ? `Following up on “${side.questions.at(-1)}”: this answer stays in the temporary conversation.`
+          : `This side conversation uses the context of your chat. Your question was: ${text}. The main conversation continues unchanged.`;
+        for (const chunk of answer.match(/.{1,24}/gs) ?? []) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          if (side.cancelled || !sideConversations.has(id)) throw new Error("Cancelled");
+          onDelta(chunk);
+        }
+        side.questions.push(text);
+        return answer;
+      } finally { side.busy = false; }
+    },
+    async cancelBtw(id) {
+      const side = sideConversations.get(id);
+      if (side) side.cancelled = true;
+    },
+    async closeBtw(id) {
+      const side = sideConversations.get(id);
+      if (side) side.cancelled = true;
+      sideConversations.delete(id);
     },
     async getSystemPrompt() {
       return {

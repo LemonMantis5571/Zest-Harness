@@ -615,6 +615,7 @@ describe("reduceChatEvent characterization", () => {
       message: "Chat history could not be saved.",
     });
     assert.equal(effects.warningToast, "Chat history could not be saved.");
+    assert.equal(effects.warningTitle, "Chat history not saved");
   });
 
   it("cancelled ends sending and marks assistant", () => {
@@ -644,6 +645,19 @@ describe("reduceChatEvent characterization", () => {
     });
     assert.equal(next.messages, before);
     assert.equal(effects.warningToast, "checkpoint failed");
+    assert.equal(effects.warningTitle, "Chat history not saved");
+  });
+
+  it("uses the warning title supplied by the backend", () => {
+    const { effects } = reduceChatEvent(initialChatUiState(), {
+      kind: "warning",
+      session_id: "session-1",
+      thread_id: "thread-1",
+      message: "Selected model `a` was unavailable; this response used `b` instead.",
+      title: "Model changed",
+    });
+    assert.equal(effects.warningToast, "Selected model `a` was unavailable; this response used `b` instead.");
+    assert.equal(effects.warningTitle, "Model changed");
   });
 
   it("restores approval card after failed resolve", () => {

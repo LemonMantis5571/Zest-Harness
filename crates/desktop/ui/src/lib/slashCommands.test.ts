@@ -2,12 +2,26 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  btwQuestion,
   filterSlashCommands,
   isModelSlash,
   slashTokenAt,
   splitSlashMatch,
 } from "./slashCommands.ts";
 import type { CommandView } from "./types.ts";
+
+describe("temporary side question command", () => {
+  it("recognizes a complete leading /btw, including an empty question", () => {
+    assert.equal(btwQuestion("/btw"), "");
+    assert.equal(btwQuestion("  /BTW\n¿Por qué?  "), "¿Por qué?");
+    assert.equal(btwQuestion("/btw first\nsecond"), "first\nsecond");
+  });
+  it("preserves paths, escaped commands, and inline mentions", () => {
+    for (const text of ["//btw", "/btw/file", "/btw-next", "explain /btw", "/btw?"]) {
+      assert.equal(btwQuestion(text), null, text);
+    }
+  });
+});
 
 const commands: CommandView[] = [
   { name: "plan", description: "Write a plan", kind: "skill" },

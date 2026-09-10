@@ -398,6 +398,7 @@ impl From<&str> for SystemPrompt {
 /// `effort` and `thinking` are *requests*, not commands. A provider maps them
 /// onto its own controls or ignores them — which is why the agent loop no longer
 /// carries a flag for whether the backend understands Anthropic's extensions.
+#[derive(Clone)]
 pub struct TurnRequest {
     pub model: String,
     pub system: Option<SystemPrompt>,
@@ -430,6 +431,14 @@ pub struct TurnRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderSessionRef {
+    /// One-shot fork requests. Completions return a normal child cursor.
+    CodexAppServerFork {
+        thread_id: String,
+    },
+    ClaudeCodeFork {
+        session_id: String,
+        model: String,
+    },
     CodexAppServer {
         thread_id: String,
     },
@@ -446,6 +455,22 @@ pub enum ProviderSessionRef {
         session_id: String,
         model: String,
     },
+}
+
+impl ProviderSessionRef {
+    /// Never resume the parent's mutable session for a side conversation.
+    pub fn for_side_conversation(&self) -> Option<Self> {
+        match self {
+            Self::CodexAppServer { thread_id } => Some(Self::CodexAppServerFork {
+                thread_id: thread_id.clone(),
+            }),
+            Self::ClaudeCode { session_id, model } => Some(Self::ClaudeCodeFork {
+                session_id: session_id.clone(),
+                model: model.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -760,6 +785,12 @@ pub async fn probe(provider: &dyn Provider, model: &str) -> Result<()> {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Providers with a mutable live connection need a separate transport for
+    /// side conversations. Stateless adapters can share their client.
+    fn side_conversation_provider(&self) -> Option<Arc<dyn Provider>> {
+        None
+    }
+
     /// Stable identifier used by configuration and the usage ledger.
     fn id(&self) -> &str;
 

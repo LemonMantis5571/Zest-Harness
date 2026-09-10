@@ -21,6 +21,7 @@ export type ChatReduceEffects = {
   /** App shows a toast when set (reducer stays side-effect free). */
   errorToast?: string;
   warningToast?: string;
+  warningTitle?: string;
 };
 
 export type ChatReduceResult = {
@@ -533,6 +534,7 @@ export function reduceChatEvent(
     }
     case "warning": {
       effects.warningToast = event.message;
+      effects.warningTitle = event.title ?? "Chat history not saved";
       return { state, effects };
     }
     case "workspace_changed": {
@@ -572,6 +574,9 @@ export function reduceChatEvents(
     }
     if (reduced.effects.warningToast) {
       effects.warningToast = reduced.effects.warningToast;
+    }
+    if (reduced.effects.warningTitle) {
+      effects.warningTitle = reduced.effects.warningTitle;
     }
   }
   return { state: next, effects };

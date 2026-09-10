@@ -1,5 +1,13 @@
 /** Which Customize panel a destination opens. */
-export type CustomizeTab = "mcp" | "skills" | "plugins" | "rules" | "shortcuts";
+export type CustomizeTab =
+  | "appearance"
+  | "typography"
+  | "chat"
+  | "mcp"
+  | "skills"
+  | "plugins"
+  | "rules"
+  | "shortcuts";
 
 /**
  * Destinations that render inside the chat shell, taking the transcript's place

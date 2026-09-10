@@ -1201,7 +1201,7 @@ export default function App() {
     if (effects.warningToast) {
       toast.add({
         type: "warning",
-        title: "Chat history not saved",
+        title: effects.warningTitle ?? "Chat history not saved",
         description: effects.warningToast,
       });
     }

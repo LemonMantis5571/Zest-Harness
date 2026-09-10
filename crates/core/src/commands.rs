@@ -66,6 +66,16 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// A side question is a complete leading token, never a path or an inline
+/// mention of the command. An empty question enters the mode without a turn.
+pub fn btw_question(input: &str) -> Option<&str> {
+    let trimmed = input.trim_start();
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    trimmed[..end]
+        .eq_ignore_ascii_case("/btw")
+        .then(|| trimmed[end..].trim())
+}
+
 /// True when `id` can be typed as `/id`.
 pub fn is_command_name(id: &str) -> bool {
     !id.is_empty() && id.chars().all(is_name_char)
@@ -125,7 +135,10 @@ pub fn mcp_slashes(
 
 /// Built-in names that are not skills or MCP servers. A skill named `model`
 /// would steal `/model` from the picker, so reserved names win here.
-const BUILTIN_COMMANDS: &[(&str, &str)] = &[("model", "Switch model or provider")];
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("btw", "Ask in a temporary side conversation"),
+    ("model", "Switch model or provider"),
+];
 
 fn is_reserved_command(name: &str) -> bool {
     BUILTIN_COMMANDS
@@ -637,6 +650,29 @@ mod tests {
         let out = expand("/model", &skills, &[]);
         assert_eq!(out.command, None);
         assert_eq!(out.prompt, "/model");
+    }
+
+    #[test]
+    fn btw_is_reserved_and_only_a_complete_leading_token_opens_it() {
+        let skills = skills_with("btw", "This must not run.");
+        let mcp = McpSlash {
+            id: "BTW".into(),
+            description: "server".into(),
+            tools: vec![],
+        };
+        let listed = list_slash_commands(&skills, &[mcp]);
+        let commands: Vec<_> = listed
+            .iter()
+            .filter(|c| c.name.eq_ignore_ascii_case("btw"))
+            .collect();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].kind, SlashKind::Builtin);
+        assert_eq!(expand("/btw question", &skills, &[]).command, None);
+        assert_eq!(btw_question("  /BTW\nwhy?  "), Some("why?"));
+        assert_eq!(btw_question("/btw"), Some(""));
+        for literal in ["//btw", "/btw/file", "/btw-next", "explain /btw", "/btw?"] {
+            assert_eq!(btw_question(literal), None, "{literal}");
+        }
     }
 
     #[test]

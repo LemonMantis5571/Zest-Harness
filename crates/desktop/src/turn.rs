@@ -302,6 +302,18 @@ async fn run_with_sink_internal<S: EventSink>(
         Err(_) => (text.clone(), None),
     };
     let user_blocks = build_user_content(&prompt, &attachments);
+    // Publish the submitted prompt before the persistence awaits below. A
+    // side panel opened while this turn is being prepared must see what the
+    // main agent was asked, even though Agent keeps its live wire history
+    // transactional until completion.
+    if let Ok(mut side) = turn.side_context.lock() {
+        let mut side_messages = session.agent.messages.clone();
+        side_messages.push(zest_core::Message::user_blocks(user_blocks.clone()));
+        *side = session
+            .agent
+            .side_conversation_with_messages(side_messages, &[])
+            .without_provider_session();
+    }
     let worker = match ensure_persist(state, &session.root) {
         Ok(w) => w,
         Err(e) => {
@@ -341,6 +353,7 @@ async fn run_with_sink_internal<S: EventSink>(
                 message: format!(
                     "Turn lifecycle could not be saved; chat will continue without recovery metadata: {error}"
                 ),
+                title: None,
             });
             false
         }
@@ -382,6 +395,7 @@ async fn run_with_sink_internal<S: EventSink>(
             thread_id: thread_id.clone(),
             turn_id: Some(turn_id.clone()),
             message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
+            title: None,
         });
     }
     sink.emit(&user_event);
@@ -438,6 +452,12 @@ async fn run_with_sink_internal<S: EventSink>(
             system.volatile.push_str(&context);
             session.agent.system = Some(system);
         }
+        let side_context = turn.side_context.clone();
+        let mut publish_side_snapshot = move |snapshot: zest_core::btw::SideConversation| {
+            if let Ok(mut current) = side_context.lock() {
+                *current = snapshot;
+            }
+        };
         let assistant_message_id = assistant_message_id.clone();
         let session_id = session_id.clone();
         let thread_id = thread_id.clone();
@@ -603,12 +623,13 @@ async fn run_with_sink_internal<S: EventSink>(
                 // Surfaced as a warning rather than swallowed: the model chip
                 // shows what was *requested*, so without this the transcript
                 // would silently attribute a turn to the wrong model.
-                StreamEvent::ModelSubstituted { served, .. } => ChatEvent::Warning {
+                StreamEvent::ModelSubstituted { requested, served } => ChatEvent::Warning {
                     session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
                     turn_id: Some(turn_id.clone()),
+                    title: Some("Model changed".into()),
                     message: format!(
-                        "The selected model was unavailable, so this response used `{served}` instead."
+                        "Selected model `{requested}` was unavailable; this response used `{served}` instead."
                     ),
                 },
                 StreamEvent::ResumeHandle(_) => {
@@ -707,6 +728,7 @@ async fn run_with_sink_internal<S: EventSink>(
                         thread_id: thread_id.clone(),
                         turn_id: Some(turn_id.clone()),
                         message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
+                        title: None,
                     });
                 }
             }
@@ -716,11 +738,12 @@ async fn run_with_sink_internal<S: EventSink>(
         let result = if multimodal {
             session
                 .agent
-                .send_blocks_cancellable_with_inbox(
+                .send_blocks_cancellable_with_inbox_and_side_context(
                     user_blocks,
                     &mut on_event,
                     Some(&cancel),
                     Some(&turn.input_inbox),
+                    &mut publish_side_snapshot,
                 )
                 .await
         } else {
@@ -739,11 +762,12 @@ async fn run_with_sink_internal<S: EventSink>(
                 .unwrap_or_default();
             session
                 .agent
-                .send_cancellable_with_inbox(
+                .send_cancellable_with_inbox_and_side_context(
                     &agent_text,
                     &mut on_event,
                     Some(&cancel),
                     Some(&turn.input_inbox),
+                    &mut publish_side_snapshot,
                 )
                 .await
         };
@@ -835,6 +859,7 @@ async fn run_with_sink_internal<S: EventSink>(
             thread_id: thread_id.clone(),
             turn_id: Some(turn_id.clone()),
             message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
+            title: None,
         });
     }
     let final_history_saved = !history_save_failed;
@@ -870,6 +895,7 @@ async fn run_with_sink_internal<S: EventSink>(
                 thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 message: format!("Turn lifecycle could not be finalized: {error}"),
+                title: None,
             });
         }
     }
@@ -988,12 +1014,14 @@ mod tests {
             thread_id: "thread-1".to_string(),
             turn_id: Some("turn-1".to_string()),
             message: "first".to_string(),
+            title: None,
         };
         let second = ChatEvent::Warning {
             session_id: "session-1".to_string(),
             thread_id: "thread-1".to_string(),
             turn_id: Some("turn-1".to_string()),
             message: "second".to_string(),
+            title: None,
         };
 
         sink.emit(&first);

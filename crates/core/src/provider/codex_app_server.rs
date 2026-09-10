@@ -89,10 +89,19 @@ struct CodexLaunchPolicy {
     turn_sandbox: &'static str,
 }
 
-fn launch_policy(has_host: bool) -> CodexLaunchPolicy {
+fn launch_policy(has_host: bool, allow_tool_use: bool) -> CodexLaunchPolicy {
     if has_host {
         CodexLaunchPolicy {
             approval_policy: "on-request",
+            thread_sandbox: THREAD_SANDBOX_READ_ONLY,
+            turn_sandbox: TURN_SANDBOX_READ_ONLY,
+        }
+    } else if !allow_tool_use {
+        // Provider-owned maintenance/side turns have no interaction host. They
+        // must still be unable to mutate the workspace, even when the provider
+        // owns its own agent loop and does not consult Zest's tool gate.
+        CodexLaunchPolicy {
+            approval_policy: "never",
             thread_sandbox: THREAD_SANDBOX_READ_ONLY,
             turn_sandbox: TURN_SANDBOX_READ_ONLY,
         }
@@ -276,24 +285,34 @@ impl CodexAppServerProvider {
         .await?;
         process.send(&json!({"method":"initialized"})).await?;
 
-        let policy = launch_policy(req.interaction.is_some());
+        let policy = launch_policy(req.interaction.is_some(), req.allow_tool_use);
         let thread_params = thread_start_params(
             &self.root,
             &req.model,
             policy.approval_policy,
             policy.thread_sandbox,
             req.system.as_ref(),
-            self.allow_mcp,
+            self.allow_mcp && req.allow_tool_use,
+            !req.allow_tool_use,
         );
         let mut resumed = false;
         let mut resume_failed = false;
         let requested_thread = match req.provider_session.as_ref() {
-            Some(ProviderSessionRef::CodexAppServer { thread_id }) => {
+            Some(ProviderSessionRef::CodexAppServer { thread_id })
+            | Some(ProviderSessionRef::CodexAppServerFork { thread_id }) => {
+                let forking = matches!(
+                    req.provider_session,
+                    Some(ProviderSessionRef::CodexAppServerFork { .. })
+                );
                 let response = rpc_request(
                     &mut process,
                     &mut request_id,
-                    "thread/resume",
-                    add_thread_id(thread_params.clone(), thread_id),
+                    if forking {
+                        "thread/fork"
+                    } else {
+                        "thread/resume"
+                    },
+                    add_thread_id(thread_params.clone(), thread_id, forking),
                     self.timeout(),
                     req.cancel.as_ref(),
                     req.interaction.clone(),
@@ -303,15 +322,16 @@ impl CodexAppServerProvider {
                 .await;
                 match response {
                     Ok(value) => match parse_thread_id(&value) {
-                        Some(thread_id) => {
+                        Some(child_id) if !forking || child_id != *thread_id => {
                             resumed = true;
-                            thread_id
+                            child_id
                         }
-                        None => {
+                        _ => {
                             resume_failed = true;
                             String::new()
                         }
                     },
+                    Err(HarnessError::Cancelled) => return Err(HarnessError::Cancelled),
                     Err(_) => {
                         // A provider-native cursor is an optimization. If the
                         // server cannot resume it, the transcript remains the
@@ -788,9 +808,12 @@ async fn server_request_result(
     }
 }
 
-fn add_thread_id(mut params: Value, thread_id: &str) -> Value {
+fn add_thread_id(mut params: Value, thread_id: &str, ephemeral: bool) -> Value {
     if let Some(object) = params.as_object_mut() {
         object.insert("threadId".into(), Value::String(thread_id.to_string()));
+        if ephemeral {
+            object.insert("ephemeral".into(), Value::Bool(true));
+        }
     }
     params
 }
@@ -802,8 +825,9 @@ fn thread_start_params(
     sandbox: &str,
     system: Option<&SystemPrompt>,
     allow_mcp: bool,
+    ephemeral: bool,
 ) -> Value {
-    json!({
+    let mut params = json!({
         "model": model,
         "cwd": root.to_string_lossy(),
         // `thread/start` uses the CLI-facing sandbox enum. The nested
@@ -813,7 +837,11 @@ fn thread_start_params(
         "approvalPolicy": approval_policy,
         "baseInstructions": system.map(SystemPrompt::text),
         "config": if allow_mcp { json!({}) } else { json!({"mcp_servers": {}}) },
-    })
+    });
+    if ephemeral {
+        params["ephemeral"] = Value::Bool(true);
+    }
+    params
 }
 
 fn turn_sandbox_policy(kind: &str, root: &std::path::Path) -> Value {
@@ -1345,6 +1373,7 @@ mod tests {
             THREAD_SANDBOX_WRITE,
             None,
             false,
+            false,
         );
         assert_eq!(params["sandbox"], "workspace-write");
         assert_ne!(params["sandbox"], TURN_SANDBOX_WRITE);
@@ -1354,7 +1383,7 @@ mod tests {
     fn a_hosted_turn_asks_before_workspace_writes() {
         // `on-request` + `workspace-write` is Codex Auto: in-repo edits never
         // raise a file-change card. A host has to force the read-only pair.
-        let policy = launch_policy(true);
+        let policy = launch_policy(true, true);
         assert_eq!(policy.approval_policy, "on-request");
         assert_eq!(policy.thread_sandbox, "read-only");
         assert_eq!(policy.turn_sandbox, "readOnly");
@@ -1365,13 +1394,37 @@ mod tests {
 
     #[test]
     fn an_unhosted_turn_keeps_the_unattended_write_sandbox() {
-        let policy = launch_policy(false);
+        let policy = launch_policy(false, true);
         assert_eq!(policy.approval_policy, "never");
         assert_eq!(policy.thread_sandbox, "workspace-write");
         assert_eq!(policy.turn_sandbox, "workspaceWrite");
         let turn = turn_sandbox_policy(policy.turn_sandbox, std::path::Path::new("C:/workspace"));
         assert_eq!(turn["type"], "workspaceWrite");
         assert_eq!(turn["writableRoots"][0], "C:/workspace");
+    }
+
+    #[test]
+    fn a_side_turn_is_ephemeral_and_read_only_without_a_host() {
+        let policy = launch_policy(false, false);
+        assert_eq!(policy.approval_policy, "never");
+        assert_eq!(policy.thread_sandbox, THREAD_SANDBOX_READ_ONLY);
+        assert_eq!(policy.turn_sandbox, TURN_SANDBOX_READ_ONLY);
+
+        let params = add_thread_id(
+            thread_start_params(
+                std::path::Path::new("C:/workspace"),
+                "gpt-5.6-terra",
+                policy.approval_policy,
+                policy.thread_sandbox,
+                None,
+                false,
+                true,
+            ),
+            "parent",
+            true,
+        );
+        assert_eq!(params["sandbox"], THREAD_SANDBOX_READ_ONLY);
+        assert_eq!(params["ephemeral"], true);
     }
 
     #[test]

@@ -71,3 +71,9 @@ export function isModelSlash(input: string): boolean {
 export function isModelCommandName(name: string): boolean {
   return name.toLowerCase() === "model";
 }
+
+/** Only a complete leading token opens the side panel; paths stay literal. */
+export function btwQuestion(input: string): string | null {
+  const match = /^\s*\/btw(?:\s+([\s\S]*))?$/i.exec(input);
+  return match ? (match[1] ?? "").trim() : null;
+}

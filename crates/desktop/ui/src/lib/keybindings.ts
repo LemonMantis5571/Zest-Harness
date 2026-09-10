@@ -62,7 +62,7 @@ export const COMMANDS: CommandDef[] = [
     // Deliberately paired with Settings' `Mod+,` rather than the obvious
     // `Mod+Shift+C`, which Chromium claims for the element inspector.
     defaultChord: "Mod+Shift+,",
-    hint: "MCP servers, skills, extras, rules, and shortcuts",
+    hint: "Appearance, chat view, MCP servers, skills, extras, rules, and shortcuts",
   },
   { id: "view.settings", label: "Open settings", section: "Navigation", defaultChord: "Mod+," },
   {

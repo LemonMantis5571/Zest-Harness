@@ -390,6 +390,22 @@ impl CursorAcpProvider {
 
 #[async_trait]
 impl Provider for CursorAcpProvider {
+    fn side_conversation_provider(&self) -> Option<Arc<dyn Provider>> {
+        // Sharing `connection` would evict the parent's warm ACP session.
+        Some(Arc::new(Self {
+            id: self.id.clone(),
+            root: self.root.clone(),
+            command: self.command.clone(),
+            default_model: self.default_model.clone(),
+            models: self.models.clone(),
+            allow_mcp: false,
+            mode: CursorMode::Ask,
+            timeout_secs: self.timeout_secs,
+            auth: self.auth.clone(),
+            connection: tokio::sync::Mutex::new(None),
+        }))
+    }
+
     fn id(&self) -> &str {
         &self.id
     }

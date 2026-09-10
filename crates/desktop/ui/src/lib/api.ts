@@ -1,5 +1,14 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+export const startBtw = (sessionId: string): Promise<string> => invoke("start_btw", { sessionId });
+export const closeBtw = (id: string): Promise<void> => invoke("close_btw", { id });
+export const cancelBtw = (id: string): Promise<void> => invoke("cancel_btw", { id });
+export function sendBtw(id: string, text: string, onDelta: (text: string) => void): Promise<string> {
+  const channel = new Channel<string>();
+  channel.onmessage = onDelta;
+  return invoke("send_btw", { id, text, onDelta: channel });
+}
 
 import type {
   ApprovalChoice,

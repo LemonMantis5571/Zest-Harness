@@ -7,6 +7,10 @@ a replacement for the commit history.
 
 ### Added
 
+- `/btw [question]` opens a temporary side conversation using the main chat's
+  completed context, with follow-ups and independent cancellation. Close the
+  desktop panel with Esc, or use `/back` in the terminal, to return without
+  adding the side exchange to the main history.
 - `zest serve --project PATH`, a windowless coordinator daemon with authenticated
   loopback MCP. Default policy is gated: create, then `delegation_approve` and
   `delegation_apply` after confirmation. `--policy trusted` lets a token holder

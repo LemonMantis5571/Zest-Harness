@@ -4,15 +4,11 @@ import {
   ChartColumnIcon,
   ChevronRightIcon,
   type LucideIcon,
-  PaletteIcon,
   ServerIcon,
-  TypeIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
 
-import { FontPicker } from "@/components/FontPicker";
-import { ThemePicker } from "@/components/ThemePicker";
 import { Button } from "@/components/ui/button";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import {
@@ -509,22 +505,6 @@ export function SettingsPanel({
                 </Button>
               ) : null}
             </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Appearance"
-            icon={PaletteIcon}
-            hint="Colour theme"
-          >
-            <ThemePicker />
-          </SettingsSection>
-
-          <SettingsSection
-            title="Typography"
-            icon={TypeIcon}
-            hint="Font family"
-          >
-            <FontPicker />
           </SettingsSection>
 
           <SettingsSection

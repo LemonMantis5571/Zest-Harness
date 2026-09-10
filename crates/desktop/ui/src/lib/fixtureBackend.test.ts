@@ -4,6 +4,40 @@ import { describe, it } from "node:test";
 import { createFixtureBackend, type FixtureScenario } from "./fixtureBackend.ts";
 import type { ChatEvent, DelegationEvent } from "./types.ts";
 
+describe("temporary side conversations", () => {
+  it("keeps side followups out of the main transcript, queue, and thread list", async () => {
+    const backend = createFixtureBackend();
+    const before = await backend.sessionInfo();
+    assert.ok(before);
+    const threads = await backend.listThreads();
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const id = await backend.startBtw(before.sessionId);
+    let streamed = "";
+    const answer = await backend.sendBtw(id, "Why this approach?", (delta) => { streamed += delta; });
+    assert.equal(streamed, answer);
+    const followup = await backend.sendBtw(id, "What about alternatives?", () => {});
+    assert.match(followup, /Why this approach/);
+    await backend.closeBtw(id);
+    assert.deepEqual(await backend.sessionInfo(), before);
+    assert.deepEqual(await backend.listThreads(), threads);
+    assert.deepEqual(events, []);
+    await assert.rejects(backend.sendBtw(id, "closed", () => {}), /closed/);
+  });
+  it("cancels a side answer and can retry without keeping the cancelled question", async () => {
+    const backend = createFixtureBackend();
+    const session = await backend.sessionInfo();
+    assert.ok(session);
+    const id = await backend.startBtw(session.sessionId);
+    const pending = backend.sendBtw(id, "Cancelled question", () => {});
+    await backend.cancelBtw(id);
+    await assert.rejects(pending, /Cancelled/);
+    const answer = await backend.sendBtw(id, "Retry question", () => {});
+    assert.doesNotMatch(answer, /Following up|Cancelled question/);
+    await backend.closeBtw(id);
+  });
+});
+
 describe("fixture chat rename", () => {
   it("persists a trimmed title through the sidebar listing", async () => {
     const backend = createFixtureBackend();

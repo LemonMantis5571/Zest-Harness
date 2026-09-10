@@ -252,6 +252,49 @@ impl Agent {
         self.provider.clone()
     }
 
+    /// Freeze the completed context without changing the live agent, its
+    /// usage meter, or its provider cursor. The side chat has no local tools.
+    pub fn side_conversation(&self) -> crate::btw::SideConversation {
+        self.side_conversation_with_messages(self.messages.clone(), &[])
+    }
+
+    /// Build a side conversation from a caller-supplied wire snapshot.
+    ///
+    /// The desktop uses this while a turn is still running: `self.messages`
+    /// intentionally remains transactional until the turn reaches a terminal
+    /// state, but a side question should be able to see the user prompt and
+    /// completed provider rounds that existed when it was opened.
+    pub fn side_conversation_with_messages(
+        &self,
+        messages: Vec<Message>,
+        extra_sensitive_ids: &[String],
+    ) -> crate::btw::SideConversation {
+        let mut sensitive_ids = self.sensitive_tool_ids.clone();
+        sensitive_ids.extend(extra_sensitive_ids.iter().cloned());
+        crate::btw::SideConversation::new(
+            self.provider
+                .side_conversation_provider()
+                .unwrap_or_else(|| self.provider.clone()),
+            self.ledger.clone(),
+            TurnRequest {
+                model: self.model.clone(),
+                system: self.system.clone(),
+                messages: redact_sensitive_staged(messages, &sensitive_ids),
+                tools: self.tools_for_model(),
+                allow_tool_use: false,
+                max_tokens: self.max_tokens,
+                effort: self.effort_for_model(),
+                thinking: true,
+                provider_session: self
+                    .provider_session
+                    .as_ref()
+                    .and_then(ProviderSessionRef::for_side_conversation),
+                interaction: None,
+                cancel: None,
+            },
+        )
+    }
+
     pub fn turn_usage(&self) -> Option<TurnUsageSummary> {
         self.turn_usage.clone()
     }
@@ -467,7 +510,7 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<()> {
-        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, None)
+        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, None, None)
             .await
     }
 
@@ -481,8 +524,35 @@ impl Agent {
         cancel: Option<&CancelToken>,
         inbox: Option<&InputInbox>,
     ) -> Result<()> {
-        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, inbox)
-            .await
+        self.send_user_cancellable(
+            Message::user_text(user_input),
+            on_event,
+            cancel,
+            inbox,
+            None,
+        )
+        .await
+    }
+
+    /// Desktop variant that publishes a read-only snapshot after each
+    /// completed provider/tool step. The callback is never part of the main
+    /// turn's commit path: it only feeds a possible ephemeral `/btw` opener.
+    pub async fn send_cancellable_with_inbox_and_side_context(
+        &mut self,
+        user_input: &str,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        on_side_context: &mut (dyn FnMut(crate::btw::SideConversation) + Send),
+    ) -> Result<()> {
+        self.send_user_cancellable(
+            Message::user_text(user_input),
+            on_event,
+            cancel,
+            inbox,
+            Some(on_side_context),
+        )
+        .await
     }
 
     /// Multimodal / structured user turn (text + image blocks, etc.).
@@ -495,7 +565,7 @@ impl Agent {
         if content.is_empty() {
             return Err(HarnessError::Other("empty user content".into()));
         }
-        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, None)
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, None, None)
             .await
     }
 
@@ -509,8 +579,31 @@ impl Agent {
         if content.is_empty() {
             return Err(HarnessError::Other("empty user content".into()));
         }
-        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, inbox)
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, inbox, None)
             .await
+    }
+
+    /// Multimodal desktop variant with the same in-flight side snapshot hook
+    /// as [`Self::send_cancellable_with_inbox_and_side_context`].
+    pub async fn send_blocks_cancellable_with_inbox_and_side_context(
+        &mut self,
+        content: Vec<serde_json::Value>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        on_side_context: &mut (dyn FnMut(crate::btw::SideConversation) + Send),
+    ) -> Result<()> {
+        if content.is_empty() {
+            return Err(HarnessError::Other("empty user content".into()));
+        }
+        self.send_user_cancellable(
+            Message::user_blocks(content),
+            on_event,
+            cancel,
+            inbox,
+            Some(on_side_context),
+        )
+        .await
     }
 
     async fn send_user_cancellable(
@@ -519,6 +612,7 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
         inbox: Option<&InputInbox>,
+        mut on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
         self.turn_usage = None;
@@ -530,6 +624,8 @@ impl Agent {
         #[allow(unused_assignments)]
         let mut last_usage: Option<Usage> = None;
 
+        publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+
         loop {
             Self::check_cancel(cancel)?;
 
@@ -537,8 +633,16 @@ impl Agent {
             // their delivery point is explicit and durable rather than an
             // implicit UI-state append.
             if let Some(inbox) = inbox {
-                for input in inbox.claim_next_step() {
+                let inputs = inbox.claim_next_step();
+                let had_inputs = !inputs.is_empty();
+                for input in inputs {
                     staged.push(Message::user_text(runtime_input_text(&input)));
+                }
+                if had_inputs {
+                    // A side panel opened while this provider call is running
+                    // should see injected context that has already been sent,
+                    // even though its response is not complete yet.
+                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
                 }
             }
 
@@ -604,6 +708,7 @@ impl Agent {
             // Echo the assistant turn back verbatim — thinking signatures and
             // tool_use blocks both have to survive intact.
             staged.push(Message::assistant(completion.content.clone()));
+            publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
 
             match completion.stop_reason.as_deref() {
                 Some("end_turn") | None => {
@@ -691,6 +796,7 @@ impl Agent {
 
                     // One user message carrying every result.
                     staged.push(Message::user_blocks(results));
+                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
                 }
 
                 // A server-side tool hit its iteration cap. Resend as-is; the
@@ -1204,12 +1310,24 @@ fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
 /// one that matters. So one name containing the other counts as agreement, and
 /// only a genuinely different family is reported.
 fn models_agree(requested: &str, served: &str) -> bool {
-    let requested = requested.trim().to_ascii_lowercase();
-    let served = served.trim().to_ascii_lowercase();
+    let requested = comparable_model_name(requested);
+    let served = comparable_model_name(served);
     if requested.is_empty() || served.is_empty() {
         return true;
     }
     requested == served || served.starts_with(&requested) || requested.starts_with(&served)
+}
+
+/// Some OpenAI-compatible endpoints report a stable short alias in the
+/// response even when the request used the vendor's versioned id. Keep those
+/// aliases together for substitution warnings and billing; otherwise every
+/// successful DeepSeek V4 Flash turn looks like a silent model downgrade.
+fn comparable_model_name(model: &str) -> String {
+    let normalized = model.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "deepseek-flash" => "deepseek-v4-flash".into(),
+        _ => normalized,
+    }
 }
 
 fn summarize_tool_body(body: &str) -> String {
@@ -1226,6 +1344,22 @@ fn summarize_tool_body(body: &str) -> String {
     }
     let truncated: String = flat.chars().take(MAX.saturating_sub(1)).collect();
     format!("{truncated}…")
+}
+
+fn publish_side_context(
+    agent: &Agent,
+    messages: &[Message],
+    extra_sensitive_ids: &[String],
+    callback: &mut Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+) {
+    let Some(callback) = callback.as_deref_mut() else {
+        return;
+    };
+    callback(
+        agent
+            .side_conversation_with_messages(messages.to_vec(), extra_sensitive_ids)
+            .without_provider_session(),
+    );
 }
 
 fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> Vec<Message> {
@@ -2398,6 +2532,8 @@ mod tests {
         // Providers routinely answer an alias with a dated build.
         assert!(models_agree("claude-opus-5", "claude-opus-5-20260514"));
         assert!(models_agree("deepseek-v4-flash", "deepseek-v4-flash"));
+        assert!(models_agree("deepseek-v4-flash", "deepseek-flash"));
+        assert!(models_agree("deepseek-flash", "deepseek-v4-flash"));
         assert!(models_agree("gpt-5.6-sol", "gpt-5.6-sol-high"));
         // Order does not matter — some endpoints answer with the shorter name.
         assert!(models_agree("claude-opus-5-20260514", "claude-opus-5"));

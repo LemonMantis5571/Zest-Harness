@@ -88,6 +88,21 @@ can review. Delegation is opt-in, and your main conversation stays with its
 selected provider. Read [Delegation](../README.md#delegate-a-scoped-task) and
 [the coordinator guide](SERVE.md) for the execution and review workflow.
 
+## Ask a side question
+
+Type `/btw Why did you choose this approach?` in the main composer to open a
+temporary side conversation. `/btw` on its own opens an empty question box.
+Follow-up questions stay in that panel. Close it or press **Esc** to return to
+the main chat without adding the side exchange to its context.
+
+You can also ask while the main task is working; the side conversation starts
+from its last completed turn. Its **Stop** button cancels only the side answer.
+In the terminal client, use `/btw [question]` and `/back` to return.
+
+Side questions use the selected provider and count toward usage. Cache reuse
+depends on the provider; `/btw` does not guarantee free input tokens. See
+[side conversations](BTW.md) for provider behavior and storage details.
+
 ## Setup help
 
 | What you see | Next step |

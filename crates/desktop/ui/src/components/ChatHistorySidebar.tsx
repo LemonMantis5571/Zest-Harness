@@ -31,6 +31,11 @@ import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import { isBooleanRecord, parseJson } from "@/lib/json";
 import { formatChord } from "@/lib/keybindings";
 import {
+  getSavedChatViewMode,
+  subscribeChatViewChange,
+  type ChatViewMode,
+} from "@/lib/chatView";
+import {
   elapsedLabel,
   type ThreadActivity,
   type ThreadActivityMap,
@@ -243,10 +248,13 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction | null>(null);
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
+  const [chatViewMode, setChatViewMode] = useState<ChatViewMode>(() => getSavedChatViewMode());
 
   const hasActiveActivity = Object.values(threadActivity).some(
     (activity) => activity.state !== "idle"
   );
+
+  useEffect(() => subscribeChatViewChange(() => setChatViewMode(getSavedChatViewMode())), []);
 
   useEffect(() => {
     if (!hasActiveActivity) return;
@@ -703,6 +711,238 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     );
   }
 
+  function renderCompactThreadItem(
+    project: ProjectChats,
+    thread: ThreadSummary,
+    key: string
+  ) {
+    const active = thread.id === activeThreadId;
+    const title = threadTitle(thread);
+    const age = formatAge(thread.updatedAt);
+    const activity = threadActivity[thread.id];
+    const activityText =
+      activity && activity.state !== "idle"
+        ? activityDescription(activity, now)
+        : undefined;
+    const git = thread.gitContext;
+    const branch = git?.branch ?? git?.baseBranch;
+    const pullRequest = git?.pullRequest;
+    const owner = thread.providerId;
+    const isEditing = editingThread?.key === key;
+    const groupLabel = project.path === null ? "Recent" : project.name;
+    const branchLabel = branch ?? (project.path === null ? "No workspace" : "No branch");
+    const ariaLabel = [groupLabel, title, branchLabel, activityText]
+      .filter(Boolean)
+      .join(". ");
+
+    return (
+      <li key={key} className="group/thread">
+        <div
+          className={cn(
+            "relative rounded-md",
+            isEditing
+              ? "bg-[var(--sidebar-accent)]"
+              : active
+                ? "bg-[color-mix(in_srgb,var(--sidebar-primary)_18%,transparent)] text-[var(--sidebar-accent-foreground)] before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-[var(--sidebar-primary)]"
+                : "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]"
+          )}
+        >
+          {isEditing ? (
+            <div
+              role="group"
+              aria-label={`Renaming ${title}`}
+              className="flex min-w-0 items-center gap-1.5 px-1.5 py-1"
+            >
+              {owner ? (
+                <ProviderIcon
+                  providerId={owner}
+                  label={owner}
+                  className="size-3.5 shrink-0 opacity-80"
+                />
+              ) : null}
+              <input
+                ref={renameInputRef}
+                value={editingThread?.value ?? ""}
+                maxLength={MAX_CHAT_TITLE_CHARS}
+                aria-label={`Rename chat ${title}`}
+                placeholder="Untitled chat"
+                disabled={renameBusy}
+                className="min-w-0 flex-1 rounded-sm border border-primary/60 bg-background/60 px-1.5 py-0.5 text-[12px] text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+                onChange={(event) =>
+                  setEditingThread((current) =>
+                    current ? { ...current, value: event.target.value } : current
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void commitRename();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelRename();
+                  }
+                }}
+                onBlur={handleRenameBlur}
+              />
+            </div>
+          ) : (
+            <div className="flex min-w-0 items-stretch">
+              <button
+                type="button"
+                onClick={() => {
+                  if (active) {
+                    onRevealTranscript();
+                    return;
+                  }
+                  void openThread(project, thread).catch((error) =>
+                    ignoreExpectedFailure(error, "open compact chat history")
+                  );
+                }}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  beginRename(project, thread, key);
+                }}
+                title={`Double-click to rename “${title}”`}
+                aria-current={active ? "page" : undefined}
+                aria-label={ariaLabel}
+                className="min-w-0 flex-1 cursor-pointer px-1.5 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  {owner ? (
+                    <span
+                      title={`This chat belongs to ${owner}.`}
+                      className="flex shrink-0 items-center text-muted-foreground"
+                    >
+                      <ProviderIcon
+                        providerId={owner}
+                        label={owner}
+                        className="size-3.5 opacity-80"
+                      />
+                    </span>
+                  ) : null}
+                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
+                    {title}
+                  </span>
+                  {activity && activity.state !== "idle" ? (
+                    <span
+                      className="flex shrink-0 items-center gap-1 text-[9px] tabular-nums text-muted-foreground"
+                      aria-hidden="true"
+                    >
+                      {activity.state === "awaiting_approval" ? (
+                        <span className="size-1.5 rounded-full bg-amber-400" />
+                      ) : (
+                        <span className="flex items-center gap-0.5">
+                          <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.32s]" />
+                          <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.16s]" />
+                          <span className="size-1 rounded-full bg-primary animate-bounce" />
+                        </span>
+                      )}
+                      {elapsedLabel(activity.startedAt, now) ?? age}
+                    </span>
+                  ) : age ? (
+                    <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">
+                      {age}
+                    </span>
+                  ) : null}
+                </div>
+                <div
+                  className={cn(
+                    "mt-px flex min-w-0 items-center gap-1 text-[9.5px] text-muted-foreground",
+                    active ? "pr-20" : "pr-14"
+                  )}
+                >
+                  <GitBranchIcon className="size-2.5 shrink-0 opacity-75" aria-hidden="true" />
+                  <span className="min-w-0 truncate">{branchLabel}</span>
+                  {pullRequest ? (
+                    <a
+                      {...pullRequestAnchorProps(pullRequest.url)}
+                      title={`Pull request #${pullRequest.number}: ${pullRequest.title}`}
+                      aria-label={`Pull request #${pullRequest.number}`}
+                      className="shrink-0 rounded bg-primary/15 px-1 text-[9px] text-primary hover:bg-primary/25"
+                      onClick={(event) =>
+                        handlePullRequestClick(event, () =>
+                          onOpenPullRequest?.(project, thread)
+                        )
+                      }
+                    >
+                      #{pullRequest.number}
+                    </a>
+                  ) : null}
+                </div>
+              </button>
+            </div>
+          )}
+          <div
+            className={cn(
+              "pointer-events-none absolute bottom-0.5 right-0.5 z-10 flex items-center gap-0.5 rounded bg-[var(--sidebar)] pr-0.5 opacity-0 transition-opacity group-hover/thread:pointer-events-auto group-hover/thread:opacity-100 group-focus-within/thread:pointer-events-auto group-focus-within/thread:opacity-100"
+            )}
+          >
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              title={thread.pinned ? "Unpin chat" : "Pin chat"}
+              aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
+              aria-pressed={thread.pinned}
+              disabled={deleting || pinning === thread.id || (sending && active)}
+              className={cn(
+                "text-muted-foreground hover:bg-muted hover:text-foreground",
+                thread.pinned
+                  ? "fill-current text-primary opacity-100"
+                  : "opacity-0 group-hover/thread:opacity-100 group-focus-within/thread:opacity-100"
+              )}
+              onClick={(event) => {
+                event.stopPropagation();
+                void togglePinned(project.path, thread);
+              }}
+            >
+              <PinIcon aria-hidden="true" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              title={`Delete “${title}”`}
+              aria-label={`Delete “${title}”`}
+              disabled={deleting}
+              className={cn(
+                "text-muted-foreground hover:bg-destructive/15 hover:text-destructive",
+                "opacity-0 group-hover/thread:opacity-100 group-focus-within/thread:opacity-100"
+              )}
+              onClick={(event) => {
+                event.stopPropagation();
+                setPendingDelete({
+                  thread,
+                  projectPath: project.path,
+                });
+              }}
+            >
+              <Trash2Icon aria-hidden="true" />
+            </Button>
+            {active ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                title="Fork conversation"
+                aria-label="Fork conversation"
+                disabled={sending || deleting}
+                className="text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void onForkThread();
+                }}
+              >
+                <GitForkIcon aria-hidden="true" />
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </li>
+    );
+  }
+
   return (
     <aside
       className={cn(
@@ -857,6 +1097,195 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
             <p className="px-2 py-1 text-xs text-muted-foreground">Loading…</p>
           ) : error ? (
             <p className="px-2 py-1 text-xs text-destructive">{error}</p>
+          ) : chatViewMode === "compact" ? (
+            <div className="flex flex-col gap-2">
+              <section aria-labelledby="compact-history-heading" className="flex flex-col gap-1">
+                <div className="flex items-center justify-between px-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <Clock3Icon className="size-3.5 text-muted-foreground" />
+                    <h2
+                      id="compact-history-heading"
+                      className="m-0 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"
+                    >
+                      Chats
+                    </h2>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title={`Search chats (${formatChord("Mod+K")})`}
+                      aria-label="Search chats"
+                      onClick={() => onSearch("chats")}
+                    >
+                      <SearchIcon aria-hidden="true" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title="Open project folder"
+                      aria-label="Open project folder"
+                      onClick={onOpenFolder}
+                    >
+                      <PlusIcon aria-hidden="true" />
+                    </Button>
+                  </div>
+                </div>
+                {projectError ? (
+                  <p className="px-2 pb-1 text-[11px] text-destructive">{projectError}</p>
+                ) : null}
+                {renameError ? (
+                  <p className="px-2 pb-1 text-[11px] text-destructive">{renameError}</p>
+                ) : null}
+              </section>
+
+              {recentThreads.length > 0 ? (
+                <section aria-labelledby="compact-recent-heading" className="flex flex-col gap-0.5">
+                  <div
+                    id="compact-recent-heading"
+                    className="px-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"
+                  >
+                    Recent
+                  </div>
+                  <ul className="m-0 flex list-none flex-col gap-px p-0">
+                    {recentThreads.map(({ project, thread }) =>
+                      renderCompactThreadItem(
+                        project,
+                        thread,
+                        `compact:recent:${project.path}:${thread.id}`
+                      )
+                    )}
+                  </ul>
+                </section>
+              ) : null}
+
+              {visibleProjects.map((project) => (
+                <section
+                  key={`compact-project:${project.path}`}
+                  aria-labelledby={`compact-project-heading:${project.path}`}
+                  className="flex flex-col gap-0.5"
+                >
+                  <div className="group/project relative flex items-center gap-0.5">
+                    <button
+                      type="button"
+                      title={project.path}
+                      onClick={() => {
+                        if (!project.active) {
+                          void onOpenProjectChat({ root: project.path });
+                        }
+                      }}
+                      className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left outline-none transition-colors hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50"
+                    >
+                      <FolderIcon
+                        className={cn(
+                          "size-3.5 shrink-0",
+                          project.active
+                            ? "text-[var(--sidebar-primary)]"
+                            : "text-muted-foreground"
+                        )}
+                      />
+                      <span
+                        id={`compact-project-heading:${project.path}`}
+                        className="truncate text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
+                      >
+                        {project.name}
+                      </span>
+                    </button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title={`Project options for ${project.name}`}
+                      aria-label={`Project options for ${project.name}`}
+                      className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
+                      onClick={() => {
+                        setProjectError(null);
+                        setProjectMenuPath((path) =>
+                          path === project.path ? null : project.path
+                        );
+                      }}
+                    >
+                      <MoreHorizontalIcon />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title={`New chat in ${project.name}`}
+                      aria-label={`New chat in ${project.name}`}
+                      className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
+                      onClick={() => {
+                        void onOpenProjectChat({ root: project.path, newThread: true });
+                      }}
+                    >
+                      <PlusIcon aria-hidden="true" />
+                    </Button>
+                    {projectMenuPath === project.path ? (
+                      <div className="absolute right-0 top-8 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl">
+                        <div className="flex items-center gap-2 px-2 pb-1.5">
+                          <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                          <div className="min-w-0">
+                            <div className="truncate text-xs font-medium text-foreground">
+                              {project.name}
+                            </div>
+                            <div className="truncate text-[10px] text-muted-foreground">
+                              Project actions
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={projectBusy || project.active}
+                          title={
+                            project.active
+                              ? "Switch projects before removing the active workspace"
+                              : "Keep the folder and chats on disk"
+                          }
+                          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-45"
+                          onClick={() => {
+                            setProjectMenuPath(null);
+                            setWorkspaceAction({ project });
+                          }}
+                        >
+                          <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0 flex-1 truncate">Remove from Zest</span>
+                        </button>
+                        {project.active ? (
+                          <p className="px-2 pt-1.5 text-[10px] leading-4 text-muted-foreground">
+                            Switch projects before managing this folder.
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  <ul className="m-0 flex list-none flex-col gap-px p-0">
+                    {project.threads.length === 0 ? (
+                      <li className="px-2 py-1 text-[11px] text-muted-foreground/80">
+                        No chats yet
+                      </li>
+                    ) : (
+                      [...project.threads]
+                        .sort((a, b) => b.updatedAt - a.updatedAt)
+                        .map((thread) =>
+                          renderCompactThreadItem(
+                            project,
+                            thread,
+                            `compact:project:${project.path}:${thread.id}`
+                          )
+                        )
+                    )}
+                  </ul>
+                </section>
+              ))}
+
+              {recentThreads.length === 0 && visibleProjects.length === 0 ? (
+                <p className="px-2 py-1 text-xs text-muted-foreground">
+                  Open a project folder to get started.
+                </p>
+              ) : null}
+            </div>
           ) : (
             <>
               <section aria-labelledby="projects-heading" className="flex flex-col gap-2">

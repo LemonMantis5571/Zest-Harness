@@ -99,6 +99,7 @@ type Props = {
   attachments: PreparedAttachment[];
   onChange: (value: string) => void;
   onSubmit: (currentDraft?: string) => void;
+  onBtw?: () => void;
   onStop?: () => void;
   onApprovalModeChange: (mode: ApprovalMode) => void;
   onModelChange: (model: string) => void;
@@ -148,6 +149,7 @@ export const Composer = memo(function Composer({
   attachments,
   onChange,
   onSubmit,
+  onBtw,
   onStop,
   onApprovalModeChange,
   onModelChange,
@@ -289,13 +291,15 @@ export const Composer = memo(function Composer({
 
     const isModelCommand =
       command.kind === "builtin" && isModelCommandName(command.name);
-    const replacement = isModelCommand ? "" : `/${command.name} `;
+    const isBtwCommand = command.kind === "builtin" && command.name.toLowerCase() === "btw" && Boolean(onBtw);
+    const replacement = isModelCommand || isBtwCommand ? "" : `/${command.name} `;
     const next =
       current.slice(0, token.start) + replacement + current.slice(token.end);
     const nextCaretPosition = token.start + replacement.length;
     setText(next);
     flushChange(next);
     setCommandsDismissed(true);
+    if (isBtwCommand) { onBtw?.(); return; }
     if (isModelCommand) onModelPickerOpenChange?.(true);
     focusComposerAt(nextCaretPosition);
   }

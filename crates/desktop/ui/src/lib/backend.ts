@@ -56,6 +56,10 @@ export type { SkillSummary, SystemPromptInfo };
 
 /** Desktop I/O surface used by App — Tauri in production, fixture offline. */
 export type DesktopBackend = {
+  startBtw(sessionId: string): Promise<string>;
+  sendBtw(id: string, text: string, onDelta: (text: string) => void): Promise<string>;
+  cancelBtw(id: string): Promise<void>;
+  closeBtw(id: string): Promise<void>;
   readonly mode: "tauri" | "fixture";
   listProviders(): Promise<ProviderRow[]>;
   listExternalAgents(): Promise<ExternalAgentRow[]>;
@@ -379,6 +383,10 @@ export function createTauriBackend(): DesktopBackend {
     getUserProfile: () => tauriApi.getUserProfile(),
     setUserProfile: (profile) => tauriApi.setUserProfile(profile),
     onChatEvent: (handler) => tauriApi.onChatEvent(handler),
+    startBtw: (sessionId) => tauriApi.startBtw(sessionId),
+    sendBtw: (id, text, onDelta) => tauriApi.sendBtw(id, text, onDelta),
+    cancelBtw: (id) => tauriApi.cancelBtw(id),
+    closeBtw: (id) => tauriApi.closeBtw(id),
     listDelegationJobs: () => tauriApi.listDelegationJobs(),
     listDelegationTargets: () => tauriApi.listDelegationTargets(),
     createDelegationJob: (request) => tauriApi.createDelegationJob(request),

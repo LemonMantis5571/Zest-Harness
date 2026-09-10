@@ -198,7 +198,10 @@ impl ClaudeCodeProvider {
     /// is no failed `--resume` to recover from.
     fn resumable_session<'a>(&self, req: &'a TurnRequest) -> Option<&'a str> {
         match req.provider_session.as_ref()? {
-            ProviderSessionRef::ClaudeCode { session_id, model } if model == &req.model => {
+            ProviderSessionRef::ClaudeCode { session_id, model }
+            | ProviderSessionRef::ClaudeCodeFork { session_id, model }
+                if model == &req.model =>
+            {
                 Some(session_id.as_str())
             }
             _ => None,
@@ -229,7 +232,14 @@ impl ClaudeCodeProvider {
             // prompt, which left the child idle until the turn timed out.
         ];
 
-        if !scope.allow.is_empty() {
+        if !req.allow_tool_use {
+            args.extend([
+                "--tools".into(),
+                String::new(),
+                "--strict-mcp-config".into(),
+                "--disable-slash-commands".into(),
+            ]);
+        } else if !scope.allow.is_empty() {
             args.push("--tools".into());
             args.push(scope.allow.join(","));
         }
@@ -256,6 +266,12 @@ impl ClaudeCodeProvider {
         if let Some(session_id) = resume {
             args.push("--resume".into());
             args.push(session_id.to_string());
+            if matches!(
+                req.provider_session,
+                Some(ProviderSessionRef::ClaudeCodeFork { .. })
+            ) {
+                args.push("--fork-session".into());
+            }
         }
 
         args
@@ -359,7 +375,12 @@ impl Provider for ClaudeCodeProvider {
         let config = self.config_for(&req.model, self.args(req, scope, resume));
         let mut normalizer =
             ClaudeNormalizer::new(self.root.clone()).requesting_tools(&scope.allow);
-        if let Some(session_id) = resume {
+        if let Some(session_id) = resume.filter(|_| {
+            !matches!(
+                req.provider_session,
+                Some(ProviderSessionRef::ClaudeCodeFork { .. })
+            )
+        }) {
             normalizer = normalizer.expecting_session(session_id);
         }
         let mut streamed_text = false;
@@ -435,6 +456,16 @@ impl Provider for ClaudeCodeProvider {
 
         // Resuming into a conversation the CLI substituted would answer from a
         // history nobody asked for, so the session is not carried forward.
+        if matches!(
+            req.provider_session,
+            Some(ProviderSessionRef::ClaudeCodeFork { .. })
+        ) && resume.is_some()
+            && normalizer.session_id() == resume
+        {
+            return Err(HarnessError::Other(
+                "Claude Code did not create a separate side session.".into(),
+            ));
+        }
         let session = match normalizer.session_mismatch() {
             Some(_) => None,
             None => normalizer
@@ -997,6 +1028,31 @@ mod tests {
         // The whole point: the operating context and the transcript were
         // delivered when the session opened and are not sent again.
         assert_eq!(prompt(&provider, &req, true), "Now implement the fix.");
+    }
+
+    #[test]
+    fn btw_forks_the_parent_and_disables_cli_tools() {
+        let provider = provider(ClaudeCodePermissionMode::Auto);
+        let mut req = request("claude-sonnet-4-6");
+        req.allow_tool_use = false;
+        req.provider_session = Some(ProviderSessionRef::ClaudeCodeFork {
+            session_id: "parent".into(),
+            model: req.model.clone(),
+        });
+        let argv = provider.args(
+            &req,
+            &provider.tool_scope(),
+            provider.resumable_session(&req),
+        );
+        assert!(argv.windows(2).any(|a| a == ["--resume", "parent"]));
+        assert!(argv.contains(&"--fork-session".into()));
+        assert!(argv.windows(2).any(|a| a == ["--tools", ""]));
+        assert!(argv.contains(&"--strict-mcp-config".into()));
+        req.provider_session = Some(ProviderSessionRef::ClaudeCode {
+            session_id: "child".into(),
+            model: req.model.clone(),
+        });
+        assert!(!args(&provider, &req).contains("--fork-session"));
     }
 
     /// A session holds the model that produced it. Resuming one under another

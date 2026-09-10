@@ -16,10 +16,7 @@ import {
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
-  CommandIcon,
   LoaderCircleIcon,
-  PanelRightCloseIcon,
-  PanelRightOpenIcon,
   PencilIcon,
   SettingsIcon,
   TriangleAlertIcon,
@@ -38,6 +35,7 @@ import { CommandPalette, type PaletteAction } from "@/components/CommandPalette"
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
 import { Composer } from "@/components/Composer";
+import { BtwPanel } from "@/components/BtwPanel";
 import type { DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
 import { NeedsInputCard } from "@/components/NeedsInputCard";
@@ -87,7 +85,7 @@ import {
 } from "@/lib/models";
 import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import type { SendTurnRequest } from "@/lib/sendTurn";
-import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
+import { btwQuestion, isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import { groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
@@ -223,7 +221,7 @@ type Props = {
   onOpenProfile?: () => void;
   /** Show the usage screen. */
   onOpenUsage?: () => void;
-  /** Show the Customize panel (MCP servers, skills, project instructions). */
+  /** Show the Customize panel (appearance, chat view, tools, and instructions). */
   onOpenCustomize?: () => void;
   /** Which panel is showing in the transcript's place, or null for the transcript. */
   shellPanel?: ShellPanel | null;
@@ -805,6 +803,10 @@ export function ChatScreen({
   onApplyDelegation,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [btw, setBtw] = useState<{ sessionId: string; question: string } | null>(null);
+  useEffect(() => {
+    if (btw && btw.sessionId !== session.sessionId) setBtw(null);
+  }, [btw, session.sessionId]);
   const [focusUser, setFocusUser] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   /**
@@ -1428,25 +1430,9 @@ export function ChatScreen({
     }
   }, [onEditMessage]);
 
-  /**
-   * Hand focus back to the toggle when the Workbench closes.
-   *
-   * In an effect rather than in the close handler: the panel holds focus while
-   * it is open, and it is only removed from the document during React's commit.
-   * Focusing from the handler raced that — the toggle was focused, the panel was
-   * then torn down, and the browser reset focus to `<body>`, stranding the
-   * keyboard at the top of the document.
-   */
-  const workbenchWasOpen = useRef(false);
   useEffect(() => {
     if (session.isFreeChat) setWorkbenchOpen(false);
   }, [session.isFreeChat]);
-  useEffect(() => {
-    if (workbenchWasOpen.current && !workbenchOpen) {
-      document.getElementById("workbench-toggle")?.focus();
-    }
-    workbenchWasOpen.current = workbenchOpen;
-  }, [workbenchOpen]);
 
   const jumpToMessage = useCallback(
     (messageId: string) => {
@@ -1504,7 +1490,7 @@ export function ChatScreen({
             {
               id: "open-customize",
               label: "Open Customize",
-              description: "MCP servers, skills, and project instructions",
+              description: "Appearance, chat view, tools, skills, and project instructions",
               shortcut: shortcutFor("view.customize"),
               group: "settings" as const,
               run: openCustomize,
@@ -1749,32 +1735,6 @@ export function ChatScreen({
                 onClick={() => void revealProjectFolder()}
               >
                 <FolderOpenIcon aria-hidden="true" />
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Command palette (Ctrl+K)"
-              aria-label="Open command palette"
-              aria-expanded={paletteOpen}
-              onClick={() => openPalette()}
-            >
-              <CommandIcon />
-            </Button>
-            {!session.isFreeChat ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                title={workbenchOpen ? "Close Workbench" : "Open Workbench"}
-                aria-label={workbenchOpen ? "Close Workbench" : "Open Workbench"}
-                aria-controls="workbench-panel"
-                aria-expanded={workbenchOpen}
-                id="workbench-toggle"
-                onClick={toggleWorkbench}
-              >
-                {workbenchOpen ? <PanelRightCloseIcon aria-hidden="true" /> : <PanelRightOpenIcon aria-hidden="true" />}
               </Button>
             ) : null}
             <Button
@@ -2028,6 +1988,7 @@ export function ChatScreen({
           ) : null}
 
           <Composer
+            onBtw={() => setBtw({ sessionId: session.sessionId, question: "" })}
             approvalMode={approvalMode}
             onApprovalModeChange={onApprovalModeChange}
             value={draft}
@@ -2059,6 +2020,12 @@ export function ChatScreen({
             onChange={onDraftChange}
             onSubmit={(currentDraft?: string) => {
               const text = currentDraft ?? draft;
+              const question = btwQuestion(text);
+              if (question !== null) {
+                setBtw({ sessionId: session.sessionId, question });
+                onDraftChange("");
+                return;
+              }
               if (isModelSlash(text)) {
                 onDraftChange("");
                 setModelPickerOpen(true);
@@ -2207,6 +2174,14 @@ export function ChatScreen({
         </Suspense>
       ) : null}
 
+      {btw?.sessionId === session.sessionId ? <BtwPanel
+        key={btw.sessionId}
+        sessionId={btw.sessionId}
+        initialQuestion={btw.question}
+        mainRunning={sending}
+        onClose={() => { setBtw(null); requestAnimationFrame(focusComposer); }}
+      /> : null}
+
       {paletteOpen ? (
         <CommandPalette
           open={paletteOpen}
@@ -2220,6 +2195,10 @@ export function ChatScreen({
           }}
           onCommand={(name) => {
             setPaletteOpen(false);
+            if (name.toLowerCase() === "btw") {
+              setBtw({ sessionId: session.sessionId, question: "" });
+              return;
+            }
             if (isModelCommandName(name)) {
               setModelPickerOpen(true);
               return;

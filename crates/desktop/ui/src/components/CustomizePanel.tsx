@@ -1,21 +1,27 @@
 import {
   ArrowLeftIcon,
   BookOpenIcon,
+  CheckIcon,
   ChevronRightIcon,
   FolderOpenIcon,
   KeyboardIcon,
+  MessageSquareIcon,
+  PaletteIcon,
   PlugIcon,
   PlusIcon,
   PuzzleIcon,
   RefreshCwIcon,
   ScrollTextIcon,
   Trash2Icon,
+  TypeIcon,
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { FontPicker } from "@/components/FontPicker";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { NowPlayingCard } from "@/components/NowPlayingCard";
+import { ThemePicker } from "@/components/ThemePicker";
 import { WallpaperCard } from "@/components/WallpaperCard";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,6 +35,12 @@ import {
   validateMcpServerDraft,
 } from "@/lib/mcpServerForm";
 import type { CustomizeTab } from "@/lib/navigationHistory";
+import {
+  applyChatViewMode,
+  getSavedChatViewMode,
+  subscribeChatViewChange,
+  type ChatViewMode,
+} from "@/lib/chatView";
 import type {
   ExternalAgentRow,
   McpServerRow,
@@ -52,6 +64,9 @@ type Props = {
 };
 
 const TABS: { id: CustomizeTab; label: string; icon: typeof PlugIcon }[] = [
+  { id: "appearance", label: "Appearance", icon: PaletteIcon },
+  { id: "typography", label: "Typography", icon: TypeIcon },
+  { id: "chat", label: "Chat view", icon: MessageSquareIcon },
   { id: "mcp", label: "MCPs", icon: PlugIcon },
   { id: "skills", label: "Skills", icon: BookOpenIcon },
   { id: "plugins", label: "Extras", icon: PuzzleIcon },
@@ -180,8 +195,8 @@ export function CustomizePanel({
               Customize
             </h1>
             <p className="m-0 mt-1 text-[12px] text-muted-foreground">
-              Tools, skills, and instructions Zest uses in this project. Everything here stays
-              on this computer.
+              Appearance, chat presentation, tools, skills, and instructions. Everything here
+              stays on this computer.
             </p>
           </div>
           <Button
@@ -232,6 +247,9 @@ export function CustomizePanel({
         {tab === "plugins" ? <PluginsPanel /> : null}
         {tab === "rules" ? <RulesPanel sending={sending} /> : null}
         {tab === "shortcuts" ? <ShortcutsPanel /> : null}
+        {tab === "appearance" ? <AppearancePanel /> : null}
+        {tab === "typography" ? <TypographyPanel /> : null}
+        {tab === "chat" ? <ChatViewPanel /> : null}
       </div>
     </div>
   );
@@ -1092,6 +1110,170 @@ function PluginsPanel() {
         </p>
       ) : null}
     </section>
+  );
+}
+
+function AppearancePanel() {
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionHeading
+        title="Appearance"
+        hint="Choose the colour palette used by the desktop shell, chats, and code."
+      />
+      <ThemePicker />
+    </section>
+  );
+}
+
+function TypographyPanel() {
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionHeading
+        title="Typography"
+        hint="Choose the typeface used across the Zest desktop shell and chats."
+      />
+      <FontPicker />
+    </section>
+  );
+}
+
+function ChatViewPanel() {
+  const [mode, setMode] = useState<ChatViewMode>(() => getSavedChatViewMode());
+
+  useEffect(() => subscribeChatViewChange(() => setMode(getSavedChatViewMode())), []);
+
+  function selectMode(next: ChatViewMode) {
+    setMode(next);
+    applyChatViewMode(next);
+  }
+
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionHeading
+        title="Chat history"
+        hint="Choose how the chat list in the sidebar is organized. The change applies immediately."
+      />
+      <div
+        role="radiogroup"
+        aria-label="Chat history visualization"
+        className="grid gap-3 sm:grid-cols-2"
+      >
+        <ChatViewOption
+          mode="project"
+          selected={mode === "project"}
+          title="Project tree"
+          description="Keep the current expandable project folders and full chat rows."
+          onSelect={selectMode}
+        />
+        <ChatViewOption
+          mode="compact"
+          selected={mode === "compact"}
+          title="Compact list"
+          description="Group chats by project and show the branch and recent time at a glance."
+          onSelect={selectMode}
+        />
+      </div>
+      <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
+        Compact list keeps more chats visible by showing the project, title, branch, and time in a
+        tight row. It changes the history presentation only; projects and chats keep the same data
+        and actions.
+      </p>
+    </section>
+  );
+}
+
+function ChatViewOption({
+  mode,
+  selected,
+  title,
+  description,
+  onSelect,
+}: {
+  mode: ChatViewMode;
+  selected: boolean;
+  title: string;
+  description: string;
+  onSelect: (mode: ChatViewMode) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={() => onSelect(mode)}
+      className={cn(
+        "group relative flex min-w-0 flex-col rounded-lg border p-3 text-left outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/50",
+        selected
+          ? "border-primary/80 bg-primary/10 ring-1 ring-primary/40 shadow-xs"
+          : "border-border/70 bg-card/60 hover:border-border hover:bg-card/90"
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <span className="block text-xs font-semibold text-foreground">{title}</span>
+          <span className="mt-1 block text-[10.5px] leading-relaxed text-muted-foreground">
+            {description}
+          </span>
+        </div>
+        {selected ? (
+          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+            <CheckIcon className="size-2.5 stroke-[3]" aria-hidden="true" />
+          </span>
+        ) : null}
+      </div>
+      <ChatViewPreview mode={mode} />
+    </button>
+  );
+}
+
+function ChatViewPreview({ mode }: { mode: ChatViewMode }) {
+  if (mode === "compact") {
+    return (
+      <div
+        aria-hidden="true"
+        className="mt-3 overflow-hidden rounded-md border border-border/60 bg-[#101216] px-2 py-1.5 text-left text-[9px] text-white/75"
+      >
+        <div className="flex items-center justify-between gap-2 text-[8px] text-white/45">
+          <span className="truncate">zest @ workspace</span>
+          <span className="shrink-0 tabular-nums">7m</span>
+        </div>
+        <div className="mt-0.5 flex min-w-0 items-center gap-1">
+          <MessageSquareIcon className="size-2.5 shrink-0 text-white/35" />
+          <span className="truncate font-medium text-white/85">Fix session shortcuts</span>
+        </div>
+        <div className="mt-0.5 flex items-center gap-1 text-[8px] text-white/35">
+          <span>↳</span>
+          <span>fix/session-shortcuts</span>
+          <span className="ml-auto rounded bg-indigo-500/30 px-1 text-indigo-200">#12</span>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2 border-t border-white/10 pt-1 text-[8px] text-white/40">
+          <span className="truncate">Browser sidebar</span>
+          <span className="shrink-0 tabular-nums">2h</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      aria-hidden="true"
+      className="mt-3 overflow-hidden rounded-md border border-border/60 bg-background/70 px-2 py-1.5 text-left text-[9px]"
+    >
+      <div className="flex items-center gap-1.5 rounded bg-secondary/50 px-1.5 py-1 text-muted-foreground">
+        <ChevronRightIcon className="size-2.5" />
+        <span className="truncate font-medium text-foreground/85">Aero-Webring</span>
+      </div>
+      <div className="mt-1 flex items-center gap-1.5 px-1.5 py-1 text-muted-foreground">
+        <MessageSquareIcon className="size-2.5" />
+        <span className="min-w-0 flex-1 truncate">hi whatsapp</span>
+        <span className="shrink-0 tabular-nums">8m</span>
+      </div>
+      <div className="flex items-center gap-1.5 px-1.5 py-1 text-muted-foreground">
+        <MessageSquareIcon className="size-2.5" />
+        <span className="min-w-0 flex-1 truncate">Composer overflow</span>
+        <span className="shrink-0 tabular-nums">1d</span>
+      </div>
+    </div>
   );
 }
 
