@@ -36,12 +36,13 @@ GTK migration before calling the Linux runtime hardened for hostile content.
 
 ## Create the beta
 
-For the first beta, the version is `0.1.0`:
+For the first published beta, use the version declared in `Cargo.toml` and
+`crates/desktop/tauri.conf.json` (currently `0.2.1`):
 
 ```powershell
 git status --short
-git tag -a v0.1.0 -m "release: Zest 0.1.0 beta"
-git push origin v0.1.0
+git tag -a v0.2.1 -m "release: Zest 0.2.1 beta"
+git push origin v0.2.1
 ```
 
 The release workflow checks that the tag, Cargo version, and Tauri version

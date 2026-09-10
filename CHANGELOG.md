@@ -5,6 +5,8 @@ a replacement for the commit history.
 
 ## Unreleased
 
+## 0.2.1 beta - 2026-09-10
+
 ### Added
 
 - `/btw [question]` opens a temporary side conversation using the main chat's
