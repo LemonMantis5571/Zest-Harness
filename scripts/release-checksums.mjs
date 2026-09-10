@@ -6,9 +6,13 @@ import { basename, dirname, extname, relative, resolve } from "node:path";
 const root = resolve(option("--root") ?? "target/release/bundle");
 const output = resolve(option("--out") ?? "SHA256SUMS.txt");
 const allowedExtensions = new Set([".appimage", ".deb", ".dmg", ".exe", ".msi", ".rpm"]);
+const allowedNames = new Set(["zest"]);
 
 const artifacts = (await filesUnder(root))
-  .filter((file) => allowedExtensions.has(extname(file).toLowerCase()))
+  .filter((file) =>
+    allowedExtensions.has(extname(file).toLowerCase()) ||
+    allowedNames.has(basename(file)),
+  )
   .sort((left, right) => left.localeCompare(right));
 
 if (artifacts.length === 0) {
