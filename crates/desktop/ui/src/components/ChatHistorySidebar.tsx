@@ -253,6 +253,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   const renameInputRef = useRef<HTMLInputElement>(null);
   const renameSavingRef = useRef(false);
   const renameCancelledRef = useRef(false);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => Date.now());
   const [projectMenuPath, setProjectMenuPath] = useState<string | null>(null);
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction | null>(null);
@@ -300,6 +301,21 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [open]);
+
+  useEffect(() => {
+    if (!projectMenuPath) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const menu = projectMenuRef.current;
+      if (menu && event.target instanceof Node && menu.contains(event.target)) {
+        return;
+      }
+      setProjectMenuPath(null);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [projectMenuPath]);
 
   const wasSending = useRef(false);
   useEffect(() => {
@@ -1288,7 +1304,10 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                       <PlusIcon aria-hidden="true" />
                     </Button>
                     {projectMenuPath === project.path ? (
-                      <div className="absolute right-0 top-8 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl">
+                      <div
+                        ref={projectMenuRef}
+                        className="absolute right-0 top-8 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl"
+                      >
                         <div className="flex items-center gap-2 px-2 pb-1.5">
                           <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
                           <div className="min-w-0">
@@ -1476,7 +1495,10 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                         </div>
 
                         {projectMenuPath === project.path ? (
-                          <div className="absolute right-0 top-9 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl">
+                          <div
+                            ref={projectMenuRef}
+                            className="absolute right-0 top-9 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl"
+                          >
                             <div className="flex items-center gap-2 px-2 pb-1.5">
                               <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
                               <div className="min-w-0">
