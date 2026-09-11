@@ -217,6 +217,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const fixtureTranscripts = new Map<string, ChatMessage[]>([
     [LONG_THREAD_ID, longThreadMessages()],
   ]);
+  const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
 
   function windowSessionFor(
@@ -1266,8 +1267,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       // Seeded rows stay visible. A freshly opened empty draft does not — the
       // desktop store also waits for the first user message before writing one.
       if (
-        session.messages.length > 0 ||
-        fixtureThreadTitles.has(session.threadId)
+        !deletedFixtureThreads.has(session.threadId) &&
+        (session.messages.length > 0 || fixtureThreadTitles.has(session.threadId))
       ) {
         threads.push({
           id: session.threadId,
@@ -1285,7 +1286,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       // A provider Zest has no mark for, so the generic fallback is visible
       // offline. This is the ordinary case for a local model, and it is the
       // half of the mapping most likely to regress unnoticed.
-      if (session.threadId !== "fixture-local") {
+      if (session.threadId !== "fixture-local" && !deletedFixtureThreads.has("fixture-local")) {
         threads.push({
           id: "fixture-local",
           createdAt: fixtureEpochSeconds - 3600,
@@ -1297,7 +1298,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           gitContext: FIXTURE_THREAD_GIT,
         });
       }
-      if (session.threadId !== LONG_THREAD_ID) {
+      if (session.threadId !== LONG_THREAD_ID && !deletedFixtureThreads.has(LONG_THREAD_ID)) {
         threads.push({
           id: LONG_THREAD_ID,
           createdAt: fixtureEpochSeconds - 7200,
@@ -1339,7 +1340,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
                   providerId: "codex",
                   messageCount: 1,
                 },
-              ],
+              ].filter((thread) => !deletedFixtureThreads.has(thread.id)),
         },
       ];
     },
@@ -1411,8 +1412,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         return { ...session };
       }
       const nextId = options.threadId || session.threadId;
-      const knownThread = fixtureTranscripts.has(nextId) ||
-        nextId === "fixture-local" || nextId === "fixture-free";
+      const knownThread = !deletedFixtureThreads.has(nextId) && (fixtureTranscripts.has(nextId) ||
+        nextId === "fixture-local" || nextId === "fixture-free");
       if (options.threadId && !knownThread && nextId !== session.threadId) {
         throw new Error(`thread '${nextId}' not found`);
       }
@@ -1560,6 +1561,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async deleteThread(id: string) {
+      deletedFixtureThreads.add(id);
       if (id === session.threadId) {
         return this.newThread();
       }

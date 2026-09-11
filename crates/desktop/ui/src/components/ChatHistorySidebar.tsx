@@ -2,10 +2,10 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
+  Columns2Icon,
   Clock3Icon,
   ChevronRightIcon,
-  PanelLeftCloseIcon,
-  PanelLeftOpenIcon,
+  PanelLeftIcon,
   FolderIcon,
   FolderOpenIcon,
   GitBranchIcon,
@@ -41,6 +41,7 @@ import {
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
 import type { ProjectChats, ProviderRow, ThreadSummary, UserProfile } from "@/lib/types";
+import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { cn } from "@/lib/utils";
 import {
   handlePullRequestClick,
@@ -96,6 +97,11 @@ type Props = {
   onNavigateForward: () => void;
   /** Open this chat's pull request in the review pane. */
   onOpenPullRequest?: (project: ProjectChats, thread: ThreadSummary) => void;
+  /** Saved multi-pane layouts shown separately from normal chat history. */
+  splitGroups?: ReadonlyArray<SplitSidebarGroup>;
+  activeSplitGroupId?: string | null;
+  onOpenSplitGroup?: (groupId: string) => void;
+  onFocusSplitPane?: (groupId: string, paneId: string) => void;
 };
 
 function threadTitle(thread: ThreadSummary) {
@@ -225,6 +231,10 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   onNavigateBack,
   onNavigateForward,
   onOpenPullRequest,
+  splitGroups = [],
+  activeSplitGroupId = null,
+  onOpenSplitGroup,
+  onFocusSplitPane,
 }: Props) {
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [loading, setLoading] = useState(false);
@@ -991,7 +1001,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               aria-expanded={open}
               onClick={() => onOpenChange(false)}
             >
-              <PanelLeftCloseIcon aria-hidden="true" />
+              <PanelLeftIcon aria-hidden="true" />
             </Button>
           </div>
         ) : (
@@ -1004,7 +1014,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
             aria-expanded={open}
             onClick={() => onOpenChange(true)}
           >
-            <PanelLeftOpenIcon aria-hidden="true" />
+            <PanelLeftIcon aria-hidden="true" />
           </Button>
         )}
       </div>
@@ -1092,6 +1102,61 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
           </nav>
 
           <div className="my-2 border-t border-border/40" />
+
+          {splitGroups.length > 0 ? (
+            <section aria-labelledby="split-groups-heading" className="mb-3 flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 px-2 pb-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
+                <Columns2Icon className="size-3.5" aria-hidden="true" />
+                <h2 id="split-groups-heading" className="m-0">Split views</h2>
+              </div>
+              <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                {splitGroups.map((group) => {
+                  const active = group.active || activeSplitGroupId === group.id;
+                  return (
+                    <li key={`split-group:${group.id}`} className="min-w-0">
+                      <button
+                        type="button"
+                        aria-current={active ? "page" : undefined}
+                        aria-label={`${group.label} with ${group.panes.length} chats`}
+                        onClick={() => onOpenSplitGroup?.(group.id)}
+                        className={cn(
+                          "flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md border-l-2 px-1.5 text-left text-[12px] outline-none transition-colors",
+                          active
+                            ? "border-[var(--sidebar-primary)] bg-[var(--sidebar-accent)] text-foreground"
+                            : "border-transparent text-muted-foreground hover:bg-[var(--sidebar-accent)] hover:text-foreground",
+                          "focus-visible:ring-2 focus-visible:ring-ring/50"
+                        )}
+                      >
+                        <Columns2Icon className={cn("size-3.5 shrink-0", active && "text-[var(--sidebar-primary)]")} aria-hidden="true" />
+                        <span className="min-w-0 flex-1 truncate">{group.label}</span>
+                        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{group.panes.length}</span>
+                      </button>
+                      {group.panes.length > 0 ? (
+                        <ul className="m-0 mt-0.5 flex list-none flex-col gap-px p-0 pl-4">
+                          {group.panes.map((pane) => (
+                            <li key={`split-pane:${group.id}:${pane.paneId}`}>
+                              <button
+                                type="button"
+                                aria-label={`Open ${pane.title} in ${group.label}`}
+                                onClick={() => onFocusSplitPane?.(group.id, pane.paneId)}
+                                className={cn(
+                                  "flex min-w-0 w-full flex-col rounded-md px-2 py-1 text-left outline-none transition-colors hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
+                                  active && pane.threadId === activeThreadId && "bg-[var(--sidebar-accent)] text-foreground"
+                                )}
+                              >
+                                <span className="truncate text-[12px]">{pane.title}</span>
+                                <span className="truncate text-[10px] text-muted-foreground">{pane.projectLabel}</span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ) : null}
 
           {loading && projects.length === 0 ? (
             <p className="px-2 py-1 text-xs text-muted-foreground">Loading…</p>

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatSkeleton } from "@/components/ChatSkeleton";
+import { ChatHistorySidebar } from "@/components/ChatHistorySidebar";
 import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDialog";
 import { ProviderPicker } from "@/components/ProviderPicker";
 import { WaitingScreen } from "@/components/WaitingScreen";
@@ -103,6 +104,10 @@ import type {
   WorkspaceReview,
   WallpaperView,
 } from "@/lib/types";
+import {
+  splitSidebarGroups,
+  type SplitWorkspaceSnapshot,
+} from "@/lib/splitLayout";
 import { applyFont, getSavedFontId } from "@/lib/fonts";
 import { applyTheme, getSavedThemeId } from "@/lib/themes";
 import { WALLPAPER_CHANGED_EVENT } from "@/lib/wallpaperSync";
@@ -461,9 +466,15 @@ export default function App() {
   const [waitingError, setWaitingError] = useState<string | null>(null);
 
   const [session, setSession] = useState<SessionInfo | null>(null);
-  const [splitInitial, setSplitInitial] = useState<SessionInfo | null>(null);
-  const splitInitialRef = useRef<SessionInfo | null>(null);
-  const splitDraftRef = useRef("");
+  const [splitVisible, setSplitVisible] = useState(false);
+  const [splitSnapshot, setSplitSnapshot] = useState<SplitWorkspaceSnapshot | null>(null);
+  const splitSnapshotRef = useRef<SplitWorkspaceSnapshot | null>(null);
+  const splitVisibleRef = useRef(false);
+  splitSnapshotRef.current = splitSnapshot;
+  splitVisibleRef.current = splitVisible;
+  const [splitStartNewGroup, setSplitStartNewGroup] = useState(false);
+  const [chatListRevision, setChatListRevision] = useState(0);
+  const [deletedThreadId, setDeletedThreadId] = useState<string | null>(null);
   const [, publishSplit] = useState(0);
   const splitActions = useRef(createSerialActions());
   const splitSendAcks = useRef(new Map<string, () => void>());
@@ -601,6 +612,34 @@ export default function App() {
     }
     navigateTo({ kind: "chat" });
   }, [applyNavigationDestination, navigateTo]);
+
+  const rememberSplitSnapshot = useCallback((next: SplitWorkspaceSnapshot) => {
+    splitSnapshotRef.current = next;
+    setSplitSnapshot(next);
+  }, []);
+
+  const activateSplitLocation = useCallback(
+    (groupId: string, paneId?: string) => {
+      const current = splitSnapshotRef.current;
+      const group = current?.groups.find((candidate) => candidate.id === groupId);
+      if (!current || !group) return;
+      const focus = paneId ?? group.focusedPaneId;
+      const next: SplitWorkspaceSnapshot = {
+        ...current,
+        activeGroupId: groupId,
+        groups: current.groups.map((candidate) =>
+          candidate.id === groupId
+            ? { ...candidate, focusedPaneId: focus }
+            : candidate
+        ),
+      };
+      rememberSplitSnapshot(next);
+      setSplitStartNewGroup(false);
+      splitVisibleRef.current = true;
+      setSplitVisible(true);
+    },
+    [rememberSplitSnapshot]
+  );
 
   // The first loaded chat establishes the root of the app-view history. Boot,
   // provider selection, and sign-in progress are lifecycle states, not places
@@ -991,7 +1030,7 @@ export default function App() {
   }, []);
 
   const maybeAutoCompact = useCallback(() => {
-    if (splitInitialRef.current) return;
+    if (splitVisibleRef.current) return;
     const targetSessionId = sessionIdRef.current;
     if (!targetSessionId || compactionInFlightRef.current || sendingRef.current) {
       return;
@@ -1010,7 +1049,7 @@ export default function App() {
         .contextUsage()
         .then((usage) => {
           if (
-            splitInitialRef.current || targetSessionId !== sessionIdRef.current ||
+            splitVisibleRef.current || targetSessionId !== sessionIdRef.current ||
             compactionInFlightRef.current ||
             sendingRef.current
           ) {
@@ -1177,7 +1216,7 @@ export default function App() {
       threadId: threadKey,
     };
     chatStatesRef.current.set(threadKey, state);
-    if (splitInitialRef.current) publishSplit((revision) => revision + 1);
+    if (splitVisibleRef.current) publishSplit((revision) => revision + 1);
     if (event.kind === "user") splitSendAcks.current.get(threadKey)?.();
 
     if (isCurrent) {
@@ -1290,7 +1329,7 @@ export default function App() {
       if (threadKey === currentThread) currentState = state;
     }
 
-    if (splitInitialRef.current) publishSplit((revision) => revision + 1);
+    if (splitVisibleRef.current) publishSplit((revision) => revision + 1);
     if (!currentState) return;
     messagesRef.current = currentState.messages;
     activeAssistantId.current = currentState.activeAssistantId;
@@ -1954,6 +1993,9 @@ export default function App() {
         providerId: current?.provider ?? selectedIdRef.current ?? undefined,
       });
       applySession(info, { clearDraft: true });
+      splitVisibleRef.current = false;
+      setSplitVisible(false);
+      setSplitStartNewGroup(false);
       showTranscript();
     } catch (err) {
       const recovery = conversationRecovery(err);
@@ -2205,6 +2247,8 @@ export default function App() {
         if (deletedActive) {
           applySession(info, { clearDraft: true });
         }
+        setChatListRevision((revision) => revision + 1);
+        setDeletedThreadId(id);
         setWorkspacePath(info.isFreeChat ? null : info.root);
         void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
         toast.add({
@@ -2243,6 +2287,9 @@ export default function App() {
         const info = await backend.openProjectChat(options);
         setPendingConversationRecovery(null);
         applySession(info, { clearDraft: Boolean(options.newThread) });
+        splitVisibleRef.current = false;
+        setSplitVisible(false);
+        setSplitStartNewGroup(false);
         showTranscript();
         // Refresh the picker catalogue so the model list and key status match
         // the project we actually opened instead of the project we just left.
@@ -2957,13 +3004,81 @@ export default function App() {
 
         {screen === "chat" && session ? (
           <Suspense fallback={<ChatSkeleton />}>
-          {splitInitial ? <SplitWorkspace
-            initial={splitInitial}
-            initialDraft={splitDraftRef.current}
+          {splitVisible ? <SplitWorkspace
+            initial={session}
+            initialDraft={draftRef.current}
             states={chatStatesRef.current}
+            snapshot={splitSnapshot}
+            startNewGroup={splitStartNewGroup}
+            onStateChange={rememberSplitSnapshot}
+            providers={providers}
+            chatListRevision={chatListRevision}
+            deletedThreadId={deletedThreadId}
+            renderSidebar={(model) => (
+              <ChatHistorySidebar
+                onOpenPullRequests={() => navigateTo({ kind: "pullRequests" })}
+                pullRequestsActive={shellPanel?.kind === "pullRequests"}
+                open={model.open}
+                activeThreadId={model.activeThreadId}
+                activeProjectPath={model.activeProjectPath}
+                activeProviderId={model.activeProviderId}
+                sending={Boolean(chatStatesRef.current.get(model.activeThreadId)?.sending)}
+                threadActivity={threadActivity}
+                onOpenChange={model.onOpenChange}
+                onNewChat={onNewChat}
+                onOpenProjectChat={onOpenProjectChat}
+                onForkThread={onForkThread}
+                onDeleteThread={onDeleteThread}
+                onOpenFolder={onOpenFolder}
+                onOpenCustomize={() => navigateTo({ kind: "customize", tab: "mcp" })}
+                customizeActive={shellPanel?.kind === "customize"}
+                profileActive={shellPanel?.kind === "profile"}
+                profile={profile}
+                providerLabel={model.activeProviderId}
+                onOpenProfile={() => navigateTo({ kind: "profile" })}
+                providers={providers}
+                quotaRefreshKey={model.activeThreadId}
+                onSearch={model.onSearch}
+                onRevealTranscript={showTranscript}
+                canNavigateBack={navigation.back.length > 0}
+                canNavigateForward={navigation.forward.length > 0}
+                onNavigateBack={navigateBack}
+                onNavigateForward={navigateForward}
+                splitGroups={model.groups}
+                activeSplitGroupId={model.activeGroupId}
+                onOpenSplitGroup={model.onOpenSplitGroup}
+                onFocusSplitPane={model.onFocusSplitPane}
+              />
+            )}
             onOpen={(target, fork = false) => splitActions.current(async () => {
               let info = await backend.openProjectChat(target);
               if (fork) info = await backend.forkThread();
+              applySession(info);
+              return info;
+            })}
+            onUpdateOptions={(targetSession, target, options) => splitActions.current(async () => {
+              let info = sessionRef.current;
+              if (!info || info.threadId !== targetSession.threadId) {
+                info = await backend.openProjectChat({
+                  root: target.root,
+                  threadId: target.newThread ? undefined : target.threadId ?? targetSession.threadId,
+                  newThread: target.newThread,
+                  providerId: target.providerId ?? targetSession.provider,
+                });
+              }
+
+              if (options.providerId && options.providerId !== info.provider) {
+                info = await backend.switchSessionProvider(options.providerId, options.model);
+              } else if (options.reset) {
+                const meta = await backend.resetSessionOptions();
+                info = { ...info, ...meta };
+              } else {
+                const meta = await backend.updateSessionOptions({
+                  model: options.model,
+                  effort: options.effort,
+                });
+                info = { ...info, ...meta };
+              }
               applySession(info);
               return info;
             })}
@@ -3034,16 +3149,16 @@ export default function App() {
               setDraft(nextDraft);
               draftRef.current = nextDraft;
               saveDraft(activeThreadId, nextDraft);
-              splitInitialRef.current = null;
-              setSplitInitial(null);
+              splitVisibleRef.current = false;
+              setSplitVisible(false);
+              setSplitStartNewGroup(false);
             })}
           /> : <ChatScreen
             onOpenSplit={() => {
               if (compacting) return;
-              splitDraftRef.current = draftRef.current;
-              const initial = { ...session, messages };
-              splitInitialRef.current = initial;
-              setSplitInitial(initial);
+              setSplitStartNewGroup(true);
+              splitVisibleRef.current = true;
+              setSplitVisible(true);
             }}
             wallpaper={wallpaper}
             session={session}
@@ -3153,6 +3268,13 @@ export default function App() {
             settingsRequest={settingsRequest}
             sessionWarning={sessionWarning}
             onDismissWarning={() => setSessionWarning(null)}
+            splitGroups={splitSidebarGroups(
+              splitSnapshot,
+              splitVisible ? splitSnapshot?.activeGroupId ?? null : null
+            )}
+            activeSplitGroupId={splitVisible ? splitSnapshot?.activeGroupId ?? null : null}
+            onOpenSplitGroup={(groupId) => activateSplitLocation(groupId)}
+            onFocusSplitPane={(groupId, paneId) => activateSplitLocation(groupId, paneId)}
           />}
           </Suspense>
         ) : null}

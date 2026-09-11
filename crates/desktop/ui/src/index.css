@@ -352,8 +352,10 @@ html {
 }
 
 @media (max-width: 700px) {
-  .zest-split-panes { flex-direction: column; }
-  .zest-split-panes > .contents > .zest-split-pane { flex: 1 1 0% !important; }
+  .zest-split-panes,
+  .zest-split-node { flex-direction: column !important; }
+  .zest-split-panes .zest-split-node > div,
+  .zest-split-panes > .zest-split-pane { flex: 1 1 0% !important; }
   .zest-split-divider { display: none; }
 }
 

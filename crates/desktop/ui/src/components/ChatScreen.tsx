@@ -87,6 +87,7 @@ import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import type { SendTurnRequest } from "@/lib/sendTurn";
 import { btwQuestion, isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
+import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
@@ -148,7 +149,7 @@ function shortRoot(root: string): string {
   if (parts.length <= 2) return cleaned;
   return parts.slice(-2).join("/");
 }
-type Props = {
+export type ChatScreenProps = {
   onOpenSplit?: () => void;
   onOpenPullRequests?: () => void;
   wallpaper?: WallpaperView | null;
@@ -265,7 +266,13 @@ type Props = {
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
+  splitGroups?: ReadonlyArray<SplitSidebarGroup>;
+  activeSplitGroupId?: string | null;
+  onOpenSplitGroup?: (groupId: string) => void;
+  onFocusSplitPane?: (groupId: string, paneId: string) => void;
 };
+
+type Props = ChatScreenProps;
 
 function focusComposer() {
   const el = document.getElementById(
@@ -801,6 +808,10 @@ export function ChatScreen({
   onCancelDelegation,
   onRetryDelegation,
   onApplyDelegation,
+  splitGroups = [],
+  activeSplitGroupId = null,
+  onOpenSplitGroup,
+  onFocusSplitPane,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [btw, setBtw] = useState<{ sessionId: string; question: string } | null>(null);
@@ -1688,6 +1699,10 @@ export function ChatScreen({
         canNavigateForward={canNavigateForward}
         onNavigateBack={onNavigateBack}
         onNavigateForward={onNavigateForward}
+        splitGroups={splitGroups}
+        activeSplitGroupId={activeSplitGroupId}
+        onOpenSplitGroup={onOpenSplitGroup}
+        onFocusSplitPane={onFocusSplitPane}
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
