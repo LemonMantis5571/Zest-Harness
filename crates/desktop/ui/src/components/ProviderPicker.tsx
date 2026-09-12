@@ -229,25 +229,12 @@ export function ProviderPicker({
                 aria-selected={selectedRow}
                 onClick={() => onSelect(p.id)}
                 className={cn(
-                  "grid w-full cursor-pointer grid-cols-[10px_1fr_auto] items-center gap-3 px-3.5 py-3 text-left font-inherit outline-none transition-[background-color,color] duration-150",
+                  "grid w-full cursor-pointer grid-cols-[1fr_auto] items-center gap-3 px-3.5 py-3 text-left font-inherit outline-none transition-[background-color,color] duration-150",
                   "border-b border-border/50 last:border-b-0",
                   "hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
                   selectedRow && "bg-accent/70"
                 )}
               >
-                <span
-                  className={cn(
-                    "justify-self-center size-2 rounded-full transition-colors duration-150",
-                    usable && p.statusKind === "ready" && "bg-primary",
-                    verifyFailed && "bg-amber-400",
-                    usable && p.statusKind === "unknown" && "bg-[#c4c4c4]",
-                    !verifyFailed &&
-                      (p.statusKind === "not_logged_in" ||
-                        p.statusKind === "unconfigured") &&
-                      "bg-transparent shadow-[inset_0_0_0_1.5px_var(--muted-foreground)]"
-                  )}
-                  aria-hidden
-                />
                 <span className="min-w-0">
                   <div className="flex items-center gap-2 text-[13px] font-medium tracking-[-0.1px]">
                     {/* Decorative — the name it identifies is right beside it. */}

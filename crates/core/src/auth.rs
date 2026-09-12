@@ -22,6 +22,8 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Stdio;
 use std::process::{Child, Command};
 
 use crate::tools::external_agent::resolve_program;
@@ -132,8 +134,7 @@ impl LoginProcess {
         }
         if self.store.as_ref().is_some_and(store_rewritten) {
             if let Some(child) = self.child.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = terminate_login_child(child);
             }
             return Ok(LoginPoll::Succeeded);
         }
@@ -152,9 +153,7 @@ impl LoginProcess {
             .child
             .as_mut()
             .expect("login process has a child or an in-process sign-in");
-        child.kill()?;
-        let _ = child.wait();
-        Ok(())
+        terminate_login_child(child)
     }
 }
 
@@ -164,6 +163,50 @@ fn login_poll_from_cli_exit(status: std::process::ExitStatus) -> LoginPoll {
     } else {
         LoginPoll::Failed("The sign-in did not finish. Try again.".into())
     }
+}
+
+/// Stop a vendor login and any shell/Node child it spawned.
+///
+/// Several provider CLIs are installed as Windows `.cmd` shims. Killing only
+/// the shim can leave the real login process alive, which means a cancelled
+/// sign-in still owns its browser session or callback resources and the next
+/// Connect attempt cannot start cleanly. `taskkill /T` is scoped to this exact
+/// process id and is the Windows equivalent of stopping the login process
+/// tree. The direct kill remains as a fallback for unusual environments.
+fn terminate_login_child(child: &mut Child) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let tree_status = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        match tree_status {
+            Ok(status) if status.success() => {
+                let _ = child.wait();
+                return Ok(());
+            }
+            Ok(_) | Err(_) => {
+                // The process may have finished between polling and cancel.
+                // Treat that as already cancelled; otherwise fall through to
+                // the direct kill below.
+                if child.try_wait()?.is_some() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    match child.kill() {
+        Ok(()) => {}
+        Err(_error) if child.try_wait()?.is_some() => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let _ = child.wait();
+    Ok(())
 }
 
 /// Outcome of an in-flight Connect, including ChatGPT sign-in success.
