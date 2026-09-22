@@ -348,6 +348,7 @@ export type ContextUsage = {
   source: string;
   systemTokens: number;
   conversationTokens: number;
+  toolSchemaTokens: number;
   /** Fresh input on the last measured turn. Zero when `source` is `estimate`. */
   inputTokens: number;
   cacheReadTokens: number;

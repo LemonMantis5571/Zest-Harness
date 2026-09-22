@@ -1,4 +1,4 @@
-export type EffortId = "low" | "medium" | "high" | "xhigh" | "max";
+export type EffortId = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ModelOption = {
   id: string;
@@ -15,6 +15,8 @@ export type EffortOption = {
 /** Display labels only — availability comes from Rust `ProviderView` / `SessionInfo.models`. */
 const MODEL_LABELS: Record<string, { label: string; shortLabel: string }> = {
   "gpt-5.6-sol": { label: "5.6 Sol", shortLabel: "Sol" },
+  "gpt-6-sol": { label: "6 Sol", shortLabel: "Sol" },
+  "gpt-6-luna": { label: "6 Luna", shortLabel: "Luna" },
   "gpt-5.6-terra": { label: "5.6 Terra", shortLabel: "Terra" },
   "gpt-5.6-luna": { label: "5.6 Luna", shortLabel: "Luna" },
   "gpt-5.5": { label: "5.5", shortLabel: "5.5" },
@@ -23,12 +25,15 @@ const MODEL_LABELS: Record<string, { label: string; shortLabel: string }> = {
 };
 
 export const EFFORTS: EffortOption[] = [
+  { id: "none", label: "None", shortLabel: "None" },
   { id: "low", label: "Low", shortLabel: "Low" },
   { id: "medium", label: "Medium", shortLabel: "Med" },
   { id: "high", label: "High", shortLabel: "High" },
   { id: "xhigh", label: "Extra high", shortLabel: "XHigh" },
   { id: "max", label: "Max", shortLabel: "Max" },
 ];
+
+const DEFAULT_EFFORT_IDS: EffortId[] = ["low", "medium", "high", "xhigh", "max"];
 
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 export const DEFAULT_EFFORT: EffortId = "high";
@@ -147,7 +152,7 @@ export function modelPickerGroups(
     const models = modelsForRow(row);
     if (models.length === 0) continue;
     // ChatGPT Codex and Codex CLI advertise the same list. Showing both
-    // stacks the same six models twice; the provider sheet is how you
+    // stacks the same catalogue twice; the provider sheet is how you
     // change the transport.
     if (sameModelCatalogue(currentModels, models)) continue;
     groups.push({
@@ -209,7 +214,7 @@ export function effortsForModel(
   }
   const allowed = spec?.efforts?.length
     ? spec.efforts
-    : EFFORTS.map((e) => e.id);
+    : DEFAULT_EFFORT_IDS;
   return EFFORTS.filter((e) => allowed.includes(e.id));
 }
 

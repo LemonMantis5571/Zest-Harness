@@ -4,6 +4,7 @@ import {
   ChartColumnIcon,
   ChevronRightIcon,
   type LucideIcon,
+  SettingsIcon,
   ServerIcon,
   UserIcon,
   XIcon,
@@ -20,6 +21,10 @@ import { WorkerModelPicker } from "@/components/WorkerModelPicker";
 import { getBackend } from "@/lib/backend";
 import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
+import {
+  setResponseBlockStreaming,
+  useResponseBlockStreaming,
+} from "@/lib/responseStreaming";
 import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 import type {
   ExternalAgentCheck,
@@ -157,6 +162,7 @@ export function SettingsPanel({
   onProfileChange,
 }: Props) {
   const supportsEffort = effortsForModel(session.models, model).length > 0;
+  const responseBlockStreaming = useResponseBlockStreaming();
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   useDialogFocusTrap(open, panelRef);
@@ -505,6 +511,45 @@ export function SettingsPanel({
                 </Button>
               ) : null}
             </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Response display"
+            icon={SettingsIcon}
+            hint={responseBlockStreaming ? "Complete blocks" : "Text as it arrives"}
+          >
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">Stream complete blocks</div>
+                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  Show each paragraph or code block once it is complete.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={responseBlockStreaming}
+                aria-label="Stream responses by complete blocks"
+                title="Stream responses by complete blocks"
+                onClick={() =>
+                  setResponseBlockStreaming(!responseBlockStreaming)
+                }
+                className={cn(
+                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                  responseBlockStreaming ? "bg-primary" : "bg-muted"
+                )}
+              >
+                <span
+                  className={cn(
+                    "pointer-events-none size-4 rounded-full bg-background shadow-sm transition-transform",
+                    responseBlockStreaming ? "translate-x-4" : "translate-x-0"
+                  )}
+                />
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              Turn it off to show text as it arrives.
+            </p>
           </SettingsSection>
 
           <SettingsSection

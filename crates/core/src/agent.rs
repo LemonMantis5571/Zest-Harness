@@ -472,9 +472,8 @@ impl Agent {
     /// Anchored on the provider's own count of the last prompt where there is
     /// one; the estimate supplies only the *delta*. char/4 is far better at "how
     /// much did this shrink" than at "how big is this", and subtracting an
-    /// absolute saving from a measured total is also what handles the estimator's
-    /// blind spot for tool schemas correctly — scaling by a ratio would credit
-    /// the saving against schema bytes that pruning cannot touch.
+    /// absolute saving from a measured total keeps the unchanged system and tool
+    /// schema tokens from being scaled down with the pruned conversation.
     ///
     /// The estimate under-counts tokens in code and JSON, so the projection
     /// over-states what remains and this errs toward still summarizing.
@@ -487,6 +486,7 @@ impl Agent {
             .unwrap_or_else(|| {
                 crate::context_budget::system_tokens(self.system.as_ref())
                     + crate::context_budget::conversation_tokens(&self.messages)
+                    + crate::context_budget::tool_schema_tokens(&self.tools_for_model())
             });
         anchor.saturating_sub(report.tokens_saved_estimate())
             < crate::context_budget::auto_compact_threshold(self.context_window())
@@ -705,6 +705,14 @@ impl Agent {
 
             Self::check_cancel(cancel)?;
 
+            if matches!(completion.stop_reason.as_deref(), Some("end_turn") | None)
+                && !Self::has_assistant_output(&completion.content)
+            {
+                return Err(HarnessError::Other(
+                    "provider returned an empty assistant response".into(),
+                ));
+            }
+
             // Echo the assistant turn back verbatim — thinking signatures and
             // tool_use blocks both have to survive intact.
             staged.push(Message::assistant(completion.content.clone()));
@@ -720,6 +728,11 @@ impl Agent {
                 }
 
                 Some("tool_use") => {
+                    if Self::has_malformed_tool_input(&completion.content) {
+                        return Err(HarnessError::Other(
+                            "provider returned non-object arguments for a tool call".into(),
+                        ));
+                    }
                     let calls = tool_uses(&completion.content);
                     if calls.is_empty() {
                         return Err(HarnessError::Other(
@@ -824,12 +837,32 @@ impl Agent {
         }
     }
 
+    fn has_assistant_output(content: &[serde_json::Value]) -> bool {
+        content.iter().any(
+            |block| match block.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty()),
+                Some("thinking" | "redacted_thinking") | None => false,
+                Some(_) => true,
+            },
+        )
+    }
+
+    fn has_malformed_tool_input(content: &[serde_json::Value]) -> bool {
+        content.iter().any(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                && !block.get("input").is_some_and(|input| input.is_object())
+        })
+    }
+
     /// Return only the tools the selected model advertises support for.
     ///
     /// Provider implementations still own the final wire conversion. This
     /// small gate keeps the agent loop from asking a text-only model to reason
     /// about a function schema it cannot use.
-    fn tools_for_model(&self) -> Vec<crate::anthropic::types::ToolDef> {
+    pub fn tools_for_model(&self) -> Vec<crate::anthropic::types::ToolDef> {
         let supports_tools = self
             .provider
             .models()
@@ -1430,6 +1463,38 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn empty_provider_responses_are_not_assistant_output() {
+        assert!(!Agent::has_assistant_output(&[]));
+        assert!(!Agent::has_assistant_output(&[json!({
+            "type": "text",
+            "text": "  "
+        })]));
+        assert!(Agent::has_assistant_output(&[json!({
+            "type": "text",
+            "text": "answer"
+        })]));
+        assert!(Agent::has_assistant_output(&[json!({"type":"tool_use"})]));
+        assert!(Agent::has_assistant_output(&[
+            json!({"type":"server_tool_use"})
+        ]));
+    }
+
+    #[test]
+    fn tool_calls_require_object_arguments() {
+        assert!(Agent::has_malformed_tool_input(&[json!({
+            "type": "tool_use",
+            "input": null
+        })]));
+        assert!(Agent::has_malformed_tool_input(&[
+            json!({"type":"tool_use"})
+        ]));
+        assert!(!Agent::has_malformed_tool_input(&[json!({
+            "type": "tool_use",
+            "input": {}
+        })]));
+    }
 
     struct FakeProvider {
         calls: AtomicUsize,

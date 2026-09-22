@@ -1,14 +1,13 @@
 //! Context-window occupancy for the chat chrome.
 //!
 //! Honest labels: the provider's own count of the whole prompt when it reported
-//! one, otherwise a char/4 estimate over system + conversation (no tool-schema
-//! stringify). The arithmetic itself lives in [`zest_core::context_budget`],
-//! because compaction has to reach the same answer.
+//! one, otherwise a char/4 estimate over system, conversation, and tool
+//! schemas. The arithmetic lives in core so compaction uses the same estimate.
 
 use serde::Serialize;
 use zest_core::context_budget::{
-    auto_compaction_due, conversation_tokens, system_tokens, AUTO_COMPACT_THRESHOLD_PERCENT,
-    MIN_COMPACTION_CONVERSATION_TOKENS,
+    auto_compaction_due, conversation_tokens, system_tokens, tool_schema_tokens,
+    AUTO_COMPACT_THRESHOLD_PERCENT, MIN_COMPACTION_CONVERSATION_TOKENS,
 };
 use zest_core::{Agent, Usage};
 
@@ -23,6 +22,8 @@ pub struct ContextUsageView {
     pub source: String,
     pub system_tokens: u64,
     pub conversation_tokens: u64,
+    /// Estimate for tool definitions sent with the selected model.
+    pub tool_schema_tokens: u64,
     /// Fresh input on the last measured turn. Zero when `source` is `estimate`.
     pub input_tokens: u64,
     /// Prompt the provider served from its cache on the last measured turn.
@@ -72,10 +73,11 @@ pub fn estimate_context(agent: &Agent, checkpoint_count: usize) -> ContextUsageV
     let window = agent.context_window();
     let system_tokens = system_tokens(agent.system.as_ref());
     let conversation_tokens = conversation_tokens(&agent.messages);
+    let tool_schema_tokens = tool_schema_tokens(&agent.tools_for_model());
 
     let (used, source) = used_tokens(
         agent.last_usage.as_ref(),
-        system_tokens + conversation_tokens,
+        system_tokens + conversation_tokens + tool_schema_tokens,
     );
     let measured = agent.last_usage.as_ref().filter(|_| source == "last_turn");
 
@@ -103,6 +105,7 @@ pub fn estimate_context(agent: &Agent, checkpoint_count: usize) -> ContextUsageV
         source: source.into(),
         system_tokens,
         conversation_tokens,
+        tool_schema_tokens,
         input_tokens: measured.map_or(0, |u| u64::from(u.input_tokens)),
         cache_read_tokens: measured.map_or(0, |u| u64::from(u.cache_read_input_tokens)),
         cache_write_tokens: measured.map_or(0, |u| u64::from(u.cache_creation_input_tokens)),

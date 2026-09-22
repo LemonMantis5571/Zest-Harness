@@ -2032,6 +2032,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         source: "last_turn",
         systemTokens: 3200,
         conversationTokens: 8800,
+        toolSchemaTokens: 0,
         // A measured turn, so the three columns sum to usedTokens. Cache-heavy on
         // purpose: that is what a real session looks like, and it is the shape
         // that used to read as an almost-empty window.

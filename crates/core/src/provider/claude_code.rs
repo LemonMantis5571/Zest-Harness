@@ -454,6 +454,8 @@ impl Provider for ClaudeCodeProvider {
             return Err(HarnessError::Cancelled);
         }
 
+        ensure_finished_stream(&normalizer)?;
+
         // Resuming into a conversation the CLI substituted would answer from a
         // history nobody asked for, so the session is not carried forward.
         if matches!(
@@ -480,21 +482,8 @@ impl Provider for ClaudeCodeProvider {
         if answer.trim().is_empty() {
             // Tag these so the desktop shows Claude's words. `Other` is
             // treated as internal and becomes "Try again."
-            if let Some(error) = normalizer.result_error() {
-                return Err(HarnessError::from_provider_stream("claude_code", error));
-            }
             if let Some(error) = run.errors().first() {
                 return Err(HarnessError::from_provider_stream("claude_code", *error));
-            }
-            // "No answer" and "stopped before answering" are different failures
-            // and want different next steps, so they should not read the same.
-            // The stream always ends in a `result` record when the turn really
-            // finished; reaching here without one means the CLI stopped early.
-            if !normalizer.has_finish() {
-                return Err(HarnessError::from_provider_stream(
-                    "claude_code",
-                    "Claude Code stopped before finishing this turn.",
-                ));
             }
             return Err(HarnessError::from_provider_stream(
                 "claude_code",
@@ -531,6 +520,19 @@ impl Provider for ClaudeCodeProvider {
             provider_session: session,
         })
     }
+}
+
+fn ensure_finished_stream(normalizer: &ClaudeNormalizer) -> Result<()> {
+    if !normalizer.has_finish() {
+        return Err(HarnessError::from_provider_stream(
+            "claude_code",
+            "Claude Code stopped before finishing this turn.",
+        ));
+    }
+    if let Some(error) = normalizer.result_error() {
+        return Err(HarnessError::from_provider_stream("claude_code", error));
+    }
+    Ok(())
 }
 
 /// Opt-in diagnostics, matching the ACP timing switch: no prompts, no output
@@ -845,6 +847,23 @@ mod tests {
             !interactive.contains("{prompt}"),
             "stream-json input carries the prompt on stdin, not argv: {interactive}"
         );
+    }
+
+    #[test]
+    fn a_nonempty_partial_stream_requires_a_result_record() {
+        let normalizer = ClaudeNormalizer::new(".");
+        assert!(ensure_finished_stream(&normalizer).is_err());
+    }
+
+    #[test]
+    fn a_result_error_is_not_hidden_by_partial_text() {
+        let mut normalizer = ClaudeNormalizer::new(".");
+        normalizer.normalize(&serde_json::json!({
+            "type": "result",
+            "is_error": true,
+            "result": "provider failed"
+        }));
+        assert!(ensure_finished_stream(&normalizer).is_err());
     }
 
     /// The provider used to collapse every mode except `plan` onto `default`,

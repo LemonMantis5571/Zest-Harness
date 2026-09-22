@@ -143,6 +143,10 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
             <span className="font-mono tabular-nums">
               {formatTokens(usage.conversationTokens)}
             </span>
+            <span className="text-muted-foreground">Tool schemas</span>
+            <span className="font-mono tabular-nums">
+              {formatTokens(usage.toolSchemaTokens)}
+            </span>
             <span className="text-muted-foreground">Messages</span>
             <span className="font-mono tabular-nums">{usage.messageCount}</span>
             <span className="text-muted-foreground">Checkpoints</span>

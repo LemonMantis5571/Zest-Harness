@@ -29,6 +29,7 @@ use rig_core::completion::CompletionRequest;
 use rig_core::providers::chatgpt::{ChatGPTAuth, ChatGPTBuilder};
 use rig_core::streaming::StreamedAssistantContent;
 use serde_json::json;
+use std::time::Duration;
 
 use super::rig_convert::{from_rig_content, to_rig_history, to_rig_tools};
 use super::{Completion, StreamEvent, TurnRequest};
@@ -36,6 +37,8 @@ use crate::anthropic::types::Usage;
 use crate::cancel::wait_cancel;
 use crate::codex_oauth::CodexOAuthSession;
 use crate::error::{HarnessError, Result};
+
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Run one turn and stream it back as Zest events.
 ///
@@ -89,34 +92,57 @@ pub async fn stream_turn(
         record_telemetry_content: false,
     };
 
-    let mut stream = model
-        .stream(request)
-        .await
-        .map_err(|error| HarnessError::Other(format!("ChatGPT stream: {error}")))?;
+    let mut stream = tokio::select! {
+        biased;
+        _ = wait_cancel(req.cancel.as_ref()) => return Err(HarnessError::Cancelled),
+        result = tokio::time::timeout(STREAM_IDLE_TIMEOUT, model.stream(request)) => {
+            result
+                .map_err(|_| HarnessError::StreamIdleTimeout)?
+                .map_err(|error| HarnessError::Other(format!("ChatGPT stream: {error}")))?
+        }
+    };
 
     let mut usage = Usage::default();
     let mut usage_available = false;
     let mut stop_reason: Option<String> = None;
     let mut served_model: Option<String> = None;
+    let mut saw_final = false;
+    let mut last_progress = tokio::time::Instant::now();
 
     loop {
+        let idle_remaining = STREAM_IDLE_TIMEOUT.saturating_sub(last_progress.elapsed());
+        if idle_remaining.is_zero() {
+            return Err(HarnessError::StreamIdleTimeout);
+        }
         let next = tokio::select! {
             biased;
             _ = wait_cancel(req.cancel.as_ref()) => return Err(HarnessError::Cancelled),
             next = stream.next() => next,
+            _ = tokio::time::sleep(idle_remaining) => {
+                return Err(HarnessError::StreamIdleTimeout);
+            }
         };
         let Some(item) = next else { break };
         let item = item.map_err(|error| HarnessError::Other(format!("ChatGPT stream: {error}")))?;
 
         match item {
-            StreamedAssistantContent::Text(text) => on_event(StreamEvent::Text(&text.text)),
+            StreamedAssistantContent::Text(text) => {
+                if !text.text.is_empty() {
+                    last_progress = tokio::time::Instant::now();
+                    on_event(StreamEvent::Text(&text.text));
+                }
+            }
             StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                on_event(StreamEvent::Thinking(&reasoning))
+                if !reasoning.is_empty() {
+                    last_progress = tokio::time::Instant::now();
+                    on_event(StreamEvent::Thinking(&reasoning));
+                }
             }
             // The completed call is where the provider-issued id lands, and the
             // UI row has to carry that id: `agent.rs` matches the tool result
             // against it and so does the next request.
             StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                last_progress = tokio::time::Instant::now();
                 let id = tool_call
                     .provider
                     .as_ref()
@@ -128,25 +154,39 @@ pub async fn stream_turn(
                 });
             }
             StreamedAssistantContent::Final(final_record) => {
+                saw_final = true;
                 usage = map_usage(&final_record.usage);
                 usage_available = true;
                 stop_reason = final_record.finish_reason.as_ref().map(stop_reason_of);
                 served_model = final_record.model.clone();
+                break;
             }
             // Reasoning replaces its deltas rather than adding to them, and the
             // aggregated `choice` already applies that. Emitting here would
             // duplicate the text the deltas already streamed.
-            StreamedAssistantContent::Reasoning { .. } => {}
+            StreamedAssistantContent::Reasoning { reasoning, .. } => {
+                if !reasoning.is_empty() {
+                    last_progress = tokio::time::Instant::now();
+                }
+            }
             // Partial tool arguments. The UI row opens on the completed call,
             // so there is nothing to show yet.
-            StreamedAssistantContent::ToolCallDelta { .. } => {}
+            StreamedAssistantContent::ToolCallDelta { .. } => {
+                last_progress = tokio::time::Instant::now();
+            }
             // A provider-native item Rig does not model. It is deliberately not
             // added to the accumulated turn, so there is nothing to persist.
             StreamedAssistantContent::Unknown(_) => {}
         }
     }
 
+    ensure_final_record(saw_final)?;
     let content = from_rig_content(&stream.choice);
+    if content.is_empty() {
+        return Err(HarnessError::Other(
+            "ChatGPT stream returned no assistant content".into(),
+        ));
+    }
 
     // `agent.rs` drives its loop off this: `tool_use` means run the tools and
     // come back, anything else ends the turn. A provider that reported no
@@ -174,6 +214,14 @@ pub async fn stream_turn(
 }
 
 /// Rig's finish reason as the `stop_reason` string `agent.rs` matches on.
+fn ensure_final_record(saw_final: bool) -> Result<()> {
+    if saw_final {
+        Ok(())
+    } else {
+        Err(HarnessError::PrematureEof)
+    }
+}
+
 fn stop_reason_of(reason: &rig_core::completion::FinishReason) -> String {
     use rig_core::completion::FinishReason;
     match reason {
@@ -200,5 +248,19 @@ fn map_usage(usage: &rig_core::completion::Usage) -> Usage {
         output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: cached,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_without_a_final_record_is_not_a_completed_turn() {
+        assert!(matches!(
+            ensure_final_record(false),
+            Err(HarnessError::PrematureEof)
+        ));
+        assert!(ensure_final_record(true).is_ok());
     }
 }

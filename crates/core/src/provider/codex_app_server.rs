@@ -986,14 +986,24 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
         .into_iter()
         .filter_map(|item| {
             let id = string_field(&item, &["id", "model"])?;
-            let efforts = item
+            let efforts = match item
                 .get("supportedReasoningEfforts")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
+            {
+                Some(efforts) => efforts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                None if matches!(id.as_str(), "gpt-6-sol" | "gpt-6-luna") => {
+                    super::default_efforts_for_model(&id)
+                }
+                None => Vec::new(),
+            };
+            let supports_vision = item
+                .get("supportsVision")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| super::model_supports_vision(&id));
             Some(ModelSpec {
                 context_window: item
                     .get("contextWindow")
@@ -1002,7 +1012,7 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
                 id,
                 efforts,
                 supports_tools: true,
-                supports_vision: false,
+                supports_vision,
             })
         })
         .collect::<Vec<_>>();
@@ -1014,13 +1024,10 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
             0,
             ModelSpec {
                 id: default_model.to_string(),
-                efforts: super::STANDARD_EFFORTS
-                    .iter()
-                    .map(|effort| (*effort).into())
-                    .collect(),
+                efforts: super::default_efforts_for_model(default_model),
                 context_window: super::context_window_for_model(default_model),
                 supports_tools: true,
-                supports_vision: false,
+                supports_vision: super::model_supports_vision(default_model),
             },
         );
     }

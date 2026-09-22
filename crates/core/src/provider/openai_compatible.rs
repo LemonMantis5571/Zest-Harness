@@ -209,8 +209,10 @@ impl OpenAiCompatibleClient {
         let mut parser = SseParser::default();
         let mut body = response.bytes_stream();
         let mut accumulator = OpenAiAccumulator::default();
+        let mut last_progress = tokio::time::Instant::now();
 
         loop {
+            let idle_deadline = last_progress + STREAM_IDLE_TIMEOUT;
             tokio::select! {
                 biased;
                 _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
@@ -222,14 +224,16 @@ impl OpenAiCompatibleClient {
                                 break;
                             }
                             let event: Value = serde_json::from_str(&payload)?;
-                            accumulator.push(&event, on_event)?;
+                            if accumulator.push(&event, on_event)? {
+                                last_progress = tokio::time::Instant::now();
+                            }
                         }
                         if accumulator.done { break; }
                     }
                     Some(Err(error)) => return Err(error.into()),
                     None => break,
                 },
-                _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                _ = tokio::time::sleep_until(idle_deadline) => {
                     return Err(HarnessError::StreamIdleTimeout);
                 }
             }
@@ -238,7 +242,7 @@ impl OpenAiCompatibleClient {
         if !accumulator.done {
             return Err(HarnessError::PrematureEof);
         }
-        Ok(accumulator.finish(limits))
+        accumulator.finish(limits)
     }
 
     async fn send_once(
@@ -284,6 +288,7 @@ struct ToolAccum {
     id: String,
     name: String,
     arguments: String,
+    saw_arguments: bool,
     emitted: bool,
 }
 
@@ -292,7 +297,7 @@ impl OpenAiAccumulator {
         &mut self,
         event: &Value,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if let Some(error) = event.get("error") {
             let message = error
                 .get("message")
@@ -362,7 +367,7 @@ impl OpenAiAccumulator {
             .and_then(Value::as_array)
             .and_then(|c| c.first())
         else {
-            return Ok(());
+            return Ok(false);
         };
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.stop_reason = Some(
@@ -375,25 +380,45 @@ impl OpenAiAccumulator {
             );
         }
         let Some(delta) = choice.get("delta") else {
-            return Ok(());
+            return Ok(false);
         };
+        let mut progressed = false;
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
             self.text.push_str(text);
-            on_event(StreamEvent::Text(text));
+            if !text.is_empty() {
+                progressed = true;
+                on_event(StreamEvent::Text(text));
+            }
         }
+        progressed |= ["reasoning", "reasoning_content", "analysis"]
+            .iter()
+            .filter_map(|field| delta.get(*field).and_then(Value::as_str))
+            .any(|text| !text.is_empty());
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let tool = self.tools.entry(index).or_default();
                 if let Some(id) = call.get("id").and_then(Value::as_str) {
                     tool.id.push_str(id);
+                    progressed |= !id.is_empty();
                 }
                 if let Some(function) = call.get("function") {
                     if let Some(name) = function.get("name").and_then(Value::as_str) {
                         tool.name.push_str(name);
+                        progressed |= !name.is_empty();
                     }
-                    if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                    if let Some(raw_arguments) = function.get("arguments") {
+                        let Some(arguments) = raw_arguments.as_str() else {
+                            return Err(HarnessError::Stream {
+                                kind: "malformed_tool_input".into(),
+                                message:
+                                    "OpenAI-compatible tool arguments must arrive as JSON text"
+                                        .into(),
+                            });
+                        };
+                        tool.saw_arguments = true;
                         tool.arguments.push_str(arguments);
+                        progressed |= !arguments.is_empty();
                     }
                 }
                 if !tool.emitted && !tool.id.is_empty() && !tool.name.is_empty() {
@@ -405,19 +430,41 @@ impl OpenAiAccumulator {
                 }
             }
         }
-        Ok(())
+        Ok(progressed)
     }
 
-    fn finish(self, limits: Option<RateLimitSnapshot>) -> Completion {
+    fn finish(self, limits: Option<RateLimitSnapshot>) -> Result<Completion> {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(json!({"type":"text", "text": self.text}));
         }
         for tool in self.tools.into_values() {
-            let input = serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}));
+            if tool.id.trim().is_empty() || tool.name.trim().is_empty() {
+                return Err(HarnessError::Stream {
+                    kind: "incomplete_tool_call".into(),
+                    message: "OpenAI-compatible stream ended with an incomplete tool call".into(),
+                });
+            }
+            if !tool.saw_arguments || tool.arguments.trim().is_empty() {
+                return Err(HarnessError::Stream {
+                    kind: "incomplete_tool_call".into(),
+                    message: "OpenAI-compatible stream ended before tool arguments arrived".into(),
+                });
+            }
+            let input: Value =
+                serde_json::from_str(&tool.arguments).map_err(|error| HarnessError::Stream {
+                    kind: "malformed_tool_input".into(),
+                    message: format!("OpenAI-compatible tool arguments are invalid JSON: {error}"),
+                })?;
+            if !input.is_object() {
+                return Err(HarnessError::Stream {
+                    kind: "malformed_tool_input".into(),
+                    message: "OpenAI-compatible tool arguments must be a JSON object".into(),
+                });
+            }
             content.push(json!({"type":"tool_use", "id":tool.id, "name":tool.name, "input":input}));
         }
-        Completion {
+        Ok(Completion {
             content,
             stop_reason: self.stop_reason,
             usage: self.usage,
@@ -425,7 +472,7 @@ impl OpenAiAccumulator {
             limits,
             served_model: self.served_model,
             provider_session: None,
-        }
+        })
     }
 }
 
@@ -641,7 +688,7 @@ mod tests {
         };
         accumulator.push(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}), &mut sink).unwrap();
         accumulator.push(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"README.md\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}), &mut sink).unwrap();
-        let completion = accumulator.finish(None);
+        let completion = accumulator.finish(None).unwrap();
         assert_eq!(events, vec!["read"]);
         assert_eq!(completion.stop_reason.as_deref(), Some("tool_use"));
         assert!(completion.usage_available);
@@ -671,7 +718,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            accumulator.finish(None).served_model.as_deref(),
+            accumulator.finish(None).unwrap().served_model.as_deref(),
             Some("deepseek-v4-flash")
         );
     }
@@ -684,13 +731,89 @@ mod tests {
         accumulator
             .push(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut sink)
             .unwrap();
-        assert_eq!(accumulator.finish(None).served_model, None);
+        assert_eq!(accumulator.finish(None).unwrap().served_model, None);
 
         // An empty string is silence too, not a model named "".
         let mut blank = OpenAiAccumulator::default();
         blank
             .push(&json!({"model":"  ","choices":[{"delta":{}}]}), &mut sink)
             .unwrap();
-        assert_eq!(blank.finish(None).served_model, None);
+        assert_eq!(blank.finish(None).unwrap().served_model, None);
+    }
+
+    #[test]
+    fn malformed_tool_arguments_fail_instead_of_becoming_an_empty_object() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        accumulator
+            .push(
+                &json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{"}}]}}]}),
+                &mut sink,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            accumulator.finish(None),
+            Err(HarnessError::Stream { kind, .. }) if kind == "malformed_tool_input"
+        ));
+    }
+
+    #[test]
+    fn null_tool_arguments_are_rejected() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        let result = accumulator.push(
+            &json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":null}}]}}]}),
+            &mut sink,
+        );
+
+        assert!(matches!(
+            result,
+            Err(HarnessError::Stream { kind, .. }) if kind == "malformed_tool_input"
+        ));
+    }
+
+    #[test]
+    fn keepalive_events_do_not_count_as_stream_progress() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        assert!(!accumulator
+            .push(&json!({"choices": []}), &mut sink)
+            .unwrap());
+        assert!(!accumulator
+            .push(&json!({"choices": [{"delta": {"content": ""}}]}), &mut sink)
+            .unwrap());
+        assert!(accumulator
+            .push(
+                &json!({"choices": [{"delta": {"content": "hello"}}]}),
+                &mut sink
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn empty_or_missing_tool_arguments_are_incomplete() {
+        for arguments in [None, Some("")] {
+            let mut accumulator = OpenAiAccumulator::default();
+            let mut sink = |_: StreamEvent<'_>| {};
+            let mut function = serde_json::Map::new();
+            function.insert("name".into(), json!("read_file"));
+            if let Some(arguments) = arguments {
+                function.insert("arguments".into(), json!(arguments));
+            }
+            accumulator
+                .push(
+                    &json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":function}]}}]}),
+                    &mut sink,
+                )
+                .unwrap();
+
+            assert!(matches!(
+                accumulator.finish(None),
+                Err(HarnessError::Stream { kind, .. }) if kind == "incomplete_tool_call"
+            ));
+        }
     }
 }

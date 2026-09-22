@@ -10,7 +10,8 @@ import { ZoomableImage } from "@/components/ZoomableImage";
 import { safeHttpUrl } from "@/lib/externalLinks";
 import { linkClassName } from "@/lib/linkify";
 import { hoistLocalImages } from "@/lib/localImagePath";
-import { splitBlocks } from "@/lib/markdownBlocks";
+import { splitRenderableBlocks } from "@/lib/markdownBlocks";
+import { useResponseBlockStreaming } from "@/lib/responseStreaming";
 import { cn } from "@/lib/utils";
 
 function codeText(children: ReactNode): string {
@@ -187,8 +188,9 @@ type Props = {
  * One top-level markdown block.
  *
  * Memoized separately from its neighbours: while a message streams, only its
- * trailing block changes, so every settled block above skips re-parsing
- * entirely. That is the difference between O(n²) and O(n) over a long answer.
+ * trailing block changes. In block-streaming mode that unfinished tail stays
+ * buffered, so each visible block is settled and skips later re-parsing. That
+ * is the difference between O(n²) and O(n) over a long answer.
  */
 const Block = memo(function Block({ text, streaming }: { text: string; streaming: boolean }) {
   const components = streaming ? STREAMING_COMPONENTS : STATIC_COMPONENTS;
@@ -218,9 +220,11 @@ export const Markdown = memo(function Markdown({
   className,
   streaming = false,
 }: Props) {
+  const blockStreaming = useResponseBlockStreaming();
+  const holdIncompleteTail = streaming && blockStreaming;
   const blocks = useMemo(
-    () => splitBlocks(hoistLocalImages(children)),
-    [children]
+    () => splitRenderableBlocks(hoistLocalImages(children), holdIncompleteTail),
+    [children, holdIncompleteTail]
   );
 
   return (
@@ -231,7 +235,11 @@ export const Markdown = memo(function Markdown({
       )}
     >
       {blocks.map((block) => (
-        <Block key={block.key} text={block.text} streaming={streaming} />
+        <Block
+          key={block.key}
+          text={block.text}
+          streaming={streaming && !blockStreaming}
+        />
       ))}
     </div>
   );

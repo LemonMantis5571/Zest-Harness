@@ -147,7 +147,8 @@ fn heuristic_context_window(model: &str) -> u64 {
         // worse than compacting a little early on a direct Grok endpoint.
         return GROK_WINDOW;
     }
-    if model.contains("gpt-5.6")
+    if model.contains("gpt-6")
+        || model.contains("gpt-5.6")
         || model.contains("gpt-5.5")
         || (model.contains("gpt-5.4") && !model.contains("mini") && !model.contains("nano"))
     {
@@ -170,13 +171,21 @@ fn heuristic_context_window(model: &str) -> u64 {
 }
 
 fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
+    let supports_vision = model_supports_vision(&id);
     ModelSpec {
         context_window: context_window_for_model(&id),
         id,
         efforts,
         supports_tools: true,
-        supports_vision: false,
+        supports_vision,
     }
+}
+
+pub(super) fn model_supports_vision(model_id: &str) -> bool {
+    matches!(
+        model_id.to_ascii_lowercase().as_str(),
+        "gpt-6-sol" | "gpt-6-luna"
+    )
 }
 
 /// Static catalogue a provider exposes for pickers and session validation.
@@ -222,7 +231,7 @@ pub fn thread_provider_handoff(
 /// Normalize UI / env effort aliases to the wire form.
 pub fn normalize_effort(effort: &str) -> String {
     match effort.trim().to_ascii_lowercase().as_str() {
-        "low" | "medium" | "high" | "xhigh" | "max" => effort.trim().to_ascii_lowercase(),
+        "none" | "low" | "medium" | "high" | "xhigh" | "max" => effort.trim().to_ascii_lowercase(),
         "extra" | "extra high" | "extra_high" => "xhigh".into(),
         "med" => "medium".into(),
         _ => "high".into(),
@@ -234,6 +243,8 @@ pub fn normalize_effort(effort: &str) -> String {
 /// Mirrors the desktop picker (`CODEX_MODELS` in the UI). Keep these in sync.
 pub const CODEX_KNOWN_MODELS: &[&str] = &[
     "gpt-5.6-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
@@ -256,13 +267,26 @@ pub enum EffortPolicy<'a> {
 }
 
 impl EffortPolicy<'_> {
-    fn levels(self) -> Vec<String> {
+    fn levels(self, model_id: &str) -> Vec<String> {
         match self {
             Self::Unsupported => Vec::new(),
-            Self::Standard([]) => STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect(),
+            Self::Standard([]) => default_efforts_for_model(model_id),
             Self::Standard(allowed) => allowed.to_vec(),
         }
     }
+}
+
+/// Standard reasoning levels, including `none` only for models that publish it.
+pub(super) fn default_efforts_for_model(model_id: &str) -> Vec<String> {
+    let mut levels = Vec::with_capacity(STANDARD_EFFORTS.len() + 1);
+    if matches!(
+        model_id.to_ascii_lowercase().as_str(),
+        "gpt-6-sol" | "gpt-6-luna"
+    ) {
+        levels.push("none".to_string());
+    }
+    levels.extend(STANDARD_EFFORTS.iter().map(|level| (*level).to_string()));
+    levels
 }
 
 /// The one catalogue builder.
@@ -282,7 +306,6 @@ pub fn catalogue(
     builtin: &[&str],
     efforts: EffortPolicy<'_>,
 ) -> Vec<ModelSpec> {
-    let levels = efforts.levels();
     let mut ids: Vec<String> = if !models.is_empty() {
         models.to_vec()
     } else if !builtin.is_empty() {
@@ -294,7 +317,10 @@ pub fn catalogue(
         ids.insert(0, default_model.to_string());
     }
     ids.into_iter()
-        .map(|id| model_spec(id, levels.clone()))
+        .map(|id| {
+            let levels = efforts.levels(&id);
+            model_spec(id, levels)
+        })
         .collect()
 }
 

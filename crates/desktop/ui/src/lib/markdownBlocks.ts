@@ -21,6 +21,8 @@ export type MarkdownBlock = {
   text: string;
 };
 
+type ParsedMarkdownBlock = MarkdownBlock & { complete: boolean };
+
 const FENCE = /^[ \t]{0,3}(`{3,}|~{3,})/;
 const LIST_ITEM = /^[ \t]{0,3}([-*+]|\d{1,9}[.)])[ \t]/;
 
@@ -37,31 +39,29 @@ function isContinuation(line: string, inList: boolean): boolean {
 }
 
 /**
- * Split `text` into renderable blocks.
+ * Parse `text` into blocks and mark which blocks have a real closing boundary.
  *
  * Guarantees the property the memoization depends on: for append-only growth,
  * every block except the last is byte-identical to the block at the same index
  * in the shorter text. So block `key` can be the index — earlier blocks keep
  * both their identity and their content, and React skips them entirely.
  *
- * The one exception is deliberate: while a code fence is open, everything from
- * the fence onward is a single block that grows until the fence closes. It has
- * to re-render, because an unterminated fence is not the same document as a
- * terminated one.
+ * While a code fence is open, everything from the fence onward is a single
+ * incomplete block that grows until its closing fence arrives.
  */
-export function splitBlocks(text: string): MarkdownBlock[] {
+function parseBlocks(text: string): ParsedMarkdownBlock[] {
   if (!text) return [];
 
   const lines = text.split("\n");
-  const blocks: MarkdownBlock[] = [];
+  const blocks: ParsedMarkdownBlock[] = [];
   let current: string[] = [];
   let fence: string | null = null;
   let inList = false;
 
-  const flush = () => {
+  const flush = (complete: boolean) => {
     if (current.length === 0) return;
     const body = current.join("\n");
-    if (body.trim()) blocks.push({ key: blocks.length, text: body });
+    if (body.trim()) blocks.push({ key: blocks.length, text: body, complete });
     current = [];
     inList = false;
   };
@@ -75,6 +75,7 @@ export function splitBlocks(text: string): MarkdownBlock[] {
       const close = FENCE.exec(line);
       if (close && close[1][0] === fence[0] && close[1].length >= fence.length) {
         fence = null;
+        flush(true);
       }
       continue;
     }
@@ -83,7 +84,7 @@ export function splitBlocks(text: string): MarkdownBlock[] {
     if (open) {
       // A fence starts its own block, so the settled text before it can be
       // memoized while the code inside is still arriving.
-      flush();
+      flush(true);
       fence = open[1];
       current.push(line);
       continue;
@@ -104,7 +105,7 @@ export function splitBlocks(text: string): MarkdownBlock[] {
         current.push(line);
         continue;
       }
-      flush();
+      flush(true);
       continue;
     }
 
@@ -112,6 +113,22 @@ export function splitBlocks(text: string): MarkdownBlock[] {
     current.push(line);
   }
 
-  flush();
+  const endsParagraph = /(?:\r?\n){2,}[ \t\r\n]*$/.test(text);
+  flush(endsParagraph && !inList && !fence);
   return blocks;
+}
+
+/** Split markdown into stable blocks and mark whether the final one is closed. */
+export function splitBlocks(text: string): MarkdownBlock[] {
+  return parseBlocks(text).map(({ key, text: body }) => ({ key, text: body }));
+}
+
+/** Hide an unfinished trailing block while a response is streaming. */
+export function splitRenderableBlocks(
+  text: string,
+  holdIncompleteTail: boolean
+): MarkdownBlock[] {
+  return parseBlocks(text)
+    .filter((block) => !holdIncompleteTail || block.complete)
+    .map(({ key, text: body }) => ({ key, text: body }));
 }
