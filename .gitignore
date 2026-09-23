@@ -82,6 +82,36 @@ Desktop.ini
 # --- Scratch / local experiments ---
 # ACP probe transcripts: local captures that quote workspace content.
 /outputs/acp-probe/
+# Generated media does not belong in output reports. Intentional app/document
+# assets belong in the relevant assets/ or docs/ directory and need review.
+/outputs/**/*.aac
+/outputs/**/*.aif
+/outputs/**/*.aiff
+/outputs/**/*.avif
+/outputs/**/*.avi
+/outputs/**/*.bmp
+/outputs/**/*.flac
+/outputs/**/*.gif
+/outputs/**/*.heic
+/outputs/**/*.heif
+/outputs/**/*.jpeg
+/outputs/**/*.jpg
+/outputs/**/*.m4a
+/outputs/**/*.m4v
+/outputs/**/*.mkv
+/outputs/**/*.mov
+/outputs/**/*.mp3
+/outputs/**/*.mp4
+/outputs/**/*.mpeg
+/outputs/**/*.mpg
+/outputs/**/*.ogg
+/outputs/**/*.png
+/outputs/**/*.tif
+/outputs/**/*.tiff
+/outputs/**/*.wav
+/outputs/**/*.webm
+/outputs/**/*.webp
+/outputs/**/*.wmv
 /tmp/
 *.log
 *.tmp

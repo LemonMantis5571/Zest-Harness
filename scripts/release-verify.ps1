@@ -50,6 +50,14 @@ Step "toolchain check" {
   }
 }
 
+Step "output artifact policy tests" {
+  node --test ./scripts/check-output-artifacts.test.mjs
+}
+
+Step "output artifact policy" {
+  node ./scripts/check-output-artifacts.mjs
+}
+
 Step "npm ci" {
   npm ci --no-fund --no-audit
 }

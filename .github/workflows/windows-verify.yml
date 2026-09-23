@@ -7,9 +7,19 @@ on:
 
 jobs:
   verify:
+    name: Windows full verify
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check PR output artifacts across commits
+        if: github.event_name == 'pull_request'
+        env:
+          OUTPUT_POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          OUTPUT_POLICY_HEAD_SHA: ${{ github.sha }}
+        run: node ./scripts/check-output-artifacts.mjs --range "$env:OUTPUT_POLICY_BASE_SHA" "$env:OUTPUT_POLICY_HEAD_SHA"
 
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@master

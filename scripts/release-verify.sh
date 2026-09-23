@@ -124,6 +124,8 @@ npm_audit() {
 }
 
 step "toolchain check" check_toolchain
+step "output artifact policy tests" node --test ./scripts/check-output-artifacts.test.mjs
+step "output artifact policy" node ./scripts/check-output-artifacts.mjs
 step "npm ci" npm ci --no-fund --no-audit
 step "binding drift (ts-rs)" check_bindings
 step "ui test" npm run ui:test
