@@ -19,8 +19,13 @@ test("search, model and effort lists support keyboard navigation and restore foc
   await page.keyboard.press("ArrowDown");
   await expect(models.nth(1)).toBeFocused();
   await expect(trigger).toHaveText("5.6 Sol");
+  await page.getByRole("searchbox").fill("5.6 Terra");
+  const terra = page.getByRole("listbox", { name: "Model", exact: true }).getByRole("option");
+  await expect(terra).toHaveCount(1);
+  await page.keyboard.press("ArrowDown");
+  await expect(terra).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(models.nth(1)).toBeDisabled();
+  await expect(terra).toBeDisabled();
   const efforts = page.getByRole("listbox", { name: "Effort" }).getByRole("option");
   await expect(efforts.getByText("High", { exact: true })).toBeVisible();
   await expect(efforts.nth(2)).toBeFocused();

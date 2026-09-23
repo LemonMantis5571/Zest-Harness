@@ -165,7 +165,7 @@ pub async fn stream_turn(
             // aggregated `choice` already applies that. Emitting here would
             // duplicate the text the deltas already streamed.
             StreamedAssistantContent::Reasoning { reasoning, .. } => {
-                if !reasoning.is_empty() {
+                if !reasoning.content.is_empty() {
                     last_progress = tokio::time::Instant::now();
                 }
             }

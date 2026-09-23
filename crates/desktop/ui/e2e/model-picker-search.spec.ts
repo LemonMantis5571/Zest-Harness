@@ -5,7 +5,9 @@ test("search preserves selection, exposes capabilities and has a clear empty sta
   const trigger = page.getByTitle("Select model", { exact: true });
   await trigger.click();
   const models = page.getByRole("listbox", { name: "Model", exact: true });
-  await expect(models.getByRole("option")).toHaveCount(61);
+  await expect(models.getByRole("option")).toHaveCount(63);
+  await expect(models.getByRole("option", { name: /^6 Sol\b/ })).toHaveCount(1);
+  await expect(models.getByRole("option", { name: /^6 Luna\b/ })).toHaveCount(1);
   const search = page.getByRole("searchbox");
   await search.fill("RESEARCH-MODEL-02");
   await expect(models.getByRole("option")).toHaveCount(1);
@@ -23,7 +25,7 @@ test("search preserves selection, exposes capabilities and has a clear empty sta
   await expect(page.getByRole("status")).toHaveText("No models match your search.");
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await expect(search).toHaveValue("");
-  await expect(models.getByRole("option")).toHaveCount(61);
+  await expect(models.getByRole("option")).toHaveCount(63);
   await expect(trigger).toHaveText("5.6 Sol");
   await expect(
     page.getByRole("listbox", { name: "Effort" }).getByRole("option", { name: "High", exact: true })

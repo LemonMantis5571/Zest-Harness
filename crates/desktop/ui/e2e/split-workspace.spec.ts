@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 test("both panes stream together and stopping one leaves the other running", async ({ page }) => {
+  // This assertion checks live text delivery, so use the text-as-it-arrives
+  // preference rather than the default complete-block display mode.
+  await page.addInitScript(() => {
+    localStorage.setItem("zest.responseBlockStreaming.v1", "false");
+  });
   await page.goto("/?fixture=1&scenario=split-streaming");
   await page.getByRole("button", { name: "Open split view" }).click();
   const left = page.getByRole("region", { name: "Left chat", exact: true });
