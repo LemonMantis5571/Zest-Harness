@@ -17,6 +17,8 @@ pub struct OpenAiProviderInput {
     pub model: String,
     pub models: Vec<String>,
     pub credential: String,
+    pub decision_model: Option<String>,
+    pub decision_reviewer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +235,19 @@ pub fn add_openai_provider(path: &Path, input: &OpenAiProviderInput) -> Result<(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("endpoint must be an http(s) URL with a host".into());
     }
+    let decision_model = input
+        .decision_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if decision_model.is_some()
+        && (url.scheme() != "https" || url.host_str() != Some("openrouter.ai"))
+    {
+        return Err("decision models require the https://openrouter.ai endpoint".into());
+    }
+    if input.decision_reviewer && decision_model.is_none() {
+        return Err("the Jev reviewer requires an OpenRouter decision model".into());
+    }
 
     let original = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -248,6 +263,15 @@ pub fn add_openai_provider(path: &Path, input: &OpenAiProviderInput) -> Result<(
     let providers = doc["providers"]
         .as_table_mut()
         .ok_or_else(|| "[providers] is not a table".to_string())?;
+    if input.decision_reviewer {
+        for (other_id, other) in providers.iter_mut() {
+            if other_id != id {
+                if let Some(other) = other.as_table_mut() {
+                    other.remove("decision_reviewer");
+                }
+            }
+        }
+    }
     let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
     let provider = entry
         .as_table_mut()
@@ -261,6 +285,16 @@ pub fn add_openai_provider(path: &Path, input: &OpenAiProviderInput) -> Result<(
     provider["base_url"] = toml_edit::value(base_url);
     provider["model"] = toml_edit::value(model);
     provider["credential"] = toml_edit::value(credential);
+    if let Some(decision_model) = decision_model {
+        provider["decision_model"] = toml_edit::value(decision_model);
+    } else {
+        provider.remove("decision_model");
+    }
+    if input.decision_reviewer {
+        provider["decision_reviewer"] = toml_edit::value(true);
+    } else {
+        provider.remove("decision_reviewer");
+    }
 
     let mut models = Array::new();
     for value in input
@@ -866,6 +900,8 @@ mod tests {
                 model: "deepseek-v4-flash".into(),
                 models: vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
                 credential: "deepseek".into(),
+                decision_model: None,
+                decision_reviewer: false,
             },
         )
         .unwrap();
@@ -873,6 +909,93 @@ mod tests {
         assert!(raw.contains("# keep me"));
         let config = Config::parse(&raw).unwrap();
         assert!(config.providers.contains_key("deepseek"));
+    }
+
+    #[test]
+    fn adds_openrouter_decision_model_and_rejects_non_openrouter_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        add_openai_provider(
+            &path,
+            &OpenAiProviderInput {
+                id: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "openrouter/auto".into(),
+                models: Vec::new(),
+                credential: "openrouter".into(),
+                decision_model: Some("~typesafe/jev-latest".into()),
+                decision_reviewer: true,
+            },
+        )
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert!(matches!(
+            &config.providers["openrouter"],
+            crate::config::ProviderConfig::OpenaiCompatible {
+                decision_model: Some(model),
+                decision_reviewer: true,
+                ..
+            } if model == "~typesafe/jev-latest"
+        ));
+
+        let error = add_openai_provider(
+            &path,
+            &OpenAiProviderInput {
+                id: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "openrouter/auto".into(),
+                models: Vec::new(),
+                credential: "openrouter".into(),
+                decision_model: None,
+                decision_reviewer: true,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("requires an OpenRouter decision model"));
+
+        let error = add_openai_provider(
+            &path,
+            &OpenAiProviderInput {
+                id: "local".into(),
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                model: "local-model".into(),
+                models: Vec::new(),
+                credential: "local".into(),
+                decision_model: Some("~typesafe/jev-latest".into()),
+                decision_reviewer: false,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("openrouter.ai"));
+
+        add_openai_provider(
+            &path,
+            &OpenAiProviderInput {
+                id: "openrouter_second".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "openrouter/auto".into(),
+                models: Vec::new(),
+                credential: "openrouter_second".into(),
+                decision_model: Some("~typesafe/jev-latest".into()),
+                decision_reviewer: true,
+            },
+        )
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert!(matches!(
+            &config.providers["openrouter"],
+            crate::config::ProviderConfig::OpenaiCompatible {
+                decision_reviewer: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &config.providers["openrouter_second"],
+            crate::config::ProviderConfig::OpenaiCompatible {
+                decision_reviewer: true,
+                ..
+            }
+        ));
     }
 
     #[test]

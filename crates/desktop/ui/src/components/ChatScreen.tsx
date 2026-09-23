@@ -30,6 +30,7 @@ import {
   writeSidebarOpen,
 } from "@/components/ChatHistorySidebar";
 import { CommandOutputCard } from "@/components/CommandOutputCard";
+import { JevReviewCard } from "@/components/JevReviewCard";
 import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { SettingsPanel } from "@/components/SettingsPanel";
@@ -113,6 +114,7 @@ import type {
   WallpaperView,
   WorkspaceChange,
   WorkspaceReview,
+  JevQuickReview,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { markStartup, measureStartup } from "@/lib/startupPerf";
@@ -184,6 +186,12 @@ export type ChatScreenProps = {
   onForkThread: () => Promise<void>;
   onRewindThread: (checkpointId: string) => Promise<void>;
   workspaceReview: WorkspaceReview | null;
+  jevPlanReview: JevQuickReview | null;
+  jevChangeReview: JevQuickReview | null;
+  onInvestigateJevPlan: () => void;
+  onInvestigateJevChanges: () => void;
+  onRetryJevPlan: () => Promise<void>;
+  onRetryJevChanges: () => Promise<void>;
   workspaceChange: WorkspaceChange | null;
   onRefreshWorkspaceChanges: () => Promise<WorkspaceChange>;
   onVerifyWorkspace: () => Promise<void>;
@@ -266,6 +274,7 @@ export type ChatScreenProps = {
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
+  onInvestigateDelegation: (jobId: string) => void;
   splitGroups?: ReadonlyArray<SplitSidebarGroup>;
   activeSplitGroupId?: string | null;
   onOpenSplitGroup?: (groupId: string) => void;
@@ -292,6 +301,9 @@ type ChatMessageRowProps = {
   /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
   providerLabel: string;
   isPlanToBuild?: boolean;
+  jevReview?: JevQuickReview | null;
+  onInvestigateJev?: () => void;
+  onRetryJev?: () => Promise<void>;
   onBuildPlan?: () => void;
   onResolveApproval: (
     approvalId: string,
@@ -431,6 +443,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
   approvalMode,
   providerLabel,
   isPlanToBuild = false,
+  jevReview,
+  onInvestigateJev,
+  onRetryJev,
   onBuildPlan,
   onResolveApproval,
   onOpenDiff,
@@ -618,6 +633,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
                     <span className="inline-block h-4 w-1.5 animate-pulse bg-foreground/70" />
                   </span>
                 ) : null}
+                {jevReview ? (
+                  <div className="mt-2"><JevReviewCard review={jevReview} onInvestigate={onInvestigateJev} onRetry={onRetryJev} /></div>
+                ) : null}
               </CommandOutputCard>
             ) : (
               <div className="group/assistant relative">
@@ -758,6 +776,12 @@ export function ChatScreen({
   onForkThread,
   onRewindThread,
   workspaceReview,
+  jevPlanReview,
+  jevChangeReview,
+  onInvestigateJevPlan,
+  onInvestigateJevChanges,
+  onRetryJevPlan,
+  onRetryJevChanges,
   workspaceChange,
   onRefreshWorkspaceChanges,
   onVerifyWorkspace,
@@ -808,6 +832,7 @@ export function ChatScreen({
   onCancelDelegation,
   onRetryDelegation,
   onApplyDelegation,
+  onInvestigateDelegation,
   splitGroups = [],
   activeSplitGroupId = null,
   onOpenSplitGroup,
@@ -1907,6 +1932,9 @@ export function ChatScreen({
                         approvalMode={approvalMode}
                         providerLabel={providerLabel}
                         isPlanToBuild={planToBuild === msg.id}
+                        jevReview={jevPlanReview?.targetId === `${session.threadId}:${msg.id}` ? jevPlanReview : null}
+                        onInvestigateJev={onInvestigateJevPlan}
+                        onRetryJev={onRetryJevPlan}
                         onBuildPlan={onBuildPlan}
                         onResolveApproval={onResolveApproval}
                         onOpenDiff={openDiff}
@@ -2174,6 +2202,9 @@ export function ChatScreen({
             sending={sending}
             compacting={compacting}
             review={workspaceReview}
+            jevReview={workspaceChange?.changeId && jevChangeReview?.targetId === `${session.threadId}:${workspaceChange.changeId}` ? jevChangeReview : null}
+            onInvestigateJev={onInvestigateJevChanges}
+            onRetryJev={onRetryJevChanges}
             onClose={closeWorkbench}
             onVerify={onVerifyWorkspace}
             onRewind={onRewindThread}
@@ -2184,6 +2215,7 @@ export function ChatScreen({
             onCancelDelegation={onCancelDelegation}
             onRetryDelegation={onRetryDelegation}
             onApplyDelegation={onApplyDelegation}
+            onInvestigateDelegation={onInvestigateDelegation}
             onReconnectProvider={onReconnectProvider}
           />
         </Suspense>

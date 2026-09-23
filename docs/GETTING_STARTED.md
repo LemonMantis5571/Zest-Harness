@@ -34,9 +34,41 @@ for the selected provider before continuing.
 ### Provider API key
 
 Use the API provider form and select a preset such as **Anthropic**, **DeepSeek**,
-or **OpenAI**. Enter your own API key and complete the form. API access and usage
-are governed by your provider account; an existing chat subscription does not
-by itself establish API access.
+**OpenAI**, or **OpenRouter**. Enter your own API key and complete the form. API
+access and usage are governed by your provider account; an existing chat
+subscription does not by itself establish API access.
+
+Jev is off by default. To add it through OpenRouter, enter
+`~typesafe/jev-latest` in **Decision model**. Zest then offers `jev_decide` to
+the chat agent. Jev receives only the `state` sent in a tool call and returns
+structured Choice, Score, or Noul answers with probabilities; it does not
+replace the text-generating chat model.
+
+**Check plans and changes with Jev** is a separate opt-in setting
+in the OpenRouter form. Once enabled, Zest checks a completed plan before Build
+and a meaningful workspace diff after a turn. It checks delegated changes after
+the ordinary reviewer. Jev reports separate signals for request fit, constraints,
+and completion evidence. A concern offers **Ask Zest to investigate**, which
+uses the regular chat model for an explanation. Jev does not block Build or an
+ordinary reviewer acceptance, and an API failure is shown as unavailable.
+
+Plan text and bounded diff evidence go to OpenRouter only when this setting is
+on. Empty, sensitive, truncated, and oversized diffs are skipped. Results are
+cached by content and model so reopening a chat does not repeat the call. Zest
+records delegated Jev answers and usage in `review-result.json`. For a manual
+`zest.toml`, set `decision_reviewer = true` beside `decision_model` under the
+OpenRouter provider. Only one provider can be the Jev reviewer.
+
+The concern threshold starts at 0.90 and is provisional. Before enabling this
+for a broad release, evaluate labeled plan gaps and change mismatches, and
+record false alerts, missed issues, response time, and OpenRouter cost from
+the stored usage. Jev's probabilities are signals, not proof of plan or code
+quality.
+
+To use it, ask the chat agent to make a bounded decision, such as: "Use Jev to
+classify this issue as billing, account, or technical, and include the
+probabilities." The chat model builds the choices and supplies the issue text
+as `state`.
 
 Keys are not written into `zest.toml`. Zest uses the OS credential manager when
 available. Do not paste a key into chat or put one in a screenshot or bug report.

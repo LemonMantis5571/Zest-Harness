@@ -57,6 +57,7 @@ import type {
   WorkspacePickResult,
   WorkspaceChange,
   WorkspaceReview,
+  JevQuickReview,
 } from "./types";
 
 export function listProviders() {
@@ -131,6 +132,8 @@ export function configureApiProvider(input: {
   baseUrl: string;
   model: string;
   models: string[];
+  decisionModel: string | null;
+  decisionReviewer: boolean;
   credential: string;
   key: string;
 }) {
@@ -538,6 +541,14 @@ export function pullRequestDiff(number?: number) {
 
 export function verifyWorkspace() {
   return invoke<WorkspaceReview>("verify_workspace");
+}
+
+export function checkJevPlan(input: { threadId: string; messageId: string; request: string; plan: string; force?: boolean; cacheOnly?: boolean }) {
+  return invoke<JevQuickReview | null>("check_jev_plan", { ...input, force: input.force ?? false, cacheOnly: input.cacheOnly ?? false });
+}
+
+export function checkJevChanges(input: { threadId: string; changeId: string; objective: string; claimedSummary: string; force?: boolean; cacheOnly?: boolean }) {
+  return invoke<JevQuickReview | null>("check_jev_changes", { ...input, force: input.force ?? false, cacheOnly: input.cacheOnly ?? false });
 }
 
 export function contextUsage() {

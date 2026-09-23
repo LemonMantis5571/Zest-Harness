@@ -15,6 +15,7 @@ use crate::runtime::{
 };
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
+use zest_core::tools::jev::{configured_review_model, review_with_jev, JevReview};
 use zest_core::{
     apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
     diff_paths, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
@@ -721,6 +722,9 @@ pub struct DelegationJobView {
     pub reviewer_findings: Vec<ReviewFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
+    pub jev_review: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub worker_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
@@ -818,6 +822,53 @@ fn report_from_store(store: &DelegationStore, job: &DelegationJob) -> Option<Rev
         .read_artifact(&job.job_id, "review-result.json")
         .ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+fn jev_review_from_store(store: &DelegationStore, job: &DelegationJob) -> Option<String> {
+    let bytes = store
+        .read_artifact(&job.job_id, "review-result.json")
+        .ok()?;
+    let artifact: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if let Some(error) = artifact.get("jevError").and_then(serde_json::Value::as_str) {
+        return Some(if error.starts_with("Jev skipped") {
+            error.to_string()
+        } else {
+            format!("Jev check unavailable: {error}")
+        });
+    }
+    let jev = artifact.get("jev")?;
+    let checks = jev.get("checks")?.as_array()?;
+    if checks.is_empty() {
+        return Some(
+            "Jev could not settle the delegated check. Ask Zest to investigate if needed.".into(),
+        );
+    }
+    let concerns: Vec<_> = checks
+        .iter()
+        .filter_map(|check| {
+            (check.get("outcome")?.as_str()? == "concern")
+                .then(|| check.get("label")?.as_str())
+                .flatten()
+        })
+        .collect();
+    let inconclusive = checks
+        .iter()
+        .filter(|check| {
+            check.get("outcome").and_then(serde_json::Value::as_str) == Some("inconclusive")
+        })
+        .count();
+    if !concerns.is_empty() {
+        Some(format!(
+            "Jev suggests a closer look at {}. Ask Zest to investigate for an explanation.",
+            concerns.join(", ")
+        ))
+    } else if inconclusive > 0 {
+        Some(format!(
+            "Jev could not settle {inconclusive} check(s). Ask Zest to investigate if needed."
+        ))
+    } else {
+        Some("Jev quick checks found no concern in the supplied evidence.".into())
+    }
 }
 
 fn worker_result_from_store(store: &DelegationStore, job: &DelegationJob) -> Option<WorkerResult> {
@@ -972,6 +1023,7 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         .unwrap_or_default();
     let changed_files = diff_paths(&diff);
     let report = report_from_store(store, job);
+    let jev_review = jev_review_from_store(store, job);
     let acceptance_checks = job
         .card
         .acceptance_checks
@@ -1048,6 +1100,7 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         changed_files,
         acceptance_checks,
         reviewer_findings,
+        jev_review,
         worker_summary,
         error: job.error.clone(),
         created_at: job.created_at,
@@ -2261,11 +2314,89 @@ impl DelegationCoordinator {
             self.emit(&store, &job, EventKind::Blocked);
             return Ok(());
         }
+        let jev_enabled = config.providers.values().any(|provider| {
+            matches!(
+                provider,
+                ProviderConfig::OpenaiCompatible {
+                    decision_reviewer: true,
+                    ..
+                }
+            )
+        });
+        let sensitive_diff = diff_paths(&worker_diff)
+            .iter()
+            .any(|path| zest_core::tools::sensitive::is_sensitive_path(path));
+        let jev_state =
+            (jev_enabled && !sensitive_diff && !worker_diff.trim().is_empty()).then(|| {
+                serde_json::json!({
+                    "title": job.card.title,
+                    "objective": job.card.objective,
+                    "scope": job.card.scope,
+                    "contextPaths": job.card.context,
+                    "requiredChecks": job.card.acceptance_checks,
+                    "workerSummary": worker_result.summary,
+                    "workerDiff": worker_diff,
+                    "reviewerReport": report,
+                    "authoritativeChecks": checks,
+                })
+            });
+        let jev_state_bytes = jev_state
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let jev_state_hash = jev_state_bytes
+            .as_ref()
+            .map(|bytes| blake3::hash(bytes).to_hex().to_string());
+        let cached_jev = jev_state_hash.as_ref().and_then(|state_hash| {
+            store
+                .read_artifact(job_id, "review-result.json")
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|artifact| artifact.get("jev").cloned())
+                .and_then(|value| serde_json::from_value::<JevReview>(value).ok())
+                .filter(|review| {
+                    review.content_hash == state_hash.as_str()
+                        && configured_review_model(&config)
+                            == Some(review.configured_model.as_str())
+                })
+        });
+        if cancel.is_cancelled() {
+            return self.cancelled(&store, job).await;
+        }
+        let mut report_artifact =
+            serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        if let Some(jev) = &cached_jev {
+            report_artifact["jev"] =
+                serde_json::to_value(jev).map_err(|error| error.to_string())?;
+        }
+        let skip_reason = if jev_enabled && sensitive_diff {
+            Some("Jev skipped the diff because it contains a sensitive file")
+        } else if jev_enabled && worker_diff.trim().is_empty() {
+            Some("Jev skipped an empty diff")
+        } else if jev_state_bytes
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > 80 * 1024)
+        {
+            Some("Jev skipped a diff that exceeds the review size limit")
+        } else {
+            None
+        };
+        if let Some(error) = skip_reason {
+            report_artifact["jevError"] = serde_json::json!(error);
+        }
+        if let Some(state_hash) = &jev_state_hash {
+            report_artifact["jevStateHash"] = serde_json::json!(state_hash);
+            report_artifact["jevTargetId"] = serde_json::json!(job_id);
+        }
+        if let Some(model) = configured_review_model(&config) {
+            report_artifact["jevConfiguredModel"] = serde_json::json!(model);
+        }
         store
             .write_artifact(
                 job_id,
                 "review-result.json",
-                &serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
+                &serde_json::to_vec_pretty(&report_artifact).map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
         job.finish_attempt(&reviewer_attempt);
@@ -2293,6 +2424,51 @@ impl DelegationCoordinator {
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
             self.emit(&store, &job, EventKind::ChangesRequested);
+        }
+        if let (Some(state), Some(state_hash)) = (jev_state, jev_state_hash) {
+            if cached_jev.is_none() && skip_reason.is_none() {
+                let configured_model = configured_review_model(&config).map(str::to_string);
+                let coordinator = Arc::clone(self);
+                let store = store.clone();
+                let job_id = job_id.to_string();
+                tokio::spawn(async move {
+                    let result = review_with_jev(&config, state).await;
+                    let Ok(bytes) = store.read_artifact(&job_id, "review-result.json") else {
+                        return;
+                    };
+                    let Ok(mut artifact) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    else {
+                        return;
+                    };
+                    if artifact
+                        .get("jevStateHash")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(state_hash.as_str())
+                        || artifact
+                            .get("jevConfiguredModel")
+                            .and_then(serde_json::Value::as_str)
+                            != configured_model.as_deref()
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(Some(review)) => artifact["jev"] = serde_json::json!(review),
+                        Ok(None) => return,
+                        Err(error) => artifact["jevError"] = serde_json::json!(error),
+                    }
+                    let Ok(encoded) = serde_json::to_vec_pretty(&artifact) else {
+                        return;
+                    };
+                    if store
+                        .write_artifact(&job_id, "review-result.json", &encoded)
+                        .is_ok()
+                    {
+                        if let Ok(Some(current_job)) = store.load(&job_id) {
+                            coordinator.emit(&store, &current_job, EventKind::ReviewerCompleted);
+                        }
+                    }
+                });
+            }
         }
         Ok(())
     }

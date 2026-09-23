@@ -50,6 +50,7 @@ import type {
   WorkspacePickResult,
   WorkspaceChange,
   WorkspaceReview,
+  JevQuickReview,
 } from "./types";
 
 export type { SkillSummary, SystemPromptInfo };
@@ -91,6 +92,8 @@ export type DesktopBackend = {
     baseUrl: string;
     model: string;
     models: string[];
+    decisionModel: string | null;
+    decisionReviewer: boolean;
     credential: string;
     key: string;
   }): Promise<void>;
@@ -251,6 +254,8 @@ export type DesktopBackend = {
   workspaceChanges(): Promise<WorkspaceChange>;
   pullRequestDiff(number?: number): Promise<WorkspaceChange>;
   verifyWorkspace(): Promise<WorkspaceReview>;
+  checkJevPlan(input: { threadId: string; messageId: string; request: string; plan: string; force?: boolean; cacheOnly?: boolean }): Promise<JevQuickReview | null>;
+  checkJevChanges(input: { threadId: string; changeId: string; objective: string; claimedSummary: string; force?: boolean; cacheOnly?: boolean }): Promise<JevQuickReview | null>;
   contextUsage(): Promise<ContextUsage>;
   getUserProfile(): Promise<UserProfile>;
   setUserProfile(profile: UserProfile): Promise<UserProfile>;
@@ -379,6 +384,8 @@ export function createTauriBackend(): DesktopBackend {
     workspaceChanges: () => tauriApi.workspaceChanges(),
     pullRequestDiff: (number) => tauriApi.pullRequestDiff(number),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
+    checkJevPlan: (input) => tauriApi.checkJevPlan(input),
+    checkJevChanges: (input) => tauriApi.checkJevChanges(input),
     contextUsage: () => tauriApi.contextUsage(),
     getUserProfile: () => tauriApi.getUserProfile(),
     setUserProfile: (profile) => tauriApi.setUserProfile(profile),

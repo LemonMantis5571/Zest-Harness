@@ -23,6 +23,9 @@ import {
   type ChatUiState,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { changeReviewContext, completedPlanContext, latestFinishedPlanContext } from "@/lib/jevReviewContext";
+import { changeInvestigationPrompt, planInvestigationPrompt } from "@/lib/jevInvestigation";
+import { reviewForSnapshot, shouldAutoCheckChange } from "@/lib/jevReviewState";
 import { createSerialActions } from "@/lib/serialActions";
 import { loginSessionIsNew } from "@/lib/loginWait";
 import { sendOwnsComposer, type SendTurnRequest } from "@/lib/sendTurn";
@@ -102,6 +105,7 @@ import type {
   UserProfile,
   WorkspaceChange,
   WorkspaceReview,
+  JevQuickReview,
   WallpaperView,
 } from "@/lib/types";
 import {
@@ -488,6 +492,11 @@ export default function App() {
   const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [workspaceReview, setWorkspaceReview] = useState<WorkspaceReview | null>(null);
+  const [jevPlanReview, setJevPlanReview] = useState<JevQuickReview | null>(null);
+  const [jevChangeReview, setJevChangeReview] = useState<JevQuickReview | null>(null);
+  const jevPlanResultInputRef = useRef("");
+  const jevChangeResultInputRef = useRef("");
+  const jevAutoCheckedChangeRef = useRef("");
   const [workspaceChange, setWorkspaceChange] = useState<WorkspaceChange | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
@@ -1438,6 +1447,11 @@ export default function App() {
     setSession(info);
     setWorkspacePath(info.isFreeChat ? null : info.root);
     setWorkspaceReview(null);
+    setJevPlanReview(null);
+    setJevChangeReview(null);
+    jevPlanResultInputRef.current = "";
+    jevChangeResultInputRef.current = "";
+    jevAutoCheckedChangeRef.current = "";
     setWorkspaceChange(workspaceChangesRef.current.get(info.threadId) ?? null);
     setGitContext(null);
     void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
@@ -2085,6 +2099,39 @@ export default function App() {
     }
   }, []);
 
+  // Jev runs only after a complete plan or a settled workspace change. The
+  // backend owns the content hash and durable cache, so reopening a chat does
+  // not spend another decision call on the same evidence.
+  useEffect(() => {
+    const threadId = session?.threadId;
+    const candidate = latestFinishedPlanContext(messages);
+    if (!threadId || !candidate || sending) return;
+    const isBuildable = completedPlanContext(messages)?.id === candidate.id;
+    const targetId = `${threadId}:${candidate.id}`;
+    const inputKey = JSON.stringify([targetId, candidate.request, candidate.plan]);
+    let cancelled = false;
+    void backend.checkJevPlan({ threadId, messageId: candidate.id, request: candidate.request, plan: candidate.plan, cacheOnly: !isBuildable })
+      .then((result) => { if (!cancelled && threadIdRef.current === threadId) { jevPlanResultInputRef.current = inputKey; setJevPlanReview(result); } })
+      .catch((error) => ignoreExpectedFailure(error, "check plan with Jev"));
+    return () => { cancelled = true; };
+  }, [session?.threadId, messages, sending]);
+
+  useEffect(() => {
+    const threadId = session?.threadId;
+    const candidate = changeReviewContext(messages);
+    const changeId = workspaceChange?.changeId;
+    if (!threadId || !changeId || !candidate || sending || !workspaceChange?.diff.trim()) return;
+    const targetId = `${threadId}:${changeId}`;
+    if (!shouldAutoCheckChange(jevAutoCheckedChangeRef.current, targetId)) return;
+    jevAutoCheckedChangeRef.current = targetId;
+    const inputKey = JSON.stringify([targetId, candidate.objective, candidate.claimedSummary, workspaceChange.diff]);
+    let cancelled = false;
+    void backend.checkJevChanges({ threadId, changeId, ...candidate })
+      .then((result) => { if (!cancelled && threadIdRef.current === threadId) { jevChangeResultInputRef.current = inputKey; setJevChangeReview(result); } })
+      .catch((error) => ignoreExpectedFailure(error, "check changes with Jev"));
+    return () => { cancelled = true; };
+  }, [session?.threadId, messages, sending, workspaceChange?.changeId, workspaceChange?.diff]);
+
   const onRewindThread = useCallback(
     async (checkpointId: string) => {
       if (sendingRef.current) {
@@ -2639,6 +2686,66 @@ export default function App() {
     await submitTurn(BUILD_PLAN_PROMPT, [], { restoreDraftOnFailure: false });
   }, [approvalModeState, submitTurn]);
 
+  const onRetryJevPlan = useCallback(async () => {
+    const threadId = threadIdRef.current;
+    const candidate = latestFinishedPlanContext(messagesRef.current);
+    if (!threadId || !candidate) return;
+    try {
+      const result = await backend.checkJevPlan({ threadId, messageId: candidate.id, request: candidate.request, plan: candidate.plan, force: true });
+      jevPlanResultInputRef.current = JSON.stringify([`${threadId}:${candidate.id}`, candidate.request, candidate.plan]);
+      setJevPlanReview(result);
+    } catch (error) {
+      toast.add({ type: "error", title: "Jev check failed", description: formatInvokeError(error) });
+    }
+  }, []);
+
+  const onRetryJevChanges = useCallback(async () => {
+    const threadId = threadIdRef.current;
+    const changeId = workspaceChange?.changeId;
+    const candidate = changeReviewContext(messagesRef.current);
+    if (!threadId || !changeId || !candidate) return;
+    try {
+      const result = await backend.checkJevChanges({ threadId, changeId, ...candidate, force: true });
+      jevChangeResultInputRef.current = JSON.stringify([`${threadId}:${changeId}`, candidate.objective, candidate.claimedSummary, workspaceChange?.diff]);
+      setJevChangeReview(result);
+    } catch (error) {
+      toast.add({ type: "error", title: "Jev check failed", description: formatInvokeError(error) });
+    }
+  }, [workspaceChange?.changeId, workspaceChange?.diff]);
+
+  const onInvestigateJevPlan = useCallback(() => {
+    const candidate = latestFinishedPlanContext(messagesRef.current);
+    const threadId = threadIdRef.current;
+    if (!candidate || !threadId || jevPlanReview?.targetId !== `${threadId}:${candidate.id}` || sendingRef.current) return;
+    if (jevPlanResultInputRef.current !== JSON.stringify([jevPlanReview.targetId, candidate.request, candidate.plan])) return;
+    void submitTurn(planInvestigationPrompt(jevPlanReview, candidate.request, candidate.plan), [], { restoreDraftOnFailure: false });
+  }, [jevPlanReview, submitTurn]);
+
+  const onInvestigateJevChanges = useCallback(() => {
+    const threadId = threadIdRef.current;
+    const change = workspaceChange;
+    const candidate = changeReviewContext(messagesRef.current);
+    if (!threadId || !change || !candidate || jevChangeReview?.targetId !== `${threadId}:${change.changeId}` || sendingRef.current) return;
+    if (jevChangeResultInputRef.current !== JSON.stringify([jevChangeReview.targetId, candidate.objective, candidate.claimedSummary, change.diff])) return;
+    void backend.workspaceChanges().then((fresh) => {
+      if (fresh.changeId !== change.changeId) {
+        setWorkspaceChange(fresh);
+        toast.add({ type: "warning", title: "Changes moved on", description: "Run the Jev check on the current diff before investigating." });
+        return;
+      }
+      void submitTurn(changeInvestigationPrompt(jevChangeReview, candidate.objective, candidate.claimedSummary, fresh.diff), [], { restoreDraftOnFailure: false });
+    }).catch((error) => toast.add({ type: "error", title: "Could not read changes", description: formatInvokeError(error) }));
+  }, [jevChangeReview, workspaceChange, submitTurn]);
+
+  const onInvestigateDelegation = useCallback((jobId: string) => {
+    if (sendingRef.current) return;
+    const threadId = threadIdRef.current;
+    void backend.prepareDelegationHandoff(jobId).then((handoff) => {
+      if (!threadId || threadIdRef.current !== threadId || sendingRef.current) return;
+      void submitTurn(`Investigate Jev's advisory checks for delegated job ${handoff.jobId}. Read its persisted worker.diff, worker-result.json, and review-result.json under .zest/delegations/${handoff.jobId}/. Compare the diff and checks with the task. Explain any concrete issue with file evidence; if Jev was inconclusive, say what evidence is missing. The worker summary was: ${handoff.summary}`, [], { restoreDraftOnFailure: false });
+    }).catch((error) => toast.add({ type: "error", title: "Could not open delegated review", description: formatInvokeError(error) }));
+  }, [submitTurn]);
+
   const onStop = useCallback(async () => {
     if (!sendingRef.current) return;
     try {
@@ -2942,6 +3049,16 @@ export default function App() {
     wallpaper?.status === "ready" &&
     Boolean(wallpaper.imageDataUrl) &&
     (authMode || shellPanel !== null);
+  const currentPlan = latestFinishedPlanContext(messages);
+  const currentPlanKey = currentPlan && session
+    ? JSON.stringify([`${session.threadId}:${currentPlan.id}`, currentPlan.request, currentPlan.plan])
+    : "";
+  const displayedPlanReview = reviewForSnapshot(jevPlanReview, `${session?.threadId}:${currentPlan?.id}`, jevPlanResultInputRef.current, currentPlanKey);
+  const currentChange = changeReviewContext(messages);
+  const currentChangeKey = currentChange && session && workspaceChange
+    ? JSON.stringify([`${session.threadId}:${workspaceChange.changeId}`, currentChange.objective, currentChange.claimedSummary, workspaceChange.diff])
+    : "";
+  const displayedChangeReview = reviewForSnapshot(jevChangeReview, `${session?.threadId}:${workspaceChange?.changeId}`, jevChangeResultInputRef.current, currentChangeKey);
 
   return (
     <>
@@ -3197,6 +3314,13 @@ export default function App() {
             onForkThread={onForkThread}
             onRewindThread={onRewindThread}
             workspaceReview={workspaceReview}
+            jevPlanReview={displayedPlanReview}
+            jevChangeReview={displayedChangeReview}
+            onInvestigateJevPlan={onInvestigateJevPlan}
+            onInvestigateJevChanges={onInvestigateJevChanges}
+            onRetryJevPlan={onRetryJevPlan}
+            onRetryJevChanges={onRetryJevChanges}
+            onInvestigateDelegation={onInvestigateDelegation}
             workspaceChange={workspaceChange}
             onRefreshWorkspaceChanges={refreshWorkspaceChanges}
             onVerifyWorkspace={onVerifyWorkspace}

@@ -1033,6 +1033,8 @@ mod tests {
                 efforts: Vec::new(),
                 credential: None,
                 api_key_env: None,
+                decision_model: None,
+                decision_reviewer: false,
             },
         );
         config.providers.insert(

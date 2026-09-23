@@ -24,6 +24,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button";
 import { OrchestrationStatus } from "@/components/OrchestrationStatus";
+import { JevReviewCard } from "@/components/JevReviewCard";
 import { getBackend } from "@/lib/backend";
 import {
   blobatarToneFor,
@@ -41,6 +42,7 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspaceReview,
+  JevQuickReview,
 } from "@/lib/types";
 
 type Props = PanelProps & { open: boolean };
@@ -51,6 +53,9 @@ type PanelProps = {
   sending: boolean;
   compacting: boolean;
   review: WorkspaceReview | null;
+  jevReview: JevQuickReview | null;
+  onInvestigateJev: () => void;
+  onRetryJev: () => Promise<void>;
   onClose: () => void;
   onVerify: () => Promise<void>;
   onRewind: (checkpointId: string) => Promise<void>;
@@ -61,6 +66,7 @@ type PanelProps = {
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
+  onInvestigateDelegation: (jobId: string) => void;
   onReconnectProvider?: (providerId: string) => void;
 };
 
@@ -387,6 +393,9 @@ function WorkbenchBody({
   sending,
   compacting,
   review,
+  jevReview,
+  onInvestigateJev,
+  onRetryJev,
   onClose,
   onVerify,
   onRewind,
@@ -397,6 +406,7 @@ function WorkbenchBody({
   onCancelDelegation,
   onRetryDelegation,
   onApplyDelegation,
+  onInvestigateDelegation,
   onReconnectProvider,
 }: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
@@ -867,6 +877,9 @@ function WorkbenchBody({
                   ) : null}
                 </div>
               ) : null}
+              {jevReview ? (
+                <div className="mt-3"><JevReviewCard review={jevReview} onInvestigate={onInvestigateJev} onRetry={onRetryJev} /></div>
+              ) : null}
             </section>
 
             <section>
@@ -1271,6 +1284,16 @@ function WorkbenchBody({
                           ) : (
                             <>
                               <div className="font-medium text-foreground">Reviewer findings</div>
+                              {job.jevReview ? (
+                                <div className="mt-1 text-muted-foreground">
+                                  {job.jevReview}
+                                  {job.jevReview.startsWith("Jev suggests") || job.jevReview.startsWith("Jev could not settle") ? (
+                                    <div className="mt-1">
+                                      <Button type="button" size="sm" variant="outline" disabled={sending} onClick={() => onInvestigateDelegation(job.jobId)}>Ask Zest to investigate</Button>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
                               {job.reviewerFindings.length > 0 ? (
                                 <div className="mt-1 flex flex-col gap-1">
                                   {job.reviewerFindings.map((finding) => (

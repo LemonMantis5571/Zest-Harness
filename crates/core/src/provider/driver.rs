@@ -172,6 +172,7 @@ fn conventional_api_key_env(id: &str) -> Option<&'static str> {
     match id {
         "deepseek" => Some("DEEPSEEK_API_KEY"),
         "openai" => Some("OPENAI_API_KEY"),
+        "openrouter" => Some("OPENROUTER_API_KEY"),
         "gemini" => Some("GEMINI_API_KEY"),
         _ => None,
     }
@@ -849,6 +850,22 @@ credential = "deepseek"
         let request = credentials_for("deepseek", &config.providers["deepseek"]);
         assert_eq!(request.env, Some("DEEPSEEK_API_KEY"));
         assert_eq!(request.account, Some("deepseek"));
+    }
+
+    #[test]
+    fn an_openrouter_entry_without_api_key_env_uses_the_conventional_variable() {
+        let config = crate::config::Config::parse(
+            r#"
+[providers.openrouter]
+kind = "openai_compatible"
+base_url = "https://openrouter.ai/api/v1"
+model = "openrouter/auto"
+decision_model = "~typesafe/jev-latest"
+"#,
+        )
+        .unwrap();
+        let request = credentials_for("openrouter", &config.providers["openrouter"]);
+        assert_eq!(request.env, Some("OPENROUTER_API_KEY"));
     }
 
     #[test]

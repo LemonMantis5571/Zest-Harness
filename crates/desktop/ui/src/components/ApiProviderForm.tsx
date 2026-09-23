@@ -5,11 +5,17 @@ import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 
-type Preset = "anthropic" | "deepseek" | "openai" | "custom";
+type Preset = "anthropic" | "deepseek" | "openai" | "openrouter" | "custom";
 
 const PRESETS: Record<
   Preset,
-  { label: string; id: string; baseUrl: string; model: string; models: string[] }
+  {
+    label: string;
+    id: string;
+    baseUrl: string;
+    model: string;
+    models: string[];
+  }
 > = {
   anthropic: {
     label: "Anthropic",
@@ -30,6 +36,13 @@ const PRESETS: Record<
     id: "openai",
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-5",
+    models: [],
+  },
+  openrouter: {
+    label: "OpenRouter",
+    id: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "openrouter/auto",
     models: [],
   },
   custom: { label: "Custom", id: "custom", baseUrl: "", model: "", models: [] },
@@ -70,6 +83,8 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
   const [baseUrl, setBaseUrl] = useState(PRESETS.anthropic.baseUrl);
   const [model, setModel] = useState(PRESETS.anthropic.model);
   const [models, setModels] = useState(PRESETS.anthropic.models.join(", "));
+  const [decisionModel, setDecisionModel] = useState("");
+  const [decisionReviewer, setDecisionReviewer] = useState(false);
   const [credential, setCredential] = useState(PRESETS.anthropic.id);
   const [key, setKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -82,6 +97,8 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
     setBaseUrl(value.baseUrl);
     setModel(value.model);
     setModels(value.models.join(", "));
+    setDecisionModel("");
+    setDecisionReviewer(false);
     setCredential(value.id);
     setError(null);
   };
@@ -91,6 +108,13 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
     id.trim().length > 0 &&
     model.trim().length > 0 &&
     (preset === "anthropic" || baseUrl.trim().length > 0);
+  const isOpenRouter = (() => {
+    try {
+      return new URL(baseUrl).hostname.toLowerCase() === "openrouter.ai";
+    } catch {
+      return false;
+    }
+  })();
 
   return (
     <form
@@ -117,6 +141,8 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
                   .split(",")
                   .map((value) => value.trim())
                   .filter(Boolean),
+                decisionModel: isOpenRouter ? decisionModel.trim() || null : null,
+                decisionReviewer: isOpenRouter && decisionReviewer && !!decisionModel.trim(),
                 credential,
                 key,
               });
@@ -227,12 +253,48 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
                 <dd className="font-mono text-foreground/90">{models}</dd>
               </>
             ) : null}
+            {decisionModel.trim() ? (
+              <>
+                <dt className="text-muted-foreground">Decision</dt>
+                <dd className="truncate font-mono text-foreground/90">{decisionModel}</dd>
+              </>
+            ) : null}
           </div>
           <p className="m-0 pt-1 text-[10px] text-muted-foreground/80">
             Switch to Custom to change the endpoint or model names.
           </p>
         </dl>
       )}
+
+      {isOpenRouter ? (
+        <div className="mb-3 space-y-2">
+          <Field
+            label="Decision model (optional)"
+            hint="Enter ~typesafe/jev-latest to enable Jev. Leave blank to keep it off."
+          >
+            <input
+              value={decisionModel}
+              onChange={(event) => {
+                setDecisionModel(event.target.value);
+                if (!event.target.value.trim()) setDecisionReviewer(false);
+              }}
+              placeholder="~typesafe/jev-latest"
+              className={inputClass}
+              autoComplete="off"
+            />
+          </Field>
+          <label className="flex items-start gap-2 text-[11px] text-foreground">
+            <input
+              type="checkbox"
+              checked={decisionReviewer}
+              disabled={!decisionModel.trim()}
+              onChange={(event) => setDecisionReviewer(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span><strong>Check plans and changes with Jev</strong> (optional). After a finished plan or workspace change, Zest sends the relevant request and plan, or the task, diff, and available check results, to OpenRouter. Jev's signals are advisory.</span>
+          </label>
+        </div>
+      ) : null}
 
       <Field label={preset === "custom" ? "API key" : `${PRESETS[preset].label} API key`} hint="Your key is never saved in zest.toml.">
         <input
