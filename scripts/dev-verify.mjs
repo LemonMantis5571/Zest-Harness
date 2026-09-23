@@ -13,6 +13,12 @@ const npmPrefix =
     : [];
 
 const steps = [
+  [
+    "Output artifact policy tests",
+    process.execPath,
+    ["--test", "./scripts/check-output-artifacts.test.mjs"],
+  ],
+  ["Output artifact policy", process.execPath, ["./scripts/check-output-artifacts.mjs"]],
   ["UI tests", npm, [...npmPrefix, "run", "ui:test"]],
   ["UI lint", npm, [...npmPrefix, "run", "ui:lint"]],
   ["UI lint plugin tests", npm, [...npmPrefix, "run", "ui:lint:plugins"]],

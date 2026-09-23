@@ -21,9 +21,19 @@ From the repository root:
 
 ```powershell
 npm ci
+npm run hooks:install
 npm run ui:build
 npm run desktop:dev
 ```
+
+The hook installer enables a local pre-commit check for staged files under
+`outputs/`. CI checks tracked files and every file introduced or modified by a
+pull-request commit, including files later removed in that branch. Image,
+audio/video, and output files larger than 1 MiB are blocked unless their exact
+repository path is added to the allowlist in
+`scripts/check-output-artifacts.mjs` after review. Keep generated captures out
+of `outputs/`; put intentional product or docs media in the corresponding
+`assets/` or `docs/` directory.
 
 On Linux, install the desktop packages listed in the Linux verification
 workflow, then run the same npm commands from Bash. PowerShell is not
@@ -139,6 +149,8 @@ Do not commit:
 
 - API keys, `.env` files, credential-manager exports, or signing keys;
 - generated `ui/dist` output; or
+- generated image/audio/video media or files larger than 1 MiB under `outputs/`,
+  unless explicitly allowlisted; or
 - local signing configuration or personal `zest.toml` files.
 
 Use [`zest.toml.example`](zest.toml.example) for shareable configuration
@@ -166,6 +178,11 @@ chore(deps): remove unused direct dependency
 
 Keep each pull request scoped. Describe user-visible behavior, verification
 performed, and any migration or release impact.
+
+Repository maintainers should protect `master` by requiring the `Windows full
+verify`, `Linux full verify`, and `zest serve without WebKit` checks, and by
+disallowing direct pushes. CI can reject an artifact in a pushed commit, but
+only branch protection prevents bypassing the PR checks.
 
 The first beta is tag-driven. Maintainers should read
 [`docs/RELEASING.md`](docs/RELEASING.md) before pushing a `v*` tag; the release
