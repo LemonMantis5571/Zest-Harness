@@ -36,11 +36,15 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("usage") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if let Some(unknown) = args.iter().find(|arg| arg.as_str() != "--tasks") {
+                anyhow::bail!("unknown usage option `{unknown}` (try: zest usage --tasks)");
+            }
             // Refresh before printing rather than after, so the figures on
             // screen match the rates reported beneath them. At most one request
             // a day; a failure just prices against the cached copy.
             let catalog = zest_core::rates::refresh(false).await;
-            print_usage(&catalog);
+            print_usage(&catalog, args.iter().any(|arg| arg == "--tasks"));
             return Ok(());
         }
         Some("doctor") => {
@@ -183,7 +187,7 @@ zest — local-first coding workbench
 USAGE
   zest                         Start the interactive terminal client
   zest auth                    Show provider authentication status
-  zest usage                   Show local usage totals
+  zest usage [--tasks]         Show local usage totals and recent task costs
   zest doctor --live           Run the opt-in live read-only check
   zest run --jsonl -- PROMPT   Run one deny-only JSONL/headless turn
   zest serve --project PATH [--policy trusted] [--init]
@@ -719,7 +723,7 @@ fn print_auth_row(label: &str, method: &str, status: &AuthStatus) {
 
 /// Spend and headroom are printed as separate lines on purpose. They answer
 /// different questions and one of them is not ours to measure.
-fn print_usage(catalog: &zest_core::RateCatalog) {
+fn print_usage(catalog: &zest_core::RateCatalog, show_tasks: bool) {
     let ledger = Ledger::load();
 
     println!("\n\x1b[1mUsage\x1b[0m");
@@ -728,7 +732,7 @@ fn print_usage(catalog: &zest_core::RateCatalog) {
     }
     println!();
 
-    if ledger.is_empty() {
+    if ledger.is_empty() && ledger.tasks().is_empty() {
         println!("  \x1b[90mNothing recorded yet.\x1b[0m\n");
         return;
     }
@@ -759,6 +763,171 @@ fn print_usage(catalog: &zest_core::RateCatalog) {
     }
 
     print_recent_cost(&ledger, catalog);
+    if show_tasks {
+        print_task_costs(&ledger, &Prices::load().with_catalog(catalog.clone()));
+    }
+}
+
+fn print_task_costs(ledger: &Ledger, prices: &Prices) {
+    println!("\n  \x1b[1mrecent tasks (last 30 days)\x1b[0m");
+    if ledger.tasks().is_empty() {
+        println!("    \x1b[90mNo task traces recorded yet.\x1b[0m");
+        return;
+    }
+    for task in ledger.tasks().iter().rev().take(20) {
+        let mut counts = zest_core::TokenCounts::default();
+        let mut cost = 0.0;
+        let mut unpriced = false;
+        let mut requests = 0u64;
+        let mut latency_ms = 0u64;
+        let mut failed_tools = 0usize;
+        let mut failed_requests = 0usize;
+        let mut reported_tokens = 0u64;
+        let mut priced_tokens = 0u64;
+        let mut provider_prompt_tokens = 0u64;
+        let mut all_usage_available = true;
+        let mut cache_tokens_without_source = 0u64;
+        let mut source = zest_core::RequestSourceEstimates::default();
+        for request in &task.requests {
+            requests += 1;
+            latency_ms = latency_ms.saturating_add(request.elapsed_ms);
+            failed_requests += usize::from(request.failed);
+            source.system_tokens = source
+                .system_tokens
+                .saturating_add(request.source_estimates.system_tokens);
+            source.project_context_tokens = source
+                .project_context_tokens
+                .saturating_add(request.source_estimates.project_context_tokens);
+            source.skill_context_tokens = source
+                .skill_context_tokens
+                .saturating_add(request.source_estimates.skill_context_tokens);
+            source.tools_tokens = source
+                .tools_tokens
+                .saturating_add(request.source_estimates.tools_tokens);
+            source.user_tokens = source
+                .user_tokens
+                .saturating_add(request.source_estimates.user_tokens);
+            source.history_tokens = source
+                .history_tokens
+                .saturating_add(request.source_estimates.history_tokens);
+            source.tool_output_tokens = source
+                .tool_output_tokens
+                .saturating_add(request.source_estimates.tool_output_tokens);
+            if !request.usage_available {
+                unpriced = true;
+                all_usage_available = false;
+                continue;
+            }
+            let request_tokens = request
+                .input_tokens
+                .saturating_add(request.output_tokens)
+                .saturating_add(request.cache_write_tokens)
+                .saturating_add(request.cache_read_tokens);
+            reported_tokens = reported_tokens.saturating_add(request_tokens);
+            provider_prompt_tokens = provider_prompt_tokens
+                .saturating_add(request.input_tokens)
+                .saturating_add(request.cache_read_tokens)
+                .saturating_add(request.cache_write_tokens);
+            cache_tokens_without_source = cache_tokens_without_source
+                .saturating_add(request.cache_write_tokens)
+                .saturating_add(request.cache_read_tokens);
+            counts.input_tokens = counts.input_tokens.saturating_add(request.input_tokens);
+            counts.output_tokens = counts.output_tokens.saturating_add(request.output_tokens);
+            counts.cache_write_tokens = counts
+                .cache_write_tokens
+                .saturating_add(request.cache_write_tokens);
+            counts.cache_read_tokens = counts
+                .cache_read_tokens
+                .saturating_add(request.cache_read_tokens);
+            let pricing = zest_core::pricing::Counts {
+                input_tokens: request.input_tokens,
+                output_tokens: request.output_tokens,
+                cache_write_tokens: request.cache_write_tokens,
+                cache_read_tokens: request.cache_read_tokens,
+            };
+            match prices.price(
+                &request.provider_id,
+                request
+                    .served_model
+                    .as_deref()
+                    .unwrap_or(&request.requested_model),
+                &pricing,
+            ) {
+                Some(estimate) => {
+                    cost += estimate.cost_usd;
+                    priced_tokens = priced_tokens.saturating_add(request_tokens);
+                }
+                None => unpriced = true,
+            }
+        }
+        failed_tools += task.tools.iter().filter(|tool| tool.is_error).count();
+        let cost_text = if requests == 0 {
+            "no provider request".to_string()
+        } else if unpriced {
+            format!("~${cost:.4}+unpriced")
+        } else {
+            format!("~${cost:.4}")
+        };
+        println!(
+            "    {} · {} · {} req · {} provider tokens · {} ms · {} request error(s) · {} tool error(s) · {} (API-equivalent estimate)",
+            task.kind,
+            task.status,
+            requests,
+            compact(counts.total_tokens()),
+            latency_ms,
+            failed_requests,
+            failed_tools,
+            cost_text
+        );
+        if reported_tokens > 0 {
+            let coverage = 100.0 * priced_tokens as f64 / reported_tokens as f64;
+            println!(
+                "      pricing coverage: {coverage:.0}% ({} / {} provider-reported tokens); subscription spend is not recorded here",
+                compact(priced_tokens),
+                compact(reported_tokens)
+            );
+        } else if requests > 0 && !all_usage_available {
+            println!("      provider usage unavailable; no API-equivalent cost is inferred");
+        } else if requests > 0 {
+            println!("      provider reported zero tokens; API-equivalent estimate is $0.0000");
+        }
+        if requests > 0 {
+            let estimated_prompt_tokens = source
+                .system_tokens
+                .saturating_add(source.project_context_tokens)
+                .saturating_add(source.skill_context_tokens)
+                .saturating_add(source.tools_tokens)
+                .saturating_add(source.user_tokens)
+                .saturating_add(source.history_tokens)
+                .saturating_add(source.tool_output_tokens);
+            if all_usage_available {
+                let delta =
+                    i128::from(estimated_prompt_tokens) - i128::from(provider_prompt_tokens);
+                println!(
+                    "      prompt estimate: {} vs {} provider-reported prompt tokens (estimate − reported: {delta:+})",
+                    compact(estimated_prompt_tokens),
+                    compact(provider_prompt_tokens)
+                );
+            } else {
+                println!(
+                    "      prompt estimate: {}; provider prompt totals are incomplete, so no reconciliation is shown",
+                    compact(estimated_prompt_tokens)
+                );
+            }
+            println!(
+                "      estimated prompt sections (tokens): system {}, project {}, skills {}, tools {}, user {}, history {}, tool output {}; cache {} tokens are not assigned to a source",
+                compact(source.system_tokens),
+                compact(source.project_context_tokens),
+                compact(source.skill_context_tokens),
+                compact(source.tools_tokens),
+                compact(source.user_tokens),
+                compact(source.history_tokens),
+                compact(source.tool_output_tokens),
+                compact(cache_tokens_without_source)
+            );
+        }
+    }
+    println!("    \x1b[90mNo prompts, tool bodies, or project paths are stored in task traces; estimates are not bills.\x1b[0m");
 }
 
 /// The last 30 days at list rates, with its own coverage stated underneath.

@@ -31,8 +31,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::approval::ToolRisk;
+use super::grep::MAX_FILE_BYTES as GREP_REACH_BYTES;
 use super::outcome::ToolOutcome;
-use super::read_file::{MAX_BYTES as READ_REACH_BYTES, READ_FILE_TOOL};
+use super::read_file::READ_FILE_TOOL;
 use crate::thread::{new_id, ThreadId};
 
 /// Directory under `.zest` that holds every conversation's artifacts.
@@ -344,20 +345,18 @@ impl SpillPolicy {
 /// What the model is told in place of the bytes.
 ///
 /// Names this repo's tools and parameters rather than generic ones, and admits
-/// the reach limit: `read_file` counts its budget from byte zero and applies any
-/// offset afterwards, and `grep` bounds each file the same way *silently*. A
-/// model that believes it can retrieve the whole artifact will act on the part it
-/// could not reach.
+/// the grep prefix limit. `read_file` pages by line and can reach later portions
+/// of an artifact; grep still bounds each file to a prefix.
 fn notice(omitted: usize, locator: &str, total: usize) -> String {
     let mut out = format!(
         "\n\n(Omitted {omitted} bytes. Full result stored at: {locator}. \
          Use read_file with offset/limit, or grep with `path` set to that file, \
          to search within it.)\n\n"
     );
-    if total > READ_REACH_BYTES {
+    if total > GREP_REACH_BYTES {
         out.push_str(&format!(
-            "(That file is {total} bytes; read_file and grep only reach its first \
-             {READ_REACH_BYTES}.)\n\n"
+            "(That file is {total} bytes; grep searches only its first {GREP_REACH_BYTES}. \
+             Use read_file with a later line offset to inspect beyond that.)\n\n"
         ));
     }
     out
@@ -633,13 +632,13 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_admits_the_reach_limit_only_when_it_applies() {
+    fn the_notice_admits_grep_prefix_limit_only_when_it_applies() {
         let small = notice(10, ".zest/spill/t-1/x.txt", 100_000);
         assert!(small.contains("Full result stored at"), "{small}");
-        assert!(!small.contains("only reach"), "{small}");
+        assert!(!small.contains("grep searches only"), "{small}");
 
         let big = notice(10, ".zest/spill/t-1/x.txt", 900_000);
-        assert!(big.contains("only reach"), "{big}");
+        assert!(big.contains("grep searches only"), "{big}");
         assert!(big.contains("900000"), "{big}");
     }
 

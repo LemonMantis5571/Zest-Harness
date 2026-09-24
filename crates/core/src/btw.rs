@@ -7,12 +7,14 @@ use crate::anthropic::types::Message;
 use crate::cancel::CancelToken;
 use crate::error::{HarnessError, Result};
 use crate::provider::{Provider, StreamEvent, TurnRequest};
+use crate::thread::new_id;
 use crate::usage::Ledger;
 
 #[derive(Clone)]
 pub struct SideConversation {
     provider: Arc<dyn Provider>,
     ledger: Option<Arc<Mutex<Ledger>>>,
+    parent_task_id: Option<String>,
     request: TurnRequest,
 }
 
@@ -28,11 +30,13 @@ impl SideConversation {
     pub(crate) fn new(
         provider: Arc<dyn Provider>,
         ledger: Option<Arc<Mutex<Ledger>>>,
+        parent_task_id: Option<String>,
         request: TurnRequest,
     ) -> Self {
         Self {
             provider,
             ledger,
+            parent_task_id,
             request,
         }
     }
@@ -58,6 +62,41 @@ impl SideConversation {
         if cancel.is_cancelled() {
             return Err(HarnessError::Cancelled);
         }
+        let task_id = new_id("task");
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_task(
+                    task_id.clone(),
+                    "side_conversation",
+                    self.parent_task_id.clone(),
+                );
+            }
+        }
+        let result = self.send_inner(text, cancel, on_event, &task_id).await;
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.finish_task(
+                    &task_id,
+                    if result.is_ok() {
+                        "completed"
+                    } else if matches!(&result, Err(HarnessError::Cancelled)) {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    },
+                );
+            }
+        }
+        result
+    }
+
+    async fn send_inner(
+        &mut self,
+        text: &str,
+        cancel: &CancelToken,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        task_id: &str,
+    ) -> Result<String> {
         let mut request = self.request.clone();
         // Keep the entire existing prefix unchanged. Instructions specific to
         // this question come after it, preserving eligible provider caches.
@@ -67,9 +106,28 @@ impl SideConversation {
              added to the main conversation.]\n\n{}", text.trim()
         )));
         request.cancel = Some(cancel.clone());
+        let request_started = tokio::time::Instant::now();
         let completion = match self.provider.stream_turn(&request, on_event).await {
             Ok(completion) => completion,
             Err(error) => {
+                if let Some(ledger) = &self.ledger {
+                    if let Ok(mut ledger) = ledger.lock() {
+                        ledger.record_task_request(
+                            task_id,
+                            crate::agent::task_request_usage(
+                                "side_conversation",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                None,
+                            ),
+                        );
+                    }
+                }
                 // The failed provider session may contain a partial answer.
                 // Retry from the last successful side transcript instead.
                 self.request.provider_session = None;
@@ -82,6 +140,19 @@ impl SideConversation {
                     self.provider.id(),
                     completion.served_model.as_deref().unwrap_or(&request.model),
                     &completion,
+                );
+                ledger.record_task_request(
+                    task_id,
+                    crate::agent::task_request_usage(
+                        "side_conversation",
+                        self.provider.id(),
+                        &request,
+                        request_started
+                            .elapsed()
+                            .as_millis()
+                            .min(u128::from(u64::MAX)) as u64,
+                        Some(&completion),
+                    ),
                 );
             }
         }

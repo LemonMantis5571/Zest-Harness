@@ -27,6 +27,12 @@ use crate::provider::{Completion, RateLimitSnapshot};
 /// Days of per-day history to keep. Enough to draw a year-long heatmap with room
 /// to spare; old buckets are dropped rather than growing the file forever.
 pub const DAILY_RETENTION_DAYS: usize = 400;
+/// Task-level diagnostics are local and short-lived. The long-running provider
+/// ledger remains the source for account usage history.
+pub const TASK_USAGE_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+pub const MAX_TASK_USAGE_RECORDS: usize = 10_000;
+const MAX_REQUESTS_PER_TASK: usize = 512;
+const MAX_TOOLS_PER_TASK: usize = 4_096;
 
 /// Minutes east of UTC, for deciding which day a turn belongs to.
 ///
@@ -556,9 +562,75 @@ pub struct Ledger {
     /// provider spend because those workers own their own accounts.
     #[serde(default)]
     external_workers: BTreeMap<String, ExternalWorkerUsage>,
+    /// Content-free traces for recent user turns and maintenance operations.
+    #[serde(default)]
+    tasks: Vec<TaskUsageRecord>,
     /// Where to persist. Not serialized — it is where the file is, not part of it.
     #[serde(skip)]
     path: Option<PathBuf>,
+}
+
+/// One local task's provider rounds and tool activity. Text, arguments, paths,
+/// and tool bodies are intentionally absent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUsageRecord {
+    pub task_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    /// `running`, `completed`, `failed`, or `cancelled`.
+    pub status: String,
+    #[serde(default)]
+    pub requests: Vec<TaskRequestUsage>,
+    #[serde(default)]
+    pub tools: Vec<TaskToolUsage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRequestUsage {
+    pub kind: String,
+    pub provider_id: String,
+    pub requested_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
+    pub elapsed_ms: u64,
+    pub usage_available: bool,
+    /// Provider request failed before usage was returned. No error text is kept.
+    pub failed: bool,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub source_estimates: RequestSourceEstimates,
+}
+
+/// Estimated prompt sections. These estimates are not a provider's billing
+/// attribution; cached tokens whose source cannot be identified remain unknown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestSourceEstimates {
+    pub system_tokens: u64,
+    pub project_context_tokens: u64,
+    pub skill_context_tokens: u64,
+    pub tools_tokens: u64,
+    pub user_tokens: u64,
+    pub history_tokens: u64,
+    pub tool_output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskToolUsage {
+    pub name: String,
+    pub result_bytes: u64,
+    pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl Ledger {
@@ -584,12 +656,109 @@ impl Ledger {
     /// Usage accounting must never be the reason a session refuses to start.
     pub fn load_from(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let mut ledger = std::fs::read_to_string(&path)
+        let loaded = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|raw| serde_json::from_str::<Ledger>(&raw).ok())
-            .unwrap_or_default();
+            .and_then(|raw| serde_json::from_str::<Ledger>(&raw).ok());
+        let was_loaded = loaded.is_some();
+        let mut ledger = loaded.unwrap_or_default();
         ledger.path = Some(path);
+        let task_count = ledger.tasks.len();
+        ledger.trim_tasks(now_secs());
+        if was_loaded && ledger.tasks.len() != task_count {
+            ledger.save_quietly();
+        }
         ledger
+    }
+
+    /// Start a content-free task trace. Old or interrupted entries are
+    /// retained only for the same bounded window as completed traces.
+    pub fn begin_task(
+        &mut self,
+        task_id: impl Into<String>,
+        kind: impl Into<String>,
+        parent_task_id: Option<String>,
+    ) {
+        let task_id = task_id.into();
+        let now = now_secs();
+        self.trim_tasks(now);
+        if self.tasks.iter().any(|task| task.task_id == task_id) {
+            return;
+        }
+        self.tasks.push(TaskUsageRecord {
+            task_id,
+            kind: kind.into(),
+            parent_task_id,
+            started_at: now,
+            finished_at: None,
+            status: "running".into(),
+            requests: Vec::new(),
+            tools: Vec::new(),
+        });
+        self.trim_tasks(now);
+        self.save_quietly();
+    }
+
+    /// Append one provider round without storing the request or response body.
+    pub fn record_task_request(&mut self, task_id: &str, request: TaskRequestUsage) {
+        let task = self.tasks.iter_mut().find(|task| task.task_id == task_id);
+        let Some(task) = task else { return };
+        task.requests.push(request);
+        if task.requests.len() > MAX_REQUESTS_PER_TASK {
+            let remove = task.requests.len() - MAX_REQUESTS_PER_TASK;
+            task.requests.drain(..remove);
+        }
+        self.save_quietly();
+    }
+
+    /// Record tool metadata only. The returned body and arguments never enter
+    /// the task ledger.
+    pub fn record_task_tool(
+        &mut self,
+        task_id: &str,
+        name: &str,
+        result_bytes: usize,
+        is_error: bool,
+        correlation_id: Option<String>,
+    ) {
+        let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) else {
+            return;
+        };
+        task.tools.push(TaskToolUsage {
+            name: name.into(),
+            result_bytes: result_bytes as u64,
+            is_error,
+            correlation_id,
+        });
+        if task.tools.len() > MAX_TOOLS_PER_TASK {
+            let remove = task.tools.len() - MAX_TOOLS_PER_TASK;
+            task.tools.drain(..remove);
+        }
+        self.save_quietly();
+    }
+
+    pub fn finish_task(&mut self, task_id: &str, status: &str) {
+        if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
+            task.finished_at = Some(now_secs());
+            task.status = status.into();
+            self.save_quietly();
+        }
+    }
+
+    pub fn tasks(&self) -> &[TaskUsageRecord] {
+        &self.tasks
+    }
+
+    fn trim_tasks(&mut self, now: u64) {
+        self.tasks
+            .retain(|task| now.saturating_sub(task.started_at) <= TASK_USAGE_RETENTION_SECS);
+        if self.tasks.len() > MAX_TASK_USAGE_RECORDS {
+            let remove = self.tasks.len() - MAX_TASK_USAGE_RECORDS;
+            self.tasks.drain(..remove);
+        }
+    }
+
+    fn save_quietly(&self) {
+        let _ = self.save();
     }
 
     /// Fold one completed turn into the running totals.
@@ -713,6 +882,7 @@ impl Ledger {
         self.daily = reloaded.daily;
         self.models = reloaded.models;
         self.external_workers = reloaded.external_workers;
+        self.tasks = reloaded.tasks;
     }
 
     pub fn get(&self, provider_id: &str) -> Option<&ProviderUsage> {
@@ -1489,6 +1659,92 @@ mod tests {
             served_model: None,
             provider_session: None,
         }
+    }
+
+    #[test]
+    fn task_traces_keep_usage_and_metadata_but_never_content() {
+        let mut ledger = Ledger::default();
+        ledger.begin_task("turn-1", "turn", None);
+        let mut paid = completion(10, 4, None);
+        paid.usage.cache_creation_input_tokens = 7;
+        paid.usage.cache_read_input_tokens = 5;
+        ledger.record_task_request(
+            "turn-1",
+            TaskRequestUsage {
+                kind: "agent".into(),
+                provider_id: "anthropic".into(),
+                requested_model: "claude-test".into(),
+                served_model: Some("claude-served".into()),
+                elapsed_ms: 123,
+                usage_available: true,
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_write_tokens: 7,
+                cache_read_tokens: 5,
+                source_estimates: RequestSourceEstimates {
+                    system_tokens: 2,
+                    project_context_tokens: 3,
+                    skill_context_tokens: 4,
+                    tools_tokens: 5,
+                    user_tokens: 6,
+                    history_tokens: 7,
+                    tool_output_tokens: 8,
+                },
+                ..Default::default()
+            },
+        );
+        ledger.record_task_request(
+            "turn-1",
+            TaskRequestUsage {
+                kind: "agent".into(),
+                provider_id: "anthropic".into(),
+                requested_model: "claude-test".into(),
+                elapsed_ms: 25,
+                failed: true,
+                ..Default::default()
+            },
+        );
+        ledger.record_task_tool("turn-1", "read_file", 80, false, Some("job-42".into()));
+        ledger.finish_task("turn-1", "completed");
+
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.requests[0].cache_write_tokens, 7);
+        assert_eq!(task.requests[0].cache_read_tokens, 5);
+        assert_eq!(
+            task.requests[0].served_model.as_deref(),
+            Some("claude-served")
+        );
+        assert_eq!(task.requests[0].source_estimates.skill_context_tokens, 4);
+        assert!(!task.requests[0].failed);
+        assert!(!task.requests[1].usage_available);
+        assert!(task.requests[1].failed);
+        assert_eq!(task.tools[0].correlation_id.as_deref(), Some("job-42"));
+        let serialized = serde_json::to_string(task).unwrap();
+        assert!(!serialized.contains("private project path"));
+        assert!(!serialized.contains("prompt text"));
+        assert!(!serialized.contains("tool result body"));
+        assert!(!serialized.contains("SECRET_VALUE"));
+    }
+
+    #[test]
+    fn task_traces_expire_after_thirty_days_on_load() {
+        let dir = crate::fsutil::ScratchDir::new("zest-task-expiry-");
+        let path = dir.join("usage.json");
+        let mut old = Ledger {
+            path: Some(path.clone()),
+            ..Default::default()
+        };
+        old.tasks.push(TaskUsageRecord {
+            task_id: "expired".into(),
+            started_at: now_secs().saturating_sub(TASK_USAGE_RETENTION_SECS + 1),
+            ..Default::default()
+        });
+        old.save().unwrap();
+
+        let loaded = Ledger::load_from(&path);
+        assert!(loaded.tasks().is_empty());
+        let persisted: Ledger = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(persisted.tasks.is_empty());
     }
 
     #[test]

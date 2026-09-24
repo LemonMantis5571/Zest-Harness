@@ -24,7 +24,8 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::inbox::InputInbox;
 use crate::provider::{
-    Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
+    Completion, Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt,
+    TurnRequest,
 };
 use crate::thread::{new_id, ThreadInput, ThreadInputTarget};
 use crate::tools::approval::{
@@ -34,7 +35,7 @@ use crate::tools::approval::{
 use crate::tools::prepared::PreparedToolCall;
 use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
-use crate::usage::Ledger;
+use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
 
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
@@ -112,6 +113,10 @@ pub struct Agent {
     tools: ToolRegistry,
     /// Shared so delegated sub-agents on other providers bill into the same book.
     ledger: Option<Arc<Mutex<Ledger>>>,
+    /// Correlation to a parent user task for a native delegated worker.
+    usage_task_parent_id: Option<String>,
+    /// Set for the duration of one user or maintenance task.
+    active_usage_task_id: Option<String>,
     /// Gate for write/exec tools. Defaults to deny-all when unset.
     approver: Arc<dyn Approver>,
     /// Mode + session grants, consulted before the approver is ever called.
@@ -148,6 +153,8 @@ impl Agent {
             provider,
             tools,
             ledger: None,
+            usage_task_parent_id: None,
+            active_usage_task_id: None,
             approver: Arc::new(DenyApprover),
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             questioner: Arc::new(DenyQuestioner),
@@ -182,6 +189,11 @@ impl Agent {
 
     pub fn with_ledger(mut self, ledger: Arc<Mutex<Ledger>>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    pub fn with_usage_task_parent(mut self, parent_task_id: impl Into<String>) -> Self {
+        self.usage_task_parent_id = Some(parent_task_id.into());
         self
     }
 
@@ -276,6 +288,7 @@ impl Agent {
                 .side_conversation_provider()
                 .unwrap_or_else(|| self.provider.clone()),
             self.ledger.clone(),
+            self.active_usage_task_id.clone(),
             TurnRequest {
                 model: self.model.clone(),
                 system: self.system.clone(),
@@ -352,6 +365,35 @@ impl Agent {
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
+        let task_id = new_id("task");
+        let parent_task_id = self
+            .active_usage_task_id
+            .clone()
+            .or_else(|| self.usage_task_parent_id.clone());
+        let prior_task = self.active_usage_task_id.replace(task_id.clone());
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_task(task_id.clone(), "compaction", parent_task_id);
+            }
+        }
+        let result = self.compact_context_inner().await;
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.finish_task(
+                    &task_id,
+                    if result.is_ok() {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                );
+            }
+        }
+        self.active_usage_task_id = prior_task;
+        result
+    }
+
+    async fn compact_context_inner(&mut self) -> Result<CompactionOutcome> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
                 "there is not enough conversation to compact yet".into(),
@@ -410,9 +452,30 @@ impl Agent {
             cancel: None,
         };
         let mut sink = |_event: StreamEvent<'_>| {};
+        let request_started = tokio::time::Instant::now();
         let completion = match self.provider.stream_turn(&request, &mut sink).await {
             Ok(completion) => completion,
             Err(error) => {
+                if let (Some(ledger), Some(task_id)) =
+                    (&self.ledger, self.active_usage_task_id.as_deref())
+                {
+                    if let Ok(mut ledger) = ledger.lock() {
+                        ledger.record_task_request(
+                            task_id,
+                            task_request_usage(
+                                "compaction",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                None,
+                            ),
+                        );
+                    }
+                }
                 self.provider_session = None;
                 return Err(error);
             }
@@ -425,6 +488,21 @@ impl Agent {
                     billed_model(&request.model, completion.served_model.as_deref()),
                     &completion,
                 );
+                if let Some(task_id) = self.active_usage_task_id.as_deref() {
+                    ledger.record_task_request(
+                        task_id,
+                        task_request_usage(
+                            "compaction",
+                            self.provider.id(),
+                            &request,
+                            request_started
+                                .elapsed()
+                                .as_millis()
+                                .min(u128::from(u64::MAX)) as u64,
+                            Some(&completion),
+                        ),
+                    );
+                }
             }
         }
 
@@ -612,6 +690,42 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
         inbox: Option<&InputInbox>,
+        on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+    ) -> Result<()> {
+        let task_id = new_id("task");
+        self.active_usage_task_id = Some(task_id.clone());
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_task(task_id.clone(), "turn", self.usage_task_parent_id.clone());
+            }
+        }
+        let result = self
+            .send_user_cancellable_inner(user_message, on_event, cancel, inbox, on_side_context)
+            .await;
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.finish_task(
+                    &task_id,
+                    if result.is_ok() {
+                        "completed"
+                    } else if matches!(&result, Err(HarnessError::Cancelled)) {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    },
+                );
+            }
+        }
+        self.active_usage_task_id = None;
+        result
+    }
+
+    async fn send_user_cancellable_inner(
+        &mut self,
+        user_message: Message,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
         mut on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
@@ -664,9 +778,30 @@ impl Agent {
                 cancel: cancel.cloned(),
             };
 
+            let request_started = tokio::time::Instant::now();
             let completion = match self.provider.stream_turn(&request, &mut *on_event).await {
                 Ok(c) => c,
                 Err(e) => {
+                    if let (Some(ledger), Some(task_id)) =
+                        (&self.ledger, self.active_usage_task_id.as_deref())
+                    {
+                        if let Ok(mut ledger) = ledger.lock() {
+                            ledger.record_task_request(
+                                task_id,
+                                task_request_usage(
+                                    "agent",
+                                    self.provider.id(),
+                                    &request,
+                                    request_started
+                                        .elapsed()
+                                        .as_millis()
+                                        .min(u128::from(u64::MAX))
+                                        as u64,
+                                    None,
+                                ),
+                            );
+                        }
+                    }
                     // Do not commit staged history — keep prior wire messages intact.
                     self.provider_session = None;
                     return Err(e);
@@ -696,6 +831,22 @@ impl Agent {
                         billed_model(&request.model, completion.served_model.as_deref()),
                         &completion,
                     );
+                    if let Some(task_id) = self.active_usage_task_id.as_deref() {
+                        ledger.record_task_request(
+                            task_id,
+                            task_request_usage(
+                                "agent",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Some(&completion),
+                            ),
+                        );
+                    }
                 }
             }
             self.turn_usage
@@ -764,6 +915,29 @@ impl Agent {
                     // asked in, never completion order.
                     let mut results = Vec::with_capacity(calls.len());
                     for (call, outcome) in calls.iter().zip(outcomes) {
+                        if let (Some(ledger), Some(task_id)) =
+                            (&self.ledger, self.active_usage_task_id.as_deref())
+                        {
+                            if let Ok(mut ledger) = ledger.lock() {
+                                let correlation_id =
+                                    outcome
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|metadata| match metadata {
+                                            crate::tools::ToolMetadata::Delegation {
+                                                job_id,
+                                                ..
+                                            } => job_id.clone(),
+                                        });
+                                ledger.record_task_tool(
+                                    task_id,
+                                    &call.name,
+                                    outcome.body.len(),
+                                    outcome.is_error,
+                                    correlation_id,
+                                );
+                            }
+                        }
                         if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
                         }
@@ -1377,6 +1551,114 @@ fn summarize_tool_body(body: &str) -> String {
     }
     let truncated: String = flat.chars().take(MAX.saturating_sub(1)).collect();
     format!("{truncated}…")
+}
+
+/// Character-based section estimates are diagnostic only. Provider usage is
+/// retained separately, and no cached billing tokens are allocated to a
+/// section when the provider does not expose that mapping.
+pub(crate) fn request_source_estimates(request: &TurnRequest) -> RequestSourceEstimates {
+    use crate::context_budget::{chars_to_tok, system_tokens, tool_schema_tokens};
+
+    let system_text = request
+        .system
+        .as_ref()
+        .map(|system| system.cacheable.as_str())
+        .unwrap_or_default();
+    let mut section = "system";
+    let mut project_chars = 0u64;
+    let mut skill_chars = 0u64;
+    for line in system_text.split_inclusive('\n') {
+        if let Some(heading) = line.strip_prefix("# ") {
+            section = match heading.trim() {
+                "Project instructions" | "Project documentation" => "project",
+                "Available skills" | "Skill details" => "skills",
+                _ => "system",
+            };
+        }
+        match section {
+            "project" => project_chars = project_chars.saturating_add(line.chars().count() as u64),
+            "skills" => skill_chars = skill_chars.saturating_add(line.chars().count() as u64),
+            _ => {}
+        }
+    }
+    let project_context_tokens = chars_to_tok(project_chars);
+    let skill_context_tokens = chars_to_tok(skill_chars);
+    let full_system_tokens = system_tokens(request.system.as_ref());
+    let mut estimates = RequestSourceEstimates {
+        system_tokens: full_system_tokens
+            .saturating_sub(project_context_tokens)
+            .saturating_sub(skill_context_tokens),
+        project_context_tokens,
+        skill_context_tokens,
+        tools_tokens: tool_schema_tokens(&request.tools),
+        ..Default::default()
+    };
+    for message in &request.messages {
+        let mut user_chars = 0u64;
+        let mut history_chars = 0u64;
+        let mut tool_output_chars = 0u64;
+        for block in &message.content {
+            let chars = block.to_string().chars().count() as u64;
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
+                tool_output_chars = tool_output_chars.saturating_add(chars);
+            } else if message.role == "user" {
+                user_chars = user_chars.saturating_add(chars);
+            } else {
+                history_chars = history_chars.saturating_add(chars);
+            }
+        }
+        estimates.user_tokens = estimates
+            .user_tokens
+            .saturating_add(chars_to_tok(user_chars));
+        estimates.history_tokens = estimates
+            .history_tokens
+            .saturating_add(chars_to_tok(history_chars));
+        estimates.tool_output_tokens = estimates
+            .tool_output_tokens
+            .saturating_add(chars_to_tok(tool_output_chars));
+    }
+    estimates
+}
+
+pub(crate) fn task_request_usage(
+    kind: &str,
+    provider_id: &str,
+    request: &TurnRequest,
+    elapsed_ms: u64,
+    completion: Option<&Completion>,
+) -> TaskRequestUsage {
+    let available = completion.is_some_and(|completion| completion.usage_available);
+    let usage = completion.map(|completion| &completion.usage);
+    TaskRequestUsage {
+        kind: kind.into(),
+        provider_id: provider_id.into(),
+        requested_model: request.model.clone(),
+        served_model: completion.and_then(|completion| completion.served_model.clone()),
+        elapsed_ms,
+        usage_available: available,
+        failed: completion.is_none(),
+        input_tokens: if available {
+            usage.map_or(0, |usage| usage.input_tokens as u64)
+        } else {
+            0
+        },
+        output_tokens: if available {
+            usage.map_or(0, |usage| usage.output_tokens as u64)
+        } else {
+            0
+        },
+        cache_write_tokens: if available {
+            usage.map_or(0, |usage| usage.cache_creation_input_tokens as u64)
+        } else {
+            0
+        },
+        cache_read_tokens: if available {
+            usage.map_or(0, |usage| usage.cache_read_input_tokens as u64)
+        } else {
+            0
+        },
+        source_estimates: request_source_estimates(request),
+    }
 }
 
 fn publish_side_context(

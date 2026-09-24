@@ -21,8 +21,8 @@ use zest_core::{
     run_delegation_worker, run_provider_reviewer, run_provider_worker, validate_diff_scope,
     AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob, DelegationOrigin,
     DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
-    ExternalUsageReport, ProviderConfig, ResolvedTargetMetadata, ReviewReport,
-    ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
+    ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
+    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
 };
 use zest_core::{
     DecisionGate, DispatchState, ExternalSessionEvidence, InboxMessage, LifecycleEntry,
@@ -2026,7 +2026,10 @@ impl DelegationCoordinator {
                     config.clone(),
                     &worker_target,
                     &worker_prompt,
-                    Some(self.ledger.clone()),
+                    NativeTaskUsageContext {
+                        ledger: Some(self.ledger.clone()),
+                        parent_task_id: Some(job_id.to_string()),
+                    },
                     Some(cancel),
                 )
                 .await
@@ -2142,7 +2145,10 @@ impl DelegationCoordinator {
                     &reviewer_target,
                     &worker_diff,
                     &review_prompt,
-                    Some(self.ledger.clone()),
+                    NativeTaskUsageContext {
+                        ledger: Some(self.ledger.clone()),
+                        parent_task_id: Some(job_id.to_string()),
+                    },
                     Some(cancel),
                 )
                 .await

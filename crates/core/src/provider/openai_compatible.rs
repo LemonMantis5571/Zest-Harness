@@ -23,6 +23,7 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -253,13 +254,16 @@ impl OpenAiCompatibleClient {
         let response = tokio::select! {
             biased;
             _ = wait_cancel(cancel) => return Err((HarnessError::Cancelled, None)),
-            response = self.http.post(self.endpoint())
-                .header("authorization", format!("Bearer {}", self.api_key))
-                .header("content-type", "application/json")
-                .json(req)
-                .send() => match response {
+            response = wait_for_response_headers(
+                self.http.post(self.endpoint())
+                    .header("authorization", format!("Bearer {}", self.api_key))
+                    .header("content-type", "application/json")
+                    .json(req)
+                    .send(),
+                RESPONSE_HEADERS_TIMEOUT,
+            ) => match response {
                     Ok(response) => response,
-                    Err(error) => return Err((HarnessError::Http(error), None)),
+                    Err(error) => return Err((error, None)),
                 },
         };
         if response.status().is_success() {
@@ -269,6 +273,16 @@ impl OpenAiCompatibleClient {
         let body = response.text().await.unwrap_or_default();
         Err((HarnessError::Api { status, body }, None))
     }
+}
+
+async fn wait_for_response_headers<F>(request: F, timeout: Duration) -> Result<reqwest::Response>
+where
+    F: std::future::Future<Output = std::result::Result<reqwest::Response, reqwest::Error>>,
+{
+    tokio::time::timeout(timeout, request)
+        .await
+        .map_err(|_| HarnessError::Other("OpenAI-compatible response headers timed out".into()))?
+        .map_err(HarnessError::Http)
 }
 
 #[derive(Default)]
@@ -571,6 +585,20 @@ fn bounded_u32(value: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn request_waiting_for_response_headers_has_a_deadline() {
+        let request =
+            std::future::pending::<std::result::Result<reqwest::Response, reqwest::Error>>();
+        let error = wait_for_response_headers(request, Duration::from_millis(1))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            HarnessError::Other(message) if message.contains("response headers timed out")
+        ));
+    }
 
     fn usage_of(usage: Value) -> Usage {
         let mut accumulator = OpenAiAccumulator::default();

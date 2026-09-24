@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -13,11 +14,9 @@ use super::Tool;
 /// from the string the registry dispatches on.
 pub const READ_FILE_TOOL: &str = "read_file";
 
-/// Bytes this tool will read from a file, counted from byte zero.
-///
-/// Also the *reach* of an `offset`: the window is applied after the read, so no
-/// offset addresses content past this point. Callers that hand the model a file
-/// path larger than this must say so — see [`super::spill`].
+/// Maximum retained text bytes for one requested window. The reader still scans
+/// the file to count lines, so later offsets remain reachable without buffering
+/// the whole file.
 pub const MAX_BYTES: usize = 256 * 1024;
 /// Lines returned when the call does not ask for a narrower window.
 const DEFAULT_LINE_LIMIT: usize = 2_000;
@@ -77,97 +76,141 @@ impl ReadFile {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<String, String> {
-        use tokio::io::AsyncReadExt;
-
         let resolved = self.root.resolve(path)?;
-        let meta = tokio::fs::metadata(&resolved)
-            .await
-            .map_err(|e| format!("stat failed: {e}"))?;
-        let file_len = meta.len() as usize;
-
-        let file = tokio::fs::File::open(&resolved)
-            .await
-            .map_err(|e| format!("open failed: {e}"))?;
-        // Bound before alloc: read at most MAX_BYTES (+1 to detect truncation).
-        let mut buf = Vec::with_capacity(file_len.min(MAX_BYTES).saturating_add(1));
-        let mut limited = file.take(MAX_BYTES as u64 + 1);
-        limited
-            .read_to_end(&mut buf)
-            .await
-            .map_err(|e| format!("read failed: {e}"))?;
-        let byte_truncated = buf.len() > MAX_BYTES || file_len > MAX_BYTES;
-        if buf.len() > MAX_BYTES {
-            buf.truncate(MAX_BYTES);
-        }
-        let text = String::from_utf8_lossy(&buf).into_owned();
-        Ok(number_lines(&text, offset, limit, byte_truncated, file_len))
+        let offset = offset.unwrap_or(1).max(1);
+        let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
+        tokio::task::spawn_blocking(move || {
+            let window = collect_lines_window(&resolved, offset, limit)?;
+            Ok(render_lines(
+                &window.lines,
+                window.total_lines,
+                offset,
+                limit,
+                window.truncated,
+            ))
+        })
+        .await
+        .map_err(|e| format!("read worker failed: {e}"))?
     }
 }
 
-/// Render the requested window with `cat -n` style prefixes.
-///
-/// A byte-truncated tail is deliberately dropped rather than shown: the last
-/// line would be cut mid-token, and a partial line that looks whole is exactly
-/// what produces an `edit_file` call against text that does not exist.
-fn number_lines(
-    text: &str,
-    offset: Option<usize>,
-    limit: Option<usize>,
-    byte_truncated: bool,
-    file_len: usize,
-) -> String {
-    let mut lines: Vec<&str> = text.lines().collect();
-    if byte_truncated && lines.len() > 1 {
-        lines.pop();
-    }
-    let total = lines.len();
+/// Stream the complete file to count lines while retaining only the requested
+/// window, capped at `MAX_BYTES`. Large files remain pageable without an
+/// allocation proportional to their size.
+struct LineWindow {
+    lines: Vec<(usize, String)>,
+    total_lines: usize,
+    truncated: bool,
+}
 
-    // `offset` is 1-based to match what the model sees in the output.
-    let start = offset.unwrap_or(1).max(1);
-    let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
-    let start_index = start.saturating_sub(1);
+fn collect_lines_window(path: &PathBuf, start: usize, limit: usize) -> Result<LineWindow, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {e}"))?;
+    let mut reader = BufReader::new(file);
+    let end = start.saturating_add(limit);
+    let mut line_number = 1usize;
+    let mut line_bytes = 0usize;
+    let mut retained_bytes = 0usize;
+    let mut line = Vec::new();
+    let mut lines = Vec::new();
+    let mut truncated = false;
+    let mut line_truncated = false;
 
-    if total == 0 {
-        return if byte_truncated {
-            format!("[empty window; file is {file_len} bytes]")
-        } else {
-            "[empty file]".to_string()
-        };
-    }
-    if start_index >= total {
-        return format!(
-            "[offset {start} is past the end; file has {total} line(s)\
-             {}]",
-            if byte_truncated {
-                " in the first 256 KiB"
+    loop {
+        let (consumed, newline, empty) = {
+            let buffer = reader.fill_buf().map_err(|e| format!("read failed: {e}"))?;
+            if buffer.is_empty() {
+                (0, false, true)
+            } else if let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
+                (position + 1, true, false)
             } else {
-                ""
+                (buffer.len(), false, false)
             }
-        );
+        };
+        if empty {
+            if line_bytes > 0 {
+                if (start..end).contains(&line_number) {
+                    finish_window_line(&mut lines, &mut line, line_number, !line_truncated);
+                }
+                line_number = line_number.saturating_add(1);
+            }
+            break;
+        }
+
+        let content_bytes = consumed - usize::from(newline);
+        if (start..end).contains(&line_number) {
+            let available = MAX_BYTES.saturating_sub(retained_bytes);
+            let take = available.min(content_bytes);
+            let buffer = reader.fill_buf().map_err(|e| format!("read failed: {e}"))?;
+            line.extend_from_slice(&buffer[..take]);
+            retained_bytes += take;
+            if take < content_bytes {
+                truncated = true;
+                line_truncated = true;
+            }
+        }
+        line_bytes = line_bytes.saturating_add(content_bytes);
+        reader.consume(consumed);
+
+        if newline {
+            if (start..end).contains(&line_number) {
+                finish_window_line(&mut lines, &mut line, line_number, !line_truncated);
+            }
+            line_number = line_number.saturating_add(1);
+            line_bytes = 0;
+            line_truncated = false;
+        }
     }
 
-    let end_index = start_index.saturating_add(limit).min(total);
-    let mut out = String::with_capacity((end_index - start_index) * 80);
-    for (offset_in_slice, line) in lines[start_index..end_index].iter().enumerate() {
-        out.push_str(&format!(
-            "{:>6}\t{line}\n",
-            start_index + offset_in_slice + 1
-        ));
-    }
+    Ok(LineWindow {
+        lines,
+        total_lines: line_number.saturating_sub(1),
+        truncated,
+    })
+}
 
-    let shown_all_lines = start_index == 0 && end_index == total;
-    if !shown_all_lines || byte_truncated {
-        out.push_str(&format!(
-            "\n[showed lines {}-{end_index} of {total}",
-            start_index + 1
-        ));
-        if byte_truncated {
+fn finish_window_line(
+    lines: &mut Vec<(usize, String)>,
+    bytes: &mut Vec<u8>,
+    line: usize,
+    complete: bool,
+) {
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    if complete {
+        lines.push((line, String::from_utf8_lossy(bytes).into_owned()));
+    }
+    bytes.clear();
+}
+
+fn render_lines(
+    lines: &[(usize, String)],
+    total: usize,
+    start: usize,
+    limit: usize,
+    truncated: bool,
+) -> String {
+    if total == 0 {
+        return "[empty file]".to_string();
+    }
+    if start > total {
+        return format!("[offset {start} is past the end; file has {total} line(s)]");
+    }
+    let end = start.saturating_add(limit).saturating_sub(1).min(total);
+    let mut out = String::with_capacity(lines.iter().map(|(_, line)| line.len() + 8).sum());
+    for (number, line) in lines {
+        out.push_str(&format!("{number:>6}\t"));
+        out.push_str(line);
+        out.push('\n');
+    }
+    if start != 1 || end != total || truncated {
+        out.push_str(&format!("\n[showed lines {start}-{end} of {total}"));
+        if truncated {
             out.push_str(&format!(
-                "; file is {file_len} bytes and was cut at {MAX_BYTES} — lines beyond \
-                 this point are not visible to any offset"
+                "; output capped at {MAX_BYTES} bytes — narrow the limit"
             ));
-        } else if end_index < total {
-            out.push_str(&format!("; call again with offset {}", end_index + 1));
+        } else if end < total {
+            out.push_str(&format!("; call again with offset {}", end + 1));
         }
         out.push_str("]\n");
     }
@@ -340,7 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn byte_truncation_is_announced_and_drops_the_partial_line() {
+    async fn byte_truncation_is_announced_and_later_offsets_remain_reachable() {
         let dir = scratch("byte-cut");
         let line = "y".repeat(255);
         let body: String = (0..1200).map(|_| format!("{line}\n")).collect();
@@ -349,13 +392,36 @@ mod tests {
 
         let tool = ReadFile::new(&dir).unwrap();
         let out = tool
+            .run(json!({ "path": "huge.txt", "offset": 1000, "limit": 100 }))
+            .await
+            .unwrap()
+            .body;
+        assert!(out.contains("  1000\t"), "late offset was not read: {out}");
+        assert!(
+            out.contains(&line),
+            "complete selected lines should be kept"
+        );
+        assert!(
+            !out.contains("capped at"),
+            "small late window was capped: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_large_first_window_drops_partial_lines_when_capped() {
+        let dir = scratch("partial-line");
+        let line = "y".repeat(255);
+        let body: String = (0..1200).map(|_| format!("{line}\n")).collect();
+        std::fs::write(dir.join("huge.txt"), body).unwrap();
+
+        let tool = ReadFile::new(&dir).unwrap();
+        let out = tool
             .run(json!({ "path": "huge.txt", "limit": 5000 }))
             .await
             .unwrap()
             .body;
-        assert!(out.contains("not visible to any offset"), "{out}");
-        // The line the byte cap sliced through must not be presented as whole.
-        let last_content = out.lines().rfind(|l| l.contains('\t')).unwrap();
+        assert!(out.contains("capped at"), "{out}");
+        let last_content = out.lines().rfind(|line| line.contains('\t')).unwrap();
         assert!(
             last_content.ends_with(&line),
             "partial line leaked: {last_content}"

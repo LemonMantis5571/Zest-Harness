@@ -34,6 +34,13 @@ pub struct ResolvedWorkerMetadata {
     pub effort: String,
 }
 
+/// Usage ledger and initiating task for one native worker/reviewer run.
+#[derive(Clone, Default)]
+pub struct NativeTaskUsageContext {
+    pub ledger: Option<Arc<Mutex<Ledger>>>,
+    pub parent_task_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NativeWorkerResult {
     pub metadata: ResolvedWorkerMetadata,
@@ -253,7 +260,7 @@ pub async fn run_provider_worker(
     config: Config,
     target: &DelegationTarget,
     prompt: &str,
-    ledger: Option<Arc<Mutex<Ledger>>>,
+    usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
 ) -> Result<NativeWorkerResult> {
     let target = provider_target(root, &config, target)?;
@@ -264,7 +271,7 @@ pub async fn run_provider_worker(
         &target,
         prompt,
         RuntimeRole::DelegationWorker,
-        ledger,
+        usage,
         cancel,
     )
     .await;
@@ -310,7 +317,7 @@ pub async fn run_provider_reviewer(
     target: &DelegationTarget,
     worker_diff: &str,
     prompt: &str,
-    ledger: Option<Arc<Mutex<Ledger>>>,
+    usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
 ) -> Result<NativeReviewerResult> {
     let target = provider_target(root, &config, target)?;
@@ -323,7 +330,7 @@ pub async fn run_provider_reviewer(
         &target,
         prompt,
         RuntimeRole::DelegationReviewer,
-        ledger,
+        usage,
         cancel,
     )
     .await;
@@ -390,7 +397,7 @@ async fn run_in_workspace(
     target: &ResolvedWorkerMetadata,
     prompt: &str,
     role: RuntimeRole,
-    ledger: Option<Arc<Mutex<Ledger>>>,
+    usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
 ) -> Result<(String, AttemptUsage)> {
     let mut runtime = RuntimeBuilder::new(root)
@@ -401,7 +408,10 @@ async fn run_in_workspace(
         .with_role(role)
         .enable_external_agents(false)
         .register_exec_tools(false);
-    if let Some(ledger) = ledger {
+    if let Some(parent_task_id) = usage.parent_task_id {
+        runtime = runtime.with_usage_task_parent(parent_task_id);
+    }
+    if let Some(ledger) = usage.ledger {
         runtime = runtime.with_ledger(ledger);
     }
     let mut session = runtime.build()?;
