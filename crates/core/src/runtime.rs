@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::agent::Agent;
-use crate::config::{Config, ProviderConfig};
+use crate::config::Config;
 use crate::error::{HarnessError, Result};
 use crate::jobs::JobRegistry;
 use crate::mcp::register_mcp_tools;
@@ -22,7 +22,6 @@ use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
 use crate::tools::approval::{AllowApprover, ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::external_agent::ExternalAgent;
-use crate::tools::jev::OpenRouterDecisionTool;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
 use crate::tools::{
@@ -412,7 +411,6 @@ impl RuntimeBuilder {
         if !provider_owns_agent_loop {
             register_read_tools(&mut worker_tools, &root)
                 .map_err(|e| HarnessError::Other(format!("register read tools: {e}")))?;
-            register_openrouter_decision_tools(&mut worker_tools, &config, &mut warnings);
             if self.register_write && self.role != RuntimeRole::DelegationReviewer {
                 register_write_tools(&mut worker_tools, &root)
                     .map_err(|e| HarnessError::Other(format!("register write tools: {e}")))?;
@@ -562,88 +560,6 @@ impl RuntimeSession {
     /// Resolve workspace root for callers that only have a path hint.
     pub fn root(&self) -> &Path {
         &self.root
-    }
-}
-
-/// Register a configured Jev model beside the normal chat tools. Decision
-/// models use OpenRouter's separate Decisions API, so they are tools rather
-/// than selectable chat providers.
-fn register_openrouter_decision_tools(
-    tools: &mut ToolRegistry,
-    config: &Config,
-    warnings: &mut Vec<String>,
-) {
-    let configured: Vec<_> = config
-        .providers
-        .iter()
-        .filter_map(|(id, provider)| match provider {
-            ProviderConfig::OpenaiCompatible {
-                base_url,
-                decision_model: Some(model),
-                ..
-            } => Some((id.as_str(), base_url.as_str(), model.trim())),
-            _ => None,
-        })
-        .filter(|(_, _, model)| !model.is_empty())
-        .collect();
-
-    for (index, (id, base_url, model)) in configured.iter().enumerate() {
-        let parsed_url = match reqwest::Url::parse(base_url) {
-            Ok(url) => url,
-            Err(_) => {
-                warnings.push(format!(
-                    "Jev decision model for provider `{id}` was not loaded: its OpenRouter endpoint is invalid"
-                ));
-                continue;
-            }
-        };
-        if parsed_url.scheme() != "https" || parsed_url.host_str() != Some("openrouter.ai") {
-            warnings.push(format!(
-                "Jev decision model for provider `{id}` was not loaded: set its base_url to https://openrouter.ai/api/v1"
-            ));
-            continue;
-        }
-
-        let entry = &config.providers[*id];
-        let key = match crate::provider::driver::resolve(crate::provider::driver::credentials_for(
-            id, entry,
-        )) {
-            Ok(Some(key)) => key,
-            Ok(None) => {
-                warnings.push(format!(
-                    "Jev decision model for provider `{id}` was not loaded: its OpenRouter API key is not set"
-                ));
-                continue;
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "Jev decision model for provider `{id}` was not loaded: {error}"
-                ));
-                continue;
-            }
-        };
-
-        let name = if configured.len() == 1 {
-            "jev_decide".to_string()
-        } else {
-            let suffix: String = id
-                .chars()
-                .map(|character| {
-                    if character.is_ascii_alphanumeric() {
-                        character.to_ascii_lowercase()
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            format!("jev_decide_{}_{}", suffix, index + 1)
-        };
-        match OpenRouterDecisionTool::new(key, *model, *id, name) {
-            Ok(tool) => tools.register(Arc::new(tool)),
-            Err(error) => warnings.push(format!(
-                "Jev decision model for provider `{id}` was not loaded: {error}"
-            )),
-        }
     }
 }
 
@@ -1289,37 +1205,6 @@ provider = "main"
         assert!(!names.contains(&"write_file"));
         assert!(!names.contains(&"bash"));
         assert!(!names.contains(&"delegate_external"));
-    }
-
-    #[test]
-    fn configured_openrouter_decision_model_is_registered_as_a_tool() {
-        std::env::set_var("ZEST_TEST_RUNTIME_OPENROUTER_KEY", "test-key");
-        let dir = scratch("jev-tool");
-        let config = Config::parse(
-            r#"
-[providers.openrouter]
-kind = "openai_compatible"
-base_url = "https://openrouter.ai/api/v1"
-model = "openrouter/auto"
-api_key_env = "ZEST_TEST_RUNTIME_OPENROUTER_KEY"
-decision_model = "~typesafe/jev-latest"
-
-[default]
-provider = "openrouter"
-"#,
-        )
-        .unwrap();
-        let session = RuntimeBuilder::new(&dir)
-            .with_config(config)
-            .with_provider("openrouter")
-            .register_write_tools(false)
-            .register_exec_tools(false)
-            .build()
-            .unwrap();
-        std::env::remove_var("ZEST_TEST_RUNTIME_OPENROUTER_KEY");
-
-        assert!(session.agent.tool_names().contains(&"jev_decide"));
-        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
     }
 
     #[test]

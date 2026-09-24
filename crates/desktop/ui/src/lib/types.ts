@@ -103,18 +103,6 @@ export type LoginStatus = {
 export type { ModelCapability };
 export type WorkspaceReview = GeneratedWorkspaceReview;
 export type WorkspaceChange = GeneratedWorkspaceChange;
-export type JevQuickReview = {
-  targetId: string;
-  contentHash: string;
-  kind: "plan" | "changes";
-  status: "clear" | "attention" | "inconclusive" | "unavailable" | "skipped" | "stale";
-  checks: Array<{ id: string; label: string; choice?: "clear" | "concern" | "unclear"; outcome: "clear" | "concern" | "inconclusive"; probability: number }>;
-  model: string;
-  usage: Record<string, unknown> | null;
-  sourceExcerpt: string;
-  detail: string | null;
-  reviewedAtMs: number;
-};
 export type DelegationEvent = GeneratedDelegationEvent;
 export type DelegationJob = DelegationJobView;
 export type DelegationTarget = DelegationTargetView;

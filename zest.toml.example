@@ -83,17 +83,6 @@ enabled = true
 # base_url = "https://api.openai.com/v1"
 # model = "gpt-5"
 # credential = "openai"
-#
-# OpenRouter can also expose Jev as the `jev_decide` tool. Jev uses the
-# Decisions API and returns typed answers/probabilities, so it is not a chat
-# model and does not appear in the conversation model picker.
-# [providers.openrouter]
-# kind = "openai_compatible"
-# base_url = "https://openrouter.ai/api/v1"
-# model = "openrouter/auto"
-# credential = "openrouter"
-# decision_model = "~typesafe/jev-latest"
-# decision_reviewer = true # optional advisory checks on plans and changes
 
 # Zest's own MCP servers are optional, and are reached by the chat provider
 # itself. Add them from Customize > MCPs, or here.

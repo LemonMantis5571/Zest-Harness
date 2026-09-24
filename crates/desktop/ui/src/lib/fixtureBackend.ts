@@ -2023,8 +2023,6 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         patchCheck: "clean",
       };
     },
-    async checkJevPlan() { return null; },
-    async checkJevChanges() { return null; },
     async contextUsage() {
       return {
         usedTokens: 12000,

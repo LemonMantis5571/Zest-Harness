@@ -309,15 +309,6 @@ pub enum ProviderConfig {
         /// Headless/CI fallback. Never written by Zest's setup UI.
         #[serde(default)]
         api_key_env: Option<String>,
-        /// Optional OpenRouter Decisions API model exposed to the chat agent as
-        /// the `jev_decide` tool. This is separate from the provider's normal
-        /// chat-completion model because decision models do not generate text.
-        #[serde(default)]
-        decision_model: Option<String>,
-        /// Opt in to advisory Jev checks on finished plans, workspace changes,
-        /// and accepted delegated reviews. The name is kept for existing configs.
-        #[serde(default)]
-        decision_reviewer: bool,
     },
 }
 

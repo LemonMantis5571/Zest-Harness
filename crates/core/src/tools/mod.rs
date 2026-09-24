@@ -8,7 +8,6 @@ pub mod external_agent;
 pub mod glob_files;
 pub mod grep;
 pub(crate) mod isolated_workspace;
-pub mod jev;
 pub mod jobs;
 pub mod list_dir;
 pub mod outcome;

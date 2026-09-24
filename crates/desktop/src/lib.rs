@@ -10,7 +10,6 @@ mod browser;
 mod btw;
 mod context_meter;
 mod delegation;
-mod jev_review;
 mod plugins;
 #[cfg(test)]
 mod scratch_dir;
@@ -2642,8 +2641,6 @@ fn configure_api_provider(
     base_url: String,
     model: String,
     models: Vec<String>,
-    decision_model: Option<String>,
-    decision_reviewer: bool,
     credential: String,
     key: String,
 ) -> Result<(), String> {
@@ -2660,8 +2657,6 @@ fn configure_api_provider(
             model,
             models,
             credential: credential.clone(),
-            decision_model,
-            decision_reviewer,
         },
     )?;
     zest_core::credentials::set(credential.trim(), key.trim())?;
@@ -9154,8 +9149,6 @@ pub fn run() {
             pull_request_diff,
             workspace_changes,
             verify_workspace,
-            jev_review::check_jev_plan,
-            jev_review::check_jev_changes,
             context_usage,
             get_user_profile,
             set_user_profile,
@@ -9897,8 +9890,6 @@ model = "gpt-5.6-sol"
                 efforts: vec![],
                 credential: None,
                 api_key_env: Some("LOCAL_API_KEY".into()),
-                decision_model: None,
-                decision_reviewer: false,
             }),
             "Environment key"
         );
@@ -9910,8 +9901,6 @@ model = "gpt-5.6-sol"
                 efforts: vec![],
                 credential: None,
                 api_key_env: None,
-                decision_model: None,
-                decision_reviewer: false,
             }),
             "No authentication"
         );
