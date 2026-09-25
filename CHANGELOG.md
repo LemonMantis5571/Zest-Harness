@@ -5,6 +5,43 @@ a replacement for the commit history.
 
 ## Unreleased
 
+### Added
+
+- `zest usage --tasks` lists the last 30 days of tasks: provider rounds,
+  latency, request and tool errors, an API-equivalent cost estimate with its
+  pricing coverage, and estimated prompt sections. Traces hold no prompt text,
+  tool arguments or results, or project paths, stay on this machine, and expire
+  after 30 days. They are off until you set `task_traces = true` under
+  `[usage]`. Unknown usage and unpriced models are shown as gaps, never as
+  zero.
+- `[tools] mcp_discovery = true` offers MCP tools on demand through
+  `mcp_discover_tools` and `mcp_call_tool` instead of sending every server's
+  schemas with each request. See [docs/MCP.md](docs/MCP.md).
+
+### Changed
+
+- `read_file` pages to any line of a file, not only its first 256 KiB. A page
+  is still capped at 256 KiB; its footer names the lines actually shown and the
+  offset to continue from, and a single longer line is shown as a prefix.
+- `grep` searches up to 8 MiB of each file instead of 256 KiB, names any file it
+  cut, and clips long matching lines around the match.
+- OpenAI-compatible requests retry when no response arrives within 2 minutes,
+  or 10 minutes for a server on this machine or the local network, where a
+  model may still be loading.
+- With **Stream complete blocks** off, code blocks are syntax-coloured as they
+  stream instead of after the stream pauses. Each chunk tokenizes only its new
+  lines.
+
+### Fixed
+
+- Two MCP tools whose names collapse to the same qualified name no longer make
+  every request fail.
+- A `usage.json` that cannot be parsed is renamed aside rather than overwritten
+  by the next save.
+- Syntax highlighting in the desktop app on Windows is about 3x faster for a
+  code block in a reply whose prose contains an em dash or another character
+  outside Latin-1.
+
 ## 0.2.1 beta - 2026-09-10
 
 ### Added

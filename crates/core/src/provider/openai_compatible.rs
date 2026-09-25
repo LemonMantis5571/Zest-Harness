@@ -23,7 +23,12 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a hosted endpoint may take to start answering.
 const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
+/// The same for a server on this machine or the local network. Ollama, LM
+/// Studio and llama.cpp send headers only once the model is loaded and the
+/// prompt processed, which on a CPU or a cold start can take minutes.
+const LOCAL_RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(600);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -147,6 +152,43 @@ pub struct OpenAiCompatibleClient {
     http: reqwest::Client,
     api_key: String,
     base_url: String,
+    headers_timeout: Duration,
+    /// A server on this machine or network. Its header timeout is not retried:
+    /// a second attempt re-sends the whole prompt and starts the wait over.
+    local_server: bool,
+}
+
+/// Loopback, private-network and link-local hosts are "local" for timeouts.
+fn is_local_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let local_v4 = |ip: std::net::Ipv4Addr| {
+        let [a, b, ..] = ip.octets();
+        // 100.64.0.0/10 is carrier-grade NAT, which is also where Tailscale
+        // puts the machines on a tailnet.
+        ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || (a == 100 && (64..128).contains(&b))
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => local_v4(ip),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.to_ipv4_mapped().is_some_and(local_v4)
+        }
+        Err(_) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost"
+                || host == "host.docker.internal"
+                || host.ends_with(".localhost")
+                || host.ends_with(".local")
+        }
+    }
 }
 
 impl OpenAiCompatibleClient {
@@ -159,12 +201,20 @@ impl OpenAiCompatibleClient {
                 "OpenAI-compatible base URL must be an http(s) URL with a host".into(),
             ));
         }
+        let local_server = is_local_host(&parsed);
+        let headers_timeout = if local_server {
+            LOCAL_RESPONSE_HEADERS_TIMEOUT
+        } else {
+            RESPONSE_HEADERS_TIMEOUT
+        };
         Ok(Self {
             http: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()?,
             api_key,
             base_url,
+            headers_timeout,
+            local_server,
         })
     }
 
@@ -183,7 +233,12 @@ impl OpenAiCompatibleClient {
             attempt += 1;
             match self.send_once(req, cancel).await {
                 Ok(response) => break response,
-                Err((error, retry_after)) if attempt < MAX_ATTEMPTS && error.is_transient() => {
+                Err((error, retry_after))
+                    if attempt < MAX_ATTEMPTS
+                        && error.is_transient()
+                        && !(self.local_server
+                            && matches!(error, HarnessError::ResponseTimeout { .. })) =>
+                {
                     let delay = retry_after.unwrap_or_else(|| {
                         Duration::from_secs(1 << attempt.min(4).saturating_sub(1))
                     });
@@ -260,7 +315,7 @@ impl OpenAiCompatibleClient {
                     .header("content-type", "application/json")
                     .json(req)
                     .send(),
-                RESPONSE_HEADERS_TIMEOUT,
+                self.headers_timeout,
             ) => match response {
                     Ok(response) => response,
                     Err(error) => return Err((error, None)),
@@ -270,7 +325,11 @@ impl OpenAiCompatibleClient {
             return Ok(response);
         }
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
+        let body = tokio::time::timeout(STREAM_IDLE_TIMEOUT, response.text())
+            .await
+            .ok()
+            .and_then(|body| body.ok())
+            .unwrap_or_default();
         Err((HarnessError::Api { status, body }, None))
     }
 }
@@ -281,7 +340,9 @@ where
 {
     tokio::time::timeout(timeout, request)
         .await
-        .map_err(|_| HarnessError::Other("OpenAI-compatible response headers timed out".into()))?
+        .map_err(|_| HarnessError::ResponseTimeout {
+            seconds: timeout.as_secs(),
+        })?
         .map_err(HarnessError::Http)
 }
 
@@ -594,10 +655,36 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
-            error,
-            HarnessError::Other(message) if message.contains("response headers timed out")
-        ));
+        assert!(matches!(error, HarnessError::ResponseTimeout { .. }));
+        assert!(
+            error.is_transient(),
+            "nothing streamed yet, so a retry is safe"
+        );
+    }
+
+    #[test]
+    fn local_servers_get_a_longer_header_deadline() {
+        let timeout = |url: &str| {
+            OpenAiCompatibleClient::new("k".into(), url)
+                .unwrap()
+                .headers_timeout
+        };
+        for local in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://192.168.1.20:8080/v1",
+            "http://[::1]:8080/v1",
+            "http://gpu-box.local/v1",
+            "http://100.101.102.103:11434/v1",
+            "http://host.docker.internal:11434/v1",
+            "http://[::ffff:127.0.0.1]:8080/v1",
+        ] {
+            assert_eq!(timeout(local), LOCAL_RESPONSE_HEADERS_TIMEOUT, "{local}");
+        }
+        assert_eq!(
+            timeout("https://openrouter.ai/api/v1"),
+            RESPONSE_HEADERS_TIMEOUT
+        );
     }
 
     fn usage_of(usage: Value) -> Usage {

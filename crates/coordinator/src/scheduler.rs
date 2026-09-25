@@ -1078,7 +1078,13 @@ pub struct DelegationCoordinator {
 
 impl DelegationCoordinator {
     pub fn new() -> Self {
-        Self::with_ledger(Arc::new(Mutex::new(zest_core::Ledger::load())))
+        // In this crate's tests, an in-memory ledger: they must not read or
+        // rewrite the developer's real `usage.json`.
+        #[cfg(test)]
+        let ledger = zest_core::Ledger::default();
+        #[cfg(not(test))]
+        let ledger = zest_core::Ledger::load();
+        Self::with_ledger(Arc::new(Mutex::new(ledger)))
     }
 
     pub fn with_ledger(ledger: Arc<Mutex<zest_core::Ledger>>) -> Self {
@@ -2028,7 +2034,7 @@ impl DelegationCoordinator {
                     &worker_prompt,
                     NativeTaskUsageContext {
                         ledger: Some(self.ledger.clone()),
-                        parent_task_id: Some(job_id.to_string()),
+                        correlation_id: Some(job_id.to_string()),
                     },
                     Some(cancel),
                 )
@@ -2147,7 +2153,7 @@ impl DelegationCoordinator {
                     &review_prompt,
                     NativeTaskUsageContext {
                         ledger: Some(self.ledger.clone()),
-                        parent_task_id: Some(job_id.to_string()),
+                        correlation_id: Some(job_id.to_string()),
                     },
                     Some(cancel),
                 )

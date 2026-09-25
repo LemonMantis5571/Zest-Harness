@@ -185,7 +185,7 @@ No hace falta maquinaria de reinyección diferida: en Zest el fold ocurre a mita
 
 Nada nuevo. `read_file` y `grep` ya alcanzan `.zest/`, que es como funciona `spill` hoy. El atributo `source=` es el localizador.
 
-Límite a declarar: `read_file::MAX_BYTES` son 256 KiB. Un fold grande puede excederlo, igual que ya le pasa a spill, que emite un aviso condicional en `notice()`. El bloque de fold debe emitir el mismo aviso cuando el archivo supere ese alcance.
+Límite a declarar: `read_file` pagina por línea y alcanza cualquier offset, pero cada página rinde como máximo `read_file::MAX_BYTES` (256 KiB) y una sola línea más larga se muestra recortada. `grep` busca hasta `grep::MAX_FILE_BYTES` (8 MiB) por archivo y lo avisa. Spill emite un aviso condicional en `notice()` cuando el archivo supera el alcance de grep; el bloque de fold debe emitir el mismo aviso.
 
 El fold recursivo cae del diseño: leer el XML de un fold es una tool call normal, y el fold siguiente incluye esa lectura en su rango.
 

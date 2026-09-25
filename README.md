@@ -82,6 +82,12 @@ when available, and usage is recorded per provider. Requests and selected
 context are sent to the provider you connect; local-first does not mean every
 model runs on your machine.
 
+Zest sends no telemetry. Spend totals stay in a local `usage.json`. Per-task
+traces for `zest usage --tasks` are off until you set `task_traces = true`
+under `[usage]` in `zest.toml`; they hold token counts, latency, and tool
+names and outcomes, never prompts, tool bodies, or paths, stay on your machine,
+and expire after 30 days.
+
 Optional plugins install as separate processes. See [Plugins](docs/PLUGINS.md)
 and [provider quota](docs/QUOTA.md).
 

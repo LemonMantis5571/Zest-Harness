@@ -303,6 +303,9 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let counter = hits.clone();
 
+        // Each response closes its connection and says so. Without the header
+        // the client pools the socket and sends the retry down one the server
+        // has already dropped, which Windows reports as a connection reset.
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -337,7 +340,7 @@ mod tests {
                         };
                         let _ = write!(
                             stream,
-                            "HTTP/1.1 {status} X\r\n{header}content-length: 4\r\n\r\nboom"
+                            "HTTP/1.1 {status} X\r\n{header}content-length: 4\r\nconnection: close\r\n\r\nboom"
                         );
                     }
                     None => {
@@ -351,7 +354,7 @@ mod tests {
                         );
                         let _ = write!(
                             stream,
-                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{sse}",
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
                             sse.len()
                         );
                     }

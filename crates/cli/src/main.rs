@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
@@ -764,20 +765,37 @@ fn print_usage(catalog: &zest_core::RateCatalog, show_tasks: bool) {
 
     print_recent_cost(&ledger, catalog);
     if show_tasks {
-        print_task_costs(&ledger, &Prices::load().with_catalog(catalog.clone()));
+        let traces_on = std::env::current_dir()
+            .ok()
+            .and_then(|dir| zest_core::Config::find(dir).ok())
+            .is_some_and(|config| config.usage.task_traces);
+        if traces_on {
+            print_task_costs(&ledger, &Prices::load().with_catalog(catalog.clone()));
+        } else {
+            println!("\n  \x1b[1mrecent tasks\x1b[0m");
+            println!(
+                "    \x1b[90mTask traces are off. Add `[usage]` with `task_traces = true` to zest.toml to keep content-free traces on this machine for 30 days.\x1b[0m"
+            );
+        }
     }
 }
 
 fn print_task_costs(ledger: &Ledger, prices: &Prices) {
-    println!("\n  \x1b[1mrecent tasks (last 30 days)\x1b[0m");
+    print!("{}", render_task_costs(ledger, prices));
+}
+
+fn render_task_costs(ledger: &Ledger, prices: &Prices) -> String {
+    let mut output = String::new();
+    writeln!(output, "\n  \x1b[1mrecent tasks (last 30 days)\x1b[0m").unwrap();
     if ledger.tasks().is_empty() {
-        println!("    \x1b[90mNo task traces recorded yet.\x1b[0m");
-        return;
+        writeln!(output, "    \x1b[90mNo task traces recorded yet.\x1b[0m").unwrap();
+        return output;
     }
     for task in ledger.tasks().iter().rev().take(20) {
         let mut counts = zest_core::TokenCounts::default();
         let mut cost = 0.0;
         let mut unpriced = false;
+        let mut unknown_usage = 0usize;
         let mut requests = 0u64;
         let mut latency_ms = 0u64;
         let mut failed_tools = 0usize;
@@ -786,7 +804,7 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
         let mut priced_tokens = 0u64;
         let mut provider_prompt_tokens = 0u64;
         let mut all_usage_available = true;
-        let mut cache_tokens_without_source = 0u64;
+        let mut cache_tokens = 0u64;
         let mut source = zest_core::RequestSourceEstimates::default();
         for request in &task.requests {
             requests += 1;
@@ -814,7 +832,7 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
                 .tool_output_tokens
                 .saturating_add(request.source_estimates.tool_output_tokens);
             if !request.usage_available {
-                unpriced = true;
+                unknown_usage += 1;
                 all_usage_available = false;
                 continue;
             }
@@ -828,7 +846,7 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
                 .saturating_add(request.input_tokens)
                 .saturating_add(request.cache_read_tokens)
                 .saturating_add(request.cache_write_tokens);
-            cache_tokens_without_source = cache_tokens_without_source
+            cache_tokens = cache_tokens
                 .saturating_add(request.cache_write_tokens)
                 .saturating_add(request.cache_read_tokens);
             counts.input_tokens = counts.input_tokens.saturating_add(request.input_tokens);
@@ -845,14 +863,11 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
                 cache_write_tokens: request.cache_write_tokens,
                 cache_read_tokens: request.cache_read_tokens,
             };
-            match prices.price(
-                &request.provider_id,
-                request
-                    .served_model
-                    .as_deref()
-                    .unwrap_or(&request.requested_model),
-                &pricing,
-            ) {
+            if request_tokens == 0 {
+                // Nothing to price; an unknown rate cannot change a zero.
+                continue;
+            }
+            match prices.price(&request.provider_id, request.billed_model(), &pricing) {
                 Some(estimate) => {
                     cost += estimate.cost_usd;
                     priced_tokens = priced_tokens.saturating_add(request_tokens);
@@ -863,14 +878,28 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
         failed_tools += task.tools.iter().filter(|tool| tool.is_error).count();
         let cost_text = if requests == 0 {
             "no provider request".to_string()
-        } else if unpriced {
-            format!("~${cost:.4}+unpriced")
         } else {
-            format!("~${cost:.4}")
+            // Unpriced (tokens known, rate not) and unknown (usage never
+            // reported) are different gaps, and neither is zero.
+            let mut parts = Vec::new();
+            if priced_tokens > 0 || (!unpriced && unknown_usage == 0) {
+                parts.push(format!("~${cost:.4}"));
+            }
+            if unpriced {
+                parts.push("unpriced tokens".to_string());
+            }
+            if unknown_usage > 0 {
+                parts.push(format!("{unknown_usage} request(s) with unknown usage"));
+            }
+            parts.join(" + ")
         };
-        println!(
+        let kind = match &task.correlation_id {
+            Some(job) => format!("{} for {job}", task.kind),
+            None => task.kind.clone(),
+        };
+        writeln!(output,
             "    {} · {} · {} req · {} provider tokens · {} ms · {} request error(s) · {} tool error(s) · {} (API-equivalent estimate)",
-            task.kind,
+            kind,
             task.status,
             requests,
             compact(counts.total_tokens()),
@@ -878,18 +907,34 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
             failed_requests,
             failed_tools,
             cost_text
-        );
+        ).unwrap();
         if reported_tokens > 0 {
             let coverage = 100.0 * priced_tokens as f64 / reported_tokens as f64;
-            println!(
+            writeln!(output,
                 "      pricing coverage: {coverage:.0}% ({} / {} provider-reported tokens); subscription spend is not recorded here",
                 compact(priced_tokens),
                 compact(reported_tokens)
-            );
+            ).unwrap();
         } else if requests > 0 && !all_usage_available {
-            println!("      provider usage unavailable; no API-equivalent cost is inferred");
+            writeln!(
+                output,
+                "      provider usage unavailable; no API-equivalent cost is inferred"
+            )
+            .unwrap();
         } else if requests > 0 {
-            println!("      provider reported zero tokens; API-equivalent estimate is $0.0000");
+            writeln!(
+                output,
+                "      provider reported zero tokens; API-equivalent estimate is $0.0000"
+            )
+            .unwrap();
+        }
+        if task.dropped_requests > 0 || task.dropped_tools > 0 {
+            writeln!(
+                output,
+                "      {} earlier round(s) and {} tool record(s) were dropped from this trace; the totals above are partial",
+                task.dropped_requests, task.dropped_tools
+            )
+            .unwrap();
         }
         if requests > 0 {
             let estimated_prompt_tokens = source
@@ -903,19 +948,19 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
             if all_usage_available {
                 let delta =
                     i128::from(estimated_prompt_tokens) - i128::from(provider_prompt_tokens);
-                println!(
+                writeln!(output,
                     "      prompt estimate: {} vs {} provider-reported prompt tokens (estimate − reported: {delta:+})",
                     compact(estimated_prompt_tokens),
                     compact(provider_prompt_tokens)
-                );
+                ).unwrap();
             } else {
-                println!(
+                writeln!(output,
                     "      prompt estimate: {}; provider prompt totals are incomplete, so no reconciliation is shown",
                     compact(estimated_prompt_tokens)
-                );
+                ).unwrap();
             }
-            println!(
-                "      estimated prompt sections (tokens): system {}, project {}, skills {}, tools {}, user {}, history {}, tool output {}; cache {} tokens are not assigned to a source",
+            writeln!(output,
+                "      estimated prompt sections (tokens): system {}, project {}, skills {}, tools {}, user {}, history {}, tool output {}; {} of the provider-reported prompt tokens were cache reads or writes, which cannot be split by section",
                 compact(source.system_tokens),
                 compact(source.project_context_tokens),
                 compact(source.skill_context_tokens),
@@ -923,11 +968,12 @@ fn print_task_costs(ledger: &Ledger, prices: &Prices) {
                 compact(source.user_tokens),
                 compact(source.history_tokens),
                 compact(source.tool_output_tokens),
-                compact(cache_tokens_without_source)
-            );
+                compact(cache_tokens)
+            ).unwrap();
         }
     }
-    println!("    \x1b[90mNo prompts, tool bodies, or project paths are stored in task traces; estimates are not bills.\x1b[0m");
+    writeln!(output, "    \x1b[90mNo prompts, tool bodies, or project paths are stored in task traces; estimates are not bills.\x1b[0m").unwrap();
+    output
 }
 
 /// The last 30 days at list rates, with its own coverage stated underneath.
@@ -1255,6 +1301,7 @@ fn risk_word(risk: ToolRisk) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zest_core::{RequestSourceEstimates, TaskRequestUsage};
 
     fn question(choices: Vec<&str>, multiple: bool) -> ProviderQuestionRequest {
         ProviderQuestionRequest {
@@ -1287,6 +1334,154 @@ mod tests {
     fn provider_question_rejects_an_unknown_choice() {
         let request = question(vec!["Rust", "Go"], false);
         assert_eq!(parse_question_answers("Ruby", &request), None);
+    }
+
+    #[test]
+    fn task_usage_view_renders_estimates_coverage_and_content_free_activity() {
+        let mut ledger = Ledger::default();
+        ledger.begin_task("task-view", "turn", None);
+        ledger.record_task_request(
+            "task-view",
+            TaskRequestUsage {
+                kind: "agent".into(),
+                provider_id: "unknown-provider".into(),
+                requested_model: "unpriced-model".into(),
+                served_model: Some("unpriced-model".into()),
+                elapsed_ms: 25,
+                usage_available: true,
+                failed: false,
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_write_tokens: 5,
+                cache_read_tokens: 10,
+                source_estimates: RequestSourceEstimates {
+                    system_tokens: 2,
+                    project_context_tokens: 1,
+                    skill_context_tokens: 1,
+                    tools_tokens: 2,
+                    user_tokens: 3,
+                    history_tokens: 4,
+                    tool_output_tokens: 1,
+                },
+            },
+        );
+        ledger.record_task_tool("task-view", "read_file", 512, false, None);
+        ledger.finish_task("task-view", "completed");
+
+        let rendered = render_task_costs(&ledger, &Prices::default());
+
+        assert!(rendered.contains("recent tasks (last 30 days)"));
+        assert!(rendered.contains("turn · completed · 1 req · 135 provider tokens · 25 ms"));
+        assert!(rendered.contains("· unpriced tokens (API-equivalent estimate)"));
+        assert!(rendered.contains("pricing coverage: 0% (0 / 135 provider-reported tokens)"));
+        assert!(rendered.contains("prompt estimate: 14 vs 115 provider-reported prompt tokens"));
+        assert!(rendered.contains("system 2, project 1, skills 1, tools 2, user 3, history 4, tool output 1; 15 of the provider-reported prompt tokens were cache reads or writes"));
+        assert!(rendered.contains("No prompts, tool bodies, or project paths are stored"));
+    }
+
+    fn priced_request(requested: &str, served: Option<&str>, usage: bool) -> TaskRequestUsage {
+        TaskRequestUsage {
+            kind: "agent".into(),
+            provider_id: "anthropic".into(),
+            requested_model: requested.into(),
+            served_model: served.map(Into::into),
+            usage_available: usage,
+            failed: !usage,
+            input_tokens: if usage { 1_000_000 } else { 0 },
+            ..TaskRequestUsage::default()
+        }
+    }
+
+    #[test]
+    fn task_usage_view_prices_like_the_ledger_and_names_each_gap() {
+        let mut prices = Prices::default();
+        prices.models.insert(
+            "claude-opus-5".into(),
+            zest_core::pricing::ModelPrice::simple(2.0, 10.0),
+        );
+
+        let mut ledger = Ledger::default();
+        // A dated build of the requested alias bills as the alias.
+        ledger.begin_task("dated", "turn", None);
+        ledger.record_task_request(
+            "dated",
+            priced_request("claude-opus-5", Some("claude-opus-5-20260901"), true),
+        );
+        ledger.finish_task("dated", "completed");
+        let rendered = render_task_costs(&ledger, &prices);
+        assert!(
+            rendered.contains("· ~$2.0000 (API-equivalent estimate)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("pricing coverage: 100%"), "{rendered}");
+
+        // A failed round is unknown usage, not an unpriced model.
+        let mut ledger = Ledger::default();
+        ledger.begin_correlated_task("mixed", "worker", None, Some("job-9".into()));
+        ledger.record_task_request("mixed", priced_request("claude-opus-5", None, true));
+        ledger.record_task_request("mixed", priced_request("claude-opus-5", None, false));
+        ledger.finish_task("mixed", "completed");
+        let rendered = render_task_costs(&ledger, &prices);
+        assert!(
+            rendered.contains("worker for job-9 · completed"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("~$2.0000 + 1 request(s) with unknown usage (API-equivalent"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("unpriced"), "{rendered}");
+
+        // Zero reported tokens on an unpriced model are still zero.
+        let mut ledger = Ledger::default();
+        ledger.begin_task("zero", "turn", None);
+        let mut zero = priced_request("no-rate-model", None, true);
+        zero.input_tokens = 0;
+        ledger.record_task_request("zero", zero);
+        ledger.finish_task("zero", "completed");
+        let rendered = render_task_costs(&ledger, &prices);
+        assert!(
+            rendered.contains("· ~$0.0000 (API-equivalent"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("provider reported zero tokens"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn task_usage_view_keeps_missing_provider_usage_unknown() {
+        let mut ledger = Ledger::default();
+        ledger.begin_task("unknown-usage", "turn", None);
+        ledger.record_task_request(
+            "unknown-usage",
+            TaskRequestUsage {
+                kind: "agent".into(),
+                provider_id: "provider".into(),
+                requested_model: "model".into(),
+                served_model: None,
+                elapsed_ms: 0,
+                usage_available: false,
+                failed: true,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_write_tokens: 0,
+                cache_read_tokens: 0,
+                source_estimates: RequestSourceEstimates {
+                    user_tokens: 7,
+                    ..RequestSourceEstimates::default()
+                },
+            },
+        );
+        ledger.finish_task("unknown-usage", "failed");
+
+        let rendered = render_task_costs(&ledger, &Prices::default());
+
+        assert!(rendered.contains("provider usage unavailable; no API-equivalent cost is inferred"));
+        assert!(rendered.contains("· 1 request(s) with unknown usage (API-equivalent"));
+        assert!(rendered.contains("prompt estimate: 7; provider prompt totals are incomplete"));
+        assert!(!rendered.contains("provider reported zero tokens"));
     }
 }
 

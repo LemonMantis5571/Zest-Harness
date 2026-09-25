@@ -1026,6 +1026,12 @@ pub fn register_mcp_tools(
         started += 1;
         let server = Arc::new(McpServer::new(id, config.clone(), cwd));
         for def in tools.iter().take(MAX_TOOLS_PER_SERVER) {
+            // Sanitising and the 64-character cap can map two remote names onto
+            // one qualified name. Two definitions with the same name make the
+            // provider reject every request, so the later one is left out.
+            if registry.risk(&qualified_tool_name(id, &def.name)).is_some() {
+                continue;
+            }
             registry.register(Arc::new(McpTool::new(server.clone(), def.clone())));
         }
     }
@@ -1033,9 +1039,9 @@ pub fn register_mcp_tools(
 }
 
 /// Register two stable MCP tools and keep the cached server catalogue behind
-/// them. This opt-in mode reduces the static request schema while preserving
-/// approval gating and exposing each remote schema on demand.
-#[cfg(test)]
+/// them. Opt-in through `[tools] mcp_discovery = true`: it reduces the static
+/// request schema while preserving approval gating and exposing each remote
+/// schema on demand.
 pub fn register_mcp_tool_discovery(
     registry: &mut ToolRegistry,
     servers: &BTreeMap<String, McpServerConfig>,
@@ -1062,9 +1068,15 @@ pub fn register_mcp_tool_discovery(
         started += 1;
         let server = Arc::new(McpServer::new(id, config.clone(), cwd));
         for def in tools.iter().take(MAX_TOOLS_PER_SERVER) {
-            let qualified_name = qualified_tool_name(id, &def.name);
-            if !seen.insert(qualified_name.clone()) {
-                continue;
+            // Here the qualified name is data the model passes back, not a
+            // provider-side tool name, so a collision is disambiguated rather
+            // than making the second tool undiscoverable.
+            let base = qualified_tool_name(id, &def.name);
+            let mut qualified_name = base.clone();
+            let mut suffix = 2;
+            while !seen.insert(qualified_name.clone()) {
+                qualified_name = format!("{base}~{suffix}");
+                suffix += 1;
             }
             entries.push(McpCatalogEntry {
                 server_id: id.clone(),
@@ -1090,7 +1102,6 @@ pub fn register_mcp_tool_discovery(
     uncatalogued
 }
 
-#[cfg(test)]
 #[derive(Clone)]
 struct McpCatalogEntry {
     server_id: String,
@@ -1101,12 +1112,10 @@ struct McpCatalogEntry {
     server: Arc<McpServer>,
 }
 
-#[cfg(test)]
 struct McpDiscoverTools {
     entries: Arc<Vec<McpCatalogEntry>>,
 }
 
-#[cfg(test)]
 #[async_trait]
 impl Tool for McpDiscoverTools {
     fn name(&self) -> &str {
@@ -1114,7 +1123,7 @@ impl Tool for McpDiscoverTools {
     }
 
     fn description(&self) -> &str {
-        "Search the configured MCP tool catalogue. Use `name` to fetch one tool's input schema, then call it through `mcp_call_tool`. No MCP server is contacted until a tool is called."
+        "Search the configured MCP tool catalogue. Pass `server` to list one server's tools (for example when the user names a server), and `name` to fetch one tool's input schema, then call it through `mcp_call_tool`. No MCP server is contacted until a tool is called."
     }
 
     fn input_schema(&self) -> Value {
@@ -1182,12 +1191,10 @@ impl Tool for McpDiscoverTools {
     }
 }
 
-#[cfg(test)]
 struct McpCallTool {
     entries: Arc<Vec<McpCatalogEntry>>,
 }
 
-#[cfg(test)]
 #[async_trait]
 impl Tool for McpCallTool {
     fn name(&self) -> &str {
@@ -1339,6 +1346,46 @@ mod tests {
             .prepare(
                 "mcp_call_tool",
                 json!({ "name": "mcp__docs__search", "arguments": { "query": "hello" } }),
+            )
+            .unwrap();
+        assert_eq!(prepared.risk, ToolRisk::Exec);
+    }
+
+    #[tokio::test]
+    async fn colliding_qualified_names_never_reach_the_provider_twice() {
+        let mut servers = BTreeMap::new();
+        servers.insert("docs".into(), config());
+        let mut catalog = McpCatalog::default();
+        // Sanitising maps both names onto `mcp__docs__get_item`.
+        catalog.set(
+            "docs",
+            ["get.item", "get_item"]
+                .into_iter()
+                .map(|name| McpToolDef {
+                    name: name.into(),
+                    description: format!("{name} tool"),
+                    input_schema: json!({"type": "object", "properties": {}}),
+                })
+                .collect(),
+        );
+
+        let mut eager = ToolRegistry::new();
+        register_mcp_tools(&mut eager, &servers, &catalog, Path::new("."));
+        assert_eq!(eager.names(), vec!["mcp__docs__get_item"]);
+
+        let mut on_demand = ToolRegistry::new();
+        register_mcp_tool_discovery(&mut on_demand, &servers, &catalog, Path::new("."));
+        let list = on_demand
+            .run("mcp_discover_tools", json!({}))
+            .await
+            .unwrap()
+            .body;
+        assert!(list.contains("\"mcp__docs__get_item\""), "{list}");
+        assert!(list.contains("\"mcp__docs__get_item~2\""), "{list}");
+        let prepared = on_demand
+            .prepare(
+                "mcp_call_tool",
+                json!({ "name": "mcp__docs__get_item~2", "arguments": {} }),
             )
             .unwrap();
         assert_eq!(prepared.risk, ToolRisk::Exec);

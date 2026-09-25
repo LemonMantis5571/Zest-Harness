@@ -99,6 +99,19 @@ impl ModelPrice {
         self.cache_read.unwrap_or(self.input)
     }
 
+    /// Whether the cache-read rate was stated, rather than assumed equal to
+    /// input. A report that compares cached and uncached runs must say when
+    /// the comparison is priced on the assumption.
+    pub fn states_cache_read(&self) -> bool {
+        self.cache_read.is_some()
+    }
+
+    /// Whether the cache-write rate was stated. See
+    /// [`ModelPrice::states_cache_read`].
+    pub fn states_cache_write(&self) -> bool {
+        self.cache_write.is_some()
+    }
+
     /// What one bucket of metered tokens comes to, in USD.
     fn cost(&self, counts: &Counts) -> f64 {
         (counts.input_tokens as f64 * self.input

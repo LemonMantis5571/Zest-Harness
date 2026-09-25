@@ -72,21 +72,15 @@ impl SideConversation {
                 );
             }
         }
+        let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id.clone());
         let result = self.send_inner(text, cancel, on_event, &task_id).await;
-        if let Some(ledger) = &self.ledger {
-            if let Ok(mut ledger) = ledger.lock() {
-                ledger.finish_task(
-                    &task_id,
-                    if result.is_ok() {
-                        "completed"
-                    } else if matches!(&result, Err(HarnessError::Cancelled)) {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    },
-                );
-            }
-        }
+        trace.finish(if result.is_ok() {
+            "completed"
+        } else if matches!(&result, Err(HarnessError::Cancelled)) {
+            "cancelled"
+        } else {
+            "failed"
+        });
         result
     }
 
@@ -136,11 +130,8 @@ impl SideConversation {
         };
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
-                ledger.record(
-                    self.provider.id(),
-                    completion.served_model.as_deref().unwrap_or(&request.model),
-                    &completion,
-                );
+                // The trace first, so the spend record's save carries it, and
+                // billed by the same rule as a main-chat turn.
                 ledger.record_task_request(
                     task_id,
                     crate::agent::task_request_usage(
@@ -153,6 +144,11 @@ impl SideConversation {
                             .min(u128::from(u64::MAX)) as u64,
                         Some(&completion),
                     ),
+                );
+                ledger.record(
+                    self.provider.id(),
+                    crate::agent::billed_model(&request.model, completion.served_model.as_deref()),
+                    &completion,
                 );
             }
         }
@@ -351,7 +347,8 @@ mod tests {
     #[tokio::test]
     async fn active_side_context_publishes_the_submitted_prompt_before_completion() {
         let provider = Arc::new(RecordingProvider::default());
-        let mut parent = parent(provider);
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let mut parent = parent(provider).with_ledger(ledger.clone());
         let mut snapshots = Vec::new();
         let mut sink = |_event: StreamEvent<'_>| {};
         let mut publish = |snapshot: SideConversation| snapshots.push(snapshot);
@@ -379,6 +376,35 @@ mod tests {
         assert!(serde_json::to_string(&snapshots[1].request.messages)
             .unwrap()
             .contains("side answer"));
+
+        let mut side = snapshots.remove(0);
+        side.send(
+            "Why is this request separate?",
+            &CancelToken::new(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let ledger = ledger.lock().unwrap();
+        let turn = ledger
+            .tasks()
+            .iter()
+            .find(|task| task.kind == "turn")
+            .expect("parent turn trace");
+        let side_task = ledger
+            .tasks()
+            .iter()
+            .find(|task| task.kind == "side_conversation")
+            .expect("side conversation trace");
+        assert_eq!(
+            side_task.parent_task_id.as_deref(),
+            Some(turn.task_id.as_str())
+        );
+        assert_eq!(side_task.status, "completed");
+        assert_eq!(side_task.requests.len(), 1);
+        assert_eq!(side_task.requests[0].kind, "side_conversation");
+        assert!(side_task.requests[0].usage_available);
     }
 
     #[tokio::test]

@@ -13,9 +13,10 @@ use super::sensitive::is_sensitive_path;
 use super::Tool;
 
 const MAX_MATCHES: usize = 100;
-/// Matched to `read_file`'s cap: a file the model can read whole must not have
-/// its later half be silently unsearchable.
-pub const MAX_FILE_BYTES: usize = 256 * 1024;
+/// Per-file search reach. `read_file` can page to any line, so this is set far
+/// above its page size, and a file cut at this reach is named in the output
+/// rather than being silently half-searched.
+pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_LINE_CHARS: usize = 400;
 
@@ -94,7 +95,7 @@ impl Grep {
         };
 
         let root = self.root.clone();
-        let matches = tokio::task::spawn_blocking(move || {
+        let (matches, cut_files) = tokio::task::spawn_blocking(move || {
             search(
                 &root,
                 &start,
@@ -106,7 +107,7 @@ impl Grep {
         .await
         .map_err(|e| format!("grep task failed: {e}"))??;
 
-        format_results(matches)
+        format_results(matches, &cut_files)
     }
 }
 
@@ -119,7 +120,9 @@ impl Tool for Grep {
     fn description(&self) -> &str {
         "Search file contents under the project root with a regular expression. \
          Optional `path` scopes to a file or directory; optional `glob` filters \
-         by filename pattern (e.g. `*.rs`). Results are capped. Respects \
+         by filename pattern (e.g. `*.rs`). Results are capped; each file is \
+         searched up to 8 MiB and the output names any file cut there. Long \
+         matching lines are clipped around the match. Respects \
          `.gitignore` and skips `.git`, `.zest`, `target`, and `node_modules`. \
          Direct search of likely-secret files requires user approval. Prefer this \
          over shell search commands so paths, quoting, encoding, and output limits \
@@ -182,19 +185,20 @@ fn search(
     re: &Regex,
     file_filter: Option<&GlobSet>,
     allow_sensitive_file: bool,
-) -> Result<Vec<MatchLine>, String> {
+) -> Result<(Vec<MatchLine>, Vec<String>), String> {
     let meta = std::fs::metadata(start).map_err(|e| format!("stat failed: {e}"))?;
 
     let mut matches = Vec::new();
+    let mut cut_files = Vec::new();
     let mut output_bytes = 0usize;
 
     if meta.is_file() {
         let Ok(resolved) = root.confine(start) else {
-            return Ok(matches);
+            return Ok((matches, cut_files));
         };
         let rel = root.relativize(&resolved);
         if is_sensitive_path(&rel) && !allow_sensitive_file {
-            return Ok(matches);
+            return Ok((matches, cut_files));
         }
         search_file(
             root,
@@ -202,9 +206,10 @@ fn search(
             re,
             file_filter,
             &mut matches,
+            &mut cut_files,
             &mut output_bytes,
         );
-        return Ok(matches);
+        return Ok((matches, cut_files));
     }
 
     if !meta.is_dir() {
@@ -238,11 +243,12 @@ fn search(
             re,
             file_filter,
             &mut matches,
+            &mut cut_files,
             &mut output_bytes,
         );
     }
 
-    Ok(matches)
+    Ok((matches, cut_files))
 }
 
 fn search_file(
@@ -251,6 +257,7 @@ fn search_file(
     re: &Regex,
     file_filter: Option<&GlobSet>,
     matches: &mut Vec<MatchLine>,
+    cut_files: &mut Vec<String>,
     output_bytes: &mut usize,
 ) {
     if matches.len() >= MAX_MATCHES || *output_bytes >= MAX_OUTPUT_BYTES {
@@ -269,18 +276,23 @@ fn search_file(
     };
     let capacity = file
         .metadata()
-        .map(|meta| meta.len().min(MAX_FILE_BYTES as u64) as usize)
+        .map(|meta| meta.len().min(MAX_FILE_BYTES as u64 + 1) as usize)
         .unwrap_or(0);
     let mut bytes = Vec::with_capacity(capacity);
     if file
-        .take(MAX_FILE_BYTES as u64)
+        .take(MAX_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .is_err()
     {
         return;
     }
+    let cut = bytes.len() > MAX_FILE_BYTES;
+    bytes.truncate(MAX_FILE_BYTES);
     if bytes.contains(&0) {
         return;
+    }
+    if cut {
+        cut_files.push(rel.clone());
     }
     let text = String::from_utf8_lossy(&bytes);
 
@@ -288,9 +300,9 @@ fn search_file(
         if matches.len() >= MAX_MATCHES || *output_bytes >= MAX_OUTPUT_BYTES {
             break;
         }
-        if re.is_match(line) {
+        if let Some(found) = re.find(line) {
             let line_no = idx + 1;
-            let clipped = clip_chars(line, MAX_LINE_CHARS);
+            let clipped = clip_around(line, found.start(), MAX_LINE_CHARS);
             *output_bytes = output_bytes
                 .saturating_add(rel.len())
                 .saturating_add(clipped.len())
@@ -319,17 +331,45 @@ fn clip_chars(s: &str, max_chars: usize) -> String {
     out
 }
 
-fn format_results(matches: Vec<MatchLine>) -> Result<String, String> {
+/// Clip a long line to `max_chars`, keeping the match in view. A match deep in
+/// a minified file or a one-line JSON artifact is otherwise reported as a
+/// prefix that does not contain it.
+fn clip_around(line: &str, match_start: usize, max_chars: usize) -> String {
+    const LEAD_CHARS: usize = 100;
+    let match_char = line[..match_start].chars().count();
+    if match_char + LEAD_CHARS / 2 < max_chars {
+        return clip_chars(line, max_chars);
+    }
+    let skip = match_char - LEAD_CHARS;
+    let byte = line.char_indices().nth(skip).map_or(line.len(), |(i, _)| i);
+    format!("…{}", clip_chars(&line[byte..], max_chars))
+}
+
+fn format_results(matches: Vec<MatchLine>, cut_files: &[String]) -> Result<String, String> {
+    let mut out = String::new();
     if matches.is_empty() {
-        return Ok("(no matches)".to_string());
+        out.push_str("(no matches)");
     }
     let truncated = matches.len() >= MAX_MATCHES;
-    let mut out = String::new();
     for m in &matches {
         out.push_str(&format!("{}:{}:{}\n", m.path, m.line_no, m.line));
     }
     if truncated {
         out.push_str(&format!("\n[truncated at {MAX_MATCHES} matches]"));
+    }
+    if !cut_files.is_empty() {
+        let shown: Vec<&str> = cut_files.iter().take(10).map(String::as_str).collect();
+        let more = cut_files.len() - shown.len();
+        let more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "\n[searched only the first {MAX_FILE_BYTES} bytes of: {}{more}; \
+             use read_file with a line offset for the rest]",
+            shown.join(", ")
+        ));
     }
     Ok(out)
 }
@@ -378,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn searches_only_the_bounded_prefix_of_a_large_file() {
+    async fn searches_the_bounded_prefix_of_a_large_file_and_says_so() {
         let dir = scratch("bounded");
         let mut bytes = vec![b'\n'; MAX_FILE_BYTES - b"needle at limit\n".len()];
         bytes.extend_from_slice(b"needle at limit\nneedle past limit\n\0");
@@ -390,7 +430,39 @@ mod tests {
             .unwrap()
             .body;
         let line_no = MAX_FILE_BYTES - b"needle at limit\n".len() + 1;
-        assert_eq!(out, format!("large.txt:{line_no}:needle at limit\n"));
+        assert!(
+            out.starts_with(&format!("large.txt:{line_no}:needle at limit\n")),
+            "{out}"
+        );
+        assert!(!out.contains("past limit"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "searched only the first {MAX_FILE_BYTES} bytes of: large.txt"
+            )),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finds_matches_past_read_files_page_size_and_deep_in_long_lines() {
+        let dir = scratch("reach");
+        let mut body = "filler line\n".repeat(40_000);
+        assert!(body.len() > 256 * 1024);
+        body.push_str(&format!(
+            "{}needle{}\n",
+            "a".repeat(5_000),
+            "b".repeat(5_000)
+        ));
+        std::fs::write(dir.join("big.txt"), body).unwrap();
+        let tool = Grep::new(&dir).unwrap();
+        let out = tool
+            .run(json!({ "pattern": "needle", "path": "big.txt" }))
+            .await
+            .unwrap()
+            .body;
+        assert!(out.starts_with("big.txt:40001:…a"), "{out}");
+        assert!(out.contains("needle"), "{out}");
+        assert!(!out.contains("searched only"), "{out}");
     }
 
     #[tokio::test]

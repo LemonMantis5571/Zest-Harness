@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -30,9 +31,11 @@ pub const DAILY_RETENTION_DAYS: usize = 400;
 /// Task-level diagnostics are local and short-lived. The long-running provider
 /// ledger remains the source for account usage history.
 pub const TASK_USAGE_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
-pub const MAX_TASK_USAGE_RECORDS: usize = 10_000;
-const MAX_REQUESTS_PER_TASK: usize = 512;
-const MAX_TOOLS_PER_TASK: usize = 4_096;
+/// Bounds on what traces add to `usage.json`, which is rewritten whole. A
+/// task that outgrows its caps keeps its newest entries and counts the rest.
+pub const MAX_TASK_USAGE_RECORDS: usize = 2_000;
+const MAX_REQUESTS_PER_TASK: usize = 256;
+const MAX_TOOLS_PER_TASK: usize = 1_024;
 
 /// Minutes east of UTC, for deciding which day a turn belongs to.
 ///
@@ -563,35 +566,71 @@ pub struct Ledger {
     #[serde(default)]
     external_workers: BTreeMap<String, ExternalWorkerUsage>,
     /// Content-free traces for recent user turns and maintenance operations.
-    #[serde(default)]
+    /// Read leniently: a malformed trace is dropped rather than taking the
+    /// spend history above down with it.
+    #[serde(default, deserialize_with = "deserialize_tasks_leniently")]
     tasks: Vec<TaskUsageRecord>,
     /// Where to persist. Not serialized — it is where the file is, not part of it.
     #[serde(skip)]
     path: Option<PathBuf>,
+    /// Set from `[usage] task_traces` by the runtime. Stored in the negative
+    /// so a bare ledger, as tests and tools build one, still records.
+    #[serde(skip)]
+    task_traces_off: bool,
+}
+
+fn deserialize_tasks_leniently<'de, D>(deserializer: D) -> Result<Vec<TaskUsageRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let serde_json::Value::Array(items) = serde_json::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect())
 }
 
 /// One local task's provider rounds and tool activity. Text, arguments, paths,
 /// and tool bodies are intentionally absent.
+///
+/// Every trace type defaults missing fields, so a field added later cannot make
+/// an existing ledger unreadable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct TaskUsageRecord {
     pub task_id: String,
+    /// `turn`, `compaction`, `side_conversation`, `worker`, or `reviewer`.
     pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The local task that started this one, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
+    /// A delegation job id shared with the initiating turn's tool record. It is
+    /// not a task id; match it against [`TaskToolUsage::correlation_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     pub started_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
     /// `running`, `completed`, `failed`, or `cancelled`.
     pub status: String,
-    #[serde(default)]
     pub requests: Vec<TaskRequestUsage>,
-    #[serde(default)]
     pub tools: Vec<TaskToolUsage>,
+    /// Oldest rounds dropped at `MAX_REQUESTS_PER_TASK`; totals are partial.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dropped_requests: u64,
+    /// Oldest tool records dropped at `MAX_TOOLS_PER_TASK`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dropped_tools: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct TaskRequestUsage {
     pub kind: String,
     pub provider_id: String,
@@ -609,10 +648,18 @@ pub struct TaskRequestUsage {
     pub source_estimates: RequestSourceEstimates,
 }
 
+impl TaskRequestUsage {
+    /// The model this round is priced as, by the same rule the spend ledger
+    /// uses, so the task view and the 30-day report agree on what ran.
+    pub fn billed_model(&self) -> &str {
+        crate::agent::billed_model(&self.requested_model, self.served_model.as_deref())
+    }
+}
+
 /// Estimated prompt sections. These estimates are not a provider's billing
 /// attribution; cached tokens whose source cannot be identified remain unknown.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct RequestSourceEstimates {
     pub system_tokens: u64,
     pub project_context_tokens: u64,
@@ -624,13 +671,66 @@ pub struct RequestSourceEstimates {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct TaskToolUsage {
+    /// A registered tool's name, or [`UNKNOWN_TOOL_NAME`] for a call to a tool
+    /// that does not exist: those names are model output, not metadata.
     pub name: String,
     pub result_bytes: u64,
     pub is_error: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+}
+
+/// Recorded in place of a tool name the registry does not know.
+pub const UNKNOWN_TOOL_NAME: &str = "(unknown tool)";
+
+/// Finishes a task trace as `cancelled` when the future running it is dropped
+/// before it reports an outcome, so an aborted run still reaches disk.
+pub(crate) struct TaskTraceGuard {
+    ledger: Option<Arc<Mutex<Ledger>>>,
+    task_id: String,
+    finished: bool,
+}
+
+impl TaskTraceGuard {
+    pub(crate) fn new(ledger: Option<Arc<Mutex<Ledger>>>, task_id: String) -> Self {
+        Self {
+            ledger,
+            task_id,
+            finished: false,
+        }
+    }
+
+    pub(crate) fn finish(mut self, status: &str) {
+        self.finish_with(status);
+    }
+
+    fn finish_with(&mut self, status: &str) {
+        if std::mem::replace(&mut self.finished, true) {
+            return;
+        }
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.finish_task(&self.task_id, status);
+            }
+        }
+    }
+}
+
+impl Drop for TaskTraceGuard {
+    fn drop(&mut self) {
+        self.finish_with("cancelled");
+    }
+}
+
+enum LoadOutcome {
+    /// Parsed from disk.
+    Loaded(Ledger),
+    /// Nothing usable on disk; saving starts a new file at the same path.
+    Fresh(Ledger),
+    /// The file exists but could not be read or set aside. Never overwrite it.
+    Unreadable,
 }
 
 impl Ledger {
@@ -654,30 +754,91 @@ impl Ledger {
     ///
     /// A missing or unreadable file yields an empty ledger rather than an error.
     /// Usage accounting must never be the reason a session refuses to start.
+    ///
+    /// Nor may it be the reason a year of history disappears. A file that exists
+    /// but cannot be parsed is renamed aside before the next save replaces it,
+    /// and one that cannot be read at all is left alone: the ledger then keeps
+    /// this session's figures in memory only.
     pub fn load_from(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let loaded = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Ledger>(&raw).ok());
-        let was_loaded = loaded.is_some();
-        let mut ledger = loaded.unwrap_or_default();
+        match Self::read_from(path.into()) {
+            LoadOutcome::Loaded(ledger) | LoadOutcome::Fresh(ledger) => ledger,
+            LoadOutcome::Unreadable => Self::default(),
+        }
+    }
+
+    fn read_from(path: PathBuf) -> LoadOutcome {
+        // A sharing violation or a scanner holding the file is usually gone in
+        // moments, and giving up means a whole session kept in memory only.
+        let mut attempt = 0;
+        let raw = loop {
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => break raw,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return LoadOutcome::Fresh(Self::at(path));
+                }
+                Err(_) if attempt < 3 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+                }
+                Err(_) => return LoadOutcome::Unreadable,
+            }
+        };
+        if raw.trim().is_empty() {
+            return LoadOutcome::Fresh(Self::at(path));
+        }
+        let Ok(mut ledger) = serde_json::from_str::<Ledger>(&raw) else {
+            let aside = path.with_extension(format!("json.unreadable-{}", now_secs()));
+            return match std::fs::rename(&path, &aside) {
+                Ok(()) => LoadOutcome::Fresh(Self::at(path)),
+                // Another process set it aside first.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    LoadOutcome::Fresh(Self::at(path))
+                }
+                Err(_) => LoadOutcome::Unreadable,
+            };
+        };
         ledger.path = Some(path);
         let task_count = ledger.tasks.len();
         ledger.trim_tasks(now_secs());
-        if was_loaded && ledger.tasks.len() != task_count {
+        if ledger.tasks.len() != task_count {
             ledger.save_quietly();
         }
-        ledger
+        LoadOutcome::Loaded(ledger)
+    }
+
+    fn at(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            ..Self::default()
+        }
     }
 
     /// Start a content-free task trace. Old or interrupted entries are
     /// retained only for the same bounded window as completed traces.
+    ///
+    /// Trace updates are not written on their own: the round's spend record and
+    /// [`Ledger::finish_task`] persist them, so a tool-heavy turn does not
+    /// rewrite `usage.json` once per tool call.
     pub fn begin_task(
         &mut self,
         task_id: impl Into<String>,
         kind: impl Into<String>,
         parent_task_id: Option<String>,
     ) {
+        self.begin_correlated_task(task_id, kind, parent_task_id, None);
+    }
+
+    /// [`Ledger::begin_task`] for a run that belongs to a delegation job.
+    pub fn begin_correlated_task(
+        &mut self,
+        task_id: impl Into<String>,
+        kind: impl Into<String>,
+        parent_task_id: Option<String>,
+        correlation_id: Option<String>,
+    ) {
+        if self.task_traces_off {
+            return;
+        }
         let task_id = task_id.into();
         let now = now_secs();
         self.trim_tasks(now);
@@ -688,14 +849,12 @@ impl Ledger {
             task_id,
             kind: kind.into(),
             parent_task_id,
+            correlation_id,
             started_at: now,
-            finished_at: None,
             status: "running".into(),
-            requests: Vec::new(),
-            tools: Vec::new(),
+            ..TaskUsageRecord::default()
         });
         self.trim_tasks(now);
-        self.save_quietly();
     }
 
     /// Append one provider round without storing the request or response body.
@@ -706,8 +865,8 @@ impl Ledger {
         if task.requests.len() > MAX_REQUESTS_PER_TASK {
             let remove = task.requests.len() - MAX_REQUESTS_PER_TASK;
             task.requests.drain(..remove);
+            task.dropped_requests = task.dropped_requests.saturating_add(remove as u64);
         }
-        self.save_quietly();
     }
 
     /// Record tool metadata only. The returned body and arguments never enter
@@ -732,8 +891,8 @@ impl Ledger {
         if task.tools.len() > MAX_TOOLS_PER_TASK {
             let remove = task.tools.len() - MAX_TOOLS_PER_TASK;
             task.tools.drain(..remove);
+            task.dropped_tools = task.dropped_tools.saturating_add(remove as u64);
         }
-        self.save_quietly();
     }
 
     pub fn finish_task(&mut self, task_id: &str, status: &str) {
@@ -746,6 +905,19 @@ impl Ledger {
 
     pub fn tasks(&self) -> &[TaskUsageRecord] {
         &self.tasks
+    }
+
+    /// Follow `[usage] task_traces`. Off stops new traces and drops the stored
+    /// ones, which leave the file on its next write.
+    pub fn set_task_traces(&mut self, enabled: bool) {
+        self.task_traces_off = !enabled;
+        if !enabled {
+            self.tasks.clear();
+        }
+    }
+
+    pub fn task_traces_enabled(&self) -> bool {
+        !self.task_traces_off
     }
 
     fn trim_tasks(&mut self, now: u64) {
@@ -877,12 +1049,26 @@ impl Ledger {
         let Some(path) = self.path.clone() else {
             return;
         };
-        let reloaded = Self::load_from(path);
+        // Only a ledger actually read from disk replaces what is in memory.
+        let LoadOutcome::Loaded(reloaded) = Self::read_from(path) else {
+            return;
+        };
         self.providers = reloaded.providers;
         self.daily = reloaded.daily;
         self.models = reloaded.models;
         self.external_workers = reloaded.external_workers;
+        // Trace events are saved with the next round, so the file can be behind
+        // on a task still running here. Keep those rather than orphaning them.
+        let in_flight: Vec<_> = self
+            .tasks
+            .drain(..)
+            .filter(|task| !reloaded.tasks.iter().any(|t| t.task_id == task.task_id))
+            .collect();
         self.tasks = reloaded.tasks;
+        self.tasks.extend(in_flight);
+        if self.task_traces_off {
+            self.tasks.clear();
+        }
     }
 
     pub fn get(&self, provider_id: &str) -> Option<&ProviderUsage> {
@@ -1661,69 +1847,244 @@ mod tests {
         }
     }
 
+    fn request_carrying_content() -> crate::provider::TurnRequest {
+        use crate::anthropic::types::Message;
+        crate::provider::TurnRequest {
+            model: "claude-test".into(),
+            system: Some(crate::provider::SystemPrompt {
+                cacheable: "Base rules.\n\n# Project documentation\n\nprivate project path D:/secret/repo\n"
+                    .into(),
+                volatile: String::new(),
+            }),
+            messages: vec![
+                Message::user_text("prompt text with SECRET_VALUE"),
+                Message::assistant(vec![serde_json::json!({
+                    "type": "tool_use", "id": "t1", "name": "read_file",
+                    "input": { "path": "private project path/.env" }
+                })]),
+                Message::user_blocks(vec![serde_json::json!({
+                    "type": "tool_result", "tool_use_id": "t1",
+                    "content": "tool result body SECRET_VALUE"
+                })]),
+            ],
+            tools: Vec::new(),
+            allow_tool_use: true,
+            max_tokens: 16,
+            effort: None,
+            thinking: false,
+            provider_session: None,
+            interaction: None,
+            cancel: None,
+        }
+    }
+
     #[test]
     fn task_traces_keep_usage_and_metadata_but_never_content() {
-        let mut ledger = Ledger::default();
-        ledger.begin_task("turn-1", "turn", None);
+        let request = request_carrying_content();
         let mut paid = completion(10, 4, None);
         paid.usage.cache_creation_input_tokens = 7;
         paid.usage.cache_read_input_tokens = 5;
+        paid.served_model = Some("claude-served".into());
+        paid.content = vec![serde_json::json!({
+            "type": "text", "text": "assistant reply quoting SECRET_VALUE"
+        })];
+
+        let mut ledger = Ledger::default();
+        ledger.begin_task("turn-1", "turn", None);
         ledger.record_task_request(
             "turn-1",
-            TaskRequestUsage {
-                kind: "agent".into(),
-                provider_id: "anthropic".into(),
-                requested_model: "claude-test".into(),
-                served_model: Some("claude-served".into()),
-                elapsed_ms: 123,
-                usage_available: true,
-                input_tokens: 10,
-                output_tokens: 4,
-                cache_write_tokens: 7,
-                cache_read_tokens: 5,
-                source_estimates: RequestSourceEstimates {
-                    system_tokens: 2,
-                    project_context_tokens: 3,
-                    skill_context_tokens: 4,
-                    tools_tokens: 5,
-                    user_tokens: 6,
-                    history_tokens: 7,
-                    tool_output_tokens: 8,
-                },
-                ..Default::default()
-            },
+            crate::agent::task_request_usage("agent", "anthropic", &request, 123, Some(&paid)),
         );
         ledger.record_task_request(
             "turn-1",
-            TaskRequestUsage {
-                kind: "agent".into(),
-                provider_id: "anthropic".into(),
-                requested_model: "claude-test".into(),
-                elapsed_ms: 25,
-                failed: true,
-                ..Default::default()
-            },
+            crate::agent::task_request_usage("agent", "anthropic", &request, 25, None),
         );
         ledger.record_task_tool("turn-1", "read_file", 80, false, Some("job-42".into()));
         ledger.finish_task("turn-1", "completed");
 
         let task = &ledger.tasks()[0];
-        assert_eq!(task.requests[0].cache_write_tokens, 7);
-        assert_eq!(task.requests[0].cache_read_tokens, 5);
+        // Each provider figure lands in its own field.
+        let first = &task.requests[0];
         assert_eq!(
-            task.requests[0].served_model.as_deref(),
-            Some("claude-served")
+            (
+                first.input_tokens,
+                first.output_tokens,
+                first.cache_write_tokens,
+                first.cache_read_tokens
+            ),
+            (10, 4, 7, 5)
         );
-        assert_eq!(task.requests[0].source_estimates.skill_context_tokens, 4);
-        assert!(!task.requests[0].failed);
-        assert!(!task.requests[1].usage_available);
-        assert!(task.requests[1].failed);
+        assert_eq!(first.elapsed_ms, 123);
+        assert_eq!(first.served_model.as_deref(), Some("claude-served"));
+        assert!(first.usage_available && !first.failed);
+        assert!(first.source_estimates.project_context_tokens > 0);
+        assert!(first.source_estimates.user_tokens > 0);
+        assert!(first.source_estimates.tool_output_tokens > 0);
+        // A failed round is marked, with no usage inferred.
+        let failed = &task.requests[1];
+        assert!(failed.failed && !failed.usage_available);
+        assert_eq!(failed.input_tokens + failed.output_tokens, 0);
         assert_eq!(task.tools[0].correlation_id.as_deref(), Some("job-42"));
+
         let serialized = serde_json::to_string(task).unwrap();
-        assert!(!serialized.contains("private project path"));
-        assert!(!serialized.contains("prompt text"));
-        assert!(!serialized.contains("tool result body"));
-        assert!(!serialized.contains("SECRET_VALUE"));
+        for content in [
+            "private project path",
+            "D:/secret/repo",
+            "prompt text",
+            "tool result body",
+            "assistant reply",
+            "SECRET_VALUE",
+            ".env",
+        ] {
+            assert!(
+                !serialized.contains(content),
+                "{content} leaked: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_updates_are_persisted_by_the_round_and_the_finish_not_each_event() {
+        let dir = crate::fsutil::ScratchDir::new("zest-task-saves-");
+        let path = dir.join("usage.json");
+        let mut ledger = Ledger::load_from(&path);
+        ledger.begin_task("turn-1", "turn", None);
+        ledger.record_task_tool("turn-1", "grep", 10, false, None);
+        ledger.record_task_request("turn-1", TaskRequestUsage::default());
+        assert!(
+            !path.exists(),
+            "trace events alone must not rewrite the ledger"
+        );
+
+        ledger.record("anthropic", "claude-test", &completion(1, 1, None));
+        let persisted = Ledger::load_from(&path);
+        assert_eq!(persisted.tasks()[0].tools.len(), 1);
+        assert_eq!(persisted.tasks()[0].status, "running");
+
+        ledger.finish_task("turn-1", "completed");
+        assert_eq!(Ledger::load_from(&path).tasks()[0].status, "completed");
+    }
+
+    #[test]
+    fn a_dropped_task_future_still_finishes_and_saves_its_trace() {
+        let dir = crate::fsutil::ScratchDir::new("zest-task-guard-");
+        let path = dir.join("usage.json");
+        let ledger = Arc::new(Mutex::new(Ledger::load_from(&path)));
+        ledger.lock().unwrap().begin_task("aborted", "worker", None);
+        ledger
+            .lock()
+            .unwrap()
+            .record_task_tool("aborted", "grep", 1, false, None);
+        drop(TaskTraceGuard::new(Some(ledger.clone()), "aborted".into()));
+        let saved = Ledger::load_from(&path);
+        assert_eq!(saved.tasks()[0].status, "cancelled");
+        assert_eq!(saved.tasks()[0].tools.len(), 1);
+
+        ledger.lock().unwrap().begin_task("done", "turn", None);
+        TaskTraceGuard::new(Some(ledger.clone()), "done".into()).finish("completed");
+        let saved = Ledger::load_from(&path);
+        assert_eq!(saved.tasks()[1].status, "completed");
+    }
+
+    #[test]
+    fn reloading_keeps_a_task_still_running_in_this_process() {
+        let dir = crate::fsutil::ScratchDir::new("zest-task-reload-");
+        let path = dir.join("usage.json");
+        let mut ledger = Ledger::load_from(&path);
+        ledger.record("anthropic", "claude-test", &completion(1, 1, None));
+        ledger.begin_task("live", "turn", None);
+        ledger.reload_from_disk();
+        ledger.record_task_tool("live", "grep", 1, false, None);
+        assert_eq!(ledger.tasks().len(), 1);
+        assert_eq!(ledger.tasks()[0].tools.len(), 1);
+    }
+
+    #[test]
+    fn turning_traces_off_stops_recording_and_drops_what_was_stored() {
+        let dir = crate::fsutil::ScratchDir::new("zest-task-off-");
+        let path = dir.join("usage.json");
+        let mut ledger = Ledger::load_from(&path);
+        ledger.begin_task("before", "turn", None);
+        ledger.finish_task("before", "completed");
+        assert_eq!(Ledger::load_from(&path).tasks().len(), 1);
+
+        ledger.set_task_traces(false);
+        ledger.begin_task("after", "turn", None);
+        ledger.record_task_tool("after", "grep", 1, false, None);
+        ledger.record("anthropic", "claude-test", &completion(1, 1, None));
+        let saved = Ledger::load_from(&path);
+        assert!(
+            saved.tasks().is_empty(),
+            "stored traces must leave the file"
+        );
+        assert!(saved.get("anthropic").is_some(), "spend is still recorded");
+    }
+
+    #[test]
+    fn capped_traces_count_what_they_dropped() {
+        let mut ledger = Ledger::default();
+        ledger.begin_task("long", "turn", None);
+        for _ in 0..MAX_REQUESTS_PER_TASK + 3 {
+            ledger.record_task_request("long", TaskRequestUsage::default());
+        }
+        for _ in 0..MAX_TOOLS_PER_TASK + 2 {
+            ledger.record_task_tool("long", "grep", 1, false, None);
+        }
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.requests.len(), MAX_REQUESTS_PER_TASK);
+        assert_eq!(task.dropped_requests, 3);
+        assert_eq!(task.tools.len(), MAX_TOOLS_PER_TASK);
+        assert_eq!(task.dropped_tools, 2);
+    }
+
+    #[test]
+    fn an_unparseable_ledger_is_set_aside_instead_of_overwritten() {
+        let dir = crate::fsutil::ScratchDir::new("zest-ledger-corrupt-");
+        let path = dir.join("usage.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let mut ledger = Ledger::load_from(&path);
+        assert!(ledger.is_empty());
+        ledger.record("anthropic", "claude-test", &completion(1, 1, None));
+
+        let aside: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("usage.json.unreadable-")
+            })
+            .collect();
+        assert_eq!(aside.len(), 1, "the original file must be kept");
+        assert_eq!(
+            std::fs::read_to_string(aside[0].path()).unwrap(),
+            "{ not json"
+        );
+        assert!(Ledger::load_from(&path).get("anthropic").is_some());
+    }
+
+    #[test]
+    fn a_malformed_or_older_trace_does_not_cost_the_spend_history() {
+        let dir = crate::fsutil::ScratchDir::new("zest-ledger-lenient-");
+        let path = dir.join("usage.json");
+        let mut ledger = Ledger::load_from(&path);
+        ledger.record("anthropic", "claude-test", &completion(1, 1, None));
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["tasks"] = serde_json::json!([
+            { "taskId": 7 },
+            { "taskId": "old-shape", "kind": "turn", "startedAt": now_secs(),
+              "status": "completed", "requests": [ { "kind": "agent" } ] }
+        ]);
+        std::fs::write(&path, raw.to_string()).unwrap();
+
+        let ledger = Ledger::load_from(&path);
+        assert_eq!(ledger.get("anthropic").map(|p| p.requests), Some(1));
+        assert_eq!(ledger.tasks().len(), 1);
+        assert_eq!(ledger.tasks()[0].task_id, "old-shape");
+        assert_eq!(ledger.tasks()[0].requests[0].input_tokens, 0);
     }
 
     #[test]

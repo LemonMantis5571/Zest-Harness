@@ -637,9 +637,9 @@ mod tests {
         assert!(small.contains("Full result stored at"), "{small}");
         assert!(!small.contains("grep searches only"), "{small}");
 
-        let big = notice(10, ".zest/spill/t-1/x.txt", 900_000);
+        let big = notice(10, ".zest/spill/t-1/x.txt", 9_000_000);
         assert!(big.contains("grep searches only"), "{big}");
-        assert!(big.contains("900000"), "{big}");
+        assert!(big.contains("9000000"), "{big}");
     }
 
     fn policy(root: &Path, cap: usize) -> SpillPolicy {

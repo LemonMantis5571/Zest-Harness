@@ -37,6 +37,13 @@ pub enum HarnessError {
     #[error("stream idle timeout")]
     StreamIdleTimeout,
 
+    /// The endpoint accepted the request but sent no response headers within
+    /// the deadline. Nothing was streamed yet, so a retry cannot duplicate
+    /// output — unlike [`HarnessError::StreamIdleTimeout`] — though a hosted
+    /// endpoint may still bill the attempt it was abandoned on.
+    #[error("no response from the provider within {seconds}s")]
+    ResponseTimeout { seconds: u64 },
+
     /// Retry gave up, wrapping the failure of the final attempt.
     ///
     /// A wrapper rather than a formatted string because the attempt count has to
@@ -181,6 +188,7 @@ impl HarnessError {
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Http(e) => e.is_timeout() || e.is_connect(),
+            Self::ResponseTimeout { .. } => true,
             Self::Api { status, .. } => matches!(status, 408 | 429 | 500 | 502 | 503 | 529),
             // Deliberately not delegating to the inner error. The attempts are
             // already spent; reporting "retryable" here would invite an outer
@@ -262,6 +270,7 @@ mod tests {
         }
         .is_transient());
         assert!(!HarnessError::PrematureEof.is_transient());
+        assert!(HarnessError::ResponseTimeout { seconds: 1 }.is_transient());
         // Mid-stream failures must never retry — output already reached the UI.
         assert!(!HarnessError::Stream {
             kind: "overloaded_error".into(),

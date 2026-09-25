@@ -63,6 +63,8 @@ pub struct Config {
     legacy_routing: Option<LegacyRouting>,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub usage: UsageConfig,
     /// Set by [`Config::parse`] when it had to rewrite a legacy document.
     /// Never read from or written to TOML — the file on disk is left alone.
     #[serde(skip)]
@@ -70,6 +72,18 @@ pub struct Config {
     /// Providers a migration could not map onto a surviving kind.
     #[serde(skip)]
     unsupported: Vec<(String, String)>,
+}
+
+/// Local usage records. Nothing configured here is ever sent anywhere.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// Keep content-free per-task traces in the local `usage.json` for 30 days,
+    /// for `zest usage --tasks`. Off unless asked for: Zest records diagnostics
+    /// only when they are needed. Turning it off drops stored traces on the
+    /// next write. Spend totals per provider are recorded either way.
+    #[serde(default)]
+    pub task_traces: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -99,6 +113,11 @@ pub struct ToolsConfig {
     /// bytes past a tool's own cap were simply gone.
     #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: usize,
+    /// Offer MCP tools through `mcp_discover_tools` and `mcp_call_tool`
+    /// instead of sending every server's schemas with each request. Smaller
+    /// requests, one extra round when a tool is first needed. Off by default.
+    #[serde(default)]
+    pub mcp_discovery: bool,
 }
 
 /// Hand-written rather than derived: a derived `usize` default is `0`, which this
@@ -109,6 +128,7 @@ impl Default for ToolsConfig {
         Self {
             bash: BashConfig::default(),
             max_result_bytes: default_max_result_bytes(),
+            mcp_discovery: false,
         }
     }
 }
@@ -913,6 +933,7 @@ impl Config {
             }),
             legacy_routing: None,
             tools: ToolsConfig::default(),
+            usage: UsageConfig::default(),
             migrations: Vec::new(),
             unsupported: Vec::new(),
         }
@@ -1773,6 +1794,15 @@ url = "https://example.com/mcp"
         .expect("the document is syntactically valid");
         let error = config.mcp["mixed"].validate("mixed").unwrap_err();
         assert!(error.contains("both"), "{error}");
+    }
+
+    #[test]
+    fn task_traces_are_off_unless_turned_on() {
+        assert!(!Config::env_fallback().usage.task_traces);
+        assert!(!Config::parse("").unwrap().usage.task_traces);
+        let on = Config::parse("[usage]\ntask_traces = true\n").unwrap();
+        assert!(on.usage.task_traces);
+        assert!(Config::parse("[usage]\nupload = true\n").is_err());
     }
 
     #[test]

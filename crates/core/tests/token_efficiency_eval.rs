@@ -33,13 +33,31 @@ struct FixtureCase {
     large_page_offset: Option<usize>,
     large_marker: Option<String>,
     history_note: Option<String>,
+    /// Fixture files the task may change. Every other fixture file must be
+    /// byte-identical afterwards, and writes to it are denied.
+    #[serde(default)]
+    writable: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Assertion {
+    /// `answer_contains`, `file_equals`, or `cargo_test_passes`.
     kind: String,
     path: Option<String>,
+    #[serde(default)]
     value: String,
+    /// Other acceptable values, e.g. a symbol for its spelled-out name.
+    #[serde(default)]
+    alternatives: Vec<String>,
+    /// For exact tokens and labels, where letter case is part of the answer.
+    #[serde(default)]
+    case_sensitive: bool,
+}
+
+impl Assertion {
+    fn expected(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.value.as_str()).chain(self.alternatives.iter().map(String::as_str))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,7 +69,13 @@ struct RequestBreakdown {
     estimated_prompt_tokens: u64,
     provider_prompt_tokens: Option<u64>,
     prompt_estimate_delta_tokens: Option<i64>,
-    unattributed_cache_tokens: u64,
+    /// Cache reads plus writes. They are part of the prompt the section
+    /// estimates describe, but providers do not say which sections they cover.
+    cache_tokens_not_split_by_section: u64,
+    /// True when some cached tokens were priced at the input rate because no
+    /// cache rate is known for the model. Cold/warm cost deltas are then not
+    /// evidence of cache savings either way.
+    cache_rate_assumed: bool,
     source_estimates: RequestSourceEstimates,
     elapsed_ms: u64,
     failed_requests: u64,
@@ -76,6 +100,8 @@ struct TaskResult {
     api_equivalent_usd: Option<f64>,
     priming_api_equivalent_usd: Option<f64>,
     combined_api_equivalent_usd: Option<f64>,
+    /// For warm runs, whether the provider reported any cache reads at all.
+    warm_cache_read_observed: Option<bool>,
     breakdown: RequestBreakdown,
 }
 
@@ -110,6 +136,10 @@ struct EvaluationReport {
     rates_content_blake3: Option<String>,
     pricebook_revision: String,
     pricebook_content_blake3: Option<String>,
+    /// Hash of the first run's cacheable system prompt. It includes personal
+    /// skills from the home directory, so two machines' token counts are only
+    /// comparable when this matches.
+    system_prompt_blake3: Option<String>,
     results: Vec<TaskResult>,
     unpaired_runs: Vec<UnpairedRun>,
     paired_analysis: Vec<PairedAnalysis>,
@@ -138,6 +168,7 @@ struct OneRun {
     latency_ms: u64,
     tool_errors: u64,
     breakdown: RequestBreakdown,
+    system_prompt_blake3: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -173,12 +204,118 @@ fn fixture_suite_has_twenty_cases_across_the_five_planned_categories() {
         } else {
             assert!(case.large_page_offset.is_none());
         }
+        match case.category.as_str() {
+            "edit" => {
+                assert_eq!(case.assertion.kind, "file_equals", "{}", case.id);
+                let path = case.assertion.path.as_ref().expect("edit assertion path");
+                assert_eq!(case.writable, vec![path.clone()], "{}", case.id);
+                assert_ne!(
+                    normalize_file(&case.files[path]),
+                    normalize_file(&case.assertion.value),
+                    "{} expects a change",
+                    case.id
+                );
+            }
+            "debugging" => {
+                assert_eq!(case.assertion.kind, "cargo_test_passes", "{}", case.id);
+                assert_eq!(
+                    case.writable,
+                    vec!["src/math.rs".to_string()],
+                    "{}",
+                    case.id
+                );
+            }
+            _ => {
+                assert_eq!(case.assertion.kind, "answer_contains", "{}", case.id);
+                assert!(case.writable.is_empty(), "{}", case.id);
+                assert!(!case.assertion.value.is_empty(), "{}", case.id);
+            }
+        }
     }
     assert_eq!(counts.get("search_answer"), Some(&4));
     assert_eq!(counts.get("edit"), Some(&4));
     assert_eq!(counts.get("debugging"), Some(&4));
     assert_eq!(counts.get("large_output"), Some(&4));
     assert_eq!(counts.get("long_history"), Some(&4));
+}
+
+#[test]
+fn answer_matching_ignores_case_unless_asked_but_respects_word_boundaries() {
+    assert!(answer_contains("Amber", "amber", false));
+    assert!(answer_contains("The badge is AMBER.", "amber", false));
+    assert!(!answer_contains("The badge is gold.", "amber", false));
+
+    // Substrings of other words and numbers are not the answer.
+    assert!(!answer_contains("Go, I trust.", "Rust", false));
+    assert!(!answer_contains("The admiral owns it.", "Mira", false));
+    assert!(!answer_contains("It is 5; usize is 64-bit.", "6", false));
+    assert!(answer_contains("RETRY_LIMIT is 6.", "6", false));
+    assert!(!answer_contains("about 6.5", "6", false));
+    assert!(answer_contains("timeout_secs = 45s", "45", false));
+    assert!(!answer_contains("145", "45", false));
+    assert!(!answer_contains("ZEST_MARKER_10", "ZEST_MARKER_1", true));
+    assert!(answer_contains("region: eu-west-2", "eu-west-2", false));
+
+    // Exact tokens keep their case when the fixture says so.
+    assert!(answer_contains("ZEST_MARKER_1", "ZEST_MARKER_1", true));
+    assert!(!answer_contains("zest_marker_1", "ZEST_MARKER_1", true));
+    assert!(answer_contains("Use Δ.", "Δ", false));
+}
+
+#[test]
+fn debugging_fixtures_are_judged_by_their_tests_not_by_one_spelling_of_the_fix() {
+    if std::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let cases: Vec<FixtureCase> = serde_json::from_str(FIXTURES).unwrap();
+    let case = cases.iter().find(|case| case.id == "debug-clamp").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    reset_fixture(temp.path(), case).unwrap();
+    assert!(
+        !assertion_passes(temp.path(), case, "").unwrap(),
+        "the bug must fail"
+    );
+
+    // A correct fix the old substring check rejected.
+    std::fs::write(
+        temp.path().join("src/math.rs"),
+        "pub fn clamp_low(value: i32) -> i32 { std::cmp::max(value, 0) }\n",
+    )
+    .unwrap();
+    assert!(assertion_passes(temp.path(), case, "").unwrap());
+
+    // Weakening the tests instead of fixing the code does not pass.
+    reset_fixture(temp.path(), case).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "mod math;\n").unwrap();
+    assert!(!assertion_passes(temp.path(), case, "").unwrap());
+}
+
+#[test]
+fn edit_fixtures_require_the_rest_of_the_file_intact() {
+    let cases: Vec<FixtureCase> = serde_json::from_str(FIXTURES).unwrap();
+    let case = cases.iter().find(|case| case.id == "edit-version").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    reset_fixture(temp.path(), case).unwrap();
+
+    std::fs::write(temp.path().join("app.txt"), "name = zest\nversion = 1.3\n").unwrap();
+    assert!(assertion_passes(temp.path(), case, "").unwrap());
+    std::fs::write(temp.path().join("app.txt"), "name = zest\r\nversion = 1.3").unwrap();
+    assert!(
+        assertion_passes(temp.path(), case, "").unwrap(),
+        "line endings are not content"
+    );
+
+    // Appending the new line while keeping the old one is not the edit.
+    std::fs::write(
+        temp.path().join("app.txt"),
+        "name = zest\nversion = 1.2\nversion = 1.3\n",
+    )
+    .unwrap();
+    assert!(!assertion_passes(temp.path(), case, "").unwrap());
 }
 
 /// Paid live fixture test. It intentionally has no built-in spend ceiling: set
@@ -213,7 +350,8 @@ async fn live_task_cost_evaluation() {
     let variants = selected_variants();
     let cases: Vec<FixtureCase> = serde_json::from_str(FIXTURES).unwrap();
     let rates = RateCatalog::load();
-    let prices = Prices::load().with_catalog(rates.clone());
+    let pricebook = Prices::load();
+    let prices = pricebook.clone().with_catalog(rates.clone());
     let run_settings = FixtureRunSettings {
         base_config: &base_config,
         provider_id: &provider_id,
@@ -224,20 +362,46 @@ async fn live_task_cost_evaluation() {
     let rates_hash = RateCatalog::default_path()
         .and_then(|path| std::fs::read(path).ok())
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
-    let pricebook = Prices::load();
     let pricebook_hash = pricebook
         .path()
         .and_then(|path| std::fs::read(path).ok())
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
     let started = unix_secs();
-    let mut results = Vec::new();
-    let mut unpaired_runs = Vec::new();
     let mut accumulated_cost = 0.0f64;
-    let mut stopped_early = false;
 
     let mut arms = vec!["baseline".to_string()];
     arms.extend(variants.iter().cloned());
     arms.dedup();
+    let mut report = EvaluationReport {
+        started_at_unix_secs: started,
+        provider_id: provider_id.clone(),
+        requested_model: requested_model.clone(),
+        requested_effort: requested_effort.clone(),
+        variants: arms.clone(),
+        cache_conditions: ["cold", "warm"],
+        optional_api_equivalent_limit_usd: limit,
+        limit_note: "API-equivalent estimate, not actual subscription spend; checked after each fixture run and may overshoot by one in-flight fixture task",
+        rate_source: "cached LiteLLM rate catalogue plus local user price overrides",
+        cache_condition_note: "cold means a fresh Zest session; earlier fixture runs may already have warmed the provider's cache for the shared system and tool prefix, so cold/warm differences cover each task's own tail. warm_cache_read_observed and cache_rate_assumed say whether a comparison can show cache savings at all",
+        rates_fetched_at_unix_secs: rates.fetched_at(),
+        rates_content_blake3: rates_hash,
+        pricebook_revision: pricebook.revision.clone(),
+        pricebook_content_blake3: pricebook_hash,
+        system_prompt_blake3: None,
+        results: Vec::new(),
+        unpaired_runs: Vec::new(),
+        paired_analysis: Vec::new(),
+        stopped_early: false,
+    };
+    let output_dir = workspace.join("target").join("token-efficiency");
+    std::fs::create_dir_all(&output_dir).expect("create ignored evaluation output directory");
+    let output = output_dir.join(format!("fixture-eval-{started}.json"));
+    // Written after every task, so a later panic or interruption keeps what
+    // already ran.
+    let save = |report: &EvaluationReport| {
+        std::fs::write(&output, serde_json::to_vec_pretty(report).unwrap())
+            .expect("write ignored evaluation report");
+    };
     'evaluation: for variant in &arms {
         for case in &cases {
             for cache_condition in ["cold", "warm"] {
@@ -256,6 +420,9 @@ async fn live_task_cost_evaluation() {
                     None
                 };
                 if let Some(prime) = &priming {
+                    if report.system_prompt_blake3.is_none() {
+                        report.system_prompt_blake3 = prime.system_prompt_blake3.clone();
+                    }
                     let prime_cost = prime.breakdown.api_equivalent_usd;
                     if let Some(cost) = prime_cost {
                         accumulated_cost += cost;
@@ -269,7 +436,7 @@ async fn live_task_cost_evaluation() {
                         } else {
                             "agent_failed"
                         };
-                        unpaired_runs.push(UnpairedRun {
+                        report.unpaired_runs.push(UnpairedRun {
                             case_id: case.id.clone(),
                             category: case.category.clone(),
                             variant: variant.clone(),
@@ -282,9 +449,8 @@ async fn live_task_cost_evaluation() {
                             tool_errors: prime.tool_errors,
                             breakdown: prime.breakdown.clone(),
                         });
-                        stopped_early = true;
                         eprintln!(
-                            "warm-cache priming did not pass for {} (agent_succeeded={}, assertion_passed={}, rounds={}, tool_errors={}, failed_requests={}, usage_unavailable={}); stopping evaluation",
+                            "warm-cache priming did not pass for {} (agent_succeeded={}, assertion_passed={}, rounds={}, tool_errors={}, failed_requests={}, usage_unavailable={}); skipping its measured warm run",
                             case.id,
                             prime.agent_succeeded,
                             prime.assertion_passed,
@@ -293,11 +459,22 @@ async fn live_task_cost_evaluation() {
                             prime.breakdown.failed_requests,
                             prime.breakdown.usage_unavailable
                         );
-                        break 'evaluation;
+                        save(&report);
+                        if limit
+                            .is_some_and(|limit| prime_cost.is_none() || accumulated_cost >= limit)
+                        {
+                            report.stopped_early = true;
+                            eprintln!(
+                                "evaluation limit reached or priming could not be priced; stopping"
+                            );
+                            save(&report);
+                            break 'evaluation;
+                        }
+                        continue;
                     }
                     if let Some(limit) = limit {
                         if prime_cost.is_none() || accumulated_cost >= limit {
-                            unpaired_runs.push(UnpairedRun {
+                            report.unpaired_runs.push(UnpairedRun {
                                 case_id: case.id.clone(),
                                 category: case.category.clone(),
                                 variant: variant.clone(),
@@ -314,7 +491,7 @@ async fn live_task_cost_evaluation() {
                                 tool_errors: prime.tool_errors,
                                 breakdown: prime.breakdown.clone(),
                             });
-                            stopped_early = true;
+                            report.stopped_early = true;
                             eprintln!("evaluation limit reached or priming could not be priced; stopping before the measured warm run");
                             break 'evaluation;
                         }
@@ -323,6 +500,9 @@ async fn live_task_cost_evaluation() {
                 let measured = run_fixture(temp.path(), case, variant, run_settings)
                     .await
                     .expect("run fixture task");
+                if report.system_prompt_blake3.is_none() {
+                    report.system_prompt_blake3 = measured.system_prompt_blake3.clone();
+                }
                 if let Some(cost) = measured.breakdown.api_equivalent_usd {
                     accumulated_cost += cost;
                 }
@@ -349,6 +529,8 @@ async fn live_task_cost_evaluation() {
                     api_equivalent_usd: measured.breakdown.api_equivalent_usd,
                     priming_api_equivalent_usd: priming_cost,
                     combined_api_equivalent_usd: combined_cost,
+                    warm_cache_read_observed: (cache_condition == "warm")
+                        .then_some(measured.breakdown.cache_read_tokens > 0),
                     breakdown: measured.breakdown,
                 };
                 println!(
@@ -361,10 +543,11 @@ async fn live_task_cost_evaluation() {
                     result.tool_errors,
                     result.combined_api_equivalent_usd
                 );
-                results.push(result);
+                report.results.push(result);
+                save(&report);
                 if let Some(limit) = limit {
                     if combined_cost.is_none() || accumulated_cost >= limit {
-                        stopped_early = true;
+                        report.stopped_early = true;
                         eprintln!("evaluation limit reached or could not be priced; stopping after current task");
                         break 'evaluation;
                     }
@@ -373,32 +556,8 @@ async fn live_task_cost_evaluation() {
         }
     }
 
-    let paired_analysis = analyze_pairs(&results, &arms);
-    let report = EvaluationReport {
-        started_at_unix_secs: started,
-        provider_id,
-        requested_model,
-        requested_effort,
-        variants: arms,
-        cache_conditions: ["cold", "warm"],
-        optional_api_equivalent_limit_usd: limit,
-        limit_note: "API-equivalent estimate, not actual subscription spend; checked after each fixture run and may overshoot by one in-flight fixture task",
-        rate_source: "cached LiteLLM rate catalogue plus local user price overrides",
-        cache_condition_note: "cold means a fresh Zest session; the provider may still have a warm remote cache, which is observable only through reported cache-read/write counters",
-        rates_fetched_at_unix_secs: rates.fetched_at(),
-        rates_content_blake3: rates_hash,
-        pricebook_revision: pricebook.revision.clone(),
-        pricebook_content_blake3: pricebook_hash,
-        results,
-        unpaired_runs,
-        paired_analysis,
-        stopped_early,
-    };
-    let output_dir = workspace.join("target").join("token-efficiency");
-    std::fs::create_dir_all(&output_dir).expect("create ignored evaluation output directory");
-    let output = output_dir.join(format!("fixture-eval-{started}.json"));
-    std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
-        .expect("write ignored evaluation report");
+    report.paired_analysis = analyze_pairs(&report.results, &arms);
+    save(&report);
     println!("content-free report: {}", output.display());
 }
 
@@ -424,12 +583,24 @@ fn selected_variants() -> Vec<String> {
 fn reset_fixture(root: &Path, case: &FixtureCase) -> std::io::Result<()> {
     if root.exists() {
         for entry in std::fs::read_dir(root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(path)?;
-            } else {
-                std::fs::remove_file(path)?;
+            let path = entry?.path();
+            // A just-finished `cargo test` can hold files in `target/` open
+            // for a moment on Windows; retry before giving up on the run.
+            let mut attempt = 0;
+            loop {
+                let removed = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match removed {
+                    Ok(()) => break,
+                    Err(_) if attempt < 5 => {
+                        attempt += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(200 * attempt));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
     }
@@ -469,6 +640,9 @@ async fn run_fixture(
     config.agents.clear();
     config.mcp.clear();
     config.tools.bash.enabled = true;
+    // The evaluation reads its own in-memory traces, whatever the user's
+    // setting; nothing is written to their ledger.
+    config.usage.task_traces = true;
     match variant {
         "baseline" => {}
         _ => return Err(format!("unknown variant: {variant}").into()),
@@ -477,7 +651,7 @@ async fn run_fixture(
     config.mcp.insert("fixture-catalog".into(), mcp_server);
 
     let usage = Arc::new(Mutex::new(Ledger::default()));
-    let allowed_paths = case.files.keys().cloned().collect();
+    let allowed_paths = case.writable.iter().cloned().collect();
     let root = std::fs::canonicalize(root)?;
     let mut builder = RuntimeBuilder::new(&root)
         .with_config(config)
@@ -500,6 +674,11 @@ async fn run_fixture(
         builder = builder.with_effort(effort);
     }
     let mut session = builder.build()?;
+    let system_prompt_blake3 = session.agent.system.as_ref().map(|system| {
+        blake3::hash(system.cacheable.as_bytes())
+            .to_hex()
+            .to_string()
+    });
     if let Some(note) = &case.history_note {
         let mut history = Vec::new();
         for turn in 0..16 {
@@ -539,16 +718,7 @@ async fn run_fixture(
                 .join("\n")
         })
         .unwrap_or_default();
-    let assertion_passed = match case.assertion.kind.as_str() {
-        "answer_contains" => final_text.contains(&case.assertion.value),
-        "file_contains" => case
-            .assertion
-            .path
-            .as_ref()
-            .and_then(|path| std::fs::read_to_string(root.join(path)).ok())
-            .is_some_and(|body| body.contains(&case.assertion.value)),
-        other => return Err(format!("unknown fixture assertion: {other}").into()),
-    };
+    let assertion_passed = assertion_passes(&root, case, &final_text)?;
     let traces = usage
         .lock()
         .map_err(|_| "usage ledger lock poisoned")?
@@ -570,6 +740,115 @@ async fn run_fixture(
         latency_ms,
         tool_errors,
         breakdown,
+        system_prompt_blake3,
+    })
+}
+
+/// Whether a finished run did what its fixture asked, judged by outcome: the
+/// fixture's own tests for a bug fix, the whole file for an edit, and a
+/// word-bounded match for an answer. Files the task was not allowed to touch
+/// must be unchanged in every case.
+fn assertion_passes(
+    root: &Path,
+    case: &FixtureCase,
+    final_text: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let untouched = case
+        .files
+        .iter()
+        .filter(|(path, _)| !case.writable.contains(path))
+        .all(|(path, body)| {
+            std::fs::read_to_string(root.join(path))
+                .is_ok_and(|now| normalize_file(&now) == normalize_file(body))
+        });
+    if !untouched {
+        return Ok(false);
+    }
+    let assertion = &case.assertion;
+    Ok(match assertion.kind.as_str() {
+        "answer_contains" => assertion
+            .expected()
+            .any(|value| answer_contains(final_text, value, assertion.case_sensitive)),
+        "file_equals" => {
+            let path = assertion.path.as_ref().ok_or("file_equals needs a path")?;
+            std::fs::read_to_string(root.join(path)).is_ok_and(|body| {
+                assertion
+                    .expected()
+                    .any(|value| normalize_file(&body) == normalize_file(value))
+            })
+        }
+        "cargo_test_passes" => cargo_test_passes(root)?,
+        other => return Err(format!("unknown fixture assertion: {other}").into()),
+    })
+}
+
+/// Line endings and trailing blank space are not content.
+fn normalize_file(body: &str) -> String {
+    body.replace("\r\n", "\n").trim_end().to_string()
+}
+
+/// Run the fixture's own tests in a separate target directory, so the check
+/// neither reuses the model's build nor leaves `target/` in the fixture.
+fn cargo_test_passes(root: &Path) -> std::io::Result<bool> {
+    // Model-written code runs here; an endless loop must fail the task, not
+    // hang the evaluation.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+    let target = tempfile::tempdir()?;
+    let mut child = std::process::Command::new("cargo")
+        .args(["test", "--quiet", "--offline"])
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", target.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if started.elapsed() > DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// The expected text as a whole word or token: `6` is not found in `64` or
+/// `6.5`, nor `Rust` in `trust`, but `45` is in `45s`. Case is ignored
+/// unless the fixture asks for it.
+fn answer_contains(answer: &str, expected: &str, case_sensitive: bool) -> bool {
+    let (answer, expected) = if case_sensitive {
+        (answer.to_string(), expected.to_string())
+    } else {
+        (answer.to_lowercase(), expected.to_lowercase())
+    };
+    let Some(first) = expected.chars().next() else {
+        return false;
+    };
+    let last = expected.chars().next_back().unwrap_or(first);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    // A number only needs to stand apart from other digits, so a unit may
+    // follow it; a word must stand apart from letters and digits alike.
+    let joins = |edge: char, neighbour: char| {
+        if edge.is_ascii_digit() {
+            neighbour.is_ascii_digit()
+        } else {
+            is_word(edge) && is_word(neighbour)
+        }
+    };
+    answer.match_indices(&expected).any(|(start, found)| {
+        let before = answer[..start].chars().next_back();
+        let rest = &answer[start + found.len()..];
+        let mut following = rest.chars();
+        let after = following.next();
+        let decimal = last.is_ascii_digit()
+            && after == Some('.')
+            && following.next().is_some_and(|c| c.is_ascii_digit());
+        !before.is_some_and(|c| joins(first, c))
+            && !after.is_some_and(|c| joins(last, c))
+            && !decimal
     })
 }
 
@@ -647,7 +926,11 @@ fn task_family(tasks: &[zest_core::TaskUsageRecord]) -> Vec<zest_core::TaskUsage
                 || task
                     .parent_task_id
                     .as_ref()
-                    .is_some_and(|parent| ids.contains(parent) || correlations.contains(parent))
+                    .is_some_and(|parent| ids.contains(parent))
+                || task
+                    .correlation_id
+                    .as_ref()
+                    .is_some_and(|job| correlations.contains(job))
             {
                 included.insert(task.task_id.clone());
                 ids.insert(task.task_id.clone());
@@ -679,7 +962,8 @@ fn request_breakdown(tasks: &[zest_core::TaskUsageRecord], prices: &Prices) -> R
         estimated_prompt_tokens: 0,
         provider_prompt_tokens: None,
         prompt_estimate_delta_tokens: None,
-        unattributed_cache_tokens: 0,
+        cache_tokens_not_split_by_section: 0,
+        cache_rate_assumed: false,
         source_estimates: RequestSourceEstimates::default(),
         elapsed_ms: 0,
         failed_requests: 0,
@@ -729,14 +1013,12 @@ fn request_breakdown(tasks: &[zest_core::TaskUsageRecord], prices: &Prices) -> R
             cache_write_tokens: request.cache_write_tokens,
             cache_read_tokens: request.cache_read_tokens,
         };
-        if let Some(cost) = prices.price(
-            &request.provider_id,
-            request
-                .served_model
-                .as_deref()
-                .unwrap_or(&request.requested_model),
-            &counts,
-        ) {
+        if let Some(rate) = prices.lookup(&request.provider_id, request.billed_model()) {
+            result.cache_rate_assumed |= (request.cache_read_tokens > 0
+                && !rate.states_cache_read())
+                || (request.cache_write_tokens > 0 && !rate.states_cache_write());
+        }
+        if let Some(cost) = prices.price(&request.provider_id, request.billed_model(), &counts) {
             priced_tokens = priced_tokens.saturating_add(request_tokens);
             api_equivalent_usd += cost.cost_usd;
         } else {
@@ -747,7 +1029,7 @@ fn request_breakdown(tasks: &[zest_core::TaskUsageRecord], prices: &Prices) -> R
         result.api_equivalent_usd = Some(api_equivalent_usd);
     }
     result.estimated_prompt_tokens = total_source_estimate(result.source_estimates);
-    result.unattributed_cache_tokens = result
+    result.cache_tokens_not_split_by_section = result
         .cache_read_tokens
         .saturating_add(result.cache_write_tokens);
     if any_usage && all_usage_available {
@@ -897,7 +1179,14 @@ fn mean_confidence_interval(values: &[f64]) -> (Option<f64>, Option<f64>, Option
         27 => 2.052,
         28 => 2.048,
         29 => 2.045,
-        _ => 1.96,
+        // Cornish-Fisher expansion of the t quantile around z; within 0.001
+        // of the table from 30 degrees of freedom up.
+        df => {
+            let z = 1.959_964f64;
+            let df = df as f64;
+            z + (z.powi(3) + z) / (4.0 * df)
+                + (5.0 * z.powi(5) + 16.0 * z.powi(3) + 3.0 * z) / (96.0 * df * df)
+        }
     };
     let margin = critical * (variance / n as f64).sqrt();
     (Some(mean), Some(mean - margin), Some(mean + margin))
@@ -977,7 +1266,7 @@ mod accounting_tests {
         assert_eq!(breakdown.estimated_prompt_tokens, 130);
         assert_eq!(breakdown.provider_prompt_tokens, Some(140));
         assert_eq!(breakdown.prompt_estimate_delta_tokens, Some(-10));
-        assert_eq!(breakdown.unattributed_cache_tokens, 20);
+        assert_eq!(breakdown.cache_tokens_not_split_by_section, 20);
 
         known.requests.push(zest_core::TaskRequestUsage {
             provider_id: "fixture".into(),
@@ -987,5 +1276,75 @@ mod accounting_tests {
         let breakdown = request_breakdown(&[known], &Prices::default());
         assert_eq!(breakdown.provider_prompt_tokens, None);
         assert_eq!(breakdown.prompt_estimate_delta_tokens, None);
+    }
+
+    #[test]
+    fn cache_priced_at_the_input_rate_is_flagged() {
+        let mut cached = task("fixture", true);
+        cached.requests[0].input_tokens = 10;
+        cached.requests[0].cache_read_tokens = 90;
+
+        let mut prices = Prices::default();
+        prices
+            .models
+            .insert("fixture/test-model".into(), ModelPrice::simple(1.0, 2.0));
+        let assumed = request_breakdown(&[cached.clone()], &prices);
+        assert!(assumed.cache_rate_assumed);
+        assert_eq!(assumed.api_equivalent_usd, Some(100.0 / 1_000_000.0));
+
+        prices.models.insert(
+            "fixture/test-model".into(),
+            ModelPrice::new(1.0, 2.0, 1.25, 0.1),
+        );
+        let stated = request_breakdown(&[cached], &prices);
+        assert!(!stated.cache_rate_assumed);
+    }
+
+    #[test]
+    fn t_quantiles_past_the_table_stay_above_the_normal_value() {
+        let values_with_df = |df: usize| (0..=df).map(|i| i as f64).collect::<Vec<_>>();
+        for df in [30usize, 40, 60, 120] {
+            let values = values_with_df(df);
+            let (mean, low, _) = mean_confidence_interval(&values);
+            let n = values.len() as f64;
+            let sd = (values
+                .iter()
+                .map(|v| (v - mean.unwrap()).powi(2))
+                .sum::<f64>()
+                / (n - 1.0))
+                .sqrt();
+            let critical = (mean.unwrap() - low.unwrap()) / (sd / n.sqrt());
+            let expected = match df {
+                30 => 2.042,
+                40 => 2.021,
+                60 => 2.000,
+                _ => 1.980,
+            };
+            assert!((critical - expected).abs() < 0.002, "df {df}: {critical}");
+        }
+    }
+
+    #[test]
+    fn worker_traces_join_the_turn_through_their_job_id() {
+        let mut turn = task("fixture", true);
+        turn.task_id = "turn".into();
+        turn.kind = "turn".into();
+        turn.tools.push(zest_core::TaskToolUsage {
+            name: "delegate".into(),
+            correlation_id: Some("job-1".into()),
+            ..Default::default()
+        });
+        let mut worker = task("fixture", true);
+        worker.task_id = "worker".into();
+        worker.kind = "worker".into();
+        worker.correlation_id = Some("job-1".into());
+        let mut unrelated = task("fixture", true);
+        unrelated.task_id = "other".into();
+        unrelated.kind = "worker".into();
+        unrelated.correlation_id = Some("job-2".into());
+
+        let family = task_family(&[turn, worker, unrelated]);
+        let ids: Vec<_> = family.iter().map(|task| task.task_id.as_str()).collect();
+        assert_eq!(ids, ["turn", "worker"]);
     }
 }

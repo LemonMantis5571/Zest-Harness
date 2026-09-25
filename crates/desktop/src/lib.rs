@@ -8675,6 +8675,9 @@ fn format_turn_error(err: &HarnessError) -> String {
             "The provider stopped sending a reply before it finished.".into()
         }
         HarnessError::StreamIdleTimeout => "The provider went quiet. Try again.".into(),
+        HarnessError::ResponseTimeout { .. } => {
+            "The provider did not start answering in time. A local server may still be loading the model; try again.".into()
+        }
         HarnessError::StoppedEarly(reason) if reason.contains("max_tokens") => {
             "The model hit its output limit before it finished.".into()
         }
