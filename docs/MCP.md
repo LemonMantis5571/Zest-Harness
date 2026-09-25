@@ -101,6 +101,14 @@ risk. Zest cannot inspect a local process or a remote URL, so every call goes
 through the approval gate and none is ever auto-approved. The desktop shows the
 call as `server · tool`, not the qualified name.
 
+With many servers, every tool schema rides along with every request. Set
+`mcp_discovery = true` under `[tools]` to send two fixed tools instead:
+`mcp_discover_tools` searches the cached catalogue and returns one tool's input
+schema on request, and `mcp_call_tool` runs it. Every call still goes through
+the approval gate, whose card names the server and tool, and the request prefix
+stays the same from turn to turn. The cost is one extra round the first time a tool
+is needed.
+
 Type `/<id>` in chat to point the model at that server. `/haiku write a verse`
 is the same idea as a skill command: the transcript keeps what you typed, and
 the model is told to use the Haiku MCP tools for the rest of the message.

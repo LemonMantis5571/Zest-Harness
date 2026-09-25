@@ -23,10 +23,20 @@ model = "gpt-5.6-sol"
 # Must stay above the `[tools.bash]` header below: TOML would otherwise read a
 # bare key here as part of that table.
 max_result_bytes = 32768
+# Offer MCP tools on demand (`mcp_discover_tools` / `mcp_call_tool`) instead of
+# sending every configured server's schemas with each request.
+# mcp_discovery = true
 
 [tools.bash]
 # Read-only commands can run without an extra approval; other commands ask.
 enabled = true
+
+# Zest sends no telemetry. Per-task traces for `zest usage --tasks` (provider
+# rounds, token counts, latency, tool names and outcomes; never prompts, tool
+# bodies or paths) are kept in the local usage.json for 30 days, and only when
+# turned on here.
+# [usage]
+# task_traces = true
 
 # The `gateway` kind was removed with the bundled CLIProxyAPI sidecar. An
 # existing `kind = "gateway"` entry still loads: `codex` and `claude` are
@@ -73,8 +83,8 @@ enabled = true
 # [providers.deepseek]
 # kind = "openai_compatible"
 # base_url = "https://api.deepseek.com"
-# model = "deepseek-v4-flash"
-# models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# model = "deepseek-flash"
+# models = ["deepseek-flash", "deepseek-v4-pro"]
 # credential = "deepseek"
 # api_key_env = "DEEPSEEK_API_KEY"
 #

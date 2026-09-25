@@ -20,6 +20,7 @@ import type {
   ReactNode,
 } from "react"
 import {
+  createStreamingHighlighter,
   highlightCode,
   markdownCodeProps,
   markdownFences,
@@ -848,6 +849,21 @@ function CodeBlock({
     previousTransformersRef.current = transformers
   }, [transformers, streaming])
 
+  /* One per streaming block, holding the lines it has already settled. Null
+     when the options need a whole-document pass, or once the stream ends. */
+  const streamingHighlighter = useMemo(
+    () =>
+      streaming && shouldHighlight
+        ? createStreamingHighlighter({
+            language,
+            instanceKey: contentId,
+            ...highlightOptions,
+            transformers,
+          })
+        : null,
+    [contentId, highlightOptions, language, shouldHighlight, streaming, transformers]
+  )
+
   useEffect(() => {
     if (!shouldHighlight) {
       setHighlighted(null)
@@ -857,12 +873,15 @@ function CodeBlock({
     let active = true
     const run = () => {
       if (!active) return
-      void highlightCode(deferredSource, {
-        language,
-        instanceKey: contentId,
-        ...highlightOptions,
-        transformers,
-      }).then((next) => {
+      const pass = streamingHighlighter
+        ? streamingHighlighter(deferredSource)
+        : highlightCode(deferredSource, {
+            language,
+            instanceKey: contentId,
+            ...highlightOptions,
+            transformers,
+          })
+      void pass.then((next) => {
         if (active) {
           setHighlighted({ source: deferredSource, spec: specKey, lines: next })
         }
@@ -870,13 +889,19 @@ function CodeBlock({
         ignoreExpectedFailure(error, "highlight code block")
       })
     }
-    // Readable plain text is already rendered. Avoid tokenizing every prefix
-    // of a growing fence; a pause or completion gives it a single grammar pass.
-    const timer = streaming ? setTimeout(run, 150) : undefined
+    // A resumable stream tokenizes only its new lines, so it can colour every
+    // frame; a chunk arriving before the frame replaces the pending one. A
+    // block that needs a whole-document pass waits for a pause instead, and
+    // completion always gives the final text one full grammar pass.
+    const frame =
+      streaming && streamingHighlighter ? requestAnimationFrame(run) : undefined
+    const timer =
+      streaming && !streamingHighlighter ? setTimeout(run, 150) : undefined
     if (!streaming) run()
 
     return () => {
       active = false
+      if (frame !== undefined) cancelAnimationFrame(frame)
       clearTimeout(timer)
     }
   }, [
@@ -887,6 +912,7 @@ function CodeBlock({
     shouldHighlight,
     specKey,
     streaming,
+    streamingHighlighter,
     transformers,
   ])
 

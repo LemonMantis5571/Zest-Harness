@@ -22,8 +22,8 @@ const PRESETS: Record<
     label: "DeepSeek",
     id: "deepseek",
     baseUrl: "https://api.deepseek.com",
-    model: "deepseek-v4-flash",
-    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    model: "deepseek-flash",
+    models: ["deepseek-flash", "deepseek-v4-pro"],
   },
   openai: {
     label: "OpenAI",

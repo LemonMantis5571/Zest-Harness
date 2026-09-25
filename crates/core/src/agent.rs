@@ -24,7 +24,8 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::inbox::InputInbox;
 use crate::provider::{
-    Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
+    Completion, Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt,
+    TurnRequest,
 };
 use crate::thread::{new_id, ThreadInput, ThreadInputTarget};
 use crate::tools::approval::{
@@ -34,7 +35,7 @@ use crate::tools::approval::{
 use crate::tools::prepared::PreparedToolCall;
 use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
-use crate::usage::Ledger;
+use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
 
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
@@ -112,6 +113,14 @@ pub struct Agent {
     tools: ToolRegistry,
     /// Shared so delegated sub-agents on other providers bill into the same book.
     ledger: Option<Arc<Mutex<Ledger>>>,
+    /// How this agent's own tasks are labelled in the usage trace: `turn`, or
+    /// `worker`/`reviewer` for a native delegated run.
+    usage_task_kind: &'static str,
+    /// Delegation job a native worker or reviewer runs for. Matched against the
+    /// initiating turn's tool record; it is not a task id.
+    usage_task_correlation_id: Option<String>,
+    /// Set for the duration of one user or maintenance task.
+    active_usage_task_id: Option<String>,
     /// Gate for write/exec tools. Defaults to deny-all when unset.
     approver: Arc<dyn Approver>,
     /// Mode + session grants, consulted before the approver is ever called.
@@ -148,6 +157,9 @@ impl Agent {
             provider,
             tools,
             ledger: None,
+            usage_task_kind: "turn",
+            usage_task_correlation_id: None,
+            active_usage_task_id: None,
             approver: Arc::new(DenyApprover),
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             questioner: Arc::new(DenyQuestioner),
@@ -182,6 +194,18 @@ impl Agent {
 
     pub fn with_ledger(mut self, ledger: Arc<Mutex<Ledger>>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Label this agent's task traces, e.g. `worker` for delegation job
+    /// `job-1`.
+    pub fn with_usage_task_label(
+        mut self,
+        kind: &'static str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        self.usage_task_kind = kind;
+        self.usage_task_correlation_id = correlation_id;
         self
     }
 
@@ -276,6 +300,7 @@ impl Agent {
                 .side_conversation_provider()
                 .unwrap_or_else(|| self.provider.clone()),
             self.ledger.clone(),
+            self.active_usage_task_id.clone(),
             TurnRequest {
                 model: self.model.clone(),
                 system: self.system.clone(),
@@ -352,6 +377,31 @@ impl Agent {
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
+        let task_id = new_id("task");
+        let parent_task_id = self.active_usage_task_id.clone();
+        let prior_task = self.active_usage_task_id.replace(task_id.clone());
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_correlated_task(
+                    task_id.clone(),
+                    "compaction",
+                    parent_task_id,
+                    self.usage_task_correlation_id.clone(),
+                );
+            }
+        }
+        let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id);
+        let result = self.compact_context_inner().await;
+        trace.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        });
+        self.active_usage_task_id = prior_task;
+        result
+    }
+
+    async fn compact_context_inner(&mut self) -> Result<CompactionOutcome> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
                 "there is not enough conversation to compact yet".into(),
@@ -410,9 +460,30 @@ impl Agent {
             cancel: None,
         };
         let mut sink = |_event: StreamEvent<'_>| {};
+        let request_started = tokio::time::Instant::now();
         let completion = match self.provider.stream_turn(&request, &mut sink).await {
             Ok(completion) => completion,
             Err(error) => {
+                if let (Some(ledger), Some(task_id)) =
+                    (&self.ledger, self.active_usage_task_id.as_deref())
+                {
+                    if let Ok(mut ledger) = ledger.lock() {
+                        ledger.record_task_request(
+                            task_id,
+                            task_request_usage(
+                                "compaction",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                None,
+                            ),
+                        );
+                    }
+                }
                 self.provider_session = None;
                 return Err(error);
             }
@@ -420,6 +491,22 @@ impl Agent {
         self.provider_session = None;
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
+                // The trace first: the spend record's save then persists both.
+                if let Some(task_id) = self.active_usage_task_id.as_deref() {
+                    ledger.record_task_request(
+                        task_id,
+                        task_request_usage(
+                            "compaction",
+                            self.provider.id(),
+                            &request,
+                            request_started
+                                .elapsed()
+                                .as_millis()
+                                .min(u128::from(u64::MAX)) as u64,
+                            Some(&completion),
+                        ),
+                    );
+                }
                 ledger.record(
                     self.provider.id(),
                     billed_model(&request.model, completion.served_model.as_deref()),
@@ -612,6 +699,43 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
         inbox: Option<&InputInbox>,
+        on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+    ) -> Result<()> {
+        let task_id = new_id("task");
+        self.active_usage_task_id = Some(task_id.clone());
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_correlated_task(
+                    task_id.clone(),
+                    self.usage_task_kind,
+                    None,
+                    self.usage_task_correlation_id.clone(),
+                );
+            }
+        }
+        // Finishes the trace even if this future is dropped mid-turn, as an
+        // aborted delegation worker is.
+        let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id);
+        let result = self
+            .send_user_cancellable_inner(user_message, on_event, cancel, inbox, on_side_context)
+            .await;
+        trace.finish(if result.is_ok() {
+            "completed"
+        } else if matches!(&result, Err(HarnessError::Cancelled)) {
+            "cancelled"
+        } else {
+            "failed"
+        });
+        self.active_usage_task_id = None;
+        result
+    }
+
+    async fn send_user_cancellable_inner(
+        &mut self,
+        user_message: Message,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
         mut on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
@@ -664,9 +788,30 @@ impl Agent {
                 cancel: cancel.cloned(),
             };
 
+            let request_started = tokio::time::Instant::now();
             let completion = match self.provider.stream_turn(&request, &mut *on_event).await {
                 Ok(c) => c,
                 Err(e) => {
+                    if let (Some(ledger), Some(task_id)) =
+                        (&self.ledger, self.active_usage_task_id.as_deref())
+                    {
+                        if let Ok(mut ledger) = ledger.lock() {
+                            ledger.record_task_request(
+                                task_id,
+                                task_request_usage(
+                                    "agent",
+                                    self.provider.id(),
+                                    &request,
+                                    request_started
+                                        .elapsed()
+                                        .as_millis()
+                                        .min(u128::from(u64::MAX))
+                                        as u64,
+                                    None,
+                                ),
+                            );
+                        }
+                    }
                     // Do not commit staged history — keep prior wire messages intact.
                     self.provider_session = None;
                     return Err(e);
@@ -691,6 +836,23 @@ impl Agent {
             // staged wire history. Accounting must never abort a paid-for turn.
             if let Some(ledger) = &self.ledger {
                 if let Ok(mut ledger) = ledger.lock() {
+                    // The trace first: the spend record's save then persists both.
+                    if let Some(task_id) = self.active_usage_task_id.as_deref() {
+                        ledger.record_task_request(
+                            task_id,
+                            task_request_usage(
+                                "agent",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Some(&completion),
+                            ),
+                        );
+                    }
                     ledger.record(
                         self.provider.id(),
                         billed_model(&request.model, completion.served_model.as_deref()),
@@ -764,6 +926,36 @@ impl Agent {
                     // asked in, never completion order.
                     let mut results = Vec::with_capacity(calls.len());
                     for (call, outcome) in calls.iter().zip(outcomes) {
+                        if let (Some(ledger), Some(task_id)) =
+                            (&self.ledger, self.active_usage_task_id.as_deref())
+                        {
+                            if let Ok(mut ledger) = ledger.lock() {
+                                let correlation_id =
+                                    outcome
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|metadata| match metadata {
+                                            crate::tools::ToolMetadata::Delegation {
+                                                job_id,
+                                                ..
+                                            } => job_id.clone(),
+                                        });
+                                // A name the registry does not know is model
+                                // output, not tool metadata; do not keep it.
+                                let name = if self.tools.risk(&call.name).is_some() {
+                                    call.name.as_str()
+                                } else {
+                                    crate::usage::UNKNOWN_TOOL_NAME
+                                };
+                                ledger.record_task_tool(
+                                    task_id,
+                                    name,
+                                    outcome.body.len(),
+                                    outcome.is_error,
+                                    correlation_id,
+                                );
+                            }
+                        }
                         if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
                         }
@@ -1327,7 +1519,7 @@ impl ToolCallOutcome {
 /// already draws that line for the substitution warning, so accounting draws it
 /// the same way — one rule, one place. A real substitution does bill to what ran,
 /// because that is what spent the money.
-fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
+pub(crate) fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
     match served {
         Some(served) if !models_agree(requested, served) => served,
         _ => requested,
@@ -1354,11 +1546,15 @@ fn models_agree(requested: &str, served: &str) -> bool {
 /// Some OpenAI-compatible endpoints report a stable short alias in the
 /// response even when the request used the vendor's versioned id. Keep those
 /// aliases together for substitution warnings and billing; otherwise every
-/// successful DeepSeek V4 Flash turn looks like a silent model downgrade.
+/// successful DeepSeek Flash turn looks like a silent model downgrade.
+///
+/// DeepSeek retired V4 Flash and routes its name to V4.1 Flash, which the API
+/// calls `deepseek-flash`; configs written before that still request
+/// `deepseek-v4-flash`, and a gateway may report the versioned name.
 fn comparable_model_name(model: &str) -> String {
     let normalized = model.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "deepseek-flash" => "deepseek-v4-flash".into(),
+        "deepseek-v4-flash" | "deepseek-v4.1-flash" => "deepseek-flash".into(),
         _ => normalized,
     }
 }
@@ -1377,6 +1573,128 @@ fn summarize_tool_body(body: &str) -> String {
     }
     let truncated: String = flat.chars().take(MAX.saturating_sub(1)).collect();
     format!("{truncated}…")
+}
+
+/// Character-based section estimates are diagnostic only. Provider usage is
+/// retained separately, and no cached billing tokens are allocated to a
+/// section when the provider does not expose that mapping.
+pub(crate) fn request_source_estimates(request: &TurnRequest) -> RequestSourceEstimates {
+    use crate::context_budget::{chars_to_tok, system_tokens, tool_schema_tokens};
+
+    let system_text = request
+        .system
+        .as_ref()
+        .map(|system| system.cacheable.as_str())
+        .unwrap_or_default();
+    // Only the headings `prompt::compose_system_with_docs` itself writes, and
+    // only in the order it writes them, move the boundary. Project docs and
+    // skill bodies are pasted verbatim and full of their own `# ` lines.
+    const SECTIONS: [(&str, &str); 5] = [
+        ("Project instructions", "project"),
+        ("Operating rules", "system"),
+        ("Project documentation", "project"),
+        ("Available skills", "skills"),
+        ("Skill details", "skills"),
+    ];
+    let mut section = "system";
+    let mut next_section = 0usize;
+    let mut project_chars = 0u64;
+    let mut skill_chars = 0u64;
+    for line in system_text.split_inclusive('\n') {
+        if let Some(heading) = line.strip_prefix("# ") {
+            let heading = heading.trim();
+            if let Some(offset) = SECTIONS[next_section..]
+                .iter()
+                .position(|(name, _)| *name == heading)
+            {
+                section = SECTIONS[next_section + offset].1;
+                next_section += offset + 1;
+            }
+        }
+        match section {
+            "project" => project_chars = project_chars.saturating_add(line.chars().count() as u64),
+            "skills" => skill_chars = skill_chars.saturating_add(line.chars().count() as u64),
+            _ => {}
+        }
+    }
+    let project_context_tokens = chars_to_tok(project_chars);
+    let skill_context_tokens = chars_to_tok(skill_chars);
+    let full_system_tokens = system_tokens(request.system.as_ref());
+    let mut estimates = RequestSourceEstimates {
+        system_tokens: full_system_tokens
+            .saturating_sub(project_context_tokens)
+            .saturating_sub(skill_context_tokens),
+        project_context_tokens,
+        skill_context_tokens,
+        tools_tokens: tool_schema_tokens(&request.tools),
+        ..Default::default()
+    };
+    for message in &request.messages {
+        let mut user_chars = 0u64;
+        let mut history_chars = 0u64;
+        let mut tool_output_chars = 0u64;
+        for block in &message.content {
+            let chars = block.to_string().chars().count() as u64;
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
+                tool_output_chars = tool_output_chars.saturating_add(chars);
+            } else if message.role == "user" {
+                user_chars = user_chars.saturating_add(chars);
+            } else {
+                history_chars = history_chars.saturating_add(chars);
+            }
+        }
+        estimates.user_tokens = estimates
+            .user_tokens
+            .saturating_add(chars_to_tok(user_chars));
+        estimates.history_tokens = estimates
+            .history_tokens
+            .saturating_add(chars_to_tok(history_chars));
+        estimates.tool_output_tokens = estimates
+            .tool_output_tokens
+            .saturating_add(chars_to_tok(tool_output_chars));
+    }
+    estimates
+}
+
+pub(crate) fn task_request_usage(
+    kind: &str,
+    provider_id: &str,
+    request: &TurnRequest,
+    elapsed_ms: u64,
+    completion: Option<&Completion>,
+) -> TaskRequestUsage {
+    let available = completion.is_some_and(|completion| completion.usage_available);
+    let usage = completion.map(|completion| &completion.usage);
+    TaskRequestUsage {
+        kind: kind.into(),
+        provider_id: provider_id.into(),
+        requested_model: request.model.clone(),
+        served_model: completion.and_then(|completion| completion.served_model.clone()),
+        elapsed_ms,
+        usage_available: available,
+        failed: completion.is_none(),
+        input_tokens: if available {
+            usage.map_or(0, |usage| usage.input_tokens as u64)
+        } else {
+            0
+        },
+        output_tokens: if available {
+            usage.map_or(0, |usage| usage.output_tokens as u64)
+        } else {
+            0
+        },
+        cache_write_tokens: if available {
+            usage.map_or(0, |usage| usage.cache_creation_input_tokens as u64)
+        } else {
+            0
+        },
+        cache_read_tokens: if available {
+            usage.map_or(0, |usage| usage.cache_read_input_tokens as u64)
+        } else {
+            0
+        },
+        source_estimates: request_source_estimates(request),
+    }
 }
 
 fn publish_side_context(
@@ -1730,6 +2048,32 @@ mod tests {
         }
     }
 
+    struct TraceBodyTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for TraceBodyTool {
+        fn name(&self) -> &str {
+            "trace_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test tool with a private result body"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object", "properties": {} })
+        }
+
+        async fn run(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::result::Result<crate::tools::ToolOutcome, String> {
+            Ok(crate::tools::ToolOutcome::text(
+                "private-tool-result-must-not-be-traced",
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn model_capabilities_gate_effort_and_tool_definitions() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1759,6 +2103,132 @@ mod tests {
         let mut sink = |_ev: StreamEvent<'_>| {};
         agent.send("hello", &mut sink).await.unwrap();
         assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn task_trace_covers_tool_rounds_without_recording_prompt_or_result_content() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["trace_tool", "invented_tool_named_after_a_secret"],
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(TraceBodyTool));
+        let mut agent = Agent::new(provider, tools).with_ledger(ledger.clone());
+        let mut sink = |_event: StreamEvent<'_>| {};
+
+        agent
+            .send("private-prompt-must-not-be-traced", &mut sink)
+            .await
+            .unwrap();
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.kind, "turn");
+        assert_eq!(task.status, "completed");
+        assert!(task.finished_at.is_some());
+        assert_eq!(
+            task.requests.len(),
+            2,
+            "both provider rounds are correlated"
+        );
+        assert!(task.requests.iter().all(|request| {
+            request.kind == "agent"
+                && request.provider_id == "fake"
+                && request.requested_model == "fake-model"
+                && request.usage_available
+                && !request.failed
+        }));
+        assert_eq!(task.tools.len(), 2);
+        assert_eq!(task.tools[0].name, "trace_tool");
+        assert!(!task.tools[0].is_error);
+        // A call to a tool that does not exist keeps its outcome, not its name.
+        assert_eq!(task.tools[1].name, crate::usage::UNKNOWN_TOOL_NAME);
+        assert!(task.tools[1].is_error);
+        assert!(task.requests[1].source_estimates.tool_output_tokens > 0);
+
+        let serialized = serde_json::to_string(task).unwrap();
+        assert!(!serialized.contains("private-prompt-must-not-be-traced"));
+        assert!(!serialized.contains("private-tool-result-must-not-be-traced"));
+        assert!(!serialized.contains("invented_tool_named_after_a_secret"));
+    }
+
+    fn request_with_system(system: String) -> TurnRequest {
+        TurnRequest {
+            model: "m".into(),
+            system: Some(SystemPrompt {
+                cacheable: system,
+                volatile: String::new(),
+            }),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            allow_tool_use: true,
+            max_tokens: 16,
+            effort: None,
+            thinking: false,
+            provider_session: None,
+            interaction: None,
+            cancel: None,
+        }
+    }
+
+    #[test]
+    fn project_docs_headings_do_not_flip_estimates_back_to_system() {
+        let docs = format!(
+            "# Build\n\n```sh\n# install first\ncargo build\n```\n\n# Style\n\n{}\n",
+            "Keep functions small. ".repeat(200)
+        );
+        let composed = crate::prompt::compose_system_with_docs(
+            "Base rules.",
+            "",
+            &docs,
+            &crate::skills::SkillSet::default(),
+        );
+        let estimates = request_source_estimates(&request_with_system(composed));
+        let docs_tokens = crate::context_budget::chars_to_tok(docs.chars().count() as u64);
+        assert!(
+            estimates.project_context_tokens >= docs_tokens,
+            "{estimates:?} vs {docs_tokens}"
+        );
+        assert!(
+            estimates.system_tokens < docs_tokens / 4,
+            "project text counted as system: {estimates:?}"
+        );
+
+        // The harness's own headings still move the boundary, in order.
+        let custom = crate::prompt::compose_system_with_docs(
+            "Base rules.",
+            "Use tabs.",
+            "",
+            &crate::skills::SkillSet::default(),
+        );
+        let estimates = request_source_estimates(&request_with_system(custom));
+        assert!(estimates.project_context_tokens > 0);
+        assert!(estimates.system_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn task_trace_marks_provider_failures_and_failed_turns() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: Some(0),
+            stop: "end_turn",
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
+        let mut sink = |_event: StreamEvent<'_>| {};
+
+        assert!(agent.send("hello", &mut sink).await.is_err());
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.status, "failed");
+        assert!(task.finished_at.is_some());
+        assert_eq!(task.requests.len(), 1);
+        assert!(task.requests[0].failed);
+        assert!(!task.requests[0].usage_available);
     }
 
     #[tokio::test]
@@ -1811,12 +2281,13 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_replaces_history_and_clears_stale_usage() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
             calls: AtomicUsize::new(0),
             fail_after: None,
             stop: "end_turn",
         });
-        let mut agent = Agent::new(provider, ToolRegistry::new());
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
         agent.messages = (0..4)
             .map(|index| Message::user_text(format!("old message {index}")))
             .collect();
@@ -1830,6 +2301,16 @@ mod tests {
         assert_eq!(summary_of(&outcome), Some("hi"));
         assert_eq!(agent.messages.len(), 2);
         assert!(agent.last_usage.is_none());
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.kind, "compaction");
+        assert_eq!(task.status, "completed");
+        assert!(task.finished_at.is_some());
+        assert_eq!(task.requests.len(), 1);
+        assert_eq!(task.requests[0].kind, "compaction");
+        assert!(task.requests[0].usage_available);
     }
 
     /// The summarizer must never read the untrimmed bodies: whatever survives the
@@ -1861,10 +2342,11 @@ mod tests {
     #[tokio::test]
     async fn pruning_alone_ends_compaction_without_a_model_call() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
         let provider: Arc<dyn Provider> = Arc::new(RefusingProvider {
             calls: calls.clone(),
         });
-        let mut agent = Agent::new(provider, ToolRegistry::new());
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
         agent.model = "small-window-model".into();
         agent.messages = history_with_a_huge_tool_result("call-1");
         // Over the 80% mark of a 16k window, but only just: dropping ~45k
@@ -1895,6 +2377,13 @@ mod tests {
         assert_eq!(agent.messages.len(), 6);
         assert!(agent.last_usage.is_none());
         assert!(agent.provider_session.is_none());
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        assert_eq!(ledger.tasks()[0].kind, "compaction");
+        assert_eq!(ledger.tasks()[0].status, "completed");
+        assert!(ledger.tasks()[0].finished_at.is_some());
+        assert!(ledger.tasks()[0].requests.is_empty());
     }
 
     /// Idempotence is what bounds the loop: the second attempt finds nothing to
@@ -2599,6 +3088,8 @@ mod tests {
         assert!(models_agree("deepseek-v4-flash", "deepseek-v4-flash"));
         assert!(models_agree("deepseek-v4-flash", "deepseek-flash"));
         assert!(models_agree("deepseek-flash", "deepseek-v4-flash"));
+        // V4.1 Flash is requested as `deepseek-flash`; a gateway may name it.
+        assert!(models_agree("deepseek-flash", "deepseek-v4.1-flash"));
         assert!(models_agree("gpt-5.6-sol", "gpt-5.6-sol-high"));
         // Order does not matter — some endpoints answer with the shorter name.
         assert!(models_agree("claude-opus-5-20260514", "claude-opus-5"));

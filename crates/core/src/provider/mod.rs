@@ -56,7 +56,8 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
 pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
     let (default_model, builtin) = match provider_id {
         "codex" | "codex-chatgpt" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
-        "claude" | "anthropic" => (DEFAULT_MODEL.to_string(), &[][..]),
+        "anthropic" => (DEFAULT_MODEL.to_string(), ANTHROPIC_KNOWN_MODELS),
+        "claude" => (DEFAULT_MODEL.to_string(), &[][..]),
         "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
         "cursor" => (
             cursor_acp::DEFAULT_CURSOR_MODEL.to_string(),
@@ -237,6 +238,18 @@ pub fn normalize_effort(effort: &str) -> String {
         _ => "high".into(),
     }
 }
+
+/// Built-in catalogue for the native Anthropic API, default first.
+///
+/// Only models that take adaptive thinking and `output_config.effort`, because
+/// every Zest turn sends both. Claude Haiku 4.5 takes neither and would reject
+/// its first request, so it is reachable only by naming it in `zest.toml`.
+pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
+    DEFAULT_MODEL,
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+    "claude-sonnet-5",
+];
 
 /// Built-in Codex catalogue used when `zest.toml` omits `models` for provider `codex`.
 ///
@@ -1104,6 +1117,21 @@ model = "deepseek-v4-flash"
         assert_eq!(
             serde_json::from_value::<ResumeHandle>(encoded).unwrap(),
             handle
+        );
+    }
+
+    #[test]
+    fn the_anthropic_picker_offers_the_current_claude_line_up() {
+        let ids: Vec<String> = descriptor_for_picker_id("anthropic")
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(ids, ANTHROPIC_KNOWN_MODELS);
+        assert_eq!(ids[0], DEFAULT_MODEL, "the default leads the list");
+        assert!(
+            !ids.iter().any(|id| id.contains("haiku")),
+            "a model without adaptive thinking would reject every Zest turn"
         );
     }
 

@@ -78,7 +78,7 @@ pub use config::{
 };
 pub use delegated_worker::{
     run_acceptance_checks, run_provider_reviewer, run_provider_worker, NativeReviewerResult,
-    NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
+    NativeTaskUsageContext, NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
 };
 pub use delegation::{
     apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
@@ -186,7 +186,9 @@ pub use usage::{
     CostQuality, CostSource, DayCostPoint, ExternalCost, ExternalUsageReport,
     ExternalWorkerUsageView, HeadroomView, Ledger, MeasuredUsage, ModelCostRow, PromptCacheShares,
     ProviderCostRow, ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus,
-    TokenCounts, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
+    RequestSourceEstimates, TaskRequestUsage, TaskToolUsage, TaskUsageRecord, TokenCounts,
+    UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, MAX_TASK_USAGE_RECORDS,
+    TASK_USAGE_RETENTION_SECS,
 };
 pub use workspace_changes::{
     inspect_merge_base, snapshot_from_unified_diff, FileChangeSummary, WorkspaceChangeSet,

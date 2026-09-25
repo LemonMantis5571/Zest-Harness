@@ -7,10 +7,10 @@
 //! # Two id spaces
 //!
 //! Cursor names a model two ways. Its `--model` flag takes a flat id whose
-//! effort is a suffix (`cursor-grok-4.6-high`, `claude-opus-5-thinking-max`),
+//! effort is a suffix (`grok-4.7-high`, `claude-opus-5-thinking-max`),
 //! while ACP's `session/new` reports a parameterized one
 //! (`claude-opus-5[thinking=true,effort=high]`). Zest has its own effort axis,
-//! so the suffix is split off here: the catalogue offers `cursor-grok-4.6` with
+//! so the suffix is split off here: the catalogue offers `grok-4.7` with
 //! efforts `[low, medium, high, xhigh]`, and [`wire_model`] puts the pair back
 //! together at launch. Without that split Zest would list two hundred models
 //! and still show an effort selector that changed nothing.
@@ -39,9 +39,9 @@ const CACHE_FORMAT: u32 = 2;
 /// list replaces it as soon as the CLI answers once.
 pub const BUILTIN_MODELS: &[&str] = &[
     "composer-2.5",
-    "claude-opus-5-thinking",
+    "claude-opus-5-5",
     "claude-sonnet-5-thinking",
-    "cursor-grok-4.6",
+    "grok-4.7",
     "gpt-5.6-sol",
     "gemini-3.1-pro",
 ];

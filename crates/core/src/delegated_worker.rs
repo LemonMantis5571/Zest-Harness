@@ -34,6 +34,15 @@ pub struct ResolvedWorkerMetadata {
     pub effort: String,
 }
 
+/// Usage ledger and delegation job for one native worker/reviewer run.
+#[derive(Clone, Default)]
+pub struct NativeTaskUsageContext {
+    pub ledger: Option<Arc<Mutex<Ledger>>>,
+    /// The delegation job id. The initiating turn's tool record carries the
+    /// same id, which is how the two traces are joined.
+    pub correlation_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NativeWorkerResult {
     pub metadata: ResolvedWorkerMetadata,
@@ -253,7 +262,7 @@ pub async fn run_provider_worker(
     config: Config,
     target: &DelegationTarget,
     prompt: &str,
-    ledger: Option<Arc<Mutex<Ledger>>>,
+    usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
 ) -> Result<NativeWorkerResult> {
     let target = provider_target(root, &config, target)?;
@@ -264,7 +273,7 @@ pub async fn run_provider_worker(
         &target,
         prompt,
         RuntimeRole::DelegationWorker,
-        ledger,
+        usage,
         cancel,
     )
     .await;
@@ -310,7 +319,7 @@ pub async fn run_provider_reviewer(
     target: &DelegationTarget,
     worker_diff: &str,
     prompt: &str,
-    ledger: Option<Arc<Mutex<Ledger>>>,
+    usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
 ) -> Result<NativeReviewerResult> {
     let target = provider_target(root, &config, target)?;
@@ -323,7 +332,7 @@ pub async fn run_provider_reviewer(
         &target,
         prompt,
         RuntimeRole::DelegationReviewer,
-        ledger,
+        usage,
         cancel,
     )
     .await;
@@ -390,7 +399,7 @@ async fn run_in_workspace(
     target: &ResolvedWorkerMetadata,
     prompt: &str,
     role: RuntimeRole,
-    ledger: Option<Arc<Mutex<Ledger>>>,
+    usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
 ) -> Result<(String, AttemptUsage)> {
     let mut runtime = RuntimeBuilder::new(root)
@@ -401,7 +410,10 @@ async fn run_in_workspace(
         .with_role(role)
         .enable_external_agents(false)
         .register_exec_tools(false);
-    if let Some(ledger) = ledger {
+    if let Some(job_id) = usage.correlation_id {
+        runtime = runtime.with_usage_correlation(job_id);
+    }
+    if let Some(ledger) = usage.ledger {
         runtime = runtime.with_ledger(ledger);
     }
     let mut session = runtime.build()?;
@@ -458,6 +470,8 @@ impl ResolvedWorkerMetadata {
 mod tests {
     use super::*;
     use std::process::Command;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
 
     #[test]
     fn native_result_is_bounded() {
@@ -523,5 +537,97 @@ mod tests {
             .unwrap()
             .stdout;
         assert_eq!(before, after, "acceptance checks must clean their worktree");
+    }
+
+    #[tokio::test]
+    async fn native_worker_trace_is_labelled_and_correlated_to_its_job() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut request_body = vec![0; content_length];
+            reader.read_exact(&mut request_body).await.unwrap();
+
+            let response_body = concat!(
+                "data: {\"model\":\"served-model\",\"choices\":[{\"delta\":{\"content\":\"native worker answer\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"model\":\"served-model\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"model\":\"served-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":4}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            reader
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+            String::from_utf8(request_body).unwrap()
+        });
+
+        let config = Config::parse(&format!(
+            "[usage]\ntask_traces = true\n\n[providers.native_test]\nkind = \"openai_compatible\"\nbase_url = \"http://{address}/v1\"\nmodel = \"test-model\"\n"
+        ))
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let target = ResolvedWorkerMetadata {
+            provider_id: "native_test".into(),
+            model: "test-model".into(),
+            effort: "high".into(),
+        };
+
+        let (answer, usage) = run_in_workspace(
+            temp.path(),
+            config,
+            &target,
+            "private native-worker prompt",
+            RuntimeRole::DelegationWorker,
+            NativeTaskUsageContext {
+                ledger: Some(ledger.clone()),
+                correlation_id: Some("job-7".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let request_body = server.await.unwrap();
+
+        assert!(request_body.contains("\"model\":\"test-model\""));
+        assert_eq!(answer, "native worker answer");
+        assert_eq!(usage.input_tokens, Some(25));
+        assert_eq!(usage.output_tokens, Some(4));
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.kind, "worker");
+        assert_eq!(task.correlation_id.as_deref(), Some("job-7"));
+        assert_eq!(task.parent_task_id, None, "a job id is not a task id");
+        assert_eq!(task.status, "completed");
+        assert_eq!(task.requests.len(), 1);
+        assert_eq!(task.requests[0].provider_id, "native_test");
+        assert_eq!(task.requests[0].requested_model, "test-model");
+        assert_eq!(
+            task.requests[0].served_model.as_deref(),
+            Some("served-model")
+        );
+        assert!(task.requests[0].usage_available);
     }
 }
