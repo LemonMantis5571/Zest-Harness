@@ -31,6 +31,14 @@ a replacement for the commit history.
 - With **Stream complete blocks** off, code blocks are syntax-coloured as they
   stream instead of after the stream pauses. Each chunk tokenizes only its new
   lines.
+- The native Anthropic provider offers Claude Opus 5, Opus 5.5, Fable 5.1 and
+  Sonnet 5 without a `models` list. Requests ask the API to drop, rather than
+  reject, thinking blocks after Zest edits the history, which Opus 5.5 and
+  Fable 5.1 enforce for accounts created from 2026-08-31.
+- DeepSeek presets use `deepseek-flash` (V4.1 Flash). DeepSeek retired V4 Flash
+  and routes `deepseek-v4-flash` to it, so existing configs keep working.
+- Cursor's fallback model list, used before the CLI has been asked, names Claude
+  Opus 5.5 and Grok 4.7.
 
 ### Fixed
 

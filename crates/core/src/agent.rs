@@ -1546,11 +1546,15 @@ fn models_agree(requested: &str, served: &str) -> bool {
 /// Some OpenAI-compatible endpoints report a stable short alias in the
 /// response even when the request used the vendor's versioned id. Keep those
 /// aliases together for substitution warnings and billing; otherwise every
-/// successful DeepSeek V4 Flash turn looks like a silent model downgrade.
+/// successful DeepSeek Flash turn looks like a silent model downgrade.
+///
+/// DeepSeek retired V4 Flash and routes its name to V4.1 Flash, which the API
+/// calls `deepseek-flash`; configs written before that still request
+/// `deepseek-v4-flash`, and a gateway may report the versioned name.
 fn comparable_model_name(model: &str) -> String {
     let normalized = model.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "deepseek-flash" => "deepseek-v4-flash".into(),
+        "deepseek-v4-flash" | "deepseek-v4.1-flash" => "deepseek-flash".into(),
         _ => normalized,
     }
 }
@@ -3084,6 +3088,8 @@ mod tests {
         assert!(models_agree("deepseek-v4-flash", "deepseek-v4-flash"));
         assert!(models_agree("deepseek-v4-flash", "deepseek-flash"));
         assert!(models_agree("deepseek-flash", "deepseek-v4-flash"));
+        // V4.1 Flash is requested as `deepseek-flash`; a gateway may name it.
+        assert!(models_agree("deepseek-flash", "deepseek-v4.1-flash"));
         assert!(models_agree("gpt-5.6-sol", "gpt-5.6-sol-high"));
         // Order does not matter — some endpoints answer with the shorter name.
         assert!(models_agree("claude-opus-5-20260514", "claude-opus-5"));

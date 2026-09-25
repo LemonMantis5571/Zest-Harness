@@ -205,7 +205,12 @@ impl AnthropicDriver {
             unreachable!("driver_for routes only Anthropic entries here");
         };
         let default_model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let models = catalogue(&default_model, &[], &[], EffortPolicy::Standard(&[]));
+        let models = catalogue(
+            &default_model,
+            &[],
+            super::ANTHROPIC_KNOWN_MODELS,
+            EffortPolicy::Standard(&[]),
+        );
         (default_model, models)
     }
 }

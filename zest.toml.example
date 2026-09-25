@@ -83,8 +83,8 @@ enabled = true
 # [providers.deepseek]
 # kind = "openai_compatible"
 # base_url = "https://api.deepseek.com"
-# model = "deepseek-v4-flash"
-# models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# model = "deepseek-flash"
+# models = ["deepseek-flash", "deepseek-v4-pro"]
 # credential = "deepseek"
 # api_key_env = "DEEPSEEK_API_KEY"
 #

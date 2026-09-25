@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::accumulate::TurnAccumulator;
 use super::sse::SseParser;
-use super::types::{Request, API_BASE, API_VERSION};
+use super::types::{Request, API_BASE, API_VERSION, THINKING_BINDING_BETA};
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Completion, RateLimitSnapshot, StreamEvent};
@@ -163,6 +163,7 @@ impl AnthropicClient {
                 // harmless — the real API ignores it.
                 .header("authorization", format!("Bearer {}", self.api_key))
                 .header("anthropic-version", API_VERSION)
+                .header("anthropic-beta", THINKING_BINDING_BETA)
                 .header("content-type", "application/json")
                 .json(req)
                 .send() => match resp {
@@ -417,6 +418,66 @@ mod tests {
     /// is simply not running. It is retried, so it always reaches the annotation
     /// path, and it must still be recognisable as a transport failure afterwards.
     /// Formatting it into a string was reporting it as a bad Claude session.
+    /// Without the beta header the API rejects `thinking.block_binding` as an
+    /// unknown field, so the pair has to travel together on every request.
+    #[tokio::test]
+    async fn thinking_requests_send_block_binding_with_its_beta_header() {
+        let _guard = network_test_guard().await;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = Vec::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+                head.push(lower.trim().to_string());
+            }
+            let mut body = vec![0u8; content_length];
+            std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+            let sse = concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            );
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                sse.len()
+            );
+            (head, String::from_utf8(body).unwrap())
+        });
+
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(format!("http://{addr}"));
+        let mut thinking = request();
+        thinking.thinking = Some(super::super::types::Thinking::default());
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        client.stream(&thinking, &mut sink).await.unwrap();
+
+        let (head, body) = captured.join().unwrap();
+        assert!(
+            head.iter()
+                .any(|line| line == &format!("anthropic-beta: {THINKING_BINDING_BETA}")),
+            "{head:?}"
+        );
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(
+            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            "drop_block"
+        );
+    }
+
     #[tokio::test]
     async fn a_dead_port_stays_classified_as_unreachable() {
         let _guard = network_test_guard().await;
