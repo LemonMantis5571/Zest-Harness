@@ -1593,7 +1593,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       attachments?: AttachmentInput[],
       target?: InputTarget,
     ) {
-      if (scenario === "split-streaming") {
+      // Queue targets first, as the desktop does: a send during a live
+      // split-streaming turn must queue, not start a second stream on the chat.
+      if (scenario === "split-streaming" && !(target === "followup" || target === "steer" || target === "inject")) {
         const { turnId, userId, assistantId } = fixtureIds();
         const id = { session_id: session.sessionId, thread_id: session.threadId, turn_id: turnId };
         session = { ...session, messages: [...session.messages, { id: userId, role: "user", text }] };
@@ -2024,6 +2026,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async contextUsage() {
+      // Like the desktop, a chat cannot be measured while a turn holds it.
+      if (splitStreams.has(session.threadId) || pendingScenario) {
+        throw new Error(
+          JSON.stringify({ code: "busy", message: "this chat is still working — switch chats or wait for it to finish" }),
+        );
+      }
       return {
         usedTokens: 12000,
         windowTokens: 256000,

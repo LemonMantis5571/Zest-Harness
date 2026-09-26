@@ -2015,6 +2015,7 @@ export function ChatScreen({
             branch={branch}
             gitContext={gitContext}
             contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
+            contextScope={session.threadId}
             sending={sending}
             queuedMessages={queuedMessages}
             onUpdateQueuedMessage={onUpdateQueuedMessage}

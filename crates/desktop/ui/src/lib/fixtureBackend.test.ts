@@ -410,3 +410,24 @@ describe("fixture queued-message recovery", () => {
     assert.equal(info?.pendingInputs[0]?.text, "second");
   });
 });
+
+describe("fixture split-streaming scenario", () => {
+  it("queues a send made during a live turn, answers busy, and still stops that turn", async () => {
+    const backend = createFixtureBackend({ scenario: "split-streaming" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const live = backend.sendMessage("keep running");
+    // Like the desktop: a queued send never starts a second stream on the chat.
+    await backend.sendMessage("second", undefined, "followup");
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ["user", "assistant_start", "input_queued"]
+    );
+    await assert.rejects(backend.contextUsage(), (error: Error) => JSON.parse(error.message).code === "busy");
+
+    await backend.cancelTurn();
+    await live;
+    assert.equal(events.at(-1)?.kind, "cancelled");
+    assert.equal((await backend.contextUsage()).percentFull, 4.7);
+  });
+});

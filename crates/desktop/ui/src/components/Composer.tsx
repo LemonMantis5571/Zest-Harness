@@ -82,6 +82,8 @@ type Props = {
   gitContext: GitContext | null;
   approvalMode: ApprovalMode;
   contextRefreshKey: string | number;
+  /** The chat the context meter measures. */
+  contextScope: string;
   sending: boolean;
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
@@ -132,6 +134,7 @@ export const Composer = memo(function Composer({
   gitContext,
   approvalMode,
   contextRefreshKey,
+  contextScope,
   sending,
   queuedMessages,
   onUpdateQueuedMessage,
@@ -837,6 +840,7 @@ export const Composer = memo(function Composer({
             />
             <ContextUsageButton
               refreshKey={contextRefreshKey}
+              scope={contextScope}
               className="shrink-0"
             />
           </div>
