@@ -30,7 +30,7 @@ verify:
 ## How it works
 1. `getBackend()` in `backend.ts` caches one backend per page; `selectBackend` returns `createFixtureBackend()` when `import.meta.env.DEV` and the URL has `fixture`.
 2. `createFixtureBackend` in `fixtureBackend.ts` implements the whole `DesktopBackend` type with closure state; `scenarioFromLocation` reads `?scenario`. `mode` is `"fixture"` except for `provider-picker` and `model-catalogue`, which take App's normal boot path.
-3. In fixture mode `App.tsx` calls `startSession("fixture")`, then `backend.boot(handleChatEvent)`; `boot` runs `runFixtureStream` (`fixture.ts`) only when there is no scenario or a safety scenario.
+3. In fixture mode `App.tsx` calls `startSession("fixture")` (bounded by `BOOT_TIMEOUT_MS`, 15 s), then `backend.boot(handleChatEvent)`, which is not bounded; `boot` runs `runFixtureStream` (`fixture.ts`) only when there is no scenario or a safety scenario.
 4. Events go through the handler registered by `onChatEvent`/`onDelegationEvent`; a generation counter stops a StrictMode double subscription from clearing the live sink.
 5. Safety scenarios keep one `pendingScenario`; `resolveApproval`, `resolveQuestion`, and `cancelTurn` finish it (cancel also auto-fires after 5 s).
 6. Playwright (`playwright.config.ts`): tests in `e2e/`, 2 workers, fully parallel, base URL `http://127.0.0.1:1420`, 1280x800, traces kept on failure. Its `webServer` runs `npm run dev -- --host 127.0.0.1` and reuses an already running dev server outside CI. `vite.config.ts` pins port 1420 (`strictPort`) and the `@` alias.
@@ -47,6 +47,8 @@ verify:
 
 ## Pitfalls
 - Fixture state is per page load; nothing persists, and specs cannot share state.
+- The canned boot stream is a turn, not startup, and must stay outside the boot timeout. It used to be inside it: on a slow CI runner the stream passed 15 s and the app dropped an open chat back to the provider picker mid-test, which surfaced as an unrelated-looking `slash-commands.spec.ts` click timeout on Windows. To reproduce slow-runner timing locally, throttle the CPU in a spec with CDP `Emulation.setCPUThrottlingRate` (6x reproduced it).
+- A spec that types into the seeded chat right after `goto` races that boot turn; waiting for it to finish (as `zest-control start` does) avoids sends being queued.
 - Default `sendMessage` responds synchronously with the full echo; only `split-streaming` leaves a turn running. Specs that need a live turn must use that scenario or add one.
 - A new empty thread is not listed until it has a message, matching the desktop store.
 - `lib/*.ts` modules loaded by `node --test` must import siblings with relative `.ts` paths; the `@/` alias only resolves under Vite.
