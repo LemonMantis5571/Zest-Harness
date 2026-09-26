@@ -20,8 +20,10 @@ tests:
   - crates/desktop/ui/src/lib/quotaGauges.test.ts
   - crates/desktop/ui/src/lib/heatmap.test.ts
   - crates/desktop/ui/src/lib/cacheMetrics.test.ts
+  - crates/core/tests/token_efficiency_eval.rs
 verify:
   - cargo test -p zest-core --lib usage::tests
+  - cargo test -p zest-core --test token_efficiency_eval
   - cargo test -p zest-core --lib quota::tests
   - cargo test -p zest-core --lib pricing::tests
   - cargo test -p zest-core --lib rates::tests
@@ -45,6 +47,13 @@ Provider-facing rules and sources are documented in [QUOTA.md](../QUOTA.md).
   project), per provider, per model, and per local day (400 days kept). The turn
   is billed to the requested model unless the endpoint served a genuinely
   different one. Write failures never fail a turn.
+- Task traces are off unless `[usage] task_traces = true`. When on, each local
+  task (turn, compaction, side conversation, delegation worker or reviewer)
+  gets a content-free `TaskUsageRecord` in `usage.json`: provider rounds, token
+  counts, latency, tool names and outcomes, never prompts, tool bodies, or
+  paths. Kept 30 days and capped (2,000 records, 256 rounds and 1,024 tool
+  records per task, oldest dropped first). `zest usage --tasks` prints them. A
+  malformed trace is dropped on read instead of breaking the spend history.
 - Day boundaries use the webview's timezone, sent once at startup
   (`set_local_offset`); the CLI stays on UTC.
 - Headroom is overwritten only when a provider actually reported limits.
@@ -100,6 +109,11 @@ Provider-facing rules and sources are documented in [QUOTA.md](../QUOTA.md).
 
 - Fixture: `/?fixture=1` provides synthetic `usageSnapshot`, `providerQuota` and
   `usageReport` data for the panel and screens.
+- `cargo test -p zest-core --test token_efficiency_eval` runs the eval's offline
+  tests. Its live run makes paid requests and is ignored by default: set
+  `ZEST_TOKEN_EVAL=1`, `ZEST_TOKEN_EVAL_PROVIDER`, and a spend cap in
+  `ZEST_TOKEN_EVAL_LIMIT_USD` (optionally `_MODEL`, `_EFFORT`, `_VARIANTS`),
+  then pass `-- --ignored`. Tasks live in `tests/fixtures/token_efficiency_tasks.json`.
 - CLI: `zest usage` prints the ledger, headroom and a 30-day cost with coverage.
 - `quota::tests` cover response parsing, DeepSeek host gating, the Claude Desktop
   cache and ordering without network.

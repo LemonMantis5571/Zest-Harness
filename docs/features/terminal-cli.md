@@ -36,7 +36,9 @@ verify:
   unavailable (○).
 - **`zest usage`** refreshes the rate catalog at most once a day. It then prints
   the ledger per provider (spent versus provider-reported headroom) and a
-  30-day cost report with its coverage.
+  30-day cost report with its coverage. `--tasks` adds recent per-task costs
+  from the task traces, which are off unless `[usage] task_traces = true`
+  ([usage-and-quota](usage-and-quota.md)).
 - **`zest doctor --live`** runs one real read-only turn against `README.md` in
   the current directory, using the separate ledger `.zest/doctor-usage.json`.
   It then checks that text streamed, that `read_file` started and succeeded,

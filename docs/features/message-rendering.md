@@ -20,6 +20,8 @@ paths:
   - crates/desktop/ui/src/lib/localImagePath.ts
   - crates/desktop/ui/src/lib/documentShape.ts
   - crates/desktop/ui/src/lib/responseStreaming.ts
+  - crates/desktop/ui/src/lib/resumableHighlight.ts
+  - crates/desktop/ui/src/lib/oneByteString.ts
 tests:
   - crates/desktop/ui/src/lib/markdownBlocks.test.ts
   - crates/desktop/ui/src/lib/markdownStreaming.test.ts
@@ -30,6 +32,8 @@ tests:
   - crates/desktop/ui/src/lib/chatImageSrc.test.ts
   - crates/desktop/ui/src/lib/localImagePath.test.ts
   - crates/desktop/ui/src/lib/documentShape.test.ts
+  - crates/desktop/ui/src/lib/resumableHighlight.test.ts
+  - crates/desktop/ui/src/lib/oneByteString.test.ts
   - crates/desktop/ui/e2e/streaming-performance.spec.ts
   - crates/desktop/ui/e2e/code-highlighting.spec.ts
   - crates/desktop/ui/e2e/fixtures/streaming.html
@@ -55,7 +59,7 @@ verify:
 
 ## How it works
 - `ChatScreen.tsx` `ChatMessageRow` -> `Markdown.tsx` (`react-markdown` + `remark-gfm`). `hoistLocalImages` (`localImagePath.ts`) rewrites the source, then `splitRenderableBlocks` (`markdownBlocks.ts`) cuts top-level blocks keyed by index; each `Block` is memoized. With block streaming on, the incomplete tail is withheld and fences reach `CodeBlock` with `streaming=false`; with it off, the tail renders and `streaming` is forwarded.
-- `pre` -> `CodeBlock.tsx` (`normalizeLang`/`languageLabel` from `codeLanguage.ts`, which maps a few spellings and otherwise passes the fence tag through) -> ReUI `code-block.tsx`: `useDeferredValue` source, plain lines as the floor, `highlightCode` (`code-block-highlight.tsx`, shiki core on the JavaScript regex engine, grammars lazy-loaded from a static import map) debounced 150 ms while streaming and immediate once complete. Highlight results are tagged with their source and spec so a swapped document never shows stale colours. The block sticks to the bottom while streaming and announces completion to screen readers.
+- `pre` -> `CodeBlock.tsx` (`normalizeLang`/`languageLabel` from `codeLanguage.ts`, which maps a few spellings and otherwise passes the fence tag through) -> ReUI `code-block.tsx`: `useDeferredValue` source, plain lines as the floor, `highlightCode` (`code-block-highlight.tsx`, shiki core on the JavaScript regex engine, grammars lazy-loaded from a static import map); a growing fence resumes the grammar after its last complete line (`createResumableHighlight` in `resumableHighlight.ts`) instead of re-tokenizing the whole block, and `toOneByteIfLatin1` (`oneByteString.ts`) hands shiki a one-byte string when it can, which keeps its regexes off V8's slower two-byte path debounced 150 ms while streaming and immediate once complete. Highlight results are tagged with their source and spec so a swapped document never shows stale colours. The block sticks to the bottom while streaming and announces completion to screen readers.
 - `MermaidBlock.tsx`: dynamic `import("mermaid")`, `securityLevel: "strict"`, theme follows the app appearance, SVG inserted via `markTrustedHtml` (`safeHtml.ts`, a provenance brand, not a sanitizer).
 - `ZoomableImage.tsx` -> `resolveChatImageSrc` (`chatImageSrc.ts`) -> `safeImageSrc` (`imageSrc.ts`) or `parseLocalImagePath` + `convertFileSrc`. `ImageLightbox` is shared with composer attachment chips.
 - Links: `safeHttpUrl` and `installExternalLinkHandling` (capture-phase click/auxclick) in `externalLinks.ts` -> `openExternalUrl`.
