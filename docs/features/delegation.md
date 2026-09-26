@@ -199,12 +199,14 @@ Code and Gemini presets.
   reviewer then says `accepted`, the report fails validation with "required
   check lacks evidence" and the job becomes `blocked`. The card can only reach
   `ready_to_apply` if the command prefix is in `[tools.bash] extra_allowlist`.
-- **Suspected corrupt record with a separate reviewer.** Core `ReviewerTarget`
-  and `DelegationTarget` both use serde `tag = "kind"`. A
-  `ReviewerTarget::Target(..)` therefore appears to serialize a duplicate
-  `kind` key that will not deserialize again. The only test,
-  `store_create_preserves_distinct_reviewer_target_on_card_and_job`, never
-  reloads the job from disk.
+- **Reviewer target format.** `ReviewerTarget` is stored adjacently tagged,
+  `{"kind":"target","target":{..}}`, the same shape as `ReviewerTargetView`.
+  It used to nest one `kind`-tagged enum inside another, writing `kind` twice;
+  such a record failed to load, and `DelegationStore::list` stops at the first
+  unreadable job, so one card with a separate reviewer broke the whole board.
+  Its custom `Deserialize` still reads those legacy records (the last `kind`
+  wins, which is the target's own tag). Keep a disk round trip in any test of
+  record shapes.
 - **Clipped external diffs.** External worker diffs are cut in the middle at
   512 KiB (`clip_diff`). A clipped diff will not apply.
 - **No automatic retries.** A failed, blocked or rejected job waits for a
