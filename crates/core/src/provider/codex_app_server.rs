@@ -30,6 +30,7 @@ use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
 };
+use crate::tools::sensitive::write_risk;
 
 const APP_SERVER_ARGS: &[&str] = &["app-server", "--listen", "stdio://"];
 /// `thread/start.sandbox` is the CLI kebab-case enum.
@@ -732,13 +733,9 @@ async fn server_request_result(
             // file rather than about writing in general — trusting `notes.txt`
             // must never be trusting `.env`.
             let policy = interaction.as_ref().and_then(|host| host.approval_policy());
-            match preview_permission(
-                policy.as_ref(),
-                FILE_CHANGE_TOOL,
-                &path,
-                ToolRisk::Write,
-                false,
-            ) {
+            // A secret file asks every time, even in modes that auto-approve writes.
+            let risk = write_risk(&path);
+            match preview_permission(policy.as_ref(), FILE_CHANGE_TOOL, &path, risk, false) {
                 PolicyOutcome::Allow => return json!({"decision": "accept"}),
                 PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
                 PolicyOutcome::Ask => {}
@@ -750,16 +747,21 @@ async fn server_request_result(
                 approval_id: approval_id.clone(),
                 tool_name: FILE_CHANGE_TOOL.into(),
                 tool_call_id: approval_id.clone(),
-                risk: ToolRisk::Write,
+                risk,
                 path: path.clone(),
                 summary: "Codex requested a file change".into(),
-                diff: diff.clone(),
+                // Like the parent agent, keep a secret file's lines off the card.
+                diff: if risk == ToolRisk::Sensitive {
+                    String::new()
+                } else {
+                    diff.clone()
+                },
             });
             let decision = if let Some(host) = interaction {
                 host.decide_file_change(ProviderFileChangeRequest {
                     approval_id,
                     path: (!path.is_empty()).then_some(path.clone()),
-                    diff: (!diff.is_empty()).then_some(diff),
+                    diff: (!diff.is_empty() && risk != ToolRisk::Sensitive).then_some(diff),
                     reason: string_field(&params, &["reason"]),
                 })
                 .await

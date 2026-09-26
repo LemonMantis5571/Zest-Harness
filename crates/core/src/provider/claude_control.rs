@@ -30,7 +30,7 @@ use crate::tools::approval::{
     ApprovalDecision, ApprovalMode, ApprovalPolicy, PolicyOutcome, ToolRisk,
 };
 use crate::tools::project::ProjectRoot;
-use crate::tools::sensitive::is_sensitive_path;
+use crate::tools::sensitive::{is_sensitive_path, write_risk};
 use crate::tools::write_file::bounded_unified_diff;
 
 /// Cap on a rendered diff handed to the approval card.
@@ -100,10 +100,16 @@ pub(crate) fn surface_for(tool_name: &str) -> Surface {
     }
 }
 
-/// Risk the session policy sees. Reads of credential-looking files stay gated.
+/// Risk the session policy sees. Reads and writes of credential-looking files
+/// stay gated.
 pub(crate) fn risk_for(request: &ToolPermissionRequest) -> ToolRisk {
     match surface_for(&request.tool_name) {
-        Surface::FileChange => ToolRisk::Write,
+        Surface::FileChange => write_risk(
+            request
+                .field("file_path")
+                .or_else(|| request.field("notebook_path"))
+                .unwrap_or(""),
+        ),
         Surface::Command(ToolRisk::Read) => {
             let path = request
                 .field("file_path")
@@ -628,6 +634,18 @@ mod tests {
                 json!({ "file_path": r"C:\Temp\frutiger-aero.png" }),
             )),
             ToolRisk::Read
+        );
+    }
+
+    #[test]
+    fn editing_a_credentials_file_is_sensitive() {
+        assert_eq!(
+            risk_for(&request("Edit", json!({ "file_path": "/repo/.env" }))),
+            ToolRisk::Sensitive
+        );
+        assert_eq!(
+            risk_for(&request("Write", json!({ "file_path": "/repo/notes.txt" }))),
+            ToolRisk::Write
         );
     }
 }

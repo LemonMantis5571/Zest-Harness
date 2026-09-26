@@ -48,6 +48,11 @@ verify:
   `ToolRisk::Sensitive`: it asks every time (Bypass excepted), its approval card has
   no diff, its UI summary reads "sensitive content (hidden)", it is redacted from
   durable wire history, and it is never spilled.
+- Writing one is gated the same way: `write_file` / `edit_file` on a sensitive
+  path prepare as `ToolRisk::Sensitive` (`write_risk` in `sensitive.rs`, applied
+  in `PreparedToolCall::write_kind`), so Auto and Accept edits ask instead of
+  applying it, and the card keeps its summary but drops the diff. Template env
+  files (`.env.example`) stay ordinary writes.
 - Walks honor `.gitignore` only in a git work tree or a folder with its own
   `.gitignore`, never read ignore files above the root, do not follow symlinks,
   and always skip `.git`, `.zest`, `target`, `node_modules`.
@@ -106,6 +111,6 @@ covered by toolRuns.test.ts. In `?fixture=1` a sent message shows a tool row;
   re-prepares later calls after the first write lands (`should_reprepare`).
 - Registration order is part of the cached prompt prefix; reordering tools
   invalidates the prompt cache.
-- Only reads are sensitive-gated. `write_file` / `edit_file` on `.env` are
-  ordinary Write risk (auto-applied in Auto mode), and the edit preview diff can
-  contain that file's lines.
+- Keep secret writes on `write_risk`: they were once ordinary Write risk, so Auto
+  mode applied an edit to `.env` without asking. The Claude Code and Codex
+  bridges use the same helper for their file-change requests.

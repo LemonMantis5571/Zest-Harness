@@ -133,7 +133,8 @@ impl PreparedToolCall {
     ) -> Self {
         Self {
             tool_name: tool_name.into(),
-            risk: ToolRisk::Write,
+            // A secret file (`.env`, keys) asks every time; see `write_risk`.
+            risk: super::sensitive::write_risk(&relative_path),
             preview,
             metadata: None,
             auto_eligible: false,

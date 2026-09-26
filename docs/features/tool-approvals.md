@@ -21,7 +21,9 @@ verify:
 
 ## Behavior
 - Risk comes from the prepared call: `Read` never asks; `Sensitive`, `Write`, and
-  `Exec` go through `ApprovalPolicy::decide`.
+  `Exec` go through `ApprovalPolicy::decide`. Reading or writing a likely secret
+  (`.env`, keys) is `Sensitive`, never `Write`, so the modes that auto-apply
+  writes still ask for it.
 - Modes (`ApprovalMode`): **Manual** asks for every gated call; **Accept edits**
   applies writes, asks for the rest; **Plan** refuses every gated call with a
   message telling the model to describe the change instead; **Auto** applies

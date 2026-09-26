@@ -48,6 +48,10 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   approval host the thread runs `on-request` + read-only sandbox so every write
   asks; hostless maintenance turns are read-only; only hostless tool turns get
   `workspace-write`. "Allow for session" is remembered per command / per path.
+- In both bridges a file change to a likely secret (`.env`, keys) is `Sensitive`
+  (`write_risk`), not `Write`, so Auto and Accept edits still ask and the card
+  omits its diff (`risk_for` in `claude_control.rs`, the `item/fileChange`
+  handler in `codex_app_server.rs`).
 - Cursor (`cursor_acp`): `cursor-agent acp` over JSON-RPC. Cursor asks permission
   only for shell commands; file edits are never gated, so `mode = "plan"` or
   `ask` is the only way to stop edits. Answers are always `allow-once` /
