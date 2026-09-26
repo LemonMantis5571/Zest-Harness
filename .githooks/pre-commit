@@ -4,3 +4,4 @@ set -eu
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 node ./scripts/check-output-artifacts.mjs --staged
+node ./scripts/feature-map.mjs check --staged

@@ -110,6 +110,17 @@ check_whitespace() {
   git diff --cached --check --ignore-space-at-eol
 }
 
+ui_e2e() {
+  # Installs the browser matching the locked @playwright/test; a no-op when
+  # present. System libraries only on CI Linux, where sudo is passwordless.
+  if [ "$(uname -s)" = "Linux" ] && [ -n "${CI:-}" ]; then
+    npx playwright install --with-deps chromium || return
+  else
+    npx playwright install chromium || return
+  fi
+  npm run ui:e2e
+}
+
 npm_audit() {
   local attempt
   for attempt in 1 2 3; do
@@ -126,12 +137,17 @@ npm_audit() {
 step "toolchain check" check_toolchain
 step "output artifact policy tests" node --test ./scripts/check-output-artifacts.test.mjs
 step "output artifact policy" node ./scripts/check-output-artifacts.mjs
+step "feature map tests" node --test ./scripts/feature-map.test.mjs
+step "feature map" node ./scripts/feature-map.mjs check
+step "ui control cli tests" node --test ./scripts/zest-control.test.mjs
 step "npm ci" npm ci --no-fund --no-audit
 step "binding drift (ts-rs)" check_bindings
 step "ui test" npm run ui:test
 step "ui lint (strict)" npm run ui:lint
 step "ui plugin lint rules" npm run ui:lint:plugins
 step "ui build" npm run ui:build
+step "ui e2e (playwright)" ui_e2e
+step "ui control smoke (zest-control check)" node ./scripts/zest-control.mjs check
 step "cargo fmt --check" cargo fmt --all -- --check
 step "cargo clippy (strict)" cargo clippy --workspace --all-targets -- -D warnings
 step "cargo test" cargo test --workspace --all-targets

@@ -58,6 +58,18 @@ Step "output artifact policy" {
   node ./scripts/check-output-artifacts.mjs
 }
 
+Step "feature map tests" {
+  node --test ./scripts/feature-map.test.mjs
+}
+
+Step "feature map" {
+  node ./scripts/feature-map.mjs check
+}
+
+Step "ui control cli tests" {
+  node --test ./scripts/zest-control.test.mjs
+}
+
 Step "npm ci" {
   npm ci --no-fund --no-audit
 }
@@ -133,6 +145,22 @@ Step "ui plugin lint rules" {
 
 Step "ui build" {
   npm run ui:build
+}
+
+Step "ui e2e (playwright)" {
+  # Installs the browser matching the locked @playwright/test; a no-op when
+  # present. System libraries only on CI Linux, where sudo is passwordless.
+  if ($IsLinux -and $env:CI) {
+    npx playwright install --with-deps chromium
+  } else {
+    npx playwright install chromium
+  }
+  if ($LASTEXITCODE -ne 0) { throw "playwright install failed (exit $LASTEXITCODE)" }
+  npm run ui:e2e
+}
+
+Step "ui control smoke (zest-control check)" {
+  node ./scripts/zest-control.mjs check
 }
 
 Step "cargo fmt --check" {

@@ -19,10 +19,18 @@ const steps = [
     ["--test", "./scripts/check-output-artifacts.test.mjs"],
   ],
   ["Output artifact policy", process.execPath, ["./scripts/check-output-artifacts.mjs"]],
+  ["Feature map tests", process.execPath, ["--test", "./scripts/feature-map.test.mjs"]],
+  ["Feature map", process.execPath, ["./scripts/feature-map.mjs", "check"]],
+  ["UI control CLI tests", process.execPath, ["--test", "./scripts/zest-control.test.mjs"]],
   ["UI tests", npm, [...npmPrefix, "run", "ui:test"]],
   ["UI lint", npm, [...npmPrefix, "run", "ui:lint"]],
   ["UI lint plugin tests", npm, [...npmPrefix, "run", "ui:lint:plugins"]],
   ["UI build", npm, [...npmPrefix, "run", "ui:build"]],
+  // Needs Playwright's Chromium once per machine: npx playwright install chromium
+  ["UI end-to-end tests", npm, [...npmPrefix, "run", "ui:e2e"]],
+  // Drives the live UI through scripts/zest-control.mjs, so the agent-facing
+  // control CLI is exercised on every run and cannot rot unnoticed.
+  ["UI control smoke", process.execPath, ["./scripts/zest-control.mjs", "check"]],
   ["Rust formatting", "cargo", ["fmt", "--all", "--", "--check"]],
   [
     "Rust clippy",
