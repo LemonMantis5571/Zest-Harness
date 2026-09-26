@@ -8,7 +8,8 @@ Zest keeps three different kinds of information separate:
    request. These can be stale while the app is idle.
 3. **Account balance** — money or credits available in a provider account.
 
-The top-bar quota panel only shows values from the provider. It never turns
+The quota panel (the gauge button in the sidebar footer) only shows values from
+the provider. It never turns
 local token counts into a remaining plan number.
 
 ## What is live today

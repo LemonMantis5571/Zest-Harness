@@ -51,11 +51,16 @@ not write `zest.toml` and it does not scaffold an app. The first card still
 has to ask for real files. Providers and `[agents.*]` come from `~/.zest/zest.toml`
 unless the project already has its own config.
 
-`ZEST_SERVE_TOKEN` is a high-entropy bearer token. It is never accepted on
-argv, never written into the project, and never printed in readiness or logs.
+`ZEST_SERVE_TOKEN` is a high-entropy bearer token: at least 32 characters, no
+whitespace. It is never accepted on argv, never written into the project, and
+never printed in readiness or logs.
 
-A second coordinator for the same project — desktop or another `zest serve` —
-fails on `.zest/delegations/coordinator.lock`.
+One coordinator owns a project at a time, through
+`.zest/delegations/coordinator.lock`. A second `zest serve` for the same project
+fails to start. The desktop holds the lock only while it has delegation work
+queued or running in that project, so `zest serve` can start for a project that
+is open in the desktop. While `zest serve` owns a project, the desktop shows its
+cards read-only, and desktop actions report that another coordinator owns it.
 
 ## Readiness
 
@@ -87,8 +92,8 @@ tool result is `result.content[0].text`, a JSON string of the job view. Read
 
 Required fields: `idempotencyKey`, `parentThreadId`, `title`, `objective`,
 `lane`, `scope`, and `worker`. The same `idempotencyKey` returns the same job.
-`parentThreadId` is an id the host chooses. It does not have to exist as a
-Zest thread.
+`parentThreadId` is an id the host chooses: 1–200 characters of ASCII letters,
+digits, `-`, and `_`. It does not have to exist as a Zest thread.
 
 ```json
 {
@@ -128,15 +133,21 @@ defaults to the same target as `worker`.
 | `delegation_create` | Create a card. Requires `idempotencyKey`. Stays `awaiting_approval` unless the daemon is `trusted` |
 | `delegation_list` / `delegation_get` | Read cards |
 | `delegation_artifact` | Paged `worker.diff`, `worker-result.json`, or `review-result.json` |
-| `delegation_update` | Edit a card that is still awaiting approval |
+| `delegation_update` | Edit a card that is `awaiting_approval`, `blocked`, or `changes_requested` |
 | `delegation_approve` | Record human approval, pin fingerprints, enqueue the worker |
-| `delegation_retry` | Return a blocked/failed card to `awaiting_approval` |
+| `delegation_retry` | Return a `changes_requested`, `blocked`, `failed`, `apply_conflict`, or `queued` card to `awaiting_approval` |
 | `delegation_cancel` | Cancel a non-terminal card |
 | `delegation_apply` | Apply a `ready_to_apply` diff after scope + `git apply --check` |
 
 Mutations accept `expectedUpdatedAt`. A stale revision returns a conflict. A
 retry of `approve`, `cancel`, or `apply` after a lost HTTP response returns the
 state already reached and does not apply a patch twice.
+
+Requests and tool responses are limited to 256 KiB. A tool response that would
+be larger comes back as valid JSON with `isError: true`:
+`{"error":"response_too_large","bytes":…,"limitBytes":262144,"hint":…}`. Read
+cards one at a time with `delegation_get` and page artifacts with
+`delegation_artifact`.
 
 Cards created here record `origin.coordinator = "inbound_mcp"` by default,
 plus the `parentThreadId` and `idempotencyKey`. A host may send
@@ -153,8 +164,10 @@ the same `expectedUpdatedAt` is a no-op and still `accepted`.
 In `trusted`, poll `delegation_get` until `accepted`. Do not wait for
 `applied`. Do not require `delegation_apply`.
 
-`changes_requested`, `blocked`, and `failed` are stops. `delegation_retry`
-sends a blocked or failed card back to `awaiting_approval`.
+`changes_requested`, `apply_conflict`, `blocked`, and `failed` are stops.
+`delegation_retry` sends any of them, or a card still `queued`, back to
+`awaiting_approval`. Nothing retries on its own, and a retried card needs a new
+`delegation_approve`.
 
 ## Policy
 
@@ -178,10 +191,13 @@ In `gated`, a worker does not start until a recorded approval exists: either
 after the tool `y` gate. MCP create never writes that receipt. `trusted`
 records that approval on create instead.
 
-SIGINT/SIGTERM stop accepting requests, cancel in-flight workers, and persist
-interrupted `worker_running` / `review_running` jobs as `blocked` (not as a
-user cancel). Approved `queued` jobs resume after restart. An interrupted
-worker or reviewer still needs `retry` and a new approval.
+Ctrl-C (SIGINT) on every platform, and SIGTERM on Unix, stop accepting
+requests, cancel in-flight workers, and persist interrupted `worker_running` /
+`review_running` jobs as `blocked` (not as a user cancel). Windows has no
+SIGTERM, so stop the daemon there with Ctrl-C; a killed process skips this
+step, and the next start marks its interrupted jobs `blocked` instead. Approved
+`queued` jobs resume after restart. An interrupted worker or reviewer still
+needs `retry` and a new approval.
 
 ## Interactive Zest
 
