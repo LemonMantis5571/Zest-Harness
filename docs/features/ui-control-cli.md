@@ -35,6 +35,8 @@ verify:
   samples 300 ms apart match. A turn that stays live (`split-streaming`) fails
   with a hint to use `stop-turn`.
 - A failed `click` lists the accessible names that are on screen.
+- `inspect backend-calls` returns how many times the UI called each fixture
+  backend method since the page loaded, for spotting repeated or missing calls.
 - `check` runs boot, send, ruby highlighting, context meter, command palette,
   and stop-turn (with the meter kept during the turn), then fails if any error
   was recorded. Without a session it starts one and stops it afterwards. A

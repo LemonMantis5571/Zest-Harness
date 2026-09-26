@@ -39,7 +39,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 | [Message rendering](message-rendering.md) | Assistant answers render as Markdown with highlighted code, Mermaid diagrams, zoomable images, safe links, and copy/save actions, even while they stream. | 14 test files, 4 commands |
 | [Model and effort selection](model-and-effort-selection.md) | Pick a model and reasoning effort from the composer, search across providers, and have the choice remembered per provider in each project. | 7 test files, 6 commands |
 | [Notifications and toasts](notifications.md) | In-app toasts when Zest is focused, OS notifications when it is not, grouped duplicates, and an explicit policy for background failures. | 1 test file, 1 command |
-| [Offline fixture mode](offline-fixture-mode.md) | Run the desktop UI in an ordinary browser with an in-memory fake backend and a canned turn; every Playwright spec runs against it. | 1 test file, 2 commands |
+| [Offline fixture mode](offline-fixture-mode.md) | Run the desktop UI in an ordinary browser with an in-memory fake backend and a canned turn; every Playwright spec runs against it. | 2 test files, 2 commands |
 | [Plugins (Now Playing, Wallpaper)](plugins.md) | Optional out-of-process add-ons, off by default, that show and control music or put an image behind the app. | 3 test files, 5 commands |
 | [Project file tools](project-file-tools.md) | The agent reads, searches, lists, creates, and edits files only inside the open project, with likely secrets hidden and oversized results kept retrievable. | 2 test files, 8 commands |
 | [Provider runtime and native API providers](provider-runtime.md) | One provider-neutral interface for every backend, with Zest's own streaming clients for the Anthropic Messages API, OpenAI-compatible endpoints, and ChatGPT Codex. | 1 test file, 10 commands |
@@ -56,7 +56,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 | [UI control CLI (zest-control)](ui-control-cli.md) | One-line commands that drive the live UI, inspect it, and report every error, so agents debug and verify without writing throwaway browser scripts. | 1 test file, 2 commands |
 | [Usage, cost and provider quota](usage-and-quota.md) | See tokens, estimated cost and cache reuse across Zest and your coding CLIs, and check live limits or balance reported by each provider. | 5 test files, 8 commands |
 | [Workbench panel](workbench-panel.md) | A side panel for a project chat with Activity, Outline, Delegation, and Files tabs, including a quick workspace check, checkpoint rewind, and a read-only file browser. | 1 test file, 3 commands |
-| [Branch changes and diff review](workspace-changes-and-review.md) | A project chat shows what changed on its branch since the chat started and opens a review pane with a cleaned-up or raw diff, with secret files redacted. | 3 test files, 3 commands |
+| [Branch changes and diff review](workspace-changes-and-review.md) | A project chat shows what changed on its branch since the chat started and opens a review pane with a cleaned-up or raw diff, with secret files redacted. | 4 test files, 4 commands |
 | [zest serve (headless coordinator)](zest-serve.md) | A windowless daemon that owns one project's delegation queue and exposes delegation_* tools over authenticated MCP on loopback, so a bot or script can create, approve and apply feature cards. | 1 test file, 3 commands |
 <!-- feature-index:end -->
 

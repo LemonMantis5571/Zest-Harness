@@ -431,3 +431,20 @@ describe("fixture split-streaming scenario", () => {
     assert.equal((await backend.contextUsage()).percentFull, 4.7);
   });
 });
+
+describe("fixture btw-streaming scenario", () => {
+  it("keeps a side answer live until it is stopped", async () => {
+    const backend = createFixtureBackend({ scenario: "btw-streaming" });
+    const session = await backend.sessionInfo();
+    assert.ok(session);
+    const id = await backend.startBtw(session.sessionId);
+    const deltas: string[] = [];
+    const pending = backend.sendBtw(id, "Stop this side answer", (delta) => deltas.push(delta));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Far longer than the ordinary stream takes; still only the first chunk.
+    assert.equal(deltas.length, 1);
+    await backend.cancelBtw(id);
+    await assert.rejects(pending, /Cancelled/);
+    await backend.closeBtw(id);
+  });
+});

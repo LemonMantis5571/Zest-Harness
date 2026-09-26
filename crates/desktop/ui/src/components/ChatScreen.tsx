@@ -1229,8 +1229,13 @@ export function ChatScreen({
       try {
         const next = await refreshWorkspaceChanges();
         if (cancelled) return;
+        // Keep the same target while nothing changed, so an idle poll does
+        // not re-render (or re-request) the open diff.
         setDiffTarget((current) =>
-          current?.source === "branch" ? branchTarget(next) : current
+          current?.source !== "branch" ||
+          (current.diff === next.diff && current.changeId === next.changeId)
+            ? current
+            : branchTarget(next)
         );
       } catch {
         // The last rendered snapshot stays visible when Git is temporarily unavailable.

@@ -35,7 +35,7 @@ User-facing reference: [docs/BTW.md](../BTW.md) (per-provider fork behaviour, li
 5. `turn.rs` publishes side snapshots: the submitted prompt before persistence, then after each completed provider/tool step (`publish_side_context` in `agent.rs`), with sensitive tool results redacted and no provider session.
 
 ## Verify
-- `npm run ui:e2e -- btw` (fixture mode): follow-ups then an unchanged main transcript; opening during a running task without queueing; slash-menu discovery; stop keeps the question editable.
+- `npm run ui:e2e -- btw` (fixture mode): follow-ups then an unchanged main transcript; opening during a running task without queueing (`split-streaming` holds the main turn); slash-menu discovery; stop keeps the question editable (`btw-streaming` holds the side answer until Stop).
 - `cargo test -p zest-desktop --lib -- btw::tests` checks close/reopen cancels only the side answer and that switching sessions drops it.
 
 ## Pitfalls

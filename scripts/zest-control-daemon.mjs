@@ -387,8 +387,11 @@ async function inspect(probe = "state") {
       };
     case "toasts":
       return { toasts: await toasts() };
+    case "backend-calls":
+      // Counted by the fixture backend per page load (recordFixtureCalls).
+      return { backendCalls: await page.evaluate(() => globalThis.__zestFixtureCalls ?? {}) };
     default:
-      throw fail(`unknown probe "${probe}"`, "Probes: state, messages, code-blocks, meter, composer, toasts.");
+      throw fail(`unknown probe "${probe}"`, "Probes: state, messages, code-blocks, meter, composer, toasts, backend-calls.");
   }
 }
 

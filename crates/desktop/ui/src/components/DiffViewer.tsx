@@ -18,7 +18,8 @@ import {
 
 import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
-import { generateReadingDiff, type ReadingDiffView } from "@/lib/api";
+import type { ReadingDiffView } from "@/lib/api";
+import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { splitDiffSections, type DiffSection } from "@/lib/diffSections";
 import { makeReadingDiff, type ReadingDiff } from "@/lib/readingDiff";
@@ -79,16 +80,35 @@ export function DiffViewer({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const resizeCleanup = useRef<(() => void) | null>(null);
 
+  // Keyed on the diff text, not the target object: the branch view re-polls
+  // Git every 2.5 s and hands over a fresh object each time. Keying on identity
+  // made every poll a new model call and collapsed the reader's sections.
+  const targetDiff = target && !target.loading ? target.diff : null;
+  const wantsReading = view === "reading";
+  // One request per diff, shared by every effect run that wants it (StrictMode
+  // runs effects twice, and toggling Clean/Raw re-runs them).
+  const requested = useRef<{ diff: string; result: Promise<ReadingDiffView> } | null>(null);
+
   useEffect(() => {
-    if (!target || target.loading) {
-      setReading(null);
-      return;
-    }
     setCollapsed(new Set());
-    const fallback = makeReadingDiff(target.diff);
-    setReading(fallback);
+    setReading(targetDiff === null ? null : makeReadingDiff(targetDiff));
+  }, [targetDiff]);
+
+  // The clean view is a provider call: ask once per diff, and only while it is shown.
+  useEffect(() => {
+    if (targetDiff === null || !wantsReading) return;
+    let request = requested.current;
+    if (request?.diff !== targetDiff) {
+      const result = getBackend().generateReadingDiff(targetDiff);
+      request = { diff: targetDiff, result };
+      requested.current = request;
+      // A failed request may be retried the next time the view asks.
+      result.catch(() => {
+        if (requested.current?.result === result) requested.current = null;
+      });
+    }
     let cancelled = false;
-    void generateReadingDiff(target.diff)
+    request.result
       .then((result) => {
         if (!cancelled) setReading(result);
       })
@@ -100,7 +120,7 @@ export function DiffViewer({
     return () => {
       cancelled = true;
     };
-  }, [target]);
+  }, [targetDiff, wantsReading]);
 
   useLayoutEffect(() => {
     if (!storageKey || typeof window === "undefined") return;

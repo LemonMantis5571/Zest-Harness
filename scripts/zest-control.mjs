@@ -50,7 +50,7 @@ export const COMMANDS = {
   type: "Type text into the focused element",
   snapshot: "Accessibility tree as YAML: [--selector CSS] [--json]",
   screenshot: "Save a PNG: [PATH] [--full] [--selector CSS]",
-  inspect: "Structured probe: state | messages | code-blocks | meter | composer | toasts",
+  inspect: "Structured probe: state | messages | code-blocks | meter | composer | toasts | backend-calls",
   errors: "Console errors, page errors, failed requests, and error toasts: [--since SEQ] [--clear]",
   console: "All captured console output: [--level error|warning|log] [--since SEQ] [--clear]",
   eval: "Evaluate a JavaScript expression in the page and return the result",

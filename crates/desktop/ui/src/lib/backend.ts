@@ -2,7 +2,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import * as tauriApi from "./api";
 import { createFixtureBackend } from "./fixtureBackend";
-import type { SkillSummary, SystemPromptInfo } from "./api";
+import type { ReadingDiffView, SkillSummary, SystemPromptInfo } from "./api";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -249,6 +249,8 @@ export type DesktopBackend = {
   gitBranch(): Promise<string | null>;
   gitContext(): Promise<GitContext>;
   workspaceChanges(): Promise<WorkspaceChange>;
+  /** Model-abridged "clean" view of a diff. A provider call: ask once per diff. */
+  generateReadingDiff(diff: string): Promise<ReadingDiffView>;
   pullRequestDiff(number?: number): Promise<WorkspaceChange>;
   verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
@@ -377,6 +379,7 @@ export function createTauriBackend(): DesktopBackend {
     gitBranch: () => tauriApi.gitBranch(),
     gitContext: () => tauriApi.gitContext(),
     workspaceChanges: () => tauriApi.workspaceChanges(),
+    generateReadingDiff: (diff) => tauriApi.generateReadingDiff(diff),
     pullRequestDiff: (number) => tauriApi.pullRequestDiff(number),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),

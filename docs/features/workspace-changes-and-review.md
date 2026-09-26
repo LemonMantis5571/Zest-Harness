@@ -13,10 +13,12 @@ tests:
   - crates/desktop/ui/src/lib/diffSections.test.ts
   - crates/desktop/ui/src/lib/readingDiff.test.ts
   - crates/desktop/ui/src/lib/visibleInterval.test.ts
+  - crates/desktop/ui/e2e/branch-diff-polling.spec.ts
 verify:
   - cargo test -p zest-core --lib -- workspace_changes
   - cargo test -p zest-core --lib -- reading_diff
   - npm run ui:test
+  - npm run ui:e2e -- branch-diff-polling
 ---
 
 # Branch changes and diff review
@@ -50,6 +52,9 @@ verify:
   active provider for a remove/fold plan (`generate_reading_diff`); the model
   returns only line ranges inside hunks, applied locally and rejected if they
   touch metadata or cross diff markers. Raw always shows the exact patch.
+- That plan is a model call, so it is made once per diff text and only while
+  Clean is shown: an idle 2.5 s poll, switching to Raw and back, or a remount
+  asks nothing new. Collapsed sections reset only when the diff text changes.
 
 ## How it works
 1. App.tsx refreshes changes when a project chat opens and on the
@@ -65,24 +70,28 @@ verify:
    (`format_untracked_diff`), then `redact_diff`, `bounded_utf8`, summaries.
 4. ChatScreen.tsx owns `diffTarget` (`source: "tool" | "branch" |
    "pull_request"`), `openBranchChanges`, the `visibleInterval` poll, and dismiss
-   keys in localStorage.
+   keys in localStorage. A poll that finds the same diff and change id keeps the
+   existing target object.
 5. DiffViewer.tsx splits with `splitDiffSections`, builds `makeReadingDiff`, and
-   calls `generateReadingDiff` (lib/api.ts) -> Tauri `generate_reading_diff` ->
+   keys the request on the diff text, sharing one in-flight promise per diff
+   (`requested`). It calls `getBackend().generateReadingDiff` -> Tauri `generate_reading_diff` ->
    `zest_core::abridge_reading_diff` (reading_diff.rs `abridge` / `apply_plan`).
 
 ## Verify
 `workspace_changes` tests include same-size content edits invalidating the cache
 and an opt-in benchmark (`benchmark_repeated_inspection`, `--ignored`); see
 plans/006-diff-refresh-results.md. Fixture mode (`?fixture=1`) serves a
-synthetic `workspaceChanges` snapshot; `generateReadingDiff` bypasses the
-fixture backend, so only the local Clean view appears there.
+synthetic `workspaceChanges` snapshot and a `generateReadingDiff` that returns
+the diff unabridged. `npm run ui:e2e -- branch-diff-polling` opens the branch
+diff, waits out two polls, toggles Raw and Clean, and asserts one
+`generateReadingDiff` call (counted by the fixture; `node
+scripts/zest-control.mjs inspect backend-calls` shows the same counts live).
 
 ## Pitfalls
 - Do not replace full-content hashing with size/mtime checks; same-size,
   same-timestamp edits would serve a stale diff (plans/006).
-- Opening the Clean view sends the (redacted) diff to the active provider.
-  `DiffViewer` re-runs that request whenever `target` changes, and each 2.5 s
-  poll builds a new branch target object, so an open branch diff appears to call
-  the provider (and reset collapsed sections) on every tick.
+- Opening the Clean view sends the (redacted) diff to the active provider and
+  costs a model call. It used to re-run on every 2.5 s poll because the request
+  was keyed on the target object; keep it keyed on the diff text.
 - `workspace_changed` only fires when a turn changes something; a branch that
   was already dirty is found by the refresh on chat open.

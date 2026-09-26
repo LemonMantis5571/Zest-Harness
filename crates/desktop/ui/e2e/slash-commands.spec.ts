@@ -1,7 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForFixtureBoot } from "./fixtureBoot";
+
 test("slash skills can be invoked more than once from any draft position", async ({ page }) => {
   await page.goto("/?fixture=1");
+  await waitForFixtureBoot(page);
 
   const composer = page.locator("#zest-composer-input");
   await composer.fill("review this ");
