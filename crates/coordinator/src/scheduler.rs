@@ -1065,6 +1065,19 @@ pub struct ArtifactPage {
     pub next_offset: Option<u64>,
 }
 
+/// How long a coordinator keeps a project's lock once it has taken it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LockRetention {
+    /// Until the process exits. `zest serve` owns one project for its whole
+    /// life and must keep other coordinators out while it runs.
+    #[default]
+    Process,
+    /// Only while this coordinator has queued or running work in the project.
+    /// The desktop visits many projects; keeping every lock it ever took would
+    /// stop `zest serve` from starting for any of them until the app exits.
+    WhileActive,
+}
+
 pub struct DelegationCoordinator {
     lanes: Arc<Semaphore>,
     running: Mutex<HashMap<String, Arc<zest_core::CancelToken>>>,
@@ -1072,8 +1085,22 @@ pub struct DelegationCoordinator {
     notifier: SharedNotifier,
     spawner: Arc<dyn TaskSpawner>,
     locks: Mutex<HashMap<PathBuf, CoordinatorLock>>,
+    retention: LockRetention,
     ops: Mutex<()>,
     shutting_down: AtomicBool,
+}
+
+/// Releases an idle project lock when a coordinator operation returns. Declare
+/// it after the `ops` guard so it drops first, while `ops` is still held.
+struct ReleaseWhenIdle<'a> {
+    coordinator: &'a DelegationCoordinator,
+    root: &'a Path,
+}
+
+impl Drop for ReleaseWhenIdle<'_> {
+    fn drop(&mut self) {
+        self.coordinator.release_if_idle(self.root);
+    }
 }
 
 impl DelegationCoordinator {
@@ -1101,9 +1128,76 @@ impl DelegationCoordinator {
             notifier: SharedNotifier::new(notifier),
             spawner,
             locks: Mutex::new(HashMap::new()),
+            retention: LockRetention::default(),
             ops: Mutex::new(()),
             shutting_down: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_lock_retention(mut self, retention: LockRetention) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// Whether this coordinator currently holds the lock for `root`.
+    pub fn holds_lock(&self, root: &Path) -> bool {
+        let Ok(key) = canonicalize_root(root) else {
+            return false;
+        };
+        self.locks
+            .lock()
+            .map(|locks| locks.contains_key(&key))
+            .unwrap_or(false)
+    }
+
+    fn release_when_idle<'a>(&'a self, root: &'a Path) -> ReleaseWhenIdle<'a> {
+        ReleaseWhenIdle {
+            coordinator: self,
+            root,
+        }
+    }
+
+    /// Drop the project lock under [`LockRetention::WhileActive`] once no job
+    /// in the project is queued or running here. Callers hold `ops`, so no
+    /// operation can queue work between the check and the release.
+    fn release_if_idle(&self, root: &Path) {
+        if self.retention != LockRetention::WhileActive {
+            return;
+        }
+        let Ok(key) = canonicalize_root(root) else {
+            return;
+        };
+        if self.has_active_work(&key) {
+            return;
+        }
+        if let Ok(mut locks) = self.locks.lock() {
+            locks.remove(&key);
+        }
+    }
+
+    /// Unknown state counts as active: keeping a lock is safe, dropping one
+    /// that still guards work is not.
+    fn has_active_work(&self, root: &Path) -> bool {
+        let Ok(running) = self.running.lock().map(|running| {
+            running
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        }) else {
+            return true;
+        };
+        let Ok(jobs) = DelegationStore::open(root).and_then(|store| store.list()) else {
+            return true;
+        };
+        jobs.iter().any(|job| {
+            running.contains(&job.job_id)
+                || matches!(
+                    job.status,
+                    CoreDelegationStatus::Queued
+                        | CoreDelegationStatus::WorkerRunning
+                        | CoreDelegationStatus::ReviewRunning
+                )
+        })
     }
 
     fn lock_ops(&self) -> Result<MutexGuard<'_, ()>, String> {
@@ -1241,6 +1335,7 @@ impl DelegationCoordinator {
     pub fn create_job(&self, root: &Path, request: CreateDelegationJobRequest) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let origin_coordinator = request
             .origin_coordinator
             .as_deref()
@@ -1311,6 +1406,7 @@ impl DelegationCoordinator {
     ) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         self.approve_inner(root, job_id, expected_updated_at)
     }
 
@@ -1366,6 +1462,7 @@ impl DelegationCoordinator {
     pub fn apply_dispatch_receipt(self: &Arc<Self>, root: &Path, job_id: &str) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let job = store
             .load(job_id)
@@ -1392,6 +1489,7 @@ impl DelegationCoordinator {
     ) -> Result<Vec<DelegationJobView>, String> {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         self.ingest_inner(root)
     }
 
@@ -1413,6 +1511,7 @@ impl DelegationCoordinator {
     pub fn update_job(&self, root: &Path, request: UpdateDelegationJobRequest) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let mut job = store
             .load(&request.job_id)
@@ -1426,7 +1525,10 @@ impl DelegationCoordinator {
                 | CoreDelegationStatus::Blocked
                 | CoreDelegationStatus::ChangesRequested
         ) {
-            return Err("only jobs awaiting approval can be edited".into());
+            return Err(
+                "only jobs awaiting approval, blocked, or with changes requested can be edited"
+                    .into(),
+            );
         }
         if let Some(target) = request.worker {
             job.card.worker_target = Some(target.into());
@@ -1549,6 +1651,10 @@ impl DelegationCoordinator {
                     running.remove(&job_id);
                 }
             }
+            // The last job to finish may leave the project idle.
+            if let Ok(_ops) = coordinator.lock_ops() {
+                coordinator.release_if_idle(&root);
+            }
         }));
     }
 
@@ -1560,6 +1666,7 @@ impl DelegationCoordinator {
     ) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         if let Ok(running) = self.running.lock() {
             if let Some(cancel) = running.get(job_id) {
                 cancel.cancel();
@@ -1603,6 +1710,7 @@ impl DelegationCoordinator {
     ) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let mut job = store
             .load(job_id)
@@ -1647,6 +1755,7 @@ impl DelegationCoordinator {
     pub fn reconcile(self: &Arc<Self>, root: &Path) -> Result<Vec<DelegationJobView>, String> {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let _ = self.ingest_inner(root)?;
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let live_jobs = self
@@ -1696,6 +1805,7 @@ impl DelegationCoordinator {
     ) -> ResultView {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         self.apply_inner(root, job_id, expected_updated_at)
     }
 
@@ -1705,6 +1815,7 @@ impl DelegationCoordinator {
     ) -> Result<Vec<DelegationJobView>, String> {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let ready: Vec<String> = store
             .list()
@@ -2429,6 +2540,7 @@ fn canonicalize_root(root: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock::is_lock_held_error;
     use std::process::Command;
     use std::sync::Arc;
 
@@ -2731,6 +2843,70 @@ mod tests {
         let second = Arc::new(DelegationCoordinator::new());
         let error = second.ensure_lock(root).unwrap_err();
         assert!(error.contains("already owns this project"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn process_retention_keeps_the_lock_after_an_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let serve = Arc::new(DelegationCoordinator::new());
+        serve.reconcile(root).unwrap();
+        assert!(serve.holds_lock(root));
+        let error = DelegationCoordinator::new().ensure_lock(root).unwrap_err();
+        assert!(is_lock_held_error(&error), "{error}");
+    }
+
+    #[tokio::test]
+    async fn while_active_retention_releases_an_idle_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let desktop =
+            Arc::new(DelegationCoordinator::new().with_lock_retention(LockRetention::WhileActive));
+        // Listing the board and creating a card leave nothing queued or running.
+        desktop.reconcile(root).unwrap();
+        desktop.create_job(root, create_request("Idle")).unwrap();
+        assert!(!desktop.holds_lock(root));
+        let serve = Arc::new(DelegationCoordinator::new());
+        serve.ensure_lock(root).unwrap();
+        let error = desktop.reconcile(root).unwrap_err();
+        assert!(is_lock_held_error(&error), "{error}");
+    }
+
+    #[tokio::test]
+    async fn while_active_retention_holds_the_lock_until_work_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let desktop =
+            Arc::new(DelegationCoordinator::new().with_lock_retention(LockRetention::WhileActive));
+        let created = desktop.create_job(root, create_request("Busy")).unwrap();
+        desktop.approve(root, &created.job_id, None).unwrap();
+        assert!(desktop.holds_lock(root), "a queued job keeps the lock");
+        assert!(DelegationCoordinator::new().ensure_lock(root).is_err());
+
+        let ready = wait_for_status(
+            &desktop,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while desktop.holds_lock(root) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "lock was not released after the worker finished"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Apply takes the lock again for its own duration.
+        let applied = desktop
+            .apply(root, &ready.job_id, Some(ready.updated_at))
+            .unwrap();
+        assert_eq!(applied.status, DelegationStatus::Accepted);
+        assert!(!desktop.holds_lock(root));
     }
 
     #[tokio::test]

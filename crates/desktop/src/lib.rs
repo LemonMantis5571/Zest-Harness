@@ -8448,7 +8448,13 @@ async fn verify_workspace(state: State<'_, AppState>) -> Result<WorkspaceReview,
 #[tauri::command]
 fn list_delegation_jobs(state: State<'_, AppState>) -> Result<Vec<DelegationJobView>, String> {
     let root = resolve_workspace_root(&state)?;
-    let _ = state.delegations.reconcile(&root)?;
+    match state.delegations.reconcile(&root) {
+        Ok(_) => {}
+        // Another process (usually `zest serve`) owns this project's queue.
+        // Show its jobs read-only; actions report the lock when tried.
+        Err(error) if zest_coordinator::is_lock_held_error(&error) => {}
+        Err(error) => return Err(error),
+    }
     list_delegation_views(&root)
 }
 
@@ -9025,11 +9031,18 @@ pub fn run() {
                 ledger: ledger.clone(),
                 config_edit: Mutex::new(()),
                 chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
-                delegations: Arc::new(DelegationCoordinator::with_runtime(
-                    ledger,
-                    Arc::new(crate::delegation::TauriSpawner),
-                    Arc::new(zest_coordinator::NoopNotifier),
-                )),
+                // The desktop moves between projects, so it only keeps a
+                // project's lock while it has work queued or running there;
+                // otherwise `zest serve` could not start for any project the
+                // app had opened.
+                delegations: Arc::new(
+                    DelegationCoordinator::with_runtime(
+                        ledger,
+                        Arc::new(crate::delegation::TauriSpawner),
+                        Arc::new(zest_coordinator::NoopNotifier),
+                    )
+                    .with_lock_retention(zest_coordinator::LockRetention::WhileActive),
+                ),
             }
         })
         .setup(|app| {
