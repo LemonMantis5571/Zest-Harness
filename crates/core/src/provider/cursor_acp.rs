@@ -1168,7 +1168,7 @@ mod tests {
             root,
             "cursor-agent",
             None,
-            vec!["cursor-grok-4.6-fast".into()],
+            vec!["grok-4.7-fast".into()],
             false,
             CursorMode::Ask,
             90,
@@ -1183,7 +1183,7 @@ mod tests {
             }
             messages.push(Message::user_text(&prompt));
             let req = TurnRequest {
-                model: "cursor-grok-4.6-fast".into(),
+                model: "grok-4.7-fast".into(),
                 system: None,
                 messages: messages.clone(),
                 tools: Vec::new(),

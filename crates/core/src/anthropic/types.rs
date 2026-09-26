@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 pub const API_BASE: &str = "https://api.anthropic.com";
 pub const API_VERSION: &str = "2023-06-01";
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
+/// Lets a request set `thinking.block_binding`. Sent on every request, because
+/// the field is rejected without it and every model accepts the header.
+pub const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -104,6 +107,20 @@ pub struct Thinking {
     /// which still emits thinking blocks but with empty text — to a streaming UI
     /// that reads as a long stall before any output.
     pub display: &'static str,
+    pub block_binding: BlockBinding,
+}
+
+/// What the API does with a replayed thinking block whose conversation changed.
+///
+/// Claude Opus 5.5 and Fable 5.1 bind each block to the exact history before it,
+/// and for accounts created on or after 2026-08-31 an edited history is a 400.
+/// Zest does edit it: pruning shrinks old tool results, and the environment
+/// section of the system prompt changes between turns. `drop_block` makes the
+/// API drop the affected blocks and answer instead. Models that do not enforce
+/// the check accept the field and drop nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockBinding {
+    pub prefix_mismatch_behavior: &'static str,
 }
 
 impl Default for Thinking {
@@ -111,6 +128,9 @@ impl Default for Thinking {
         Thinking {
             kind: "adaptive",
             display: "summarized",
+            block_binding: BlockBinding {
+                prefix_mismatch_behavior: "drop_block",
+            },
         }
     }
 }

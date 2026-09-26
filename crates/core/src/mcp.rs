@@ -1026,10 +1026,257 @@ pub fn register_mcp_tools(
         started += 1;
         let server = Arc::new(McpServer::new(id, config.clone(), cwd));
         for def in tools.iter().take(MAX_TOOLS_PER_SERVER) {
+            // Sanitising and the 64-character cap can map two remote names onto
+            // one qualified name. Two definitions with the same name make the
+            // provider reject every request, so the later one is left out.
+            if registry.risk(&qualified_tool_name(id, &def.name)).is_some() {
+                continue;
+            }
             registry.register(Arc::new(McpTool::new(server.clone(), def.clone())));
         }
     }
     uncatalogued
+}
+
+/// Register two stable MCP tools and keep the cached server catalogue behind
+/// them. Opt-in through `[tools] mcp_discovery = true`: it reduces the static
+/// request schema while preserving approval gating and exposing each remote
+/// schema on demand.
+pub fn register_mcp_tool_discovery(
+    registry: &mut ToolRegistry,
+    servers: &BTreeMap<String, McpServerConfig>,
+    catalog: &McpCatalog,
+    cwd: &Path,
+) -> Vec<String> {
+    let mut uncatalogued = Vec::new();
+    let mut started = 0usize;
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (id, config) in servers {
+        if !config.enabled {
+            continue;
+        }
+        if started >= MAX_MCP_SERVERS {
+            uncatalogued.push(id.clone());
+            continue;
+        }
+        let tools = catalog.tools(id);
+        if tools.is_empty() {
+            uncatalogued.push(id.clone());
+            continue;
+        }
+        started += 1;
+        let server = Arc::new(McpServer::new(id, config.clone(), cwd));
+        for def in tools.iter().take(MAX_TOOLS_PER_SERVER) {
+            // Here the qualified name is data the model passes back, not a
+            // provider-side tool name, so a collision is disambiguated rather
+            // than making the second tool undiscoverable.
+            let base = qualified_tool_name(id, &def.name);
+            let mut qualified_name = base.clone();
+            let mut suffix = 2;
+            while !seen.insert(qualified_name.clone()) {
+                qualified_name = format!("{base}~{suffix}");
+                suffix += 1;
+            }
+            entries.push(McpCatalogEntry {
+                server_id: id.clone(),
+                remote_name: def.name.clone(),
+                qualified_name,
+                description: if def.description.trim().is_empty() {
+                    format!("{} on the {id} MCP server", def.name)
+                } else {
+                    def.description.clone()
+                },
+                input_schema: def.input_schema.clone(),
+                server: server.clone(),
+            });
+        }
+    }
+    if !entries.is_empty() {
+        let entries = Arc::new(entries);
+        registry.register(Arc::new(McpDiscoverTools {
+            entries: entries.clone(),
+        }));
+        registry.register(Arc::new(McpCallTool { entries }));
+    }
+    uncatalogued
+}
+
+#[derive(Clone)]
+struct McpCatalogEntry {
+    server_id: String,
+    remote_name: String,
+    qualified_name: String,
+    description: String,
+    input_schema: Value,
+    server: Arc<McpServer>,
+}
+
+struct McpDiscoverTools {
+    entries: Arc<Vec<McpCatalogEntry>>,
+}
+
+#[async_trait]
+impl Tool for McpDiscoverTools {
+    fn name(&self) -> &str {
+        "mcp_discover_tools"
+    }
+
+    fn description(&self) -> &str {
+        "Search the configured MCP tool catalogue. Pass `server` to list one server's tools (for example when the user names a server), and `name` to fetch one tool's input schema, then call it through `mcp_call_tool`. No MCP server is contacted until a tool is called."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": { "type": "string", "description": "Optional exact configured server id." },
+                "query": { "type": "string", "description": "Optional case-insensitive search over server, tool name, and description." },
+                "name": { "type": "string", "description": "Optional exact qualified name; returns its full input schema." }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    async fn run(&self, input: Value) -> Result<ToolOutcome, String> {
+        let server = input.get("server").and_then(Value::as_str);
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let exact_name = input.get("name").and_then(Value::as_str);
+        let candidates = self
+            .entries
+            .iter()
+            .filter(|entry| server.is_none_or(|server| entry.server_id == server))
+            .filter(|entry| {
+                exact_name.is_none_or(|name| entry.qualified_name == name)
+                    && (query.is_empty()
+                        || entry.server_id.to_ascii_lowercase().contains(&query)
+                        || entry.qualified_name.to_ascii_lowercase().contains(&query)
+                        || entry.description.to_ascii_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        let more_available = exact_name.is_none() && candidates.len() > 40;
+        let matches = candidates
+            .into_iter()
+            .take(if exact_name.is_some() { 1 } else { 40 })
+            .map(|entry| {
+                let mut result = json!({
+                    "name": entry.qualified_name,
+                    "server": entry.server_id,
+                    "description": entry.description
+                });
+                if exact_name.is_some() {
+                    result["input_schema"] = entry.input_schema.clone();
+                }
+                result
+            })
+            .collect::<Vec<_>>();
+        if exact_name.is_some() && matches.is_empty() {
+            return Err("no MCP tool has that qualified name".into());
+        }
+        if matches.is_empty() {
+            return Ok(ToolOutcome::text("No matching cached MCP tools."));
+        }
+        let returned = matches.len();
+        serde_json::to_string_pretty(&json!({
+            "tools": matches,
+            "returned": returned,
+            "more_available": more_available
+        }))
+        .map(ToolOutcome::text)
+        .map_err(|error| format!("could not render MCP catalogue: {error}"))
+    }
+}
+
+struct McpCallTool {
+    entries: Arc<Vec<McpCatalogEntry>>,
+}
+
+#[async_trait]
+impl Tool for McpCallTool {
+    fn name(&self) -> &str {
+        "mcp_call_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Call one discovered MCP tool. The call is always approval-gated as external execution. First use `mcp_discover_tools` to obtain the exact qualified name and argument schema."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Exact qualified name returned by mcp_discover_tools." },
+                "arguments": { "type": "object", "description": "Arguments matching that tool's discovered input schema." }
+            },
+            "required": ["name", "arguments"],
+            "additionalProperties": false
+        })
+    }
+
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Exec
+    }
+
+    fn prepare(&self, input: Value) -> Result<PreparedToolCall, String> {
+        let name = input
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required field `name`".to_string())?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.qualified_name == name)
+            .ok_or_else(|| "unknown MCP tool; discover the tool again".to_string())?;
+        let arguments = input
+            .get("arguments")
+            .cloned()
+            .ok_or_else(|| "missing required field `arguments`".to_string())?;
+        if !arguments.is_object() {
+            return Err("`arguments` must be an object".into());
+        }
+        Ok(PreparedToolCall::plain_with_preview(
+            self.name(),
+            self.risk(),
+            input,
+            ApprovalPreview {
+                path: format!("{} · {}", entry.server_id, entry.remote_name),
+                summary: format!(
+                    "Run {} on the {} MCP server",
+                    entry.remote_name, entry.server_id
+                ),
+                diff: argument_preview(&arguments),
+            },
+        ))
+    }
+
+    async fn run(&self, input: Value) -> Result<ToolOutcome, String> {
+        let name = input
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required field `name`".to_string())?;
+        let arguments = input
+            .get("arguments")
+            .cloned()
+            .ok_or_else(|| "missing required field `arguments`".to_string())?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.qualified_name == name)
+            .ok_or_else(|| "unknown MCP tool; discover the tool again".to_string())?;
+        let body = entry
+            .server
+            .call_tool(&entry.remote_name, arguments, &entry.input_schema)
+            .await?;
+        Ok(ToolOutcome::text(if body.trim().is_empty() {
+            format!("{} returned no content.", entry.remote_name)
+        } else {
+            body
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -1048,6 +1295,132 @@ mod tests {
             enabled: true,
             timeout_secs: 30,
         }
+    }
+
+    #[tokio::test]
+    async fn compact_discovery_keeps_schemas_on_demand_and_calls_approval_gated() {
+        let mut servers = BTreeMap::new();
+        servers.insert("docs".into(), config());
+        let mut catalog = McpCatalog::default();
+        catalog.set(
+            "docs",
+            vec![McpToolDef {
+                name: "search".into(),
+                description: "Search project documentation".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }),
+            }],
+        );
+        let mut registry = ToolRegistry::new();
+        assert!(
+            register_mcp_tool_discovery(&mut registry, &servers, &catalog, Path::new("."))
+                .is_empty()
+        );
+        assert_eq!(
+            registry.names(),
+            vec!["mcp_discover_tools", "mcp_call_tool"]
+        );
+        assert_eq!(registry.risk("mcp_call_tool"), Some(ToolRisk::Exec));
+
+        let list = registry
+            .run("mcp_discover_tools", json!({}))
+            .await
+            .unwrap()
+            .body;
+        assert!(list.contains("mcp__docs__search"));
+        assert!(!list.contains("input_schema"));
+        assert!(list.contains("\"more_available\": false"));
+
+        let detail = registry
+            .run("mcp_discover_tools", json!({ "name": "mcp__docs__search" }))
+            .await
+            .unwrap()
+            .body;
+        assert!(detail.contains("input_schema"));
+        assert!(detail.contains("query"));
+
+        let prepared = registry
+            .prepare(
+                "mcp_call_tool",
+                json!({ "name": "mcp__docs__search", "arguments": { "query": "hello" } }),
+            )
+            .unwrap();
+        assert_eq!(prepared.risk, ToolRisk::Exec);
+    }
+
+    #[tokio::test]
+    async fn colliding_qualified_names_never_reach_the_provider_twice() {
+        let mut servers = BTreeMap::new();
+        servers.insert("docs".into(), config());
+        let mut catalog = McpCatalog::default();
+        // Sanitising maps both names onto `mcp__docs__get_item`.
+        catalog.set(
+            "docs",
+            ["get.item", "get_item"]
+                .into_iter()
+                .map(|name| McpToolDef {
+                    name: name.into(),
+                    description: format!("{name} tool"),
+                    input_schema: json!({"type": "object", "properties": {}}),
+                })
+                .collect(),
+        );
+
+        let mut eager = ToolRegistry::new();
+        register_mcp_tools(&mut eager, &servers, &catalog, Path::new("."));
+        assert_eq!(eager.names(), vec!["mcp__docs__get_item"]);
+
+        let mut on_demand = ToolRegistry::new();
+        register_mcp_tool_discovery(&mut on_demand, &servers, &catalog, Path::new("."));
+        let list = on_demand
+            .run("mcp_discover_tools", json!({}))
+            .await
+            .unwrap()
+            .body;
+        assert!(list.contains("\"mcp__docs__get_item\""), "{list}");
+        assert!(list.contains("\"mcp__docs__get_item~2\""), "{list}");
+        let prepared = on_demand
+            .prepare(
+                "mcp_call_tool",
+                json!({ "name": "mcp__docs__get_item~2", "arguments": {} }),
+            )
+            .unwrap();
+        assert_eq!(prepared.risk, ToolRisk::Exec);
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_when_the_compact_result_has_more_matches() {
+        let mut servers = BTreeMap::new();
+        servers.insert("docs".into(), config());
+        let mut catalog = McpCatalog::default();
+        catalog.set(
+            "docs",
+            (0..41)
+                .map(|index| McpToolDef {
+                    name: format!("search_{index}"),
+                    description: "Search documentation".into(),
+                    input_schema: json!({"type": "object", "properties": {}}),
+                })
+                .collect(),
+        );
+        let mut registry = ToolRegistry::new();
+        assert!(
+            register_mcp_tool_discovery(&mut registry, &servers, &catalog, Path::new("."))
+                .is_empty()
+        );
+
+        let list = registry
+            .run("mcp_discover_tools", json!({}))
+            .await
+            .unwrap()
+            .body;
+        let parsed: Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(parsed["returned"], 40);
+        assert!(parsed["more_available"].as_bool().unwrap());
+        assert_eq!(parsed["tools"].as_array().unwrap().len(), 40);
     }
 
     fn node_available() -> bool {

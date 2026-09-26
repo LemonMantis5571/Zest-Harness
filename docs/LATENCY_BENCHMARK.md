@@ -48,7 +48,7 @@ Do not describe that estimate as a measured SDK speedup.
 ## Run the actual Rust provider without the desktop
 
 This opt-in test makes five real requests using the authenticated Cursor
-account and consumes its usage. It requests `cursor-grok-4.6-xhigh-fast`,
+account and consumes its usage. It requests `grok-4.7-xhigh-fast`,
 uses Ask mode, and reuses its process while creating a fresh session for each
 request by default:
 

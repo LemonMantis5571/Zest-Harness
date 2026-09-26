@@ -31,6 +31,19 @@ use crate::tools::{
 };
 use crate::usage::Ledger;
 
+/// The user's ledger, except in this crate's own unit tests, which build many
+/// runtimes without injecting one and must neither read nor rewrite the
+/// developer's real `usage.json`. Other crates' tests inject their own.
+#[cfg(not(test))]
+fn default_ledger() -> Ledger {
+    Ledger::load()
+}
+
+#[cfg(test)]
+fn default_ledger() -> Ledger {
+    Ledger::default()
+}
+
 /// Built runtime ready for a provider-pinned conversation.
 pub struct RuntimeSession {
     pub root: PathBuf,
@@ -92,6 +105,8 @@ pub struct RuntimeBuilder {
     register_exec: bool,
     jobs: Option<Arc<JobRegistry>>,
     job_owner: Option<String>,
+    mcp_catalog: Option<crate::mcp::McpCatalog>,
+    usage_correlation_id: Option<String>,
     role: RuntimeRole,
 }
 
@@ -116,6 +131,8 @@ impl RuntimeBuilder {
             register_exec: true,
             jobs: None,
             job_owner: None,
+            mcp_catalog: None,
+            usage_correlation_id: None,
             role: RuntimeRole::Parent,
         }
     }
@@ -226,6 +243,20 @@ impl RuntimeBuilder {
     /// Fence model-facing job controls to one durable thread.
     pub fn with_job_owner(mut self, thread_id: impl Into<String>) -> Self {
         self.job_owner = Some(thread_id.into());
+        self
+    }
+
+    /// Use a cached MCP catalogue snapshot, primarily for deterministic fixture
+    /// runs. Omitted means the machine-local catalogue.
+    pub fn with_mcp_catalog(mut self, catalog: crate::mcp::McpCatalog) -> Self {
+        self.mcp_catalog = Some(catalog);
+        self
+    }
+
+    /// Correlate a native worker or reviewer trace with the delegation job that
+    /// launched it. The initiating turn records the same id on its tool call.
+    pub fn with_usage_correlation(mut self, job_id: impl Into<String>) -> Self {
+        self.usage_correlation_id = Some(job_id.into());
         self
     }
 
@@ -350,7 +381,10 @@ impl RuntimeBuilder {
 
         let ledger = self
             .ledger
-            .unwrap_or_else(|| Arc::new(Mutex::new(Ledger::load())));
+            .unwrap_or_else(|| Arc::new(Mutex::new(default_ledger())));
+        if let Ok(mut ledger) = ledger.lock() {
+            ledger.set_task_traces(config.usage.task_traces);
+        }
 
         let provider_owns_agent_loop = provider.owns_agent_loop();
 
@@ -363,7 +397,10 @@ impl RuntimeBuilder {
             && self.enable_external_agents
             && !provider_owns_agent_loop
             && !config.agents.is_empty();
-
+        let spill_thread_id = self
+            .parent_thread_id
+            .clone()
+            .unwrap_or_else(|| crate::thread::new_id("session"));
         let mut base_system = if provider_owns_agent_loop {
             match self.system {
                 // The CLI and desktop deliberately pass the normal Zest base
@@ -452,12 +489,14 @@ impl RuntimeBuilder {
         // every server, so a configured-but-unreachable server cannot hold up
         // the first message.
         if is_parent && !provider_owns_agent_loop && !config.mcp.is_empty() {
-            let uncatalogued = register_mcp_tools(
-                &mut tools,
-                &config.mcp,
-                &crate::mcp::McpCatalog::load(),
-                &root,
-            );
+            let catalog = self
+                .mcp_catalog
+                .unwrap_or_else(crate::mcp::McpCatalog::load);
+            let uncatalogued = if config.tools.mcp_discovery {
+                crate::mcp::register_mcp_tool_discovery(&mut tools, &config.mcp, &catalog, &root)
+            } else {
+                register_mcp_tools(&mut tools, &config.mcp, &catalog, &root)
+            };
             if !uncatalogued.is_empty() {
                 // Saying nothing here is the bad outcome: the server is
                 // configured and switched on, so the user has every reason to
@@ -477,9 +516,6 @@ impl RuntimeBuilder {
         }
 
         let registry = Arc::new(registry);
-
-        // Cloned before the delegation block below moves the field.
-        let spill_thread_id = self.parent_thread_id.clone();
 
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::with_parent_secret_envs(
@@ -504,8 +540,7 @@ impl RuntimeBuilder {
         // within this process, and the store's own sibling sweep collects them
         // later, since no thread deletion will ever name them.
         if config.tools.max_result_bytes > 0 {
-            let id = spill_thread_id.unwrap_or_else(|| crate::thread::new_id("session"));
-            match SpillStore::open(&root, &id) {
+            match SpillStore::open(&root, &spill_thread_id) {
                 Ok(store) => {
                     let policy = SpillPolicy::new(store, config.tools.max_result_bytes);
                     tools = tools.with_spill(Arc::new(policy));
@@ -536,6 +571,12 @@ impl RuntimeBuilder {
             .with_approver(approver)
             .with_questioner(questioner)
             .with_policy(policy.clone());
+        let usage_task_kind = match self.role {
+            RuntimeRole::Parent => "turn",
+            RuntimeRole::DelegationWorker => "worker",
+            RuntimeRole::DelegationReviewer => "reviewer",
+        };
+        agent = agent.with_usage_task_label(usage_task_kind, self.usage_correlation_id);
         agent.model = model.clone();
         agent.effort = effort.clone();
 
@@ -665,6 +706,128 @@ mod tests {
 
     fn scratch(name: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::ScratchDir::new(&format!("zest-runtime-{name}-"))
+    }
+
+    #[test]
+    fn task_traces_follow_the_usage_setting() {
+        let traces_after_build = |setting: &str| {
+            let root = two_provider_dir("usage-traces");
+            let raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            std::fs::write(root.join("zest.toml"), format!("{setting}{raw}")).unwrap();
+            let ledger = Arc::new(Mutex::new(Ledger::default()));
+            RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_ledger(ledger.clone())
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap();
+            let enabled = ledger.lock().unwrap().task_traces_enabled();
+            enabled
+        };
+        assert!(!traces_after_build(""), "off unless asked for");
+        assert!(traces_after_build("[usage]\ntask_traces = true\n"));
+    }
+
+    #[test]
+    fn mcp_discovery_setting_swaps_every_schema_for_two_stable_tools() {
+        let mut catalog = crate::mcp::McpCatalog::default();
+        catalog.set(
+            "docs",
+            vec![crate::mcp::McpToolDef {
+                name: "search".into(),
+                description: "Search documentation".into(),
+                input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            }],
+        );
+        let build = |discovery: bool| {
+            let root = two_provider_dir(if discovery {
+                "mcp-on-demand"
+            } else {
+                "mcp-eager"
+            });
+            let mut raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            raw = format!(
+                "[tools]\nmcp_discovery = {discovery}\n{raw}\n[mcp.docs]\ncommand = \"node\"\n"
+            );
+            std::fs::write(root.join("zest.toml"), raw).unwrap();
+            let session = RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_mcp_catalog(catalog.clone())
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap();
+            session
+                .agent
+                .tool_names()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+
+        let eager = build(false);
+        assert!(
+            eager.contains(&"mcp__docs__search".to_string()),
+            "{eager:?}"
+        );
+        assert!(!eager.contains(&"mcp_discover_tools".to_string()));
+
+        let on_demand = build(true);
+        assert!(
+            on_demand.contains(&"mcp_discover_tools".to_string()),
+            "{on_demand:?}"
+        );
+        assert!(on_demand.contains(&"mcp_call_tool".to_string()));
+        assert!(!on_demand.contains(&"mcp__docs__search".to_string()));
+    }
+
+    #[test]
+    fn prompt_cache_bytes_and_tool_order_are_stable_across_project_roots() {
+        let first_root = two_provider_dir("stable-request-a");
+        let second_root = two_provider_dir("stable-request-b");
+        let build = |root: &Path| {
+            RuntimeBuilder::new(root)
+                .with_config(Config::find(root).unwrap())
+                .with_provider("codex")
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap()
+        };
+        let first = build(&first_root);
+        let second = build(&second_root);
+
+        let expected_tool_order = [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "web_search",
+            "write_file",
+            "edit_file",
+            "read_skill",
+        ];
+        assert_eq!(first.agent.tool_names(), expected_tool_order);
+        assert_eq!(first.agent.tool_names(), second.agent.tool_names());
+        assert_eq!(
+            blake3::hash(first.base_system.as_bytes()).to_hex().as_str(),
+            "1bc4094425d558a7eef2c08ee1829d11124954b3206ae78deb5c6d1dee65a111"
+        );
+        assert_eq!(
+            serde_json::to_value(first.agent.tools_for_model()).unwrap(),
+            serde_json::to_value(second.agent.tools_for_model()).unwrap()
+        );
+        let first_system = first.agent.system.as_ref().unwrap();
+        let second_system = second.agent.system.as_ref().unwrap();
+        assert_eq!(
+            first_system.cacheable.as_bytes(),
+            second_system.cacheable.as_bytes()
+        );
+        assert!(first_system.cacheable.starts_with(DEFAULT_SYSTEM));
+        assert_ne!(first_system.volatile, second_system.volatile);
     }
 
     #[test]

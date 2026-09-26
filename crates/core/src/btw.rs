@@ -7,12 +7,14 @@ use crate::anthropic::types::Message;
 use crate::cancel::CancelToken;
 use crate::error::{HarnessError, Result};
 use crate::provider::{Provider, StreamEvent, TurnRequest};
+use crate::thread::new_id;
 use crate::usage::Ledger;
 
 #[derive(Clone)]
 pub struct SideConversation {
     provider: Arc<dyn Provider>,
     ledger: Option<Arc<Mutex<Ledger>>>,
+    parent_task_id: Option<String>,
     request: TurnRequest,
 }
 
@@ -28,11 +30,13 @@ impl SideConversation {
     pub(crate) fn new(
         provider: Arc<dyn Provider>,
         ledger: Option<Arc<Mutex<Ledger>>>,
+        parent_task_id: Option<String>,
         request: TurnRequest,
     ) -> Self {
         Self {
             provider,
             ledger,
+            parent_task_id,
             request,
         }
     }
@@ -58,6 +62,35 @@ impl SideConversation {
         if cancel.is_cancelled() {
             return Err(HarnessError::Cancelled);
         }
+        let task_id = new_id("task");
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_task(
+                    task_id.clone(),
+                    "side_conversation",
+                    self.parent_task_id.clone(),
+                );
+            }
+        }
+        let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id.clone());
+        let result = self.send_inner(text, cancel, on_event, &task_id).await;
+        trace.finish(if result.is_ok() {
+            "completed"
+        } else if matches!(&result, Err(HarnessError::Cancelled)) {
+            "cancelled"
+        } else {
+            "failed"
+        });
+        result
+    }
+
+    async fn send_inner(
+        &mut self,
+        text: &str,
+        cancel: &CancelToken,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        task_id: &str,
+    ) -> Result<String> {
         let mut request = self.request.clone();
         // Keep the entire existing prefix unchanged. Instructions specific to
         // this question come after it, preserving eligible provider caches.
@@ -67,9 +100,28 @@ impl SideConversation {
              added to the main conversation.]\n\n{}", text.trim()
         )));
         request.cancel = Some(cancel.clone());
+        let request_started = tokio::time::Instant::now();
         let completion = match self.provider.stream_turn(&request, on_event).await {
             Ok(completion) => completion,
             Err(error) => {
+                if let Some(ledger) = &self.ledger {
+                    if let Ok(mut ledger) = ledger.lock() {
+                        ledger.record_task_request(
+                            task_id,
+                            crate::agent::task_request_usage(
+                                "side_conversation",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                None,
+                            ),
+                        );
+                    }
+                }
                 // The failed provider session may contain a partial answer.
                 // Retry from the last successful side transcript instead.
                 self.request.provider_session = None;
@@ -78,9 +130,24 @@ impl SideConversation {
         };
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
+                // The trace first, so the spend record's save carries it, and
+                // billed by the same rule as a main-chat turn.
+                ledger.record_task_request(
+                    task_id,
+                    crate::agent::task_request_usage(
+                        "side_conversation",
+                        self.provider.id(),
+                        &request,
+                        request_started
+                            .elapsed()
+                            .as_millis()
+                            .min(u128::from(u64::MAX)) as u64,
+                        Some(&completion),
+                    ),
+                );
                 ledger.record(
                     self.provider.id(),
-                    completion.served_model.as_deref().unwrap_or(&request.model),
+                    crate::agent::billed_model(&request.model, completion.served_model.as_deref()),
                     &completion,
                 );
             }
@@ -280,7 +347,8 @@ mod tests {
     #[tokio::test]
     async fn active_side_context_publishes_the_submitted_prompt_before_completion() {
         let provider = Arc::new(RecordingProvider::default());
-        let mut parent = parent(provider);
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let mut parent = parent(provider).with_ledger(ledger.clone());
         let mut snapshots = Vec::new();
         let mut sink = |_event: StreamEvent<'_>| {};
         let mut publish = |snapshot: SideConversation| snapshots.push(snapshot);
@@ -308,6 +376,35 @@ mod tests {
         assert!(serde_json::to_string(&snapshots[1].request.messages)
             .unwrap()
             .contains("side answer"));
+
+        let mut side = snapshots.remove(0);
+        side.send(
+            "Why is this request separate?",
+            &CancelToken::new(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let ledger = ledger.lock().unwrap();
+        let turn = ledger
+            .tasks()
+            .iter()
+            .find(|task| task.kind == "turn")
+            .expect("parent turn trace");
+        let side_task = ledger
+            .tasks()
+            .iter()
+            .find(|task| task.kind == "side_conversation")
+            .expect("side conversation trace");
+        assert_eq!(
+            side_task.parent_task_id.as_deref(),
+            Some(turn.task_id.as_str())
+        );
+        assert_eq!(side_task.status, "completed");
+        assert_eq!(side_task.requests.len(), 1);
+        assert_eq!(side_task.requests[0].kind, "side_conversation");
+        assert!(side_task.requests[0].usage_available);
     }
 
     #[tokio::test]

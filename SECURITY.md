@@ -28,7 +28,9 @@ it with the provider before investigating further.
 
 Zest keeps OpenAI-compatible provider keys entered through the desktop in the OS
 credential manager and does not intentionally write provider secrets to
-`zest.toml`, the transcript, tool context, logs, or telemetry. Native Anthropic
+`zest.toml`, the transcript, tool context, or logs, and it sends no telemetry.
+Usage records, including the opt-in `[usage] task_traces`, stay in the local
+`usage.json` and are never uploaded. Native Anthropic
 keys are supplied through the environment variable named by `api_key_env`.
 The approval system is a user confirmation boundary, not an OS sandbox: an
 approved shell command can perform any action available to the current user.
