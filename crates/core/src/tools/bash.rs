@@ -829,15 +829,19 @@ impl Bash {
     }
 }
 
+/// `raw_arg`, not `arg`: Rust quotes each argument for the MSVC runtime and
+/// escapes inner quotes as `\"`, which cmd.exe does not understand, so quoted
+/// patterns and paths with spaces arrived mangled. `/S /C "<command>"` makes
+/// cmd strip exactly the outer pair of quotes and run the rest as typed.
 #[cfg(windows)]
-fn shell_command(command: &str) -> tokio::process::Command {
+pub(crate) fn shell_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("cmd");
-    cmd.arg("/C").arg(command);
+    cmd.raw_arg("/S /C").raw_arg(format!("\"{command}\""));
     cmd
 }
 
 #[cfg(not(windows))]
-fn shell_command(command: &str) -> tokio::process::Command {
+pub(crate) fn shell_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd
@@ -1261,6 +1265,35 @@ mod tests {
             .body;
         assert!(out.contains("hello"), "{out}");
         assert!(out.contains("exit 0"), "{out}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn quoted_arguments_reach_cmd_as_typed() {
+        // Rust quotes each argument for the MSVC runtime and escapes inner
+        // quotes as \", which cmd.exe does not understand, so `/C` received
+        // mangled text: quoted patterns and any path with a space broke.
+        let dir = scratch("quoted");
+        std::fs::create_dir(dir.join("with space")).unwrap();
+        std::fs::write(
+            dir.join("with space").join("note.txt"),
+            "two words here\r\n",
+        )
+        .unwrap();
+        let output = shell_command(
+            r#"type "with space\note.txt" && findstr /C:"two words" "with space\note.txt""#,
+        )
+        .current_dir(dir.join("."))
+        .output()
+        .await
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(stdout.matches("two words here").count(), 2, "{stdout}");
     }
 
     #[tokio::test]

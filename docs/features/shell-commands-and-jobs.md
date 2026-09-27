@@ -79,6 +79,7 @@ Unit tests cover `classify`, argv parsing, timeouts, and job ownership.
 run it explicitly with the command above.
 
 ## Pitfalls
+- On Windows, shell commands (and background jobs) run as `cmd /S /C "<command>"` through `raw_arg`. Plain `.arg()` let Rust escape inner quotes as `\"`, which cmd.exe does not understand, so any quoted pattern or path with a space arrived mangled and failed ("cannot find the path specified"). Keep `raw_arg`; `quoted_arguments_reach_cmd_as_typed` covers it.
 - The metacharacter check is the whole safety argument for auto-run; any new
   allowlist path must still spawn from argv, never a shell.
 - Dropping the timed-out future does not stop the process; the explicit job /
