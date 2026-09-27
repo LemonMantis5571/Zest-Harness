@@ -12,6 +12,14 @@ pub struct CoordinatorLock {
     path: PathBuf,
 }
 
+/// Start of the error returned when another process holds the project lock.
+pub const LOCK_HELD_MESSAGE: &str = "another coordinator already owns this project";
+
+/// True when `error` came from [`CoordinatorLock::acquire`] finding the lock held.
+pub fn is_lock_held_error(error: &str) -> bool {
+    error.starts_with(LOCK_HELD_MESSAGE)
+}
+
 pub fn lock_path(root: &Path) -> PathBuf {
     root.join(".zest")
         .join("delegations")
@@ -37,10 +45,7 @@ impl CoordinatorLock {
             .map_err(|error| format!("could not open {}: {error}", path.display()))?;
         match try_lock_exclusive(&file) {
             Ok(true) => Ok(Self { _file: file, path }),
-            Ok(false) => Err(format!(
-                "another coordinator already owns this project (lock {})",
-                path.display()
-            )),
+            Ok(false) => Err(format!("{LOCK_HELD_MESSAGE} (lock {})", path.display())),
             Err(error) => Err(format!("could not lock {}: {error}", path.display())),
         }
     }

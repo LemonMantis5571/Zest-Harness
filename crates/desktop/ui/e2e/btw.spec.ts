@@ -44,11 +44,15 @@ test("btw streams followups then returns to an unchanged main conversation", asy
 test("btw can open while the main task works without queueing its question", async ({
   page,
 }) => {
-  await page.goto("/?fixture=1");
+  // split-streaming keeps the main turn live until Stop. Racing the canned boot
+  // turn instead made "still running" depend on how fast the runner was.
+  await page.goto("/?fixture=1&scenario=split-streaming");
+  const composer = page.locator("#zest-composer-input");
+  await composer.fill("Main task");
+  await composer.press("Enter");
   await expect(
     page.getByRole("button", { name: "Stop", exact: true }),
   ).toBeVisible();
-  const composer = page.locator("#zest-composer-input");
   await composer.fill("/btw");
   await composer.press("Enter");
   const panel = page.getByRole("dialog", { name: "Side conversation" });
@@ -70,7 +74,9 @@ test("btw can open while the main task works without queueing its question", asy
 test("the slash menu discovers btw and stopping keeps the question editable", async ({
   page,
 }) => {
-  await page.goto("/?fixture=1");
+  // btw-streaming holds the side answer open until Stop, so the Stop click
+  // cannot lose a race with a 150 ms stream; it also skips the canned boot turn.
+  await page.goto("/?fixture=1&scenario=btw-streaming");
   const composer = page.locator("#zest-composer-input");
   await composer.fill("Keep this main draft /bt");
   const menu = page.getByRole("listbox", { name: "Commands", exact: true });

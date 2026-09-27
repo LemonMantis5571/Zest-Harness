@@ -27,7 +27,7 @@ npm run desktop:dev
 ```
 
 The hook installer enables a local pre-commit check for staged files under
-`outputs/`. CI checks tracked files and every file introduced or modified by a
+`outputs/` and for the [feature map](docs/features/README.md). CI checks tracked files and every file introduced or modified by a
 pull-request commit, including files later removed in that branch. Image,
 audio/video, and output files larger than 1 MiB are blocked unless their exact
 repository path is added to the allowlist in
@@ -99,9 +99,22 @@ cargo install cargo-audit --locked
 bash scripts/release-verify.sh
 ```
 
-The gate checks formatting, linting, Rust and UI tests, generated bindings,
-dependency advisories, and Git whitespace. Live provider checks are separate:
-they require credentials and may consume real quota.
+The gate checks formatting, linting, Rust and UI tests, the Playwright browser
+tests, the feature map, generated bindings, dependency advisories, and Git
+whitespace. Live provider checks are separate: they require credentials and may
+consume real quota.
+
+The browser tests run the UI in offline fixture mode (`?fixture=1`) under
+Playwright. Install its Chromium once per machine with
+`npx playwright install chromium`; the release gate does this for you. Run one
+spec with `npm run ui:e2e -- <name>`. CI uploads traces from a failed run as the
+`playwright-traces-*` artifact.
+
+`scripts/zest-control.mjs` drives the same fixture UI one command at a time
+(`start`, `send`, `inspect`, `errors`, `snapshot`, `stop`; `help` lists them)
+for debugging and for agents. The gate runs its `check` smoke test after the
+browser tests, so the CLI stays working. See
+[docs/features/ui-control-cli.md](docs/features/ui-control-cli.md).
 
 For a source-only check without dependency audits or generated-binding drift:
 
@@ -113,12 +126,13 @@ The same command works in Bash.
 
 ### While you are still working
 
-`npm run verify` is a pre-commit gate, not a test command. It runs UI tests, UI
-lint, `cargo fmt --check`, `clippy --workspace --all-targets`, and
-`cargo test --workspace --lib`. Clippy and the test build have different
-fingerprints, so the workspace is compiled twice, `zest-desktop` included. That
-is minutes per run, and almost none of it is spent running tests: a full
-`cargo test -p zest-core --lib` executes in about 15 seconds once it is built.
+`npm run verify` is a pre-commit gate, not a test command. It runs the feature
+map check, UI tests, UI lint, the Playwright browser tests, `cargo fmt --check`,
+`clippy --workspace --all-targets`, and `cargo test --workspace --lib`. Clippy
+and the test build have different fingerprints, so the workspace is compiled
+twice, `zest-desktop` included. That is minutes per run, and almost none of it
+is spent running tests: a full `cargo test -p zest-core --lib` executes in about
+15 seconds once it is built.
 
 Work the inner loop instead, and save the gate for the end:
 
@@ -142,6 +156,21 @@ them alone before believing a failure.
 
 Add a focused regression test for behavior changes. For UI changes, update the
 relevant characterization tests under `crates/desktop/ui/src`.
+
+## Feature map
+
+[`docs/features/`](docs/features/README.md) has one entry per feature: expected
+behavior, the path through the code, tests, and verify commands. It is
+navigation for people and agents, so it has to stay true:
+
+- Update a feature's entry in the same change that alters its behavior or moves
+  its code. The pre-commit hook lists features whose code you changed without
+  touching their entry.
+- Add every new source file under `crates/` or `scripts/` to some feature's
+  `paths` or `tests`. `npm run features:check` fails on unowned files and on
+  entries that name files which no longer exist.
+- `npm run features -- where <path>` and `npm run features -- show <slug>` look
+  things up.
 
 ## Keep out of commits
 

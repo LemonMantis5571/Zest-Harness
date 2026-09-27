@@ -154,12 +154,43 @@ impl DelegationTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+/// Stored as `{"kind":"sameAsWorker"}` or `{"kind":"target","target":{..}}`,
+/// the same shape as the coordinator's `ReviewerTargetView`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "target")]
 pub enum ReviewerTarget {
     #[default]
     SameAsWorker,
     Target(DelegationTarget),
+}
+
+impl<'de> Deserialize<'de> for ReviewerTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", tag = "kind", content = "target")]
+        enum Stored {
+            SameAsWorker,
+            Target(DelegationTarget),
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Ok(stored) = Stored::deserialize(&value) {
+            return Ok(match stored {
+                Stored::SameAsWorker => Self::SameAsWorker,
+                Stored::Target(target) => Self::Target(target),
+            });
+        }
+        // Records written before the adjacent tag carried the target flattened
+        // beside a second `kind` key: {"kind":"target","kind":"provider",..}.
+        // Strict parsing rejected them as a duplicate field, which made the job,
+        // and every listing that met it, unreadable. As a JSON value the last
+        // `kind` wins, which is the target's own tag, so the target is intact.
+        DelegationTarget::deserialize(&value)
+            .map(Self::Target)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2541,6 +2572,63 @@ Here is the JSON verdict:
                 effort: Some("high".into()),
             }
         );
+
+        // The record must survive a trip through disk, not only memory.
+        let loaded = store.load(&job.job_id).unwrap().expect("job reloads");
+        assert_eq!(loaded.reviewer_target, reviewer);
+        assert_eq!(loaded.card.reviewer_target, reviewer);
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].reviewer_target, reviewer);
+    }
+
+    #[test]
+    fn reviewer_targets_round_trip_through_json() {
+        for reviewer in [
+            ReviewerTarget::SameAsWorker,
+            ReviewerTarget::Target(DelegationTarget::Provider {
+                provider_id: "reviewer".into(),
+                model: Some("m".into()),
+                effort: None,
+            }),
+            ReviewerTarget::Target(DelegationTarget::ExternalAgent {
+                agent_id: "claude".into(),
+            }),
+        ] {
+            let json = serde_json::to_string(&reviewer).unwrap();
+            let back: ReviewerTarget = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("{json} did not deserialize: {error}"));
+            assert_eq!(back, reviewer, "{json}");
+        }
+        assert_eq!(
+            serde_json::to_value(ReviewerTarget::SameAsWorker).unwrap(),
+            serde_json::json!({ "kind": "sameAsWorker" }),
+            "records that never chose a reviewer keep their existing shape"
+        );
+    }
+
+    #[test]
+    fn a_legacy_reviewer_target_with_a_duplicate_kind_still_loads() {
+        let legacy = r#"{"kind":"target","kind":"provider","providerId":"reviewer","model":"m"}"#;
+        let reviewer: ReviewerTarget = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            reviewer,
+            ReviewerTarget::Target(DelegationTarget::Provider {
+                provider_id: "reviewer".into(),
+                model: Some("m".into()),
+                effort: None,
+            })
+        );
+        let agent: ReviewerTarget =
+            serde_json::from_str(r#"{"kind":"target","kind":"externalAgent","agentId":"claude"}"#)
+                .unwrap();
+        assert_eq!(
+            agent,
+            ReviewerTarget::Target(DelegationTarget::ExternalAgent {
+                agent_id: "claude".into()
+            })
+        );
+        assert!(serde_json::from_str::<ReviewerTarget>(r#"{"kind":"nonsense"}"#).is_err());
     }
 
     #[test]

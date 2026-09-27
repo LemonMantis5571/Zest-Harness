@@ -57,13 +57,16 @@ workflow, and help with setup.
 
 The model control in the composer selects from your connected providers. Your
 main conversation stays with its selected provider; delegation is optional.
-Desktop and terminal share the same core and recoverable conversations.
+Desktop and terminal share the same core. The desktop saves conversations so you
+can reopen and recover them; the terminal client keeps a conversation only for
+the session.
 
 ## Delegate a scoped task
 
 Use a **feature card** when you want a separate worker to handle part of the
 project. Give it an objective, scope, selected context and acceptance checks,
-then select a worker and reviewer. The coordinator manages the queue and retries.
+then select a worker and reviewer. The coordinator manages the queue. A job that
+fails or needs changes waits for you: retrying it takes a new approval.
 
 - **Native provider workers** run through Zest's provider runtime.
 - **External workers** use a configured ACP session or a signed-in CLI, keeping

@@ -48,6 +48,11 @@ function parseDesktopError(error: unknown): DesktopErrorPayload | null {
   return null;
 }
 
+/** The desktop refused because a turn currently holds this chat's session. */
+export function isBusyError(error: unknown): boolean {
+  return parseDesktopError(error)?.code === "busy";
+}
+
 export function busyTurnMessage(error: unknown): string {
   const text = rawInvokeError(error).replace(/^busy:\s*/i, "").trim();
   if (text && !/^busy\b/i.test(text) && !text.toLowerCase().includes("already in progress")) {

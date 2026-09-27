@@ -152,7 +152,7 @@ function longThreadMessages(): ChatMessage[] {
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -165,7 +165,8 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "question" ||
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
-    value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed"
+    value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
+    value === "btw-streaming"
     ? value
     : undefined;
 }
@@ -616,7 +617,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     }, 5_000);
   }
 
-  return {
+  const backend: DesktopBackend = {
     // Exercise normal onboarding with entirely synthetic I/O in this dev-only module.
     mode: scenario === "provider-picker" || scenario === "model-catalogue" ? "tauri" : "fixture",
     async listExternalAgents() {
@@ -1593,7 +1594,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       attachments?: AttachmentInput[],
       target?: InputTarget,
     ) {
-      if (scenario === "split-streaming") {
+      // Queue targets first, as the desktop does: a send during a live
+      // split-streaming turn must queue, not start a second stream on the chat.
+      if (scenario === "split-streaming" && !(target === "followup" || target === "steer" || target === "inject")) {
         const { turnId, userId, assistantId } = fixtureIds();
         const id = { session_id: session.sessionId, thread_id: session.threadId, turn_id: turnId };
         session = { ...session, messages: [...session.messages, { id: userId, role: "user", text }] };
@@ -1810,6 +1813,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           await new Promise((resolve) => setTimeout(resolve, 25));
           if (side.cancelled || !sideConversations.has(id)) throw new Error("Cancelled");
           onDelta(chunk);
+          // btw-streaming: the answer stays live after its first chunk until
+          // Stop or close, so a spec can stop it without racing a 150 ms stream.
+          while (scenario === "btw-streaming" && !side.cancelled && sideConversations.has(id)) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
         }
         side.questions.push(text);
         return answer;
@@ -2024,6 +2032,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async contextUsage() {
+      // Like the desktop, a chat cannot be measured while a turn holds it.
+      if (splitStreams.has(session.threadId) || pendingScenario) {
+        throw new Error(
+          JSON.stringify({ code: "busy", message: "this chat is still working — switch chats or wait for it to finish" }),
+        );
+      }
       return {
         usedTokens: 12000,
         windowTokens: 256000,
@@ -2177,10 +2191,36 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         }
       };
     },
+    async generateReadingDiff(diff: string) {
+      // Deterministic stand-in for the provider call: the full diff, nothing removed.
+      return { diff, summary: "Fixture reading diff: nothing abridged.", removedLines: 0, foldedLines: 0 };
+    },
     async boot(handler) {
       chatHandlerGeneration += 1;
       chatHandler = handler;
       if (!scenario || safetyScenario) await runFixtureStream(handler);
     },
   };
+  return recordFixtureCalls(backend);
+}
+
+/**
+ * Count every backend method the UI calls, per page, on
+ * `globalThis.__zestFixtureCalls`. Tests and `scripts/zest-control.mjs inspect
+ * backend-calls` read it to see what the UI asked for, such as a provider call
+ * repeated on every poll.
+ */
+function recordFixtureCalls(backend: DesktopBackend): DesktopBackend {
+  const calls: Record<string, number> = {};
+  (globalThis as { __zestFixtureCalls?: Record<string, number> }).__zestFixtureCalls = calls;
+  return new Proxy(backend, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || typeof property !== "string") return value;
+      return (...args: unknown[]) => {
+        calls[property] = (calls[property] ?? 0) + 1;
+        return Reflect.apply(value, receiver, args);
+      };
+    },
+  });
 }

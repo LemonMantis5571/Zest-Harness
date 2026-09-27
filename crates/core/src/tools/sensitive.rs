@@ -1,9 +1,23 @@
 //! Likely-secret path heuristics.
 //!
 //! Discovery tools omit these paths. An explicit `read_file` still works but
-//! requires per-call approval. Template / example env files stay readable.
+//! requires per-call approval, and so does writing one. Template / example env
+//! files stay ordinary.
 
 use std::path::Path;
+
+use super::approval::ToolRisk;
+
+/// Risk of writing or editing `path`: a likely secret asks every time, as
+/// reading one does, instead of riding the modes that auto-approve writes
+/// (Accept edits, Auto). Only Bypass or an explicit per-path grant skips it.
+pub fn write_risk(path: &str) -> ToolRisk {
+    if is_sensitive_path(path) {
+        ToolRisk::Sensitive
+    } else {
+        ToolRisk::Write
+    }
+}
 
 /// True when `rel` (project-relative, forward slashes preferred) looks like a
 /// secret or credential file that must not appear in discovery results.
@@ -80,5 +94,14 @@ mod tests {
         assert!(!is_sensitive_path("deploy/.env.sample"));
         assert!(!is_sensitive_path("src/main.rs"));
         assert!(!is_sensitive_path("id_rsa.pub"));
+    }
+
+    #[test]
+    fn writing_a_secret_file_is_sensitive() {
+        assert_eq!(write_risk(".env"), ToolRisk::Sensitive);
+        assert_eq!(write_risk("config/.env.local"), ToolRisk::Sensitive);
+        assert_eq!(write_risk("certs/server.pem"), ToolRisk::Sensitive);
+        assert_eq!(write_risk(".env.example"), ToolRisk::Write);
+        assert_eq!(write_risk("src/main.rs"), ToolRisk::Write);
     }
 }

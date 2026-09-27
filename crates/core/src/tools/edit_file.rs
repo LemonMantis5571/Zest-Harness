@@ -205,6 +205,22 @@ impl Tool for EditFile {
 mod tests {
     use super::*;
 
+    #[test]
+    fn editing_a_secret_file_is_sensitive() {
+        let dir = scratch("secret");
+        std::fs::write(
+            dir.join(".env"),
+            "TOKEN=old
+",
+        )
+        .unwrap();
+        let tool = EditFile::new(&dir).unwrap();
+        let prepared = tool
+            .prepare_call(json!({ "path": ".env", "old_string": "old", "new_string": "new" }))
+            .unwrap();
+        assert_eq!(prepared.risk, crate::tools::approval::ToolRisk::Sensitive);
+    }
+
     fn scratch(name: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::ScratchDir::new(&format!("zest-edit-file-{name}-"))
     }

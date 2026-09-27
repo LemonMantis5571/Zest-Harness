@@ -410,3 +410,41 @@ describe("fixture queued-message recovery", () => {
     assert.equal(info?.pendingInputs[0]?.text, "second");
   });
 });
+
+describe("fixture split-streaming scenario", () => {
+  it("queues a send made during a live turn, answers busy, and still stops that turn", async () => {
+    const backend = createFixtureBackend({ scenario: "split-streaming" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const live = backend.sendMessage("keep running");
+    // Like the desktop: a queued send never starts a second stream on the chat.
+    await backend.sendMessage("second", undefined, "followup");
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ["user", "assistant_start", "input_queued"]
+    );
+    await assert.rejects(backend.contextUsage(), (error: Error) => JSON.parse(error.message).code === "busy");
+
+    await backend.cancelTurn();
+    await live;
+    assert.equal(events.at(-1)?.kind, "cancelled");
+    assert.equal((await backend.contextUsage()).percentFull, 4.7);
+  });
+});
+
+describe("fixture btw-streaming scenario", () => {
+  it("keeps a side answer live until it is stopped", async () => {
+    const backend = createFixtureBackend({ scenario: "btw-streaming" });
+    const session = await backend.sessionInfo();
+    assert.ok(session);
+    const id = await backend.startBtw(session.sessionId);
+    const deltas: string[] = [];
+    const pending = backend.sendBtw(id, "Stop this side answer", (delta) => deltas.push(delta));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Far longer than the ordinary stream takes; still only the first chunk.
+    assert.equal(deltas.length, 1);
+    await backend.cancelBtw(id);
+    await assert.rejects(pending, /Cancelled/);
+    await backend.closeBtw(id);
+  });
+});

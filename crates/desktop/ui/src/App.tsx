@@ -1668,21 +1668,24 @@ export default function App() {
 
     if (backend.mode === "fixture") {
       void (async () => {
+        let info: SessionInfo;
         try {
-          const info = await withTimeout(
-            backend.startSession("fixture"),
-            "fixture session"
-          );
-          applySession(info);
-          setSending(true);
-          sendingRef.current = true;
-          await withTimeout(
-            Promise.resolve(backend.boot?.(handleChatEvent)),
-            "fixture boot"
-          );
+          info = await withTimeout(backend.startSession("fixture"), "fixture session");
         } catch (err) {
           setPickerError(startupPickerErrorFrom(err));
           setScreen("picker");
+          return;
+        }
+        applySession(info);
+        setSending(true);
+        sendingRef.current = true;
+        try {
+          // The canned boot stream is a turn, not startup: the chat is already
+          // open. Bounding it with BOOT_TIMEOUT_MS sent a slow machine (a CI
+          // runner) back to the picker mid-test once the stream passed 15 s.
+          await backend.boot?.(handleChatEvent);
+        } catch (error) {
+          ignoreExpectedFailure(error, "fixture boot stream");
         } finally {
           setSending(false);
           sendingRef.current = false;

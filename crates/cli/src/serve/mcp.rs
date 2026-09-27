@@ -289,26 +289,24 @@ fn call_tool(state: &AppState, params: &Value) -> Result<Value, (i64, String, St
     Ok(tool_content(payload))
 }
 
-const TRUNCATION_SUFFIX: &str = "\n…truncated";
-
-fn bounded_tool_text(text: String) -> String {
-    if text.len() <= MAX_RESPONSE_BYTES {
-        return text;
-    }
-    let mut end = MAX_RESPONSE_BYTES
-        .saturating_sub(TRUNCATION_SUFFIX.len())
-        .min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{}", &text[..end], TRUNCATION_SUFFIX)
-}
-
 fn tool_content(payload: Value) -> Value {
     let text = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
-    let text = bounded_tool_text(text);
+    if text.len() <= MAX_RESPONSE_BYTES {
+        return json!({
+            "content": [{ "type": "text", "text": text }]
+        });
+    }
+    // Cutting serialized JSON leaves text no host can parse. Say how large the
+    // answer was, as JSON, and point at the calls that return less.
+    let error = json!({
+        "error": "response_too_large",
+        "bytes": text.len(),
+        "limitBytes": MAX_RESPONSE_BYTES,
+        "hint": "Read cards one at a time with delegation_get; page artifacts with delegation_artifact.",
+    });
     json!({
-        "content": [{ "type": "text", "text": text }]
+        "content": [{ "type": "text", "text": error.to_string() }],
+        "isError": true
     })
 }
 
@@ -493,11 +491,27 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tool_content_truncation_is_utf8_safe_and_bounded() {
-        let text = bounded_tool_text("€".repeat(MAX_RESPONSE_BYTES));
+    fn content_text(result: &Value) -> &str {
+        result["content"][0]["text"].as_str().unwrap()
+    }
 
-        assert!(text.ends_with(TRUNCATION_SUFFIX));
+    #[test]
+    fn tool_content_passes_a_small_payload_through() {
+        let result = tool_content(json!({ "jobs": [] }));
+
+        assert_eq!(content_text(&result), r#"{"jobs":[]}"#);
+        assert!(result.get("isError").is_none());
+    }
+
+    #[test]
+    fn an_oversized_tool_response_is_still_valid_json() {
+        let result = tool_content(json!({ "diff": "€".repeat(MAX_RESPONSE_BYTES) }));
+        let text = content_text(&result);
+
         assert!(text.len() <= MAX_RESPONSE_BYTES);
+        let parsed: Value = serde_json::from_str(text).expect("oversized response must parse");
+        assert_eq!(parsed["error"], "response_too_large");
+        assert_eq!(parsed["limitBytes"], MAX_RESPONSE_BYTES);
+        assert_eq!(result["isError"], true);
     }
 }

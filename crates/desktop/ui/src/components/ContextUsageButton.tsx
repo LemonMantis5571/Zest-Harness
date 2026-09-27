@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckCircle2Icon, XIcon } from "lucide-react";
 
 import { getBackend } from "@/lib/backend";
-import type { ContextUsage } from "@/lib/types";
+import { settleContextReading, type ContextReading } from "@/lib/contextUsageState";
 import { cn } from "@/lib/utils";
 
 function formatTokens(n: number) {
@@ -12,11 +12,13 @@ function formatTokens(n: number) {
 
 type Props = {
   refreshKey: string | number;
+  /** The chat being measured; a reading is only ever shown for its own chat. */
+  scope: string;
   className?: string;
 };
 
-export function ContextUsageButton({ refreshKey, className }: Props) {
-  const [usage, setUsage] = useState<ContextUsage | null>(null);
+export function ContextUsageButton({ refreshKey, scope, className }: Props) {
+  const [reading, setReading] = useState<ContextReading>(null);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -25,16 +27,18 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
     let cancelled = false;
     getBackend()
       .contextUsage()
-      .then((u) => {
-        if (!cancelled) setUsage(u);
+      .then((usage) => {
+        if (!cancelled) setReading((previous) => settleContextReading(previous, scope, { ok: true, usage }));
       })
-      .catch(() => {
-        if (!cancelled) setUsage(null);
+      .catch((error: unknown) => {
+        if (!cancelled) setReading((previous) => settleContextReading(previous, scope, { ok: false, error }));
       });
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [refreshKey, scope]);
+
+  const usage = reading?.scope === scope ? reading.usage : null;
 
   useEffect(() => {
     if (!open) return;
