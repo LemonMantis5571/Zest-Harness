@@ -38,6 +38,7 @@ SIL Open Font License 1.1.
 | @fontsource-variable/geist | SIL OFL-1.1 |
 | Vite, Tailwind CSS, Oxlint, TypeScript, and their plugins/types | MIT or Apache-2.0 |
 | Vendored monochrome provider paths from `@lobehub/icons` 5.15.0 ([lobe-icons](https://github.com/lobehub/lobe-icons)) | MIT |
+| Six lint rules vendored from [anti-slop](https://github.com/dmmulroy/anti-slop) at `c44ef22ca116` into `crates/desktop/ui/.oxlint-plugins/anti-slop.mjs` (dev tooling, not shipped) | MIT |
 
 For an exact package-by-package list, inspect the `license` field in each
 resolved package under `package-lock.json`/`node_modules` and retain the

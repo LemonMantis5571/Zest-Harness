@@ -2132,9 +2132,9 @@ export default function App() {
         return { accepted: false, retryable: false };
       }
       const turnThreadId = threadIdRef.current;
-      const chips: UserAttachmentChip[] = pending
-        .filter((a) => a.status === "done")
-        .map((a) => ({ name: a.name, kind: a.kind }));
+      const chips: UserAttachmentChip[] = pending.flatMap((a) =>
+        a.status === "done" ? [{ name: a.name, kind: a.kind }] : []
+      );
       if (turnThreadId && chips.length > 0) {
         pendingUserAttachmentsRef.current.set(turnThreadId, chips);
       }
