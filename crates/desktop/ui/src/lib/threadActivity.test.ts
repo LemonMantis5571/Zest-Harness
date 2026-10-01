@@ -131,7 +131,14 @@ describe("thread activity", () => {
   });
 
   it("ignores an event with no thread", () => {
-    const map = reduceThreadActivity({}, { kind: "done" } as unknown as ChatEvent, T0);
+    const noThread: ChatEvent = {
+      kind: "done",
+      session_id: "s",
+      thread_id: "",
+      turn_id: "t",
+      message_id: "m",
+    };
+    const map = reduceThreadActivity({}, noThread, T0);
     assert.deepEqual(map, {});
   });
 });

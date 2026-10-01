@@ -42,7 +42,7 @@ function tokenizer(counter?: { chars: number }) {
     const result = highlighter.codeToTokens(text, {
       lang: "typescript",
       themes: { light: "github-light", dark: "github-dark" },
-      ...(state ? { grammarState: state } : {}),
+      grammarState: state,
     });
     if (!result.grammarState) return null;
     // Offsets are relative to the tokenized text, so compare content and style.
