@@ -126,6 +126,7 @@ These tests need `git` and `rustc` on PATH to build the fixture worker.
   `reconcile` and still returns the cards; desktop actions fail with the lock
   message. Any other listing error is still swallowed by `App.tsx`, which shows
   an empty board.
+- **Unlock before close.** `CoordinatorLock` drops its OS lock explicitly (`flock(LOCK_UN)` / `UnlockFileEx`) before the file closes. Closing alone releases it only when every copy of the descriptor is gone, and a child another thread is forking (git, a worker) holds one until it execs, so a `WhileActive` release followed by a quick re-acquire failed as "another coordinator". `lock::tests` reproduces it with a cloned handle.
 - **Unsure means keep.** Under `WhileActive`, anything that leaves
   `has_active_work` unsure (an unreadable store, a poisoned mutex) keeps the
   lock, on purpose.
