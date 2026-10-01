@@ -34,8 +34,10 @@ function stripInlineMarkdown(value: string): string {
 
 function plainText(lines: string[]): string {
   return lines
-    .map(stripInlineMarkdown)
-    .filter(Boolean)
+    .flatMap((line) => {
+      const text = stripInlineMarkdown(line);
+      return text ? [text] : [];
+    })
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
