@@ -44,10 +44,10 @@ function checkpointAnchor(
 
   if (windowed) return undefined;
 
-  const candidates = [checkpoint.messageCount, checkpoint.messageCount - 1]
-    .filter((index) => index >= 0 && index < messages.length)
-    .map((index) => messages[index])
-    .filter((message): message is Extract<ChatMessage, { role: "user" }> => message?.role === "user");
+  const candidates = [checkpoint.messageCount, checkpoint.messageCount - 1].flatMap((index) => {
+    const message = index >= 0 && index < messages.length ? messages[index] : undefined;
+    return message?.role === "user" ? [message] : [];
+  });
   if (candidates[0]) return candidates[0].id;
 
   const end = Math.min(messages.length, Math.max(0, checkpoint.messageCount));

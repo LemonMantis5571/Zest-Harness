@@ -28,6 +28,7 @@ import type {
   AttachmentInput,
   ChatEvent,
   ChatMessage,
+  DayPoint,
   DelegationEvent,
   DelegationCreateInput,
   DelegationJob,
@@ -39,6 +40,7 @@ import type {
   JobSnapshot,
   McpServerRow,
   OlderThreadMessages,
+  PendingInputAttachment,
   SessionInfo,
   ThreadSummary,
   ChatSearchHit,
@@ -1175,22 +1177,24 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       const iso = (offsetDays: number) =>
         new Date((today - offsetDays * day) * 1000).toISOString().slice(0, 10);
 
-      const days = [];
+      const days: DayPoint[] = [];
       for (let back = 180; back >= 0; back--) {
         // A believable rhythm rather than noise: quiet weekends, busy weekdays.
         const weekday = new Date((today - back * day) * 1000).getDay();
         const busy = weekday !== 0 && weekday !== 6;
         const chats = busy ? (back % 5 === 0 ? 0 : 1 + (back % 4)) : back % 3 === 0 ? 1 : 0;
         if (chats === 0 && back % 7 !== 0) continue;
-        days.push({
+        const entry: DayPoint = {
           date: iso(back),
           chats,
           messages: chats * (4 + (back % 9)),
-          // Metering began 90 days ago; earlier cells carry no token figure.
-          ...(back <= 90
-            ? { tokens: chats * 12_000 + (back % 11) * 900, requests: chats * 3 }
-            : {}),
-        });
+        };
+        // Metering began 90 days ago; earlier cells carry no token figure.
+        if (back <= 90) {
+          entry.tokens = chats * 12_000 + (back % 11) * 900;
+          entry.requests = chats * 3;
+        }
+        days.push(entry);
       }
 
       return {
@@ -1621,15 +1625,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           target,
           text,
           createdAt: Date.now(),
-          attachments: (attachments ?? []).map((attachment) => ({
-            name: attachment.name,
-            detail: attachment.detail,
-            content: attachment.content ?? null,
-            status: attachment.status,
-            ...(attachment.kind ? { kind: attachment.kind } : {}),
-            ...(attachment.mediaType ? { mediaType: attachment.mediaType } : {}),
-            ...(attachment.dataBase64 ? { dataBase64: attachment.dataBase64 } : {}),
-          })),
+          attachments: (attachments ?? []).map((attachment) => {
+            const queued: PendingInputAttachment = {
+              name: attachment.name,
+              detail: attachment.detail,
+              content: attachment.content ?? null,
+              status: attachment.status,
+            };
+            if (attachment.kind) queued.kind = attachment.kind;
+            if (attachment.mediaType) queued.mediaType = attachment.mediaType;
+            if (attachment.dataBase64) queued.dataBase64 = attachment.dataBase64;
+            return queued;
+          }),
         };
         session = {
           ...session,
@@ -1780,13 +1787,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           description: "Write an implementation plan",
           kind: "skill" as const,
         },
-        ...[...fixtureMcpServers.values()]
-          .filter((server) => server.enabled)
-          .map((server) => ({
+        ...[...fixtureMcpServers.values()].flatMap((server) => !server.enabled ? [] : [{
             name: server.id,
             description: `Use the ${server.id} MCP server`,
             kind: "mcp" as const,
-          })),
+          }]),
       ];
     },
     async endSession() {
@@ -2124,15 +2129,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async updateDelegationJob(request: DelegationUpdateInput): Promise<DelegationJob> {
       if (request.jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
+      const edited = { ...fixtureDelegationJob };
+      if (request.title != null) edited.title = request.title;
+      if (request.objective != null) edited.objective = request.objective;
+      if (request.scope) edited.scope = request.scope;
+      if (request.context) edited.context = request.context;
+      if (request.acceptanceChecks) {
+        edited.acceptanceChecks = request.acceptanceChecks.map((command: string) => ({ command, status: "pending", output: "" }));
+      }
+      if (request.worker) edited.workerTarget = request.worker;
+      if (request.reviewer) edited.reviewerTarget = request.reviewer;
       fixtureDelegationJob = {
-        ...fixtureDelegationJob,
-        ...(request.title != null ? { title: request.title } : {}),
-        ...(request.objective != null ? { objective: request.objective } : {}),
-        ...(request.scope ? { scope: request.scope } : {}),
-        ...(request.context ? { context: request.context } : {}),
-        ...(request.acceptanceChecks ? { acceptanceChecks: request.acceptanceChecks.map((command: string) => ({ command, status: "pending", output: "" })) } : {}),
-        ...(request.worker ? { workerTarget: request.worker } : {}),
-        ...(request.reviewer ? { reviewerTarget: request.reviewer } : {}),
+        ...edited,
         status: "awaiting_approval",
         approved: false,
         updatedAt: fixtureDelegationJob.updatedAt + 1,

@@ -8,8 +8,19 @@ use std::path::{Path, PathBuf};
 /// share `.zest/delegations/coordinator.lock`, so a second process fails instead
 /// of dispatching or applying the same card twice.
 pub struct CoordinatorLock {
-    _file: File,
+    file: File,
     path: PathBuf,
+}
+
+impl Drop for CoordinatorLock {
+    /// Unlock before the file closes. Closing alone releases the lock only once
+    /// every descriptor sharing the open file is closed, and a process another
+    /// thread is forking (git, a worker) holds a copy until it execs; the lock
+    /// then outlived this value, and the next acquire here failed as "another
+    /// coordinator already owns this project".
+    fn drop(&mut self) {
+        unlock(&self.file);
+    }
 }
 
 /// Start of the error returned when another process holds the project lock.
@@ -44,7 +55,7 @@ impl CoordinatorLock {
             .open(&path)
             .map_err(|error| format!("could not open {}: {error}", path.display()))?;
         match try_lock_exclusive(&file) {
-            Ok(true) => Ok(Self { _file: file, path }),
+            Ok(true) => Ok(Self { file, path }),
             Ok(false) => Err(format!("{LOCK_HELD_MESSAGE} (lock {})", path.display())),
             Err(error) => Err(format!("could not lock {}: {error}", path.display())),
         }
@@ -68,6 +79,25 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
     } else {
         Err(err)
     }
+}
+
+#[cfg(unix)]
+fn unlock(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    // Best effort: closing the file still releases it once every copy is gone.
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+#[cfg(windows)]
+fn unlock(file: &File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // Best effort: closing the file still releases it once every copy is gone.
+    let _ = unsafe { UnlockFileEx(file.as_raw_handle() as HANDLE, 0, 1, 0, &mut overlapped) };
 }
 
 #[cfg(windows)]
@@ -99,5 +129,25 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
         Ok(false)
     } else {
         Err(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_released_lock_can_be_taken_while_another_descriptor_is_open() {
+        // A process forked by another thread (git, a worker) holds a copy of
+        // every descriptor until it execs. Closing ours then did not release
+        // the lock, and the next acquire in this process failed as "another
+        // coordinator". A cloned handle stands in for that child's copy.
+        let temp = tempfile::tempdir().unwrap();
+        let first = CoordinatorLock::acquire(temp.path()).unwrap();
+        let child_copy = first.file.try_clone().unwrap();
+        drop(first);
+        let again = CoordinatorLock::acquire(temp.path());
+        assert!(again.is_ok(), "{:?}", again.err());
+        drop(child_copy);
     }
 }
