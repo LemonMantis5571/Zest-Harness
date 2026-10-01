@@ -67,4 +67,6 @@ tsTester.run("no-object-url-leak", plugin.rules["no-object-url-leak"], {
   ],
 });
 
+await import("./anti-slop.test.mjs");
+
 console.log("Zest Oxlint plugin tests passed.");
