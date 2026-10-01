@@ -26,14 +26,12 @@ function codeText(children: ReactNode): string {
   return String(children);
 }
 
-type LinkElement = {
-  props?: { href?: string; children?: ReactNode };
-};
+type LinkProps = { href?: string; children?: ReactNode };
 
 function standaloneLink(children: ReactNode): { href: string; label: ReactNode } | null {
   const child = Array.isArray(children) && children.length === 1 ? children[0] : children;
-  if (!isValidElement(child)) return null;
-  const props = (child as unknown as LinkElement).props;
+  if (!isValidElement<LinkProps>(child)) return null;
+  const props = child.props;
   const href = safeHttpUrl(props?.href);
   if (!href) return null;
   return { href, label: props?.children ?? href };

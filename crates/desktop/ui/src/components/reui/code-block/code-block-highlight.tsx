@@ -1,5 +1,12 @@
 import type { ReactNode } from "react"
 import type { ShikiTransformer } from "shiki"
+import type {
+  CodeToHastOptions,
+  GrammarState,
+  HighlighterCore,
+  LanguageInput,
+  ThemeInput,
+} from "shiki/core"
 
 import { toOneByteIfLatin1 } from "@/lib/oneByteString"
 import { createResumableHighlight } from "@/lib/resumableHighlight"
@@ -124,7 +131,7 @@ export type CodeBlockLineActionsRender = (
  * lazy chunk. To add a language, add a line: that is the intended extension
  * point of this file.
  */
-export const codeBlockLanguages: Record<string, () => Promise<unknown>> = {
+export const codeBlockLanguages: Record<string, () => Promise<LanguageInput>> = {
   bash: () => import("shiki/langs/bash.mjs"),
   c: () => import("shiki/langs/c.mjs"),
   cpp: () => import("shiki/langs/cpp.mjs"),
@@ -180,7 +187,7 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   zsh: "shell",
 }
 
-export const codeBlockThemes: Record<string, () => Promise<unknown>> = {
+export const codeBlockThemes: Record<string, () => Promise<ThemeInput>> = {
   "github-light": () => import("shiki/themes/github-light.mjs"),
   "github-dark": () => import("shiki/themes/github-dark.mjs"),
   /**
@@ -486,14 +493,11 @@ export function markdownFences(markdown: string): CodeBlockMarkdownPart[] {
 /*                                   Engine                                    */
 /* -------------------------------------------------------------------------- */
 
-type HighlighterLike = {
-  codeToHast: (code: string, options: Record<string, unknown>) => unknown
-  /** The grammar state after the last line of a `codeToHast` result. */
-  getLastGrammarState: (result: unknown) => unknown
-  getLoadedLanguages: () => string[]
-  loadLanguage: (lang: unknown) => Promise<void>
-  loadTheme: (theme: unknown) => Promise<void>
-}
+/** The part of shiki's highlighter this file calls, with its real signatures. */
+type HighlighterLike = Pick<
+  HighlighterCore,
+  "codeToHast" | "getLastGrammarState" | "getLoadedLanguages" | "loadLanguage" | "loadTheme"
+>
 
 let highlighterPromise: Promise<HighlighterLike> | null = null
 const loadedLanguages = new Set<string>()
@@ -514,11 +518,11 @@ async function loadHighlighter() {
           import("shiki/engine/javascript"),
         ])
 
-      return (await createHighlighterCore({
+      return createHighlighterCore({
         themes: [],
         langs: [],
         engine: createJavaScriptRegexEngine({ forgiving: true }),
-      })) as unknown as HighlighterLike
+      })
     })()
   }
 
@@ -668,11 +672,9 @@ function collectTokens(
     if (hasStyle && onlyText) {
       const content = (child.children ?? []).map((c) => c.value ?? "").join("")
       if (!content) continue
-      out.push({
-        content,
-        ...style,
-        ...(childInWord ? { word: true } : {}),
-      })
+      const token: CodeBlockToken = { content, ...style }
+      if (childInWord) token.word = true
+      out.push(token)
       continue
     }
 
@@ -824,16 +826,15 @@ export async function highlightCode(
   try {
     const { highlighter, light, dark } = await prepareHighlighter(themes, language)
 
-    root = highlighter.codeToHast(source, {
+    const hastOptions: CodeToHastOptions = {
       lang: language,
       themes: { light, dark },
       defaultColor: "light",
       cssVariablePrefix: "--shiki-",
       decorations: buildWordDecorations(source, options.highlightedWords),
-      ...(options.transformers?.length
-        ? { transformers: options.transformers }
-        : {}),
-    }) as HastNode
+    }
+    if (options.transformers?.length) hastOptions.transformers = options.transformers
+    root = highlighter.codeToHast(source, hastOptions) as HastNode
   } catch {
     /* A missing grammar, an unloadable theme or a transformer throwing must not
        take the surface down. Plain text is always readable. */
@@ -931,16 +932,16 @@ export function createStreamingHighlighter(
     const source = toOneByteIfLatin1(normalizeCode(code))
     try {
       const { highlighter, light, dark } = await prepareHighlighter(themes, language)
-      resume ??= createResumableHighlight((text, state: unknown) => {
-        const root = highlighter.codeToHast(text, {
+      resume ??= createResumableHighlight((text, state: GrammarState | undefined) => {
+        const result = highlighter.codeToHast(text, {
           lang: language,
           themes: { light, dark },
           defaultColor: "light",
           cssVariablePrefix: "--shiki-",
-          ...(state ? { grammarState: state } : {}),
-        }) as HastNode
-        const next = highlighter.getLastGrammarState(root)
-        const codeElement = findCodeElement(root)
+          grammarState: state,
+        })
+        const next = highlighter.getLastGrammarState(result)
+        const codeElement = findCodeElement(result as HastNode)
         if (!next || !codeElement) return null
         return { lines: linesOf(codeElement, 1), state: next }
       })

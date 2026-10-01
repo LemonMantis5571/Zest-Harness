@@ -15,6 +15,7 @@ paths:
   - scripts/check-release-version.mjs
   - scripts/make-installer-art.ps1
   - crates/desktop/ui/.oxlint-plugins/zest-boundaries.mjs
+  - crates/desktop/ui/.oxlint-plugins/anti-slop.mjs
   - crates/desktop/ui/.oxlintrc.json
   - crates/desktop/tauri.signing.conf.json.example
   - crates/desktop/installer/
@@ -24,6 +25,7 @@ tests:
   - scripts/check-output-artifacts.test.mjs
   - scripts/feature-map.test.mjs
   - crates/desktop/ui/.oxlint-plugins/test.mjs
+  - crates/desktop/ui/.oxlint-plugins/anti-slop.test.mjs
 verify:
   - npm run output-policy:test
   - npm run features:test
@@ -42,6 +44,7 @@ verify:
 - Feature map: `feature-map.mjs check` fails when a doc path matches no file, a `.rs/.ts/.tsx/.mjs/.js/.ps1/.sh` file under `crates/` or `scripts/` has no owner (`lib/generated/` is exempt), or the README index is stale. `check --staged` also prints, without failing, features whose code changed while their doc did not. Other commands: `where`, `show`, `list`, `index`, and `--json`.
 - `npm run hooks:install` writes a pre-commit wrapper that runs `.githooks/pre-commit` (output policy `--staged`, feature map `--staged`). It refuses to overwrite an existing hook or override a set `core.hooksPath`.
 - UI lint (`oxlint --deny-warnings` plus the `zest` JS plugin), all errors: `no-unvalidated-persisted-json` (parsed JSON stays `unknown`/`JsonValue` until a type guard checks it), `no-secret-persistence-or-sink` (no token/secret/password-like names in `localStorage`/`sessionStorage` or `console`), `require-safe-html-provenance` (`dangerouslySetInnerHTML` only through `markTrustedHtml(...)`), `no-unowned-background-rejection` (no empty or constant `.catch`), `no-object-url-leak` (every `URL.createObjectURL` revoked in the module).
+- UI lint also runs six rules vendored from [anti-slop](https://github.com/dmmulroy/anti-slop) (`.oxlint-plugins/anti-slop.mjs`, MIT, ported from TypeScript to plain ESM), all errors: `no-chained-type-assertions` (no `as unknown as T`; type the source or parse at the boundary), `no-widen-then-assert` (no widening a known value to `unknown`/`object` and asserting it back), `no-conditional-empty-object-spread` (build the object, then add optional fields), `no-array-filter-map` (one `flatMap` instead of adjacent `filter`/`map` passes), `no-reduce-accumulator-copy` and the built-in `oxc/no-accumulating-spread` (no copying a reducer accumulator per step), and `no-module-mocking` (no `vi.mock`/`jest.mock`). The upstream rule tests run in `anti-slop.test.mjs`. anti-slop is meant to be vendored and edited, so adjust the rules in place; its noisier rules (`no-runtime-typeof`, `no-unknown-*`, `require-safety-comment-for-type-assertion`) are deliberately not enabled.
 - `npm run desktop:smoke` is opt-in (`ZEST_DESKTOP_SMOKE=1`): it starts `target/debug/zest-desktop` (or `ZEST_DESKTOP_PROFILE=release`, or `ZEST_DESKTOP_BINARY`), expects it alive after 4 s and responding on Windows, then kills it. It skips without the variable or binary and is in no gate.
 
 ## Release
