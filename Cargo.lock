@@ -6919,6 +6919,7 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "dirs 6.0.0",
+ "embed-resource",
  "mimalloc",
  "pdf-inspector",
  "rfd",

@@ -2,6 +2,9 @@
 title: Verification gates and release tooling
 summary: The local and CI gates (npm run verify, release-verify), the output-artifact and feature-map checks, git hooks, UI lint rules, and the release packaging scripts.
 paths:
+  - crates/desktop/build.rs
+  - crates/desktop/windows-common-controls.rc
+  - crates/desktop/windows-common-controls.manifest
   - scripts/dev-verify.mjs
   - scripts/release-verify.ps1
   - scripts/release-verify.sh
@@ -39,7 +42,7 @@ verify:
 ## Behavior
 - `npm run verify` (`scripts/dev-verify.mjs`) runs these steps in order and stops at the first failure: output-policy tests, output policy, feature-map tests, feature-map check, control CLI tests, UI unit tests, UI lint, lint-plugin tests, UI build, Playwright e2e (`npm run ui:e2e`), the control CLI smoke test (`zest-control.mjs check`, see [ui-control-cli](ui-control-cli.md)), `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace --lib`, `git diff --check`.
 - `scripts/release-verify.ps1` and `release-verify.sh` are the CI and release gate. They run the same checks in the same order (toolchain version print or warning; output policy tests and check; feature map tests and check; control CLI tests; `npm ci`; ts-rs binding drift; UI test, lint, plugin-rule tests, build; Playwright e2e with `npx playwright install chromium`, plus `--with-deps` on Linux CI; the control CLI smoke test; fmt; clippy; `cargo test --workspace --all-targets`; `npm audit --omit=dev` with 3 tries; `cargo audit` or `cargo deny`; `git diff --check` for unstaged and staged changes).
-- CI (`windows-verify.yml`, `linux-verify.yml`) runs the release gate on push to main/master and on PRs, first checks every commit in a PR with `check-output-artifacts.mjs --range`, and uploads `crates/desktop/ui/test-results/` as `playwright-traces-windows` / `playwright-traces-linux` on failure. Linux also builds and tests `zest serve` without WebKit.
+- CI (`windows-verify.yml`, `linux-verify.yml`) runs the release gate on push to main/master and on PRs, first checks every commit in a PR with `check-output-artifacts.mjs --range`, and uploads `crates/desktop/ui/test-results/` as `playwright-traces-windows` / `playwright-traces-linux` on failure. Linux also builds and tests `zest serve` and the JSONL run protocol without WebKit, using local provider and worker fixtures.
 - Output policy: under `outputs/`, image/audio/video files (by extension, any case) and files over 1 MiB are rejected unless their exact path is in `allowedOutputArtifacts` (empty by default). Modes: `--tracked` (default, HEAD), `--staged`, `--range <base> <head>` (full SHAs).
 - Feature map: `feature-map.mjs check` fails when a doc path matches no file, a `.rs/.ts/.tsx/.mjs/.js/.ps1/.sh` file under `crates/` or `scripts/` has no owner (`lib/generated/` is exempt), or the README index is stale. `check --staged` also prints, without failing, features whose code changed while their doc did not. Other commands: `where`, `show`, `list`, `index`, and `--json`.
 - `npm run hooks:install` writes a pre-commit wrapper that runs `.githooks/pre-commit` (output policy `--staged`, feature map `--staged`). It refuses to overwrite an existing hook or override a set `core.hooksPath`.
@@ -60,6 +63,10 @@ verify:
 ## Pitfalls
 - Local `verify` runs only `--lib` Rust tests; integration tests under `crates/*/tests/` run only in the release gate (`--all-targets`).
 - Binding drift is checked only in release-verify; regenerate with `cargo test -p zest-desktop --features export-bindings --lib export_bindings`.
+- Windows library tests embed the app's Common Controls dependency too,
+  so tests that drive the real turn and compaction handlers can start normally.
+  A shared resource is linked into every artifact on both MSVC and GNU targets;
+  Tauri's separate binary resource still supplies icons and version metadata.
 - In `release-verify.sh`, every step goes through `step`, which captures the exit code with `set +e`; an `if cmd; then` wrapper once let a failing `cargo test` pass.
 - Playwright reuses a dev server already on port 1420 outside CI.
 - Stale comments: the `release-verify.ps1` header mentions sidecar fetching (there is no sidecar step), and `build-signed.ps1` mentions a `postbuild` hook that `crates/desktop/package.json` does not define.

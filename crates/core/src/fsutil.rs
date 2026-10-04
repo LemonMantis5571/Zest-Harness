@@ -53,6 +53,83 @@ pub fn atomic_write_json<T: serde::Serialize>(target: &Path, value: &T) -> std::
     atomic_write(target, &body)
 }
 
+/// Create a project root and persist newly created directory entries on Unix.
+/// Stop at the first existing directory, so existing projects do not require
+/// read access to ancestors above them. Call before accepting receipt-backed
+/// commands in a newly initialized project.
+pub fn create_dir_all_durable(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let absolute = std::env::current_dir()?.join(path);
+        let mut missing = Vec::new();
+        let mut existing = absolute.as_path();
+        loop {
+            match std::fs::metadata(existing) {
+                Ok(metadata) if metadata.is_dir() => break,
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "project ancestor is not a directory",
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(existing.to_path_buf());
+                    existing = existing.parent().ok_or(error)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        std::fs::create_dir_all(&absolute)?;
+        if !missing.is_empty() {
+            for directory in missing
+                .iter()
+                .map(PathBuf::as_path)
+                .chain(std::iter::once(existing))
+            {
+                std::fs::File::open(directory)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)
+}
+
+/// Persist a receipt before a side effect may run. On Unix, syncing only the
+/// file is insufficient: the rename and newly created parent directories must
+/// reach disk too. `durability_root` is the existing project directory; ancestors
+/// above it need not be readable. Directory sync failures reach the caller.
+pub fn atomic_write_json_durable<T: serde::Serialize>(
+    target: &Path,
+    value: &T,
+    durability_root: &Path,
+) -> std::io::Result<()> {
+    let parent = target
+        .parent()
+        .filter(|parent| parent.starts_with(durability_root));
+    if parent.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "durable target is outside the project directory",
+        ));
+    }
+    atomic_write_json(target, value)?;
+    #[cfg(unix)]
+    for parent in target
+        .ancestors()
+        .skip(1)
+        .take_while(|parent| parent.starts_with(durability_root))
+    {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// The same, without the indentation.
 ///
 /// For machine-only files large enough that the whitespace is the file. The
@@ -233,5 +310,66 @@ mod tests {
             .filter(|n| n.contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn durable_json_write_creates_nested_directories_and_replaces_the_record() {
+        let dir = scratch("durable-receipt");
+        let path = dir.join("new-state").join("receipts").join("command.json");
+        atomic_write_json_durable(&path, &serde_json::json!({"state":"pending"}), &dir).unwrap();
+        let first: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(first, serde_json::json!({"state":"pending"}));
+        atomic_write_json_durable(&path, &serde_json::json!({"state":"completed"}), &dir).unwrap();
+        let completed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(completed, serde_json::json!({"state":"completed"}));
+    }
+
+    #[test]
+    fn durable_directory_creation_preserves_existing_project_contents() {
+        let dir = scratch("durable-directory");
+        let project = dir.join("new-parent").join("project");
+        create_dir_all_durable(&project).unwrap();
+        assert!(project.is_dir());
+        let marker = project.join("keep.txt");
+        std::fs::write(&marker, "keep me").unwrap();
+        create_dir_all_durable(&project).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "keep me");
+        assert!(create_dir_all_durable(&project.join("keep.txt").join("invalid")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_write_does_not_require_reading_ancestors_above_the_project() {
+        use std::os::unix::fs::PermissionsExt;
+        let outer = scratch("execute-only-ancestor");
+        let project = outer.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let original_permissions = std::fs::metadata(&outer).unwrap().permissions();
+        std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let target = project.join(".zest").join("receipts").join("command.json");
+        let result = atomic_write_json_durable(&target, &serde_json::json!("pending"), &project);
+        std::fs::set_permissions(&outer, original_permissions).unwrap();
+        result.unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(target).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!("pending"));
+    }
+
+    #[test]
+    fn durable_write_refuses_a_target_outside_its_project() {
+        let dir = scratch("durability-boundary");
+        let project = dir.join("project");
+        let inside = project.join("receipt.json");
+        atomic_write_json_durable(&inside, &serde_json::json!("pending"), &project).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(inside).unwrap()).unwrap(),
+            serde_json::json!("pending")
+        );
+        let path = dir.join("outside.json");
+        let result = atomic_write_json_durable(&path, &serde_json::json!("pending"), &project);
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
     }
 }

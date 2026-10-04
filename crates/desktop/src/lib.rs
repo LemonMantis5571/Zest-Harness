@@ -3709,6 +3709,7 @@ fn recover_chat_on_load(
     root: &std::path::Path,
     thread: Thread,
     warning_already_present: bool,
+    provider: Option<&dyn zest_core::Provider>,
 ) -> Result<(Thread, Option<String>, Option<RecoverableRun>), String> {
     let persistence = ChatPersistence::open(root).map_err(|error| error.to_string())?;
     let reconstructed = persistence
@@ -3718,7 +3719,7 @@ fn recover_chat_on_load(
     let had_unfinished_state =
         reconstructed.active_run.is_some() || !reconstructed.pending_interrupts.is_empty();
     let reconciliation = persistence
-        .reconcile_after_restart(&reconstructed.thread.id)
+        .reconcile_after_restart_with_provider(&reconstructed.thread.id, provider)
         .map_err(|error| error.to_string())?;
     let recovery_warning = if !(warning_already_present || reconstructed.thread_warning.is_some())
         && (had_unfinished_state
@@ -4283,23 +4284,6 @@ async fn start_session_inner(
     let claiming_legacy_thread = thread.provider_id.is_none();
     // A never-saved draft has no row for the restart reconciler to close.
     // Opening one after deleting a busy chat must not look like a crash.
-    let (recovery_warning, recovery) = if live_turn || thread_is_draft {
-        (None, None)
-    } else {
-        match recover_chat_on_load(&root, thread.clone(), load_warning.is_some()) {
-            Ok((recovered_thread, warning, recovery)) => {
-                thread = recovered_thread;
-                (warning, recovery)
-            }
-            Err(_) => (
-                Some(
-                    "Chat recovery state could not be checked; the saved transcript is still available."
-                        .into(),
-                ),
-                None,
-            ),
-        }
-    };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
     let initial_branch = read_git_branch(&root);
     // Branch comes from `.git/HEAD` (a small file). `git rev-parse` for the
@@ -4354,6 +4338,20 @@ async fn start_session_inner(
     };
     let runtime_warnings = runtime.warnings.clone();
     let mut agent = runtime.agent;
+    let (recovery_warning, recovery) = if live_turn || thread_is_draft {
+        (None, None)
+    } else {
+        match recover_chat_on_load(&root, thread.clone(), load_warning.is_some(), Some(agent.provider().as_ref())) {
+            Ok((recovered_thread, warning, recovery)) => {
+                thread = recovered_thread;
+                (warning, recovery)
+            }
+            Err(_) => (
+                Some("Chat recovery state could not be checked; the saved transcript is still available.".into()),
+                None,
+            ),
+        }
+    };
     agent.messages = thread.agent_messages.clone();
     agent.provider_session = thread.provider_session.clone();
     agent.provider_interaction = Some(Arc::new(DesktopProviderInteraction {
@@ -5635,7 +5633,7 @@ mod chat_recovery_tests {
             .unwrap();
 
         let (recovered, warning, retry) =
-            recover_chat_on_load(&root, thread.clone(), false).unwrap();
+            recover_chat_on_load(&root, thread.clone(), false, None).unwrap();
         assert_eq!(recovered.id, thread.id);
         assert_eq!(
             warning.as_deref(),
@@ -6043,6 +6041,7 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
                 &session.root,
                 loaded_thread.clone(),
                 load_warning.is_some(),
+                Some(session.agent.provider().as_ref()),
             ) {
                 Ok((recovered_thread, warning, recovery)) => {
                     session.agent.clear_messages();
@@ -6323,6 +6322,10 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
 /// a send or an approval, but it does not add a visible assistant answer.
 #[tauri::command]
 async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultView, String> {
+    compact_context_inner(&state).await
+}
+
+async fn compact_context_inner(state: &AppState) -> Result<CompactionResultView, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
@@ -6348,7 +6351,18 @@ async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultV
         return Err(error.to_string());
     }
 
-    let result = session.agent.compact_context().await;
+    let run_id = session
+        .thread
+        .events
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            ThreadEventKind::TurnCompleted { turn_id, status } if status == "completed" => {
+                Some(turn_id.clone())
+            }
+            _ => None,
+        });
+    let result = session.agent.compact_context_for_run(run_id).await;
     let output = match result {
         // Both paths rewrote history, so both need the same persistence handling.
         // The checkpoint written above is kept either way: the UI transcript

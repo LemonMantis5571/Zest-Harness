@@ -15,6 +15,7 @@ crates/desktop/tauri.signing.conf.json
 .zest/threads/
 .zest/runs/
 .zest/interrupts/
+.zest/command-receipts/
 .zest/spill/
 .zest/last-thread-id
 .zest/system.md

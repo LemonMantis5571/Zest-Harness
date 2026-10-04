@@ -28,6 +28,8 @@ verify:
 - The popover says automatic compaction starts at 80% full, or warns that the conversation will be compacted after this turn.
 - While a turn is running the backend cannot measure the chat (`context_usage` answers `busy`), so the meter keeps its last reading for that chat and refreshes when the turn ends. It never shows another chat's reading, and any other failure shows `Context —`. It refetches when the thread, message count, checkpoint count, or busy state changes.
 - After a turn finishes (`done`) in the open chat, if compaction is due, Zest compacts automatically. Sending is blocked while compaction runs.
+- Optional maintenance traces inherit the last successful turn's durable ID
+  from the thread lifecycle, even after the agent is idle or a later turn fails.
 - Compaction first tries trimming long tool results. If that is enough, nothing is summarized and the toast says "Trimmed long tool output"; otherwise the history is replaced by a model-written checkpoint ("Conversation compacted automatically"). Either way a "Before compaction" restore point is written first.
 - Compaction never fires for small conversations: it needs more than 4,000 estimated conversation tokens and at least 4 wire messages, whatever the percentage.
 
@@ -41,6 +43,9 @@ verify:
 
 ## Verify
 - Rust tests above cover threshold arithmetic, prune idempotence, measured vs estimated usage, and the prune-then-summarize decision.
+- `cargo test -p zest-desktop --lib idle_compaction_joins_the_last_successful_desktop_turn`
+  drives successful and failed desktop turns, then the actual idle compaction
+  handler, and checks the persisted checkpoint and joined task trace.
 - `?fixture=1`: the fixture backend serves a canned `contextUsage()` (4.7%, measured) and `compactContext()`, so the footer and popover render offline. Like the desktop, it answers `busy` while a turn is in flight (`split-streaming` sends, safety scenarios).
 - `npm run ui:e2e -- context-meter` keeps a `split-streaming` turn open and asserts the meter keeps its reading through it.
 

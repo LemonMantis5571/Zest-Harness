@@ -601,6 +601,9 @@ where
 #[serde(default, rename_all = "camelCase")]
 pub struct TaskUsageRecord {
     pub task_id: String,
+    /// Durable host run, shared by its provider rounds and related local tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     /// `turn`, `compaction`, `side_conversation`, `worker`, or `reviewer`.
     pub kind: String,
     /// The local task that started this one, when there is one.
@@ -836,6 +839,17 @@ impl Ledger {
         parent_task_id: Option<String>,
         correlation_id: Option<String>,
     ) {
+        self.begin_run_task(task_id, kind, parent_task_id, correlation_id, None);
+    }
+
+    pub fn begin_run_task(
+        &mut self,
+        task_id: impl Into<String>,
+        kind: impl Into<String>,
+        parent_task_id: Option<String>,
+        correlation_id: Option<String>,
+        run_id: Option<String>,
+    ) {
         if self.task_traces_off {
             return;
         }
@@ -845,8 +859,26 @@ impl Ledger {
         if self.tasks.iter().any(|task| task.task_id == task_id) {
             return;
         }
+        let parent_task_id = parent_task_id.or_else(|| {
+            let correlation = correlation_id.as_ref()?;
+            self.tasks
+                .iter()
+                .find(|task| {
+                    task.tools
+                        .iter()
+                        .any(|tool| tool.correlation_id.as_ref() == Some(correlation))
+                })
+                .map(|task| task.task_id.clone())
+        });
+        let run_id = parent_task_id
+            .as_ref()
+            .and_then(|parent| self.tasks.iter().find(|task| &task.task_id == parent))
+            .and_then(|task| task.run_id.clone())
+            .or(run_id)
+            .or_else(|| Some(task_id.clone()));
         self.tasks.push(TaskUsageRecord {
             task_id,
+            run_id,
             kind: kind.into(),
             parent_task_id,
             correlation_id,
@@ -886,12 +918,40 @@ impl Ledger {
             name: name.into(),
             result_bytes: result_bytes as u64,
             is_error,
-            correlation_id,
+            correlation_id: correlation_id.clone(),
         });
         if task.tools.len() > MAX_TOOLS_PER_TASK {
             let remove = task.tools.len() - MAX_TOOLS_PER_TASK;
             task.tools.drain(..remove);
             task.dropped_tools = task.dropped_tools.saturating_add(remove as u64);
+        }
+        // A worker can start before the dispatch tool returns. Join it here as
+        // well as at task creation, so neither scheduling order loses lineage.
+        let run_id = task.run_id.clone();
+        if let Some(correlation) = correlation_id {
+            let mut pending = vec![task_id.to_string()];
+            for child in &mut self.tasks {
+                if child.task_id != task_id
+                    && child.parent_task_id.is_none()
+                    && child.correlation_id.as_ref() == Some(&correlation)
+                {
+                    child.parent_task_id = Some(task_id.to_string());
+                    child.run_id = run_id.clone();
+                    pending.push(child.task_id.clone());
+                }
+            }
+            let mut visited = std::collections::BTreeSet::new();
+            while let Some(parent) = pending.pop() {
+                if !visited.insert(parent.clone()) {
+                    continue;
+                }
+                for child in &mut self.tasks {
+                    if child.parent_task_id.as_ref() == Some(&parent) {
+                        child.run_id = run_id.clone();
+                        pending.push(child.task_id.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -1827,6 +1887,60 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_lineage_joins_workers_in_either_dispatch_order() {
+        let mut ledger = super::Ledger::default();
+        ledger.begin_run_task("parent", "turn", None, None, Some("run-1".into()));
+        ledger.begin_correlated_task("early-worker", "worker", None, Some("job-1".into()));
+        ledger.begin_correlated_task(
+            "early-maintenance",
+            "compaction",
+            Some("early-worker".into()),
+            Some("job-1".into()),
+        );
+        ledger.record_task_tool("parent", "delegate_feature", 1, false, Some("job-1".into()));
+        ledger.begin_correlated_task("late-reviewer", "reviewer", None, Some("job-1".into()));
+        ledger.begin_task("side", "side_conversation", Some("parent".into()));
+        assert!(ledger
+            .tasks()
+            .iter()
+            .all(|task| task.run_id.as_deref() == Some("run-1")));
+        for id in ["early-worker", "late-reviewer"] {
+            assert_eq!(
+                ledger
+                    .tasks()
+                    .iter()
+                    .find(|task| task.task_id == id)
+                    .unwrap()
+                    .parent_task_id
+                    .as_deref(),
+                Some("parent")
+            );
+        }
+        let encoded = serde_json::to_string(&ledger).unwrap();
+        let loaded: super::Ledger = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(loaded.tasks()[2].run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            loaded.tasks()[2].parent_task_id.as_deref(),
+            Some("early-worker")
+        );
+        ledger.begin_run_task("later-turn", "turn", None, None, Some("run-2".into()));
+        ledger.record_task_tool(
+            "later-turn",
+            "delegate_feature",
+            1,
+            false,
+            Some("job-1".into()),
+        );
+        assert_eq!(ledger.tasks()[1].run_id.as_deref(), Some("run-1"));
+        assert_eq!(ledger.tasks()[1].parent_task_id.as_deref(), Some("parent"));
+        ledger.begin_correlated_task("unrelated", "worker", None, Some("job-2".into()));
+        assert_eq!(
+            ledger.tasks().last().unwrap().run_id.as_deref(),
+            Some("unrelated")
+        );
+    }
+
     use super::*;
     use crate::anthropic::types::Usage;
 

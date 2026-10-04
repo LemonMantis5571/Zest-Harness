@@ -7,11 +7,13 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zest_coordinator::{
     CreateDelegationJobRequest, DelegationCoordinator, DelegationStatus,
     UpdateDelegationJobRequest, ALLOWED_ARTIFACTS, INBOUND_MCP_ORIGIN,
 };
+use zest_core::command_receipts::{CommandReceiptError, CommandReceiptStore};
 use zest_core::{LEGACY_MCP_PROTOCOL_VERSION, MODERN_MCP_PROTOCOL_VERSION};
 
 use super::ServePolicy;
@@ -166,6 +168,81 @@ fn origin_allowed(origin: &str) -> bool {
 }
 
 fn call_tool(state: &AppState, params: &Value) -> Result<Value, (i64, String, StatusCode)> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(command_id) = params
+        .get("arguments")
+        .and_then(|args| args.get("commandId"))
+    else {
+        return call_tool_inner(state, params);
+    };
+    if !is_mutating_tool(name) {
+        return Err((
+            -32602,
+            "commandId is only supported by mutating delegation tools".into(),
+            StatusCode::OK,
+        ));
+    }
+    let command_id =
+        command_id
+            .as_str()
+            .ok_or((-32602, "commandId must be a string".into(), StatusCode::OK))?;
+    let mut params = params.clone();
+    params["arguments"]
+        .as_object_mut()
+        .expect("commandId belongs to an object")
+        .remove("commandId");
+    state
+        .coordinator
+        .ensure_lock(&state.root)
+        .map_err(tool_err)?;
+    let outcome = CommandReceiptStore::new(&state.root)
+        .execute(
+            command_id,
+            name,
+            &params["arguments"],
+            || match call_tool_inner(state, &params) {
+                Ok(value) => StoredToolOutcome::Success { value },
+                Err((code, message, _)) => StoredToolOutcome::Error { code, message },
+            },
+        )
+        .map_err(|error| {
+            let code = match &error {
+                CommandReceiptError::InvalidId => -32602,
+                CommandReceiptError::Conflict => -32010,
+                CommandReceiptError::Incomplete => -32011,
+                CommandReceiptError::Storage(_) => -32603,
+            };
+            (code, error.to_string(), StatusCode::OK)
+        })?;
+    match outcome {
+        StoredToolOutcome::Success { value } => Ok(value),
+        StoredToolOutcome::Error { code, message } => Err((code, message, StatusCode::OK)),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StoredToolOutcome {
+    Success { value: Value },
+    Error { code: i64, message: String },
+}
+
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "delegation_create"
+            | "delegation_update"
+            | "delegation_approve"
+            | "delegation_retry"
+            | "delegation_cancel"
+            | "delegation_apply"
+    )
+}
+
+fn call_tool_inner(state: &AppState, params: &Value) -> Result<Value, (i64, String, StatusCode)> {
     let name = params.get("name").and_then(Value::as_str).ok_or((
         -32602,
         "tools/call requires name".into(),
@@ -316,7 +393,7 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
     } else {
         "Create a feature card. Stays awaiting_approval until delegation_approve."
     };
-    vec![
+    let mut definitions = vec![
         tool("delegation_targets", "List worker and reviewer targets for this project.", json!({"type":"object"})),
         tool(
             "delegation_create",
@@ -403,7 +480,17 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
             "Apply a ready_to_apply worker.diff after scope validation and git apply --check.",
             object_with(&["jobId"]),
         ),
-    ]
+    ];
+    for definition in &mut definitions {
+        if is_mutating_tool(definition["name"].as_str().unwrap_or_default()) {
+            definition["inputSchema"]["properties"]["commandId"] = json!({
+                "type": "string", "minLength": 1, "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "description": "Stable ID for this command. Retry with the same ID and arguments to receive the saved outcome without executing again."
+            });
+        }
+    }
+    definitions
 }
 
 fn object_with(required: &[&str]) -> Value {
@@ -513,5 +600,22 @@ mod tests {
         assert_eq!(parsed["error"], "response_too_large");
         assert_eq!(parsed["limitBytes"], MAX_RESPONSE_BYTES);
         assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn command_ids_are_optional_and_only_advertised_for_mutations() {
+        for policy in [ServePolicy::Gated, ServePolicy::Trusted] {
+            for definition in tool_defs(policy) {
+                let name = definition["name"].as_str().unwrap();
+                let schema = &definition["inputSchema"];
+                assert_eq!(
+                    schema["properties"].get("commandId").is_some(),
+                    is_mutating_tool(name)
+                );
+                assert!(!schema["required"]
+                    .as_array()
+                    .is_some_and(|fields| fields.contains(&json!("commandId"))));
+            }
+        }
     }
 }

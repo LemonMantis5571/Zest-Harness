@@ -97,6 +97,7 @@ jobs:
           cargo build -p zest
           cargo test -p zest-coordinator
           cargo test -p zest --test serve_e2e
+          cargo test -p zest --test run_e2e
           if cargo tree -p zest --edges normal | grep -Eiq 'webkit|zest-desktop'; then
             echo "zest must not depend on the desktop or WebKit" >&2
             cargo tree -p zest --edges normal >&2

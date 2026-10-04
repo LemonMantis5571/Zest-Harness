@@ -50,14 +50,14 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 | [Shell commands and background jobs](shell-commands-and-jobs.md) | The agent runs commands with an explicit working directory, read-only ones unattended and everything else after approval, and can keep dev servers running as background jobs it can read and stop. | 1 test file, 4 commands |
 | [Skills and slash commands](skills-and-slash-commands.md) | Personal SKILL.md files become /commands and model-readable instructions; enabled MCP servers and built-ins share the same / list in the composer. | 2 test files, 5 commands |
 | [Split workspace](split-workspace.md) | Open several chats side by side in resizable, nested panes, each with its own draft, model, and running turn. | 3 test files, 2 commands |
-| [Terminal CLI (zest)](terminal-cli.md) | The zest binary: an interactive terminal chat with y/N approvals, auth and usage reports, a live doctor check, and zest run --jsonl for one machine-readable, deny-only agent turn. | 4 commands |
+| [Terminal CLI (zest)](terminal-cli.md) | The zest binary: an interactive terminal chat with y/N approvals, auth and usage reports, a live doctor check, and zest run --jsonl for one machine-readable, deny-only agent turn. | 1 test file, 5 commands |
 | [Threads, history, and recovery](threads-and-history.md) | Chats are saved per project, listed in the sidebar, reopened a page at a time, rewound or forked from checkpoints, and recovered safely after an interrupted run. | 6 test files, 10 commands |
 | [Tool approvals and permission modes](tool-approvals.md) | Writes, commands, and other risky tool calls pass one approval gate whose behavior follows the mode picked in the composer (Manual, Accept edits, Plan, Auto, Bypass). | 1 test file, 3 commands |
 | [UI control CLI (zest-control)](ui-control-cli.md) | One-line commands that drive the live UI, inspect it, and report every error, so agents debug and verify without writing throwaway browser scripts. | 1 test file, 2 commands |
 | [Usage, cost and provider quota](usage-and-quota.md) | See tokens, estimated cost and cache reuse across Zest and your coding CLIs, and check live limits or balance reported by each provider. | 5 test files, 8 commands |
 | [Workbench panel](workbench-panel.md) | A side panel for a project chat with Activity, Outline, Delegation, and Files tabs, including a quick workspace check, checkpoint rewind, and a read-only file browser. | 1 test file, 3 commands |
 | [Branch changes and diff review](workspace-changes-and-review.md) | A project chat shows what changed on its branch since the chat started and opens a review pane with a cleaned-up or raw diff, with secret files redacted. | 4 test files, 4 commands |
-| [zest serve (headless coordinator)](zest-serve.md) | A windowless daemon that owns one project's delegation queue and exposes delegation_* tools over authenticated MCP on loopback, so a bot or script can create, approve and apply feature cards. | 1 test file, 3 commands |
+| [zest serve (headless coordinator)](zest-serve.md) | A windowless daemon that owns one project's delegation queue and exposes delegation_* tools over authenticated MCP on loopback, so a bot or script can create, approve and apply feature cards. | 1 test file, 4 commands |
 <!-- feature-index:end -->
 
 ## Writing an entry

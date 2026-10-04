@@ -47,6 +47,11 @@ verify:
 - Every submitted turn writes a checkpoint first ("Conversation start" / "Before turn"). The rail beside the transcript lists user turns for jumping; rewinding a checkpoint (Workbench) restores the transcript and model history but never touches workspace files.
 - Editing a user message rewinds to just before it and resends the edited text as a new turn.
 - If the app died mid-turn, reopening the chat closes the stale run and pending approvals, toasts "Previous turn ready to retry", and puts that turn's prompt into an empty composer.
+- Recovery consults the built provider's resume capability and records a stable
+  reason on the aborted run: provider changed/unavailable, durable resume
+  unsupported, missing cursor, or an execution runtime detached by restart.
+  A saved cursor alone never replays work or consumes quota. Existing providers
+  do not support durable stream resume, so recovery continues to offer retry.
 - A chat whose saved provider is unknown or unavailable opens `ConversationRecoveryDialog`: choose a provider (older chats), open a copy with another provider, or configure the original. The original chat is left unchanged.
 - Sidebar layout is "project" or "compact" (`zest.chatViewMode`, set in Customize > Chat). Back/Forward in the sidebar header walk shell panels (`navigationHistory.ts`), not chats.
 
@@ -62,6 +67,8 @@ verify:
 ## Verify
 - `?fixture=1`: the "Fifteen turns" chat exercises the 10-turn window and "Earlier turns"; a background chat shows the sidebar activity mark; `sidebar-search.spec.ts` covers search and the project menu.
 - Rust tests cover round trips, migration, corrupt files, checkpoint bounds, rewind/edit, recovery reconciliation, and delete cleanup.
+- The shared persistence helper also provides a directory-synced JSON write
+  for command receipts that must survive a system crash before a side effect.
 
 ## Pitfalls
 - A user message can be edited only while its checkpoint survives; once pruned past the 24/64 MiB cap, `edit_message` fails with "rewind checkpoint is missing".

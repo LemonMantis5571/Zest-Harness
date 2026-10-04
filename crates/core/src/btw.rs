@@ -15,6 +15,7 @@ pub struct SideConversation {
     provider: Arc<dyn Provider>,
     ledger: Option<Arc<Mutex<Ledger>>>,
     parent_task_id: Option<String>,
+    run_id: Option<String>,
     request: TurnRequest,
 }
 
@@ -31,12 +32,14 @@ impl SideConversation {
         provider: Arc<dyn Provider>,
         ledger: Option<Arc<Mutex<Ledger>>>,
         parent_task_id: Option<String>,
+        run_id: Option<String>,
         request: TurnRequest,
     ) -> Self {
         Self {
             provider,
             ledger,
             parent_task_id,
+            run_id,
             request,
         }
     }
@@ -65,10 +68,12 @@ impl SideConversation {
         let task_id = new_id("task");
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
-                ledger.begin_task(
+                ledger.begin_run_task(
                     task_id.clone(),
                     "side_conversation",
                     self.parent_task_id.clone(),
+                    None,
+                    self.run_id.clone(),
                 );
             }
         }
@@ -402,6 +407,7 @@ mod tests {
             Some(turn.task_id.as_str())
         );
         assert_eq!(side_task.status, "completed");
+        assert_eq!(side_task.run_id, turn.run_id);
         assert_eq!(side_task.requests.len(), 1);
         assert_eq!(side_task.requests[0].kind, "side_conversation");
         assert!(side_task.requests[0].usage_available);

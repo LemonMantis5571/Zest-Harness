@@ -24,6 +24,8 @@ User-facing reference: [docs/BTW.md](../BTW.md) (per-provider fork behaviour, li
 - The panel streams answers, accepts follow-ups, and has "Stop side answer" and "Close side conversation" (Esc also closes). A stopped or failed answer keeps the question editable in the panel and shows an alert (for example "Answer stopped").
 - It works while the main task runs ("Main task is still running"); the main turn keeps going and its Stop button stays.
 - Nothing from the side exchange enters the main transcript, thread file, context meter, checkpoints, queue, or provider cursor. Closing the panel or switching chats discards it; reopening `/btw` starts fresh.
+- Optional usage traces carry the frozen parent run ID, including snapshots
+  captured while the desktop is still preparing the main turn.
 - `send_message` refuses text starting with `/btw` ("Open /btw from the main chat composer to ask a side question.").
 - CLI: `/btw [question]` enters a side conversation in the interactive terminal and `/back` discards it (`crates/cli/src/main.rs`).
 

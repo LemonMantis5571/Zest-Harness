@@ -143,6 +143,23 @@ Mutations accept `expectedUpdatedAt`. A stale revision returns a conflict. A
 retry of `approve`, `cancel`, or `apply` after a lost HTTP response returns the
 state already reached and does not apply a patch twice.
 
+For an exact replay of a lost response, include an optional `commandId` on
+any mutation. It must be 1–200 ASCII letters, digits, `-`, or `_`. Reuse the
+same ID and arguments when retrying. The daemon returns the saved result,
+including after restart, even if the card has since progressed. Use a new ID
+for a new action. Changing arguments or the tool name under an existing ID
+returns conflict code `-32010`.
+
+The daemon records a pending receipt before executing the action. If it stops
+before saving the result, retry returns `-32011` instead of repeating a
+possibly completed mutation. Inspect the card before deciding the next action.
+Receipts stay in the ignored local `.zest/command-receipts/` directory until
+removed. They contain an argument hash and the tool outcome, not raw arguments.
+Unlike content-free usage traces, an outcome can include the card's title and
+objective. Treat these receipts as private local state.
+The receipt directory has its own ignore rule, so a project's missing root
+`.gitignore` does not cause receipts to appear in an ordinary Git add.
+
 Requests and tool responses are limited to 256 KiB. A tool response that would
 be larger comes back as valid JSON with `isError: true`:
 `{"error":"response_too_large","bytes":…,"limitBytes":262144,"hint":…}`. Read
