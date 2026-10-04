@@ -76,6 +76,9 @@ chat.
   retry returns `-32011` and never executes again: inspect the job before
   deciding whether to issue a new command. Calls without `commandId` retain
   their existing coordinator behavior and approval requirements.
+  Receipt writes flush their directories through the project root on Unix, so
+  a newly created receipt directory cannot disappear after a system crash.
+  Failure to save the pending intent prevents the action from starting.
 - **Gated mode.** Create stays `awaiting_approval` and never writes a dispatch
   receipt. The host calls `delegation_approve`, polls until `ready_to_apply`,
   and then calls `delegation_apply`, which returns `accepted` or

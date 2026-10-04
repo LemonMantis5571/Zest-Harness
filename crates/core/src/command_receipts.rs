@@ -37,12 +37,14 @@ enum ReceiptOutcome<T> {
 }
 
 pub struct CommandReceiptStore {
+    root: PathBuf,
     dir: PathBuf,
 }
 
 impl CommandReceiptStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
+            root: root.as_ref().to_path_buf(),
             dir: root.as_ref().join(".zest").join("command-receipts"),
         }
     }
@@ -114,10 +116,10 @@ impl CommandReceiptStore {
             fingerprint,
             outcome: ReceiptOutcome::<T>::Pending,
         };
-        crate::fsutil::atomic_write_json(&path, &receipt)
+        crate::fsutil::atomic_write_json_durable(&path, &receipt, &self.root)
             .map_err(|error| CommandReceiptError::Storage(error.to_string()))?;
         receipt.outcome = ReceiptOutcome::Completed { value: action() };
-        crate::fsutil::atomic_write_json(&path, &receipt)
+        crate::fsutil::atomic_write_json_durable(&path, &receipt, &self.root)
             .map_err(|error| CommandReceiptError::Storage(error.to_string()))?;
         match receipt.outcome {
             ReceiptOutcome::Completed { value } => Ok(value),
@@ -188,6 +190,51 @@ mod tests {
             }
         });
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_process_crash_after_the_action_keeps_the_pending_receipt() {
+        const CHILD_ROOT: &str = "ZEST_TEST_RECEIPT_CRASH_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            CommandReceiptStore::new(&root)
+                .execute::<Value, _>("crash-command", "apply", &json!({}), || {
+                    crate::fsutil::atomic_write(&root.join("mutation"), b"applied once").unwrap();
+                    std::process::exit(99);
+                })
+                .unwrap();
+            panic!("the fixture must exit inside the action");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "command_receipts::tests::a_process_crash_after_the_action_keeps_the_pending_receipt",
+            ])
+            .env(CHILD_ROOT, temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(99));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("mutation")).unwrap(),
+            "applied once"
+        );
+        let mut repeated = false;
+        let retry = CommandReceiptStore::new(temp.path()).execute::<Value, _>(
+            "crash-command",
+            "apply",
+            &json!({}),
+            || {
+                repeated = true;
+                json!({"status":"applied twice"})
+            },
+        );
+        assert!(matches!(retry, Err(CommandReceiptError::Incomplete)));
+        assert!(!repeated);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("mutation")).unwrap(),
+            "applied once"
+        );
     }
 
     #[test]
