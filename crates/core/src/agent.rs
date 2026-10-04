@@ -121,6 +121,8 @@ pub struct Agent {
     usage_task_correlation_id: Option<String>,
     /// Set for the duration of one user or maintenance task.
     active_usage_task_id: Option<String>,
+    next_run_id: Option<String>,
+    active_run_id: Option<String>,
     /// Gate for write/exec tools. Defaults to deny-all when unset.
     approver: Arc<dyn Approver>,
     /// Mode + session grants, consulted before the approver is ever called.
@@ -160,6 +162,8 @@ impl Agent {
             usage_task_kind: "turn",
             usage_task_correlation_id: None,
             active_usage_task_id: None,
+            next_run_id: None,
+            active_run_id: None,
             approver: Arc::new(DenyApprover),
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             questioner: Arc::new(DenyQuestioner),
@@ -195,6 +199,17 @@ impl Agent {
     pub fn with_ledger(mut self, ledger: Arc<Mutex<Ledger>>) -> Self {
         self.ledger = Some(ledger);
         self
+    }
+
+    /// Associate the next submission with its host's non-secret lifecycle ID.
+    /// Consumed once; a later submission receives a fresh identity.
+    pub fn set_next_run_id(&mut self, run_id: impl Into<String>) {
+        // A dropped send future can leave its active fields behind. This
+        // exclusive borrow means no send is live; do not snapshot its old ID
+        // into a side question while the new submission is preparing.
+        self.active_usage_task_id = None;
+        self.active_run_id = None;
+        self.next_run_id = Some(run_id.into());
     }
 
     /// Label this agent's task traces, e.g. `worker` for delegation job
@@ -301,6 +316,9 @@ impl Agent {
                 .unwrap_or_else(|| self.provider.clone()),
             self.ledger.clone(),
             self.active_usage_task_id.clone(),
+            self.active_run_id
+                .clone()
+                .or_else(|| self.next_run_id.clone()),
             TurnRequest {
                 model: self.model.clone(),
                 system: self.system.clone(),
@@ -382,11 +400,12 @@ impl Agent {
         let prior_task = self.active_usage_task_id.replace(task_id.clone());
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
-                ledger.begin_correlated_task(
+                ledger.begin_run_task(
                     task_id.clone(),
                     "compaction",
                     parent_task_id,
                     self.usage_task_correlation_id.clone(),
+                    self.active_run_id.clone(),
                 );
             }
         }
@@ -702,14 +721,16 @@ impl Agent {
         on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
         let task_id = new_id("task");
+        self.active_run_id = Some(self.next_run_id.take().unwrap_or_else(|| task_id.clone()));
         self.active_usage_task_id = Some(task_id.clone());
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
-                ledger.begin_correlated_task(
+                ledger.begin_run_task(
                     task_id.clone(),
                     self.usage_task_kind,
                     None,
                     self.usage_task_correlation_id.clone(),
+                    self.active_run_id.clone(),
                 );
             }
         }
@@ -727,6 +748,7 @@ impl Agent {
             "failed"
         });
         self.active_usage_task_id = None;
+        self.active_run_id = None;
         result
     }
 
@@ -1820,6 +1842,80 @@ mod tests {
         stop: &'static str,
     }
 
+    #[tokio::test]
+    async fn host_run_identity_is_consumed_by_only_one_submission() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: None,
+            stop: "end_turn",
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
+        agent.set_next_run_id("run-host");
+        agent.send("first", &mut |_| {}).await.unwrap();
+        agent.send("second", &mut |_| {}).await.unwrap();
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks()[0].run_id.as_deref(), Some("run-host"));
+        assert_ne!(ledger.tasks()[1].run_id.as_deref(), Some("run-host"));
+        assert_ne!(ledger.tasks()[0].task_id, ledger.tasks()[1].task_id);
+    }
+
+    struct PendingFirstProvider(FakeProvider);
+
+    #[async_trait]
+    impl Provider for PendingFirstProvider {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn default_model(&self) -> &str {
+            self.0.default_model()
+        }
+        fn auth_status(&self) -> AuthStatus {
+            self.0.auth_status()
+        }
+
+        async fn stream_turn(
+            &self,
+            req: &TurnRequest,
+            on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            if self.0.calls.load(AtomicOrdering::SeqCst) == 0 {
+                self.0.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+            self.0.stream_turn(req, on_event).await
+        }
+    }
+
+    #[tokio::test]
+    async fn preparing_side_question_does_not_inherit_a_dropped_turn() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider = Arc::new(PendingFirstProvider(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: None,
+            stop: "end_turn",
+        }));
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
+        let mut sink = |_event: StreamEvent<'_>| {};
+        agent.set_next_run_id("run-aborted");
+        {
+            let mut turn = Box::pin(agent.send("interrupted", &mut sink));
+            assert!(futures_util::poll!(turn.as_mut()).is_pending());
+        }
+        assert_eq!(ledger.lock().unwrap().tasks()[0].status, "cancelled");
+        agent.set_next_run_id("run-next");
+        let mut side = agent.side_conversation();
+        side.send("question while preparing", &CancelToken::new(), &mut sink)
+            .await
+            .unwrap();
+        agent.send("next submission", &mut sink).await.unwrap();
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks()[1].run_id.as_deref(), Some("run-next"));
+        assert_eq!(ledger.tasks()[1].parent_task_id, None);
+        assert_eq!(ledger.tasks()[2].run_id.as_deref(), Some("run-next"));
+        assert_ne!(ledger.tasks()[0].run_id, ledger.tasks()[1].run_id);
+    }
+
     #[async_trait]
     impl Provider for FakeProvider {
         fn id(&self) -> &str {
@@ -2117,6 +2213,7 @@ mod tests {
         let mut agent = Agent::new(provider, tools).with_ledger(ledger.clone());
         let mut sink = |_event: StreamEvent<'_>| {};
 
+        agent.set_next_run_id("run-host");
         agent
             .send("private-prompt-must-not-be-traced", &mut sink)
             .await
@@ -2125,6 +2222,7 @@ mod tests {
         let ledger = ledger.lock().unwrap();
         assert_eq!(ledger.tasks().len(), 1);
         let task = &ledger.tasks()[0];
+        assert_eq!(task.run_id.as_deref(), Some("run-host"));
         assert_eq!(task.kind, "turn");
         assert_eq!(task.status, "completed");
         assert!(task.finished_at.is_some());

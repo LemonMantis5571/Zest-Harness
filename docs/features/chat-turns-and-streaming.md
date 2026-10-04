@@ -58,6 +58,9 @@ verify:
 - A failed or cancelled turn keeps its partial transcript, marks running/awaiting-approval tool rows as interrupted, and does not change the model's wire history.
 - Auth failures show "Reconnect <provider>" / "Choose provider or API key" buttons on the error bubble. A served model that differs from the requested one raises a "Model changed" warning.
 - A turn belongs to its chat: switching chats lets it finish in the background; a second turn on the same chat is refused as busy.
+- When task tracing is enabled, the agent uses the desktop turn ID as its run
+  identity, so provider rounds, tool activity and related local tasks can be
+  matched to the durable lifecycle record.
 - Drafts are kept per thread in localStorage (`zest:draft:<threadId>`); question/plan answers (`origin: "answer"`) never clear the draft or send its attachments.
 
 ## How it works

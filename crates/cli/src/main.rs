@@ -217,6 +217,7 @@ OPTIONS
   --provider ID               Use a configured provider for this turn
   --model ID                  Use a configured model for this turn
   --effort LEVEL              Request a supported effort level
+  --usage-file PATH           Use a separate local usage ledger
   -h, --help                 Show this help
 
 Approvals are reported and denied instead of waiting for an interactive window.
@@ -234,6 +235,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     let mut model: Option<String> = None;
     let mut provider: Option<String> = None;
     let mut effort: Option<String> = None;
+    let mut usage_file: Option<std::path::PathBuf> = None;
     let mut prompt_parts = Vec::new();
 
     let mut index = 0;
@@ -262,6 +264,14 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
                     args.get(index)
                         .ok_or_else(|| anyhow::anyhow!("--effort needs a value"))?
                         .clone(),
+                );
+            }
+            "--usage-file" => {
+                index += 1;
+                usage_file = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow::anyhow!("--usage-file needs a path"))?
+                        .into(),
                 );
             }
             "--" => {
@@ -297,6 +307,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
         eprintln!("warning: {issue}");
     }
 
+    let run_id = zest_core::thread::new_id("run");
     let mut builder = RuntimeBuilder::new(&root)
         .with_config(config)
         .with_effort(
@@ -308,17 +319,23 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
         .enable_external_agents(true)
         .register_write_tools(true)
         .register_exec_tools(true)
-        .with_approver(Arc::new(JsonApprover));
+        .with_approver(Arc::new(JsonApprover {
+            run_id: run_id.clone(),
+        }));
     if let Some(provider) = provider {
         builder = builder.with_provider(provider);
     }
     if let Some(model) = model {
         builder = builder.with_model(model);
     }
+    if let Some(path) = usage_file {
+        builder = builder.with_ledger(Arc::new(Mutex::new(Ledger::load_from(path))));
+    }
 
     let runtime = builder.build()?;
     emit_json(serde_json::json!({
         "kind": "session",
+        "run_id": run_id,
         "protocol": "zest-jsonl-v1",
         "provider": runtime.provider_id,
         "model": runtime.model,
@@ -326,9 +343,10 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     }));
 
     let mut agent = runtime.agent;
-    let mut on_event = |event: StreamEvent<'_>| emit_stream_json(event);
+    agent.set_next_run_id(run_id.clone());
+    let mut on_event = |event: StreamEvent<'_>| emit_stream_json(event, &run_id);
     match agent.send(&prompt, &mut on_event).await {
-        Ok(()) => emit_json(serde_json::json!({ "kind": "done" })),
+        Ok(()) => emit_json(serde_json::json!({ "kind": "done", "run_id": run_id })),
         Err(err) => {
             // The Display form carries an internal tag (`stream provider:<code>:`).
             // When the provider wrote the reason for a person, quote just that.
@@ -338,6 +356,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
                 .unwrap_or_else(|| err.to_string());
             emit_json(serde_json::json!({
                 "kind": "error",
+                "run_id": run_id,
                 "message": &message,
             }));
             // Exit with the same words the protocol line carried, so a caller
@@ -354,26 +373,27 @@ fn emit_json(value: serde_json::Value) {
     let _ = std::io::stdout().flush();
 }
 
-fn emit_stream_json(event: StreamEvent<'_>) {
+fn emit_stream_json(event: StreamEvent<'_>, run_id: &str) {
+    let emit = |value| emit_run_json(run_id, value);
     match event {
         StreamEvent::Text(text) if !text.is_empty() => {
-            emit_json(serde_json::json!({ "kind": "text", "text": text }));
+            emit(serde_json::json!({ "kind": "text", "text": text }));
         }
         StreamEvent::Thinking(text) if !text.is_empty() => {
-            emit_json(serde_json::json!({ "kind": "thinking", "text": text }));
+            emit(serde_json::json!({ "kind": "thinking", "text": text }));
         }
-        StreamEvent::ProviderActivity { id, title, status } => emit_json(serde_json::json!({
+        StreamEvent::ProviderActivity { id, title, status } => emit(serde_json::json!({
             "kind": "provider_activity",
             "id": id,
             "title": title,
             "status": status,
         })),
-        StreamEvent::ToolCallStart { name, id } => emit_json(serde_json::json!({
+        StreamEvent::ToolCallStart { name, id } => emit(serde_json::json!({
             "kind": "tool_call_start",
             "name": name,
             "id": id,
         })),
-        StreamEvent::ToolCallUpdate { name, id, metadata } => emit_json(serde_json::json!({
+        StreamEvent::ToolCallUpdate { name, id, metadata } => emit(serde_json::json!({
             "kind": "tool_call_update",
             "name": name,
             "id": id,
@@ -387,7 +407,7 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             path,
             diff,
             metadata,
-        } => emit_json(serde_json::json!({
+        } => emit(serde_json::json!({
             "kind": "tool_call_result",
             "name": name,
             "id": id,
@@ -405,7 +425,7 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             path,
             summary,
             diff,
-        } => emit_json(serde_json::json!({
+        } => emit(serde_json::json!({
             "kind": "approval_needed",
             "approvalId": approval_id,
             "toolName": tool_name,
@@ -422,7 +442,7 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             choices,
             multiple,
             placeholder,
-        } => emit_json(serde_json::json!({
+        } => emit(serde_json::json!({
             "kind": "question_needed",
             "questionId": question_id,
             "toolCallId": tool_call_id,
@@ -431,7 +451,7 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             "multiple": multiple,
             "placeholder": placeholder,
         })),
-        StreamEvent::ModelSubstituted { requested, served } => emit_json(serde_json::json!({
+        StreamEvent::ModelSubstituted { requested, served } => emit(serde_json::json!({
             "kind": "model_substituted",
             "requested": requested,
             "served": served,
@@ -441,7 +461,14 @@ fn emit_stream_json(event: StreamEvent<'_>) {
     }
 }
 
-struct JsonApprover;
+fn emit_run_json(run_id: &str, mut value: serde_json::Value) {
+    value["run_id"] = serde_json::json!(run_id);
+    emit_json(value);
+}
+
+struct JsonApprover {
+    run_id: String,
+}
 
 #[async_trait::async_trait]
 impl Approver for JsonApprover {
@@ -449,11 +476,14 @@ impl Approver for JsonApprover {
         // The agent emits the corresponding event before waiting here. Keep
         // this deny-only fallback as a second guard if a future tool bypasses
         // that event path.
-        emit_json(serde_json::json!({
-            "kind": "approval_decision",
-            "approvalId": request.approval_id,
-            "decision": "deny",
-        }));
+        emit_run_json(
+            &self.run_id,
+            serde_json::json!({
+                "kind": "approval_decision",
+                "approvalId": request.approval_id,
+                "decision": "deny",
+            }),
+        );
         ApprovalDecision::Deny
     }
 }
@@ -908,6 +938,9 @@ fn render_task_costs(ledger: &Ledger, prices: &Prices) -> String {
             failed_tools,
             cost_text
         ).unwrap();
+        if let Some(run_id) = &task.run_id {
+            writeln!(output, "      run: {run_id} · task: {}", task.task_id).unwrap();
+        }
         if reported_tokens > 0 {
             let coverage = 100.0 * priced_tokens as f64 / reported_tokens as f64;
             writeln!(output,

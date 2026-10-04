@@ -175,6 +175,11 @@ which is not a transcript. `OrchestrationStatus.tsx` renders it.
 `[agents.<id>]` worker inside a chat turn. It returns the worker's answer and
 diff as the tool result and does not apply the diff. It is not a feature card.
 
+When task traces are enabled, native worker/reviewer tasks use the job's
+`run-<jobId>` identity. If a chat dispatch tool created the job, its tool trace
+joins those tasks to the initiating chat run; scheduling before or after the
+dispatch result does not change the association.
+
 `list_targets` lists every `[providers.*]` entry, marked available when
 `resolve_provider_target` succeeds, and every `[agents.*]` entry, which must be
 isolated. The create form lets a provider target set a model and an effort. An

@@ -54,6 +54,14 @@ Provider-facing rules and sources are documented in [QUOTA.md](../QUOTA.md).
   paths. Kept 30 days and capped (2,000 records, 256 rounds and 1,024 tool
   records per task, oldest dropped first). `zest usage --tasks` prints them. A
   malformed trace is dropped on read instead of breaking the spend history.
+- New traces include `runId`: the durable desktop turn ID, the headless CLI's
+  emitted run ID, or a fresh task ID for callers without a lifecycle record.
+  Side conversations inherit it. Workers and reviewers share their delegation
+  run; when a chat dispatches a job, the tool's job ID joins them to that chat
+  run in either scheduling order, including maintenance descendants. Older
+  traces without a run ID remain readable. `zest usage --tasks` shows both IDs.
+  Starting a new host run clears stale correlation left by a dropped turn, so
+  a side question during preparation cannot join an earlier aborted run.
 - Day boundaries use the webview's timezone, sent once at startup
   (`set_local_offset`); the CLI stays on UTC.
 - Headroom is overwritten only when a provider actually reported limits.

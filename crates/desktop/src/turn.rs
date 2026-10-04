@@ -222,6 +222,7 @@ async fn run_with_sink_internal<S: EventSink>(
     // from a previous process. The durable run record remains available for
     // diagnostics, but the session no longer advertises the stale action.
     session.recovery = None;
+    session.agent.set_next_run_id(turn.turn_id.clone());
     turn.approval_hub.begin_turn(&turn.turn_id);
     turn.question_hub.begin_turn(&turn.turn_id);
 

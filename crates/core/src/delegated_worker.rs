@@ -410,6 +410,10 @@ async fn run_in_workspace(
         .with_role(role)
         .enable_external_agents(false)
         .register_exec_tools(false);
+    let run_id = usage
+        .correlation_id
+        .as_ref()
+        .map(|job_id| format!("run-{job_id}"));
     if let Some(job_id) = usage.correlation_id {
         runtime = runtime.with_usage_correlation(job_id);
     }
@@ -417,6 +421,9 @@ async fn run_in_workspace(
         runtime = runtime.with_ledger(ledger);
     }
     let mut session = runtime.build()?;
+    if let Some(run_id) = run_id {
+        session.agent.set_next_run_id(run_id);
+    }
     let mut sink = discard_event;
     session
         .agent
@@ -620,6 +627,7 @@ mod tests {
         assert_eq!(task.kind, "worker");
         assert_eq!(task.correlation_id.as_deref(), Some("job-7"));
         assert_eq!(task.parent_task_id, None, "a job id is not a task id");
+        assert_eq!(task.run_id.as_deref(), Some("run-job-7"));
         assert_eq!(task.status, "completed");
         assert_eq!(task.requests.len(), 1);
         assert_eq!(task.requests[0].provider_id, "native_test");

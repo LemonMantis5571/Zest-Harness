@@ -3,8 +3,11 @@ title: Terminal CLI (zest)
 summary: The zest binary: an interactive terminal chat with y/N approvals, auth and usage reports, a live doctor check, and zest run --jsonl for one machine-readable, deny-only agent turn.
 paths:
   - crates/cli/src/main.rs
+tests:
+  - crates/cli/tests/run_e2e.rs
 verify:
   - cargo test -p zest --bin zest
+  - cargo test -p zest --test run_e2e
   - cargo run -p zest -- --help
   - cargo run -p zest -- run --help
   - cargo tree -p zest --edges normal
@@ -51,8 +54,14 @@ verify:
     `--provider`, `--model` and `--effort` are optional, and effort falls back
     to `ZEST_EFFORT` and then `high`.
   - stdout carries JSON lines only. Config lint warnings go to stderr.
+  - `--usage-file PATH` uses a separate local ledger instead of the account
+    ledger. This lets fixture tests and integrations keep their usage isolated.
+    The trace setting still comes from `[usage] task_traces`.
 
 ### zest-jsonl-v1 events (one JSON object per line, `kind` first)
+
+Every event includes the same `run_id`, also used by optional local task
+traces. Each invocation gets a new ID; it contains no prompt or project path.
 
 | kind | fields |
 | --- | --- |
@@ -97,6 +106,10 @@ Exit codes:
 
 - `cargo test -p zest --bin zest` runs the `parse_question_answers` unit tests,
   together with the `serve::mcp` response-size tests.
+- `cargo test -p zest --test run_e2e` exercises the real binary against a local
+  streaming provider. It checks tool rounds, denied writes, failed turns,
+  matching run IDs on every event, and content-free saved traces. It spends no
+  provider quota and uses a disposable usage ledger.
 - For the protocol, run
   `cargo run -p zest -- run --jsonl -- "list the files here"`. This uses a real
   provider and quota. Check that the first line is `session` and the last is
