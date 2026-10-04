@@ -71,6 +71,9 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
   (throughput headroom, never plan quota).
 - ChatGPT Codex (`codex_oauth` kind) runs in Zest's loop; its session is refreshed
   and re-stored before each turn and Rig only ever receives an access token.
+- `resume_support` is consulted by chat restart reconciliation only after the
+  provider builds successfully. Recovery records why an old run cannot attach;
+  existing adapters remain unsupported and never replay a stale cursor.
 
 ## How it works
 
