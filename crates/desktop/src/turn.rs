@@ -1007,6 +1007,119 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn idle_compaction_joins_the_last_successful_desktop_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zest_core::{Agent, Completion, Provider, ToolRegistry, TurnRequest};
+
+        struct FixtureProvider(AtomicUsize);
+        #[async_trait]
+        impl Provider for FixtureProvider {
+            fn id(&self) -> &str {
+                "fixture"
+            }
+            fn default_model(&self) -> &str {
+                "fixture-model"
+            }
+            fn auth_status(&self) -> AuthStatus {
+                AuthStatus::Ready { account: None }
+            }
+            async fn stream_turn(
+                &self,
+                _: &TurnRequest,
+                on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+            ) -> zest_core::Result<Completion> {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 2 {
+                    return Err(HarnessError::Other("fixture failure".into()));
+                }
+                on_event(StreamEvent::Text("fixture answer"));
+                Ok(Completion {
+                    content: vec![json!({"type":"text", "text":"fixture answer"})],
+                    stop_reason: Some("end_turn".into()),
+                    usage: Default::default(),
+                    usage_available: true,
+                    limits: None,
+                    served_model: None,
+                    provider_session: None,
+                })
+            }
+        }
+
+        let root = ScratchDir::new("zest-idle-compaction-");
+        let mut usage = Ledger::load_from(root.join("fixture-usage.json"));
+        usage.set_task_traces(true);
+        let ledger = Arc::new(Mutex::new(usage));
+        let mut session = crate::session::test_session("fixture-thread", root.to_path_buf());
+        session.provider_id = "fixture".into();
+        session.model = "fixture-model".into();
+        session.thread = Thread::new().with_provider("fixture");
+        session.thread_id = session.thread.id.clone();
+        let thread_id = session.thread_id.clone();
+        session.agent = Agent::new(
+            Arc::new(FixtureProvider(AtomicUsize::new(0))),
+            ToolRegistry::new(),
+        )
+        .with_ledger(ledger.clone());
+        let sessions = Arc::new(SessionController::new());
+        sessions.set_session(session).unwrap();
+        let state = AppState {
+            sessions,
+            browser: Arc::new(BrowserHost::new()),
+            login: Mutex::new(None),
+            persist: Mutex::new(HashMap::new()),
+            workspace_root: Mutex::new(Some(root.to_path_buf())),
+            workspace_config: Mutex::new(Some(Config::default())),
+            policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
+            jobs: Arc::new(JobRegistry::new()),
+            ledger: ledger.clone(),
+            config_edit: Mutex::new(()),
+            chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
+            delegations: Arc::new(DelegationCoordinator::with_ledger(ledger.clone())),
+        };
+        let sink = RecordingSink::default();
+        for text in ["first", "second", "failed turn"] {
+            run_with_sink_internal(&sink, &state, text.into(), None, None)
+                .await
+                .unwrap();
+        }
+        let completed_run = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ChatEvent::Done { turn_id, .. } => Some(turn_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            sink.events.lock().unwrap().last(),
+            Some(ChatEvent::Error { .. })
+        ));
+        assert!(!state.sessions.is_busy().unwrap());
+        let outcome = crate::compact_context_inner(&state).await.unwrap();
+        assert!(!outcome.pruned_only);
+        let saved = ThreadStore::open(&root).unwrap().load(&thread_id).unwrap();
+        assert_eq!(saved.agent_messages.len(), 2);
+        assert!(saved
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.kind == ThreadCheckpointKind::Compaction));
+        let usage = ledger.lock().unwrap();
+        let maintenance = usage.tasks().last().unwrap();
+        assert_eq!(maintenance.kind, "compaction");
+        assert_eq!(maintenance.status, "completed");
+        assert_eq!(maintenance.requests.len(), 1);
+        assert_eq!(maintenance.run_id.as_deref(), Some(completed_run.as_str()));
+        let parent = usage
+            .tasks()
+            .iter()
+            .find(|task| task.run_id.as_ref() == Some(&completed_run) && task.kind == "turn")
+            .unwrap();
+        assert_eq!(maintenance.parent_task_id.as_ref(), Some(&parent.task_id));
+    }
+
     #[test]
     fn event_sink_preserves_event_order_without_tauri() {
         let sink = RecordingSink::default();

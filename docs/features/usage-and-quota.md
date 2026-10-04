@@ -62,6 +62,8 @@ Provider-facing rules and sources are documented in [QUOTA.md](../QUOTA.md).
   traces without a run ID remain readable. `zest usage --tasks` shows both IDs.
   Starting a new host run clears stale correlation left by a dropped turn, so
   a side question during preparation cannot join an earlier aborted run.
+  Idle desktop compaction uses the last successful turn's saved lifecycle ID,
+  not a fresh maintenance ID or a later failed turn's ID.
 - Day boundaries use the webview's timezone, sent once at startup
   (`set_local_offset`); the CLI stays on UTC.
 - Headroom is overwritten only when a provider actually reported limits.

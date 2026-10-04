@@ -6322,6 +6322,10 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
 /// a send or an approval, but it does not add a visible assistant answer.
 #[tauri::command]
 async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultView, String> {
+    compact_context_inner(&state).await
+}
+
+async fn compact_context_inner(state: &AppState) -> Result<CompactionResultView, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
@@ -6347,7 +6351,18 @@ async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultV
         return Err(error.to_string());
     }
 
-    let result = session.agent.compact_context().await;
+    let run_id = session
+        .thread
+        .events
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            ThreadEventKind::TurnCompleted { turn_id, status } if status == "completed" => {
+                Some(turn_id.clone())
+            }
+            _ => None,
+        });
+    let result = session.agent.compact_context_for_run(run_id).await;
     let output = match result {
         // Both paths rewrote history, so both need the same persistence handling.
         // The checkpoint written above is kept either way: the UI transcript

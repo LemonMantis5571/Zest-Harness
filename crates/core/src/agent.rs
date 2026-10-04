@@ -395,17 +395,38 @@ impl Agent {
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
+        self.compact_context_for_run(self.active_run_id.clone())
+            .await
+    }
+
+    /// Attribute maintenance after an idle host turn to that turn's durable ID.
+    pub async fn compact_context_for_run(
+        &mut self,
+        run_id: Option<String>,
+    ) -> Result<CompactionOutcome> {
         let task_id = new_id("task");
         let parent_task_id = self.active_usage_task_id.clone();
         let prior_task = self.active_usage_task_id.replace(task_id.clone());
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
+                let parent_task_id = parent_task_id.or_else(|| {
+                    let run_id = run_id.as_ref()?;
+                    ledger
+                        .tasks()
+                        .iter()
+                        .rev()
+                        .find(|task| {
+                            task.kind == self.usage_task_kind
+                                && task.run_id.as_ref() == Some(run_id)
+                        })
+                        .map(|task| task.task_id.clone())
+                });
                 ledger.begin_run_task(
                     task_id.clone(),
                     "compaction",
                     parent_task_id,
                     self.usage_task_correlation_id.clone(),
-                    self.active_run_id.clone(),
+                    run_id,
                 );
             }
         }
