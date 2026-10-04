@@ -13,6 +13,7 @@ pub mod btw;
 pub mod cancel;
 pub mod chat_persistence;
 pub mod codex_oauth;
+pub mod command_receipts;
 pub mod commands;
 pub mod config;
 pub mod config_edit;

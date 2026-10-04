@@ -57,7 +57,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 | [Usage, cost and provider quota](usage-and-quota.md) | See tokens, estimated cost and cache reuse across Zest and your coding CLIs, and check live limits or balance reported by each provider. | 5 test files, 8 commands |
 | [Workbench panel](workbench-panel.md) | A side panel for a project chat with Activity, Outline, Delegation, and Files tabs, including a quick workspace check, checkpoint rewind, and a read-only file browser. | 1 test file, 3 commands |
 | [Branch changes and diff review](workspace-changes-and-review.md) | A project chat shows what changed on its branch since the chat started and opens a review pane with a cleaned-up or raw diff, with secret files redacted. | 4 test files, 4 commands |
-| [zest serve (headless coordinator)](zest-serve.md) | A windowless daemon that owns one project's delegation queue and exposes delegation_* tools over authenticated MCP on loopback, so a bot or script can create, approve and apply feature cards. | 1 test file, 3 commands |
+| [zest serve (headless coordinator)](zest-serve.md) | A windowless daemon that owns one project's delegation queue and exposes delegation_* tools over authenticated MCP on loopback, so a bot or script can create, approve and apply feature cards. | 1 test file, 4 commands |
 <!-- feature-index:end -->
 
 ## Writing an entry

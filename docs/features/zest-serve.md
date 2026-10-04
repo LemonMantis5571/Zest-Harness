@@ -4,11 +4,13 @@ summary: A windowless daemon that owns one project's delegation queue and expose
 paths:
   - crates/cli/src/serve.rs
   - crates/cli/src/serve/mcp.rs
+  - crates/core/src/command_receipts.rs
 tests:
   - crates/cli/tests/serve_e2e.rs
 verify:
   - cargo test -p zest --test serve_e2e
   - cargo test -p zest --bin zest serve::mcp
+  - cargo test -p zest-core --lib command_receipts::tests
   - cargo test -p zest-coordinator
 ---
 
@@ -60,6 +62,20 @@ chat.
     `{"kind":"externalAgent","agentId"}`.
   - `reviewer` is `{"kind":"sameAsWorker"}` or
     `{"kind":"target","target":{...}}`.
+- **Command receipts.** All mutating tools accept an optional `commandId`
+  (1–200 ASCII letters, digits, `_` or `-`). Repeating the same command ID and
+  arguments returns the original response, including errors, even after a
+  daemon restart. A different command or arguments returns `-32010`.
+  `.zest/command-receipts/` stores a hash of the arguments and the response;
+  the request arguments themselves are not stored. Exact responses can include
+  card titles and objectives, so receipts are private local state, not
+  content-free usage traces. An internal `.gitignore`
+  keeps receipts untracked even in projects without Zest ignore rules.
+  Receipts remain until removed.
+  Intent is saved before execution. If a crash prevents saving the outcome,
+  retry returns `-32011` and never executes again: inspect the job before
+  deciding whether to issue a new command. Calls without `commandId` retain
+  their existing coordinator behavior and approval requirements.
 - **Gated mode.** Create stays `awaiting_approval` and never writes a dispatch
   receipt. The host calls `delegation_approve`, polls until `ready_to_apply`,
   and then calls `delegation_apply`, which returns `accepted` or
@@ -87,7 +103,9 @@ chat.
 6. It runs `axum::serve(mcp::router(..))`.
 
 In `mcp.rs`, `mcp_post` runs `authorize` then `check_origin`, then dispatches to
-`call_tool`. `call_tool` maps each tool to a coordinator method. `tool_defs`
+`call_tool`. Mutations with a command ID run through `CommandReceiptStore`
+under the project coordinator lock and a receipt mutex; `call_tool_inner`
+maps each tool to a coordinator method. `tool_defs`
 changes the `delegation_create` description by policy. `tool_content` returns
 the serialized result, or, above 256 KiB, a small `response_too_large` JSON
 error with `isError: true` so the host always receives valid JSON.
@@ -99,6 +117,8 @@ error with `isError: true` so the host always receives valid JSON.
   - a missing token is rejected;
   - the gated create, idempotent create, approve, artifact, apply and repeated
     apply steps;
+  - exact approval replay after work progresses, conflicting command IDs, and
+    exact apply replay after a daemon restart;
   - trusted auto-apply;
   - `--init` bootstrapping.
 - CI runs this in the `cli-headless` job of `.github/workflows/linux-verify.yml`
