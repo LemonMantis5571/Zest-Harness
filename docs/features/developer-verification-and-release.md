@@ -3,6 +3,8 @@ title: Verification gates and release tooling
 summary: The local and CI gates (npm run verify, release-verify), the output-artifact and feature-map checks, git hooks, UI lint rules, and the release packaging scripts.
 paths:
   - crates/desktop/build.rs
+  - crates/desktop/windows-common-controls.rc
+  - crates/desktop/windows-common-controls.manifest
   - scripts/dev-verify.mjs
   - scripts/release-verify.ps1
   - scripts/release-verify.sh
@@ -63,6 +65,8 @@ verify:
 - Binding drift is checked only in release-verify; regenerate with `cargo test -p zest-desktop --features export-bindings --lib export_bindings`.
 - Windows library tests embed the app's Common Controls dependency too,
   so tests that drive the real turn and compaction handlers can start normally.
+  A shared resource is linked into every artifact on both MSVC and GNU targets;
+  Tauri's separate binary resource still supplies icons and version metadata.
 - In `release-verify.sh`, every step goes through `step`, which captures the exit code with `set +e`; an `if cmd; then` wrapper once let a failing `cargo test` pass.
 - Playwright reuses a dev server already on port 1420 outside CI.
 - Stale comments: the `release-verify.ps1` header mentions sidecar fetching (there is no sidecar step), and `build-signed.ps1` mentions a `postbuild` hook that `crates/desktop/package.json` does not define.
