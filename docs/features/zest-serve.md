@@ -28,6 +28,8 @@ chat.
   - `--init` does three things: it creates a missing directory, runs `git init`
     if needed, and makes an empty `zest init` commit when there is no HEAD. It
     never writes `zest.toml`.
+    On Unix, newly created project directories and their containing directory
+    are flushed before the daemon can accept commands.
 - **Token.** `ZEST_SERVE_TOKEN` is required. It must have at least 32
   characters and no whitespace. The token is read only from the environment and
   never printed.

@@ -53,6 +53,48 @@ pub fn atomic_write_json<T: serde::Serialize>(target: &Path, value: &T) -> std::
     atomic_write(target, &body)
 }
 
+/// Create a project root and persist newly created directory entries on Unix.
+/// Stop at the first existing directory, so existing projects do not require
+/// read access to ancestors above them. Call before accepting receipt-backed
+/// commands in a newly initialized project.
+pub fn create_dir_all_durable(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let absolute = std::env::current_dir()?.join(path);
+        let mut missing = Vec::new();
+        let mut existing = absolute.as_path();
+        loop {
+            match std::fs::metadata(existing) {
+                Ok(metadata) if metadata.is_dir() => break,
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "project ancestor is not a directory",
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(existing.to_path_buf());
+                    existing = existing.parent().ok_or(error)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        std::fs::create_dir_all(&absolute)?;
+        if !missing.is_empty() {
+            for directory in missing
+                .iter()
+                .map(PathBuf::as_path)
+                .chain(std::iter::once(existing))
+            {
+                std::fs::File::open(directory)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)
+}
+
 /// Persist a receipt before a side effect may run. On Unix, syncing only the
 /// file is insufficient: the rename and newly created parent directories must
 /// reach disk too. `durability_root` is the existing project directory; ancestors
@@ -282,6 +324,19 @@ mod tests {
         let completed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(completed, serde_json::json!({"state":"completed"}));
+    }
+
+    #[test]
+    fn durable_directory_creation_preserves_existing_project_contents() {
+        let dir = scratch("durable-directory");
+        let project = dir.join("new-parent").join("project");
+        create_dir_all_durable(&project).unwrap();
+        assert!(project.is_dir());
+        let marker = project.join("keep.txt");
+        std::fs::write(&marker, "keep me").unwrap();
+        create_dir_all_durable(&project).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "keep me");
+        assert!(create_dir_all_durable(&project.join("keep.txt").join("invalid")).is_err());
     }
 
     #[cfg(unix)]
