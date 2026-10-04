@@ -110,6 +110,8 @@ Exit codes:
   streaming provider. It checks tool rounds, denied writes, failed turns,
   matching run IDs on every event, and content-free saved traces. It spends no
   provider quota and uses a disposable usage ledger.
+  The local provider fixture explicitly uses blocking accepted connections
+  with read/write deadlines, including a delayed-request regression on Windows.
 - For the protocol, run
   `cargo run -p zest -- run --jsonl -- "list the files here"`. This uses a real
   provider and quota. Check that the first line is `session` and the last is

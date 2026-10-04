@@ -28,6 +28,7 @@ fn provider_fixture(
                     Err(error) => panic!("provider fixture accept failed: {error}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
@@ -126,6 +127,33 @@ fn events(output: &Output) -> Vec<Value> {
                 .unwrap_or_else(|error| panic!("invalid JSONL: {line}: {error}"))
         })
         .collect()
+}
+
+#[test]
+fn provider_fixture_accepts_delayed_request_bytes() {
+    let (url, server) = provider_fixture(vec![(200, "fixture response".into())]);
+    let address = url
+        .strip_prefix("http://")
+        .unwrap()
+        .strip_suffix("/v1")
+        .unwrap();
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    stream
+        .write_all(
+            b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 17\r\n\r\n{\"delayed\":true}\n",
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert_eq!(response, "HTTP/1.1 200 Fixture\r\nContent-Type: text/event-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfixture response");
+    assert_eq!(server.join().unwrap(), vec![json!({"delayed":true})]);
 }
 
 #[test]
