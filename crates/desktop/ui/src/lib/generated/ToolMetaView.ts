@@ -3,4 +3,4 @@
 /**
  * Desktop wire view of core `ToolMetadata` (ts-rs exportable).
  */
-export type ToolMetaView = { "kind": "delegation", provider_id: string, model: string, diff?: string, job_id?: string, stage?: string, attempt?: number, review_status?: string, };
+export type ToolMetaView = { "kind": "html_document", title: string, html: string, } | { "kind": "delegation", provider_id: string, model: string, diff?: string, job_id?: string, stage?: string, attempt?: number, review_status?: string, };

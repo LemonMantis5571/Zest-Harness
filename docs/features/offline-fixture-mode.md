@@ -19,6 +19,7 @@ verify:
 # Offline fixture mode
 
 ## Behavior
+- The `html-artifacts` scenario exercises publication and restored interactive HTML. A dev-only token endpoint serves bounded source with the isolated response CSP; it is not a production artifact store or native IPC proof.
 - `npm run ui:dev`, then `http://127.0.0.1:1420/?fixture=1`: the full chat shell runs with no Tauri, provider, or credentials. `?fixture` is honoured only by the Vite dev server (`import.meta.env.DEV`); release builds drop the module.
 - On load the fixture starts session `session-fixture` / thread `fixture` and streams one canned turn: user "What's in README.md?", a thinking delta, four `read_file` tool calls (exercising run grouping), then a word-by-word reply. A second thread, `fixture-local` (provider `ollama`), shows as busy with a `git_status` tool for about 9 s to exercise the sidebar activity mark.
 - Sending a message echoes it: `Fixture echo: <text>`. A `followup`/`steer`/`inject` target queues it (`input_queued`) instead, in every scenario, including during a live `split-streaming` turn.
@@ -43,6 +44,7 @@ verify:
 - `npm run ui:e2e` or one spec: `npm run ui:e2e -- split-workspace`. Every spec except `streaming-performance` opens `/?fixture=1`; that one loads the standalone harness `e2e/fixtures/streaming.html`. Needs `npx playwright install chromium` once.
 
 ## Adding fixture behavior for a new e2e test
+- GPT-6 fixture choices carry their published 1,050,000-token context capacity and image capability, so model-picker tests exercise the displayed metadata as well as saved selections.
 - New backend method: implement it in `createFixtureBackend` (TypeScript requires it once it is on `DesktopBackend`). Prefer deterministic in-memory state over `notAvailable`.
 - New situation: add the name to the `FixtureScenario` union and to the `scenarioFromLocation` check, branch on `scenario` in the methods involved, cover it in `fixtureBackend.test.ts` via `createFixtureBackend({ scenario })`, and open `/?fixture=1&scenario=<name>` from the spec.
 - Preference-dependent UI can be pinned with `page.addInitScript` writing `localStorage` (the split spec sets `zest.responseBlockStreaming.v1`).

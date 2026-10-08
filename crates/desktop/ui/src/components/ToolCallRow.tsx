@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 
 import { DiffPreview } from "@/components/CodeBlock";
+import { HtmlArtifactCard } from "@/components/HtmlArtifactCard";
+import { htmlDocumentFromMetadata } from "@/lib/htmlArtifacts";
 import { Button } from "@/components/ui/button";
 import {
   approvalTitle,
@@ -206,6 +208,9 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
       </div>
     );
   }
+
+  const htmlDocument = tool.status === "done" ? htmlDocumentFromMetadata(tool.metadata) : null;
+  if (htmlDocument) return <HtmlArtifactCard {...htmlDocument} />;
 
   const delegation =
     tool.metadata?.kind === "delegation" ? tool.metadata : null;

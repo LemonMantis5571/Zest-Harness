@@ -99,6 +99,7 @@ pub struct RuntimeBuilder {
     questioner: Option<Arc<dyn Questioner>>,
     policy: Option<Arc<Mutex<ApprovalPolicy>>>,
     browser: Option<Arc<dyn BrowserAdapter>>,
+    html_artifacts: bool,
     enable_external_agents: bool,
     parent_thread_id: Option<String>,
     register_write: bool,
@@ -125,6 +126,7 @@ impl RuntimeBuilder {
             questioner: None,
             policy: None,
             browser: None,
+            html_artifacts: false,
             enable_external_agents: true,
             parent_thread_id: None,
             register_write: true,
@@ -207,6 +209,12 @@ impl RuntimeBuilder {
     /// desktop dependency or advertise a tool they cannot execute.
     pub fn with_browser_adapter(mut self, browser: Arc<dyn BrowserAdapter>) -> Self {
         self.browser = Some(browser);
+        self
+    }
+
+    /// Desktop artifact rendering; headless callers do not advertise a viewer.
+    pub fn with_html_artifacts(mut self, enabled: bool) -> Self {
+        self.html_artifacts = enabled;
         self
     }
 
@@ -428,6 +436,14 @@ impl RuntimeBuilder {
             base_system.push_str("\n\n");
             base_system.push_str(LOCAL_BROWSER_SYSTEM);
         }
+        if is_parent && self.html_artifacts {
+            base_system.push_str("\n\n");
+            base_system.push_str(if provider_owns_agent_loop {
+                "For an interactive visualization in this chat, emit a complete fenced block with language zest-html, containing self-contained HTML with inline CSS/JavaScript and data images. No external resources, network, or local-file access is available in the viewer. Ordinary html fences remain code. The user opens the sandboxed card. This CLI path cannot run Zest's screenshot preview; do not claim it was previewed."
+            } else {
+                "For an interactive visualization in chat, build self-contained HTML with inline CSS/JavaScript and embedded data images. Use html_preview when available, inspect its real screenshot and diagnostics, correct errors, then publish with html_render. The user opens the isolated card. No external resources, network, or local-file access is available. If preview is unavailable or denied, state that explicitly; publication is still possible."
+            });
+        }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
         let skills = Arc::new(RwLock::new(SkillSet::discover()));
@@ -532,6 +548,9 @@ impl RuntimeBuilder {
         }
         if is_parent && self.questioner.is_some() && !provider_owns_agent_loop {
             register_question_tool(&mut tools);
+        }
+        if is_parent && self.html_artifacts && !provider_owns_agent_loop {
+            crate::tools::html::register_html_tools(&mut tools, self.register_exec);
         }
 
         // Oversized results go to `.zest/spill/<chat-id>/` and the model gets a
@@ -858,6 +877,35 @@ mod tests {
             .agent
             .system_text()
             .contains("# Asking the user"));
+    }
+
+    #[test]
+    fn html_tools_append_only_in_enabled_parent_runtimes() {
+        let dir = two_provider_dir("html-runtime");
+        let make = |role, enabled, exec| {
+            RuntimeBuilder::new(&dir)
+                .with_config(Config::find(&dir).unwrap())
+                .with_provider("codex")
+                .with_html_artifacts(enabled)
+                .with_role(role)
+                .enable_external_agents(false)
+                .register_exec_tools(exec)
+                .build()
+                .unwrap()
+        };
+        let headless = make(RuntimeRole::Parent, false, false);
+        let parent = make(RuntimeRole::Parent, true, false);
+        let mut expected = headless.agent.tool_names();
+        expected.push("html_render");
+        assert_eq!(parent.agent.tool_names(), expected);
+        assert!(parent.agent.system_text().contains("html_render"));
+        assert!(!parent.agent.tool_names().contains(&"html_preview"));
+        let worker = make(RuntimeRole::DelegationWorker, true, false);
+        assert!(!worker.agent.tool_names().contains(&"html_render"));
+        assert!(!worker
+            .agent
+            .system_text()
+            .contains("interactive visualization"));
     }
 
     /// The environment block names the git branch, so it differs between two

@@ -54,7 +54,11 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
   just `default_model`; the default is always present and first. Unknown models
   or efforts outside a model's list are rejected before a turn spends quota.
 - Efforts: `low medium high xhigh max`, plus `none` only for `gpt-6-sol` /
-  `gpt-6-luna`. OpenAI-compatible advertises no effort control
+  `gpt-6-luna`. GPT-6.1 Sol and GPT-6 Astra support the five standard levels,
+  vision and a 1,050,000-token context window, but reject `none`.
+  Haiku 5.5 accepts adaptive thinking and effort and has a 1M window;
+  older Haiku models remain excluded from the native builtin list.
+  OpenAI-compatible advertises no effort control
   (`EffortPolicy::Unsupported`). UI aliases normalize via `normalize_effort`
   (`med` → `medium`, `extra high` → `xhigh`, unknown → `high`).
 - Anthropic: always streams, sends `thinking` and `output_config.effort`, retries
@@ -114,8 +118,13 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
 - `rig_convert` must set both Rig call ids from the provider's id; a synthetic
   id on the wire makes the API reject the `tool_result`. It errors rather than
   dropping an unrepresentable block.
-- `CODEX_KNOWN_MODELS` mirrors `MODEL_LABELS` in `ui/src/lib/models.ts`; keep
+- `CODEX_KNOWN_MODELS` mirrors `CODEX_LABELS` in `ui/src/lib/models.ts`; keep
   them in sync.
 - `supports_prompt_cache` defaults to false. Sending `cache_control` to a non-
   Anthropic endpoint is at best ignored.
 - `quota.rs` deliberately keeps its own match over `ProviderConfig`.
+- GPT-6.1 Sol and GPT-6 Astra require Responses for tool calling, so their
+  builtin availability is on the Codex transports, not the Chat Completions-only
+  OpenAI-compatible adapter. Current model/compatibility references:
+  [OpenAI](https://developers.openai.com/api/docs/guides/latest-model),
+  [Claude](https://platform.claude.com/docs/en/models/overview).

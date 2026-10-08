@@ -366,6 +366,11 @@ async function click(name, opts) {
   };
 }
 
+function htmlFrames() {
+  const matches = (frame) => frame !== page.mainFrame() && /zest-html|__zest_html/.test(frame.url());
+  return page.frames().filter((frame) => matches(frame) && !frame.childFrames().some(matches));
+}
+
 async function inspect(probe = "state") {
   switch (probe) {
     case "state":
@@ -374,6 +379,13 @@ async function inspect(probe = "state") {
       return { messages: await messages() };
     case "code-blocks":
       return { codeBlocks: await codeBlocks() };
+    case "html": {
+      const artifacts = [];
+      for (const frame of htmlFrames()) {
+        artifacts.push({ url: frame.url(), yaml: await frame.locator("body").ariaSnapshot() });
+      }
+      return { artifacts };
+    }
     case "meter":
       return { meter: await meter() };
     case "composer":
@@ -525,6 +537,19 @@ async function run(command, args, opts) {
       return settle(3_000);
     case "click":
       return click(args.join(" "), opts);
+    case "html-click":
+    case "html-value": {
+      const frames = htmlFrames();
+      const frame = frames[Number(opts.nth ?? 0)];
+      if (!frame) throw fail("No open HTML artifact", "Open an artifact first; inspect html lists active frames.");
+      if (command === "html-click") await frame.getByRole("button", { name: args.join(" "), exact: true }).click();
+      else {
+        const [label, ...value] = args;
+        if (!label || !value.length) throw fail("html-value needs LABEL VALUE");
+        await frame.getByLabel(label, { exact: true }).fill(value.join(" "));
+      }
+      return { ...(await inspect("html")), ...(await settle(3_000)) };
+    }
     case "type":
       await page.keyboard.type(args.join(" "));
       return {};

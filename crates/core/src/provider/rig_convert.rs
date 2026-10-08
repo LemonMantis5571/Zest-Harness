@@ -24,9 +24,11 @@
 //! altering the middle of a history invalidates every later thinking block, and
 //! the resulting 400 arrives turns later with nothing pointing back here.
 
+use base64::Engine;
 use rig_core::completion::message::{
-    AssistantContent, Message as RigMessage, ProviderCallId, Reasoning, ReasoningContent, Text,
-    ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, DocumentSourceKind, Image, ImageMediaType, Message as RigMessage,
+    ProviderCallId, Reasoning, ReasoningContent, Text, ToolCall, ToolCallId, ToolFunction,
+    ToolResult, ToolResultContent, UserContent,
 };
 use serde_json::Value;
 
@@ -246,7 +248,7 @@ fn tool_call(block: &Value) -> Result<ToolCall, ConvertError> {
     })
 }
 
-fn tool_result(block: &Value) -> Result<ToolResult, ConvertError> {
+pub(super) fn tool_result(block: &Value) -> Result<ToolResult, ConvertError> {
     let id = block
         .get("tool_use_id")
         .and_then(Value::as_str)
@@ -258,20 +260,80 @@ fn tool_result(block: &Value) -> Result<ToolResult, ConvertError> {
         )
     })?;
 
-    // Zest's own producer always writes a bare string body. A block-array body
-    // belongs to a path that reads it back defensively, and guessing at its
-    // shape here would paper over a real mismatch.
-    let text = match block.get("content") {
-        Some(Value::String(body)) => body.clone(),
-        Some(other) => other.to_string(),
-        None => String::new(),
+    let content = match block.get("content") {
+        Some(Value::String(body)) => vec![ToolResultContent::Text(Text::new(body.clone()))],
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .map(|block| match block_type(block) {
+                "text" => block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| ToolResultContent::Text(Text::new(text)))
+                    .ok_or_else(|| {
+                        ConvertError::new(
+                            "tool_result",
+                            "nested text must have a string text field",
+                        )
+                    }),
+                "image" => tool_result_image(block).map(ToolResultContent::Image),
+                other => Err(ConvertError::new(
+                    "tool_result",
+                    format!("unsupported nested content block `{other}`"),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => vec![ToolResultContent::Text(Text::new(""))],
+        Some(_) => {
+            return Err(ConvertError::new(
+                "tool_result",
+                "content must be a string or an array of text and image blocks",
+            ));
+        }
     };
 
     Ok(ToolResult {
         call,
         provider: ProviderCallId::new(id),
         name: String::new(),
-        content: vec![ToolResultContent::Text(Text::new(text))],
+        content,
+    })
+}
+
+fn tool_result_image(block: &Value) -> Result<Image, ConvertError> {
+    let source = block
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ConvertError::new("image", "tool-result image source must be an object"))?;
+    if source.get("type").and_then(Value::as_str) != Some("base64") {
+        return Err(ConvertError::new(
+            "image",
+            "unsupported tool-result image source; only base64 is supported",
+        ));
+    }
+    if source.get("media_type").and_then(Value::as_str) != Some("image/png") {
+        return Err(ConvertError::new(
+            "image",
+            "unsupported tool-result image media type; only image/png is supported",
+        ));
+    }
+    let data = source
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ConvertError::new("image", "base64 image data must be a string"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| ConvertError::new("image", "tool-result image data is invalid base64"))?;
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(ConvertError::new(
+            "image",
+            "tool-result image data is not a PNG",
+        ));
+    }
+    Ok(Image {
+        data: DocumentSourceKind::Base64(data.to_string()),
+        media_type: Some(ImageMediaType::PNG),
+        detail: None,
+        additional_params: None,
     })
 }
 
@@ -381,6 +443,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZpVYAAAAASUVORK5CYII=";
+
+    fn screenshot() -> Value {
+        json!({"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":PNG}})
+    }
+
     fn user(blocks: Vec<Value>) -> Message {
         Message::user_blocks(blocks)
     }
@@ -459,6 +527,158 @@ mod tests {
             result.content,
             vec![ToolResultContent::Text(Text::new("fn main() {}"))]
         );
+    }
+
+    #[test]
+    fn png_tool_results_keep_parallel_ids_text_and_native_image_blocks() {
+        let blocks = vec![
+            json!({"type":"text", "text":"before\n"}),
+            screenshot(),
+            json!({"type":"text", "text":"after"}),
+            screenshot(),
+        ];
+        let messages = vec![
+            assistant(vec![
+                json!({"type":"tool_use", "id":"call_read", "name":"read_file", "input":{}}),
+                json!({"type":"tool_use", "id":"call_preview", "name":"html_preview", "input":{}}),
+            ]),
+            user(vec![
+                json!({"type":"tool_result", "tool_use_id":"call_read", "content":"read text"}),
+                json!({"type":"tool_result", "tool_use_id":"call_preview", "content":blocks}),
+            ]),
+            assistant(vec![json!({"type":"text", "text":"reviewed"})]),
+        ];
+        let (_, history) = to_rig_history(None, &messages).unwrap();
+        assert_eq!(history.len(), 3);
+        let RigMessage::User { content } = &history[1] else {
+            panic!("expected tool results in a user turn");
+        };
+        let UserContent::ToolResult(read) = &content[0] else {
+            panic!("expected the read result");
+        };
+        let UserContent::ToolResult(preview) = &content[1] else {
+            panic!("expected the preview result");
+        };
+        assert_eq!(read.wire_call_id(), "call_read");
+        assert_eq!(preview.call.as_str(), "call_preview");
+        assert_eq!(preview.wire_call_id(), "call_preview");
+        assert_eq!(preview.content.len(), 4);
+        assert_eq!(
+            preview.content[0],
+            ToolResultContent::Text(Text::new("before\n"))
+        );
+        assert_eq!(
+            preview.content[2],
+            ToolResultContent::Text(Text::new("after"))
+        );
+        for index in [1, 3] {
+            let ToolResultContent::Image(image) = &preview.content[index] else {
+                panic!("the PNG must remain typed image content");
+            };
+            assert_eq!(image.data, DocumentSourceKind::Base64(PNG.into()));
+            assert_eq!(image.media_type, Some(ImageMediaType::PNG));
+        }
+
+        let items: Vec<rig_core::providers::openai::responses_api::InputItem> =
+            history[1].clone().try_into().unwrap();
+        assert_eq!(
+            serde_json::to_value(items).unwrap(),
+            json!([
+                {"type":"function_call_output", "call_id":"call_read", "output":"read text", "status":"completed"},
+                {"type":"function_call_output", "call_id":"call_preview", "status":"completed", "output":[
+                    {"type":"input_text", "text":"before\n"},
+                    {"type":"input_image", "image_url":format!("data:image/png;base64,{PNG}"), "detail":"auto"},
+                    {"type":"input_text", "text":"after"},
+                    {"type":"input_image", "image_url":format!("data:image/png;base64,{PNG}"), "detail":"auto"}
+                ]}
+            ])
+        );
+
+        let native: rig_core::providers::anthropic::completion::Message =
+            history[1].clone().try_into().unwrap();
+        let wire = serde_json::to_value(native).unwrap();
+        assert_eq!(wire["content"][0]["tool_use_id"], "call_read");
+        assert_eq!(wire["content"][1]["tool_use_id"], "call_preview");
+        assert_eq!(wire["content"][1]["content"], json!(blocks));
+    }
+
+    #[test]
+    fn text_only_tool_output_keeps_its_exact_responses_wire_shape() {
+        let messages = vec![user(vec![json!({
+            "type":"tool_result", "tool_use_id":"call_text", "content":"{\"ok\":true}\n"
+        })])];
+        let (_, history) = to_rig_history(None, &messages).unwrap();
+        let items: Vec<rig_core::providers::openai::responses_api::InputItem> =
+            history[0].clone().try_into().unwrap();
+        let expected = json!([{
+            "type":"function_call_output", "call_id":"call_text", "output":"{\"ok\":true}\n", "status":"completed"
+        }]);
+        assert_eq!(
+            serde_json::to_vec(&items).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_and_unsupported_nested_tool_content_is_an_explicit_error() {
+        let invalid = vec![
+            (json!(null), "content must be"),
+            (json!(42), "content must be"),
+            (json!({"text":"not an array"}), "content must be"),
+            (json!([null]), "unsupported nested"),
+            (json!([{"type":"document"}]), "unsupported nested"),
+            (json!([{"type":"text"}]), "string text"),
+            (json!([{"type":"text", "text":42}]), "string text"),
+            (json!([{"type":"image"}]), "source must be an object"),
+            (
+                json!([{"type":"image", "source":[]}]),
+                "source must be an object",
+            ),
+            (json!([{"type":"image", "source":{}}]), "only base64"),
+            (
+                json!([{"type":"image", "source":{"type":"url", "url":"https://example.invalid/image.png"}}]),
+                "only base64",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "data":PNG}}]),
+                "only image/png",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":"image/jpeg", "data":PNG}}]),
+                "only image/png",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":42, "data":PNG}}]),
+                "only image/png",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":"image/png"}}]),
+                "data must be a string",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":42}}]),
+                "data must be a string",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"!!!"}}]),
+                "invalid base64",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":""}}]),
+                "not a PNG",
+            ),
+            (
+                json!([{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"aW1hZ2U="}}]),
+                "not a PNG",
+            ),
+        ];
+        for (content, reason) in invalid {
+            let messages = vec![user(vec![json!({
+                "type":"tool_result", "tool_use_id":"call_preview", "content":content
+            })])];
+            let error = to_rig_history(None, &messages).unwrap_err();
+            assert!(error.reason.contains(reason), "{content}: {error}");
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ const FILE_URL = new RegExp(
   "gi"
 );
 const MARKDOWN_IMAGE = /!\[([^\]]*)\]\(([^)]+)\)/g;
-const FENCE = /^\s*```/;
+const FENCE = /^\s*(`{3,}|~{3,})/;
 
 function unwrap(value: string): string {
   let text = value.trim();
@@ -149,15 +149,18 @@ export function hoistLocalImages(markdown: string): string {
   const lines = markdown.split("\n");
   const seen = new Set<string>();
   const out: string[] = [];
-  let inFence = false;
+  let closingFence: RegExp | null = null;
 
   for (const line of lines) {
-    if (FENCE.test(line)) {
-      inFence = !inFence;
+    if (closingFence) {
       out.push(line);
+      if (closingFence.test(line)) closingFence = null;
       continue;
     }
-    if (inFence) {
+    const opening = FENCE.exec(line);
+    if (opening) {
+      const fence = opening[1];
+      closingFence = new RegExp(`^\\s*${fence[0]}{${fence.length},}[ \\t\\r]*$`);
       out.push(line);
       continue;
     }

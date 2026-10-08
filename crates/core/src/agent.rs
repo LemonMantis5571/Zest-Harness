@@ -982,6 +982,7 @@ impl Agent {
                                                 job_id,
                                                 ..
                                             } => job_id.clone(),
+                                            crate::tools::ToolMetadata::HtmlDocument { .. } => None,
                                         });
                                 // A name the registry does not know is model
                                 // output, not tool metadata; do not keep it.
@@ -1010,7 +1011,7 @@ impl Agent {
                         {
                             if let Some(ledger) = &self.ledger {
                                 if let Ok(mut ledger) = ledger.lock() {
-                                    ledger.record_external(provider_id, usage.as_ref());
+                                    ledger.record_external(provider_id, usage.as_deref());
                                 }
                             }
                         }
@@ -1039,7 +1040,18 @@ impl Agent {
                             metadata: outcome.metadata,
                         });
                         // Live staged history keeps the real body for the model.
-                        results.push(tool_result(&call.id, &outcome.body, outcome.is_error));
+                        let supports_vision = self
+                            .provider
+                            .models()
+                            .iter()
+                            .any(|model| model.id == self.model && model.supports_vision);
+                        results.push(tool_result_with_images(
+                            &call.id,
+                            &outcome.body,
+                            outcome.is_error,
+                            &outcome.images,
+                            supports_vision,
+                        ));
                     }
 
                     // One user message carrying every result.
@@ -1250,6 +1262,7 @@ impl Agent {
                                 path,
                                 diff,
                                 metadata: outcome.metadata,
+                                images: outcome.images,
                             },
                             Err(message) => {
                                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1384,6 +1397,7 @@ impl Agent {
                 path: None,
                 diff: None,
                 metadata: None,
+                images: Vec::new(),
             },
             Ok(_) => ToolCallOutcome::failed("the user submitted an empty answer", ToolRisk::Read),
             Err(message) => ToolCallOutcome::failed(message, ToolRisk::Read),
@@ -1512,6 +1526,7 @@ impl Agent {
                 path,
                 diff,
                 metadata: outcome.metadata,
+                images: outcome.images,
             },
             Err(message) => {
                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1532,6 +1547,7 @@ struct ToolCallOutcome {
     path: Option<String>,
     diff: Option<String>,
     metadata: Option<crate::tools::ToolMetadata>,
+    images: Vec<crate::tools::outcome::ToolImage>,
 }
 
 fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
@@ -1547,8 +1563,31 @@ impl ToolCallOutcome {
             path: None,
             diff: None,
             metadata: None,
+            images: Vec::new(),
         }
     }
+}
+
+fn tool_result_with_images(
+    id: &str,
+    body: &str,
+    is_error: bool,
+    images: &[crate::tools::outcome::ToolImage],
+    supports_vision: bool,
+) -> serde_json::Value {
+    if images.is_empty() {
+        return tool_result(id, body, is_error);
+    }
+    if !supports_vision {
+        return tool_result(id, &format!("{body}\nScreenshot captured, but this selected model is not declared vision-capable; pixels were not sent."), is_error);
+    }
+    let mut content = vec![serde_json::json!({"type":"text","text":body})];
+    content.extend(
+        images
+            .iter()
+            .map(crate::tools::outcome::ToolImage::content_block),
+    );
+    serde_json::json!({"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error})
 }
 
 /// Short one-line preview for UI / CLI tool result markers.
@@ -1861,6 +1900,195 @@ mod tests {
         calls: AtomicUsize,
         fail_after: Option<usize>,
         stop: &'static str,
+    }
+
+    struct HtmlFixtureProvider(AtomicUsize);
+
+    #[async_trait]
+    impl Provider for HtmlFixtureProvider {
+        fn id(&self) -> &str {
+            "html-fixture"
+        }
+        fn default_model(&self) -> &str {
+            "vision-fixture"
+        }
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+        fn models(&self) -> Vec<ModelSpec> {
+            vec![ModelSpec {
+                id: self.default_model().into(),
+                efforts: Vec::new(),
+                context_window: 200_000,
+                supports_tools: true,
+                supports_vision: true,
+            }]
+        }
+        async fn stream_turn(
+            &self,
+            req: &TurnRequest,
+            _: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            let round = self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            let content = match round {
+                0 => vec![
+                    json!({"type":"tool_use","id":"preview","name":"html_preview","input":{"title":"Counter","html":"<button>Broken</button><script>throw new Error('fixture-preview-error')</script>"}}),
+                ],
+                1 => {
+                    let result = req
+                        .messages
+                        .last()
+                        .unwrap()
+                        .content
+                        .iter()
+                        .find(|b| b["tool_use_id"] == "preview")
+                        .unwrap();
+                    assert_eq!(result["is_error"], false, "preview failed: {result}");
+                    assert!(result["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("fixture-preview-error"));
+                    let pixels = &result["content"][1];
+                    assert_eq!(pixels["type"], "image");
+                    assert_eq!(pixels["source"]["media_type"], "image/png");
+                    assert!(pixels["source"]["data"].as_str().unwrap().len() > 1000);
+                    vec![
+                        json!({"type":"tool_use","id":"render","name":"html_render","input":{"title":"Fixed counter","html":"<button onclick=\"this.textContent=Number(this.textContent)+1\">0</button>"}}),
+                    ]
+                }
+                2 => {
+                    assert_eq!(
+                        req.messages.last().unwrap().content[0]["tool_use_id"],
+                        "render"
+                    );
+                    vec![
+                        json!({"type":"text","text":"Published the corrected interactive counter."}),
+                    ]
+                }
+                _ => panic!("unexpected fixture round"),
+            };
+            Ok(Completion {
+                content,
+                stop_reason: Some(if round < 2 { "tool_use" } else { "end_turn" }.into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Chromium/Edge; no provider credentials or paid calls"]
+    async fn html_agent_preview_receives_pixels_corrects_and_publishes_end_to_end() {
+        let provider = Arc::new(HtmlFixtureProvider(AtomicUsize::new(0)));
+        let mut tools = ToolRegistry::new();
+        crate::tools::html::register_html_tools(&mut tools, true);
+        let policy = Arc::new(Mutex::new(ApprovalPolicy::new(
+            crate::tools::approval::ApprovalMode::Bypass,
+        )));
+        let mut agent = Agent::new(provider.clone(), tools).with_policy(policy);
+        let mut published = None;
+        agent
+            .send(
+                "Build an interactive counter; preview it, correct errors, and publish",
+                &mut |event| {
+                    if let StreamEvent::ToolCallResult {
+                        metadata: Some(crate::tools::ToolMetadata::HtmlDocument { title, html }),
+                        ..
+                    } = event
+                    {
+                        published = Some((title, html));
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.0.load(AtomicOrdering::SeqCst), 3);
+        let (title, html) = published.unwrap();
+        assert_eq!(title, "Fixed counter");
+        assert!(html.contains("onclick"));
+        assert!(agent
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| b["tool_use_id"] == "preview" && b["content"][1]["type"] == "image"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Chromium/Edge; no provider credentials or paid calls"]
+    async fn html_agent_preview_session_grant_does_not_execute_a_changed_document() {
+        struct SessionApprover(AtomicUsize);
+        #[async_trait]
+        impl Approver for SessionApprover {
+            async fn decide(&self, _: &ApprovalRequest) -> ApprovalDecision {
+                if self.0.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    ApprovalDecision::AllowSession
+                } else {
+                    ApprovalDecision::Deny
+                }
+            }
+        }
+
+        let provider = Arc::new(RefusingProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let approver = Arc::new(SessionApprover(AtomicUsize::new(0)));
+        let mut tools = ToolRegistry::new();
+        crate::tools::html::register_html_tools(&mut tools, true);
+        let agent = Agent::new(provider, tools).with_approver(approver.clone());
+        let mut cards = Vec::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::ApprovalNeeded { path, .. } = event {
+                cards.push(path);
+            }
+        };
+        for (index, source) in [
+            "<button>1</button>",
+            "<button>1</button>",
+            "<button>2</button>",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = crate::anthropic::types::ToolUse {
+                id: format!("preview-{index}"),
+                name: "html_preview".into(),
+                input: json!({"title":"Counter","html":source}),
+            };
+            let prepared = agent.tools.prepare(&call.name, call.input.clone()).unwrap();
+            let result = agent.run_gated_call(&call, prepared, &mut sink, None).await;
+            if index < 2 {
+                assert!(!result.is_error, "{}", result.body);
+                assert_eq!(result.images.len(), 1);
+            } else {
+                assert!(result.is_error);
+                assert_eq!(result.body, "user denied permission to run `html_preview` (html_preview: Counter (18 bytes; offline))");
+                assert_eq!(result.images.len(), 0);
+            }
+        }
+        assert_eq!(approver.0.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(cards.len(), 2);
+        assert_ne!(cards[0], cards[1]);
+    }
+
+    #[test]
+    fn screenshot_feedback_preserves_text_shape_and_reports_nonvision_models() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZpVYAAAAASUVORK5CYII=";
+        let image = crate::tools::outcome::ToolImage::png(png.into()).unwrap();
+        assert_eq!(
+            tool_result_with_images("c", "text", false, &[], true),
+            tool_result("c", "text", false)
+        );
+        let result =
+            tool_result_with_images("c", "text", false, std::slice::from_ref(&image), false);
+        assert!(result["content"]
+            .as_str()
+            .unwrap()
+            .contains("pixels were not sent"));
+        let result = tool_result_with_images("c", "text", false, &[image], true);
+        assert_eq!(result["content"][1]["source"]["data"], png);
     }
 
     #[tokio::test]

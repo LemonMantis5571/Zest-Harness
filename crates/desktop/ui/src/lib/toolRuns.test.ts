@@ -105,6 +105,15 @@ describe("summarizeTools", () => {
 });
 
 describe("groupToolRuns", () => {
+  it("keeps HTML cards visible between folded lookup groups", () => {
+    const artifact = tool({ id: "html", name: "html_render", metadata: { kind: "html_document", title: "Counter", html: "<p>0</p>" } });
+    const tools = [...many(2), artifact, ...many(2).map((t) => ({ ...t, id: `after-${t.id}` }))];
+    const runs = groupToolRuns(tools);
+    assert.deepEqual(runs.map((run) => run.kind), ["group", "single", "group"]);
+    assert.equal(runs[1].kind === "single" && runs[1].tool.id, "html");
+    assert.deepEqual(runs.flatMap((run) => run.kind === "group" ? run.tools : [run.tool]), tools);
+  });
+
   it("leaves a single call as a row", () => {
     const runs = groupToolRuns(many(1));
     assert.equal(runs.length, 1);

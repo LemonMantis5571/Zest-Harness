@@ -14,6 +14,7 @@ import { runFixtureStream } from "./fixture.ts";
 import { safeMarkdownFilename } from "./markdownExport.ts";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT } from "./models.ts";
 import { matchExcerpt } from "./commandPaletteSearch.ts";
+import { htmlFilename, isolatedHtml, parseHtmlDocument, type HtmlDocument, type PreparedHtmlView } from "./htmlArtifacts.ts";
 import {
   THREAD_OLDER_USER_TURNS,
   THREAD_WINDOW_USER_TURNS,
@@ -42,6 +43,7 @@ import type {
   OlderThreadMessages,
   PendingInputAttachment,
   SessionInfo,
+  ToolPart,
   ThreadSummary,
   ChatSearchHit,
   WallpaperFilterId,
@@ -51,9 +53,9 @@ import type {
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
   id: m.id,
   efforts: ["low", "medium", "high", "xhigh", "max"],
-  contextWindow: 256000,
+  contextWindow: m.id.startsWith("gpt-6") ? 1_050_000 : 256000,
   supportsTools: true,
-  supportsVision: false,
+  supportsVision: m.id.startsWith("gpt-6"),
 }));
 const CATALOGUE_MODELS = [
   ...FIXTURE_MODELS,
@@ -153,8 +155,37 @@ function longThreadMessages(): ChatMessage[] {
 
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
+export const FIXTURE_HTML_DOCUMENT: HtmlDocument = {
+  title: "Offline counter",
+  html: `<style>body{font:18px system-ui;padding:24px;color:#20212a}button{font:inherit;padding:8px 16px}input{font:inherit;width:64px;margin:0 12px 16px}output{margin-left:12px}</style><h1>Offline counter</h1><label for="step">Step</label><input id="step" type="number" value="1"><br><button id="increment">Increment</button><output id="count">0</output><script>document.getElementById('increment').onclick=()=>{const count=document.getElementById('count');count.textContent=String(Number(count.textContent)+Number(document.getElementById('step').value));};</script>`,
+};
+
+function htmlArtifactMessages(): ChatMessage[] {
+  const artifact: ToolPart = {
+    id: "html-render-restored", name: "html_render", status: "done", summary: "Stored an offline HTML document.",
+    metadata: { kind: "html_document", ...parseHtmlDocument(FIXTURE_HTML_DOCUMENT) },
+  };
+  return [
+    { id: "html-user-restored", role: "user", text: "Make an offline counter." },
+    { id: "html-assistant-restored", role: "assistant", thinking: "", streaming: false,
+      text: "The document is restored from this chat. Open it when you want to run it.",
+      tools: [
+        { id: "html-read-1", name: "read_file", path: "README.md", status: "done" },
+        { id: "html-read-2", name: "read_file", path: "package.json", status: "done" },
+        artifact,
+        { id: "html-read-3", name: "read_file", path: "src/main.tsx", status: "done" },
+        { id: "html-read-4", name: "read_file", path: "src/App.tsx", status: "done" },
+      ],
+    },
+    { id: "html-fence-user-restored", role: "user", text: "Also show the explicit CLI fence." },
+    { id: "html-fence-assistant-restored", role: "assistant", thinking: "", streaming: false, tools: [],
+      text: `\`\`\`zest-html Fence counter\n${FIXTURE_HTML_DOCUMENT.html}\n\`\`\``,
+    },
+  ];
+}
+
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -168,7 +199,7 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
-    value === "btw-streaming"
+    value === "btw-streaming" || value === "html-artifacts"
     ? value
     : undefined;
 }
@@ -220,6 +251,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const fixtureTranscripts = new Map<string, ChatMessage[]>([
     [LONG_THREAD_ID, longThreadMessages()],
   ]);
+  if (scenario === "html-artifacts") fixtureTranscripts.set("fixture", htmlArtifactMessages());
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
 
@@ -427,7 +459,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     return display;
   }
 
-  function emitFixtureEcho(text: string, attachments?: AttachmentInput[]) {
+  function emitFixtureEcho(text: string, attachments?: AttachmentInput[], document?: HtmlDocument) {
     if (!chatHandler) return;
     const { turnId, userId, assistantId } = fixtureIds();
     const id = {
@@ -436,7 +468,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       turn_id: turnId,
     };
     const display = displayFixtureText(text, attachments);
-    const fixtureAssistantText = `Fixture echo: ${text.trim() || "(attachment)"}`;
+    const fixtureAssistantText = document ? `Published ${document.title} in chat.` : `Fixture echo: ${text.trim() || "(attachment)"}`;
+    const htmlTool = document ? {
+      id: `html-${crypto.randomUUID()}`, name: "html_render", status: "done" as const,
+      summary: fixtureAssistantText, metadata: { kind: "html_document" as const, ...document },
+    } : null;
     session = {
       ...session,
       messages: [
@@ -457,13 +493,26 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           role: "assistant",
           text: fixtureAssistantText,
           thinking: "",
-          tools: [],
+          tools: htmlTool ? [htmlTool] : [],
           streaming: false,
         },
       ],
     };
+    if (document) {
+      fixtureTranscripts.set(session.threadId, [...session.messages]);
+      if (!fixtureThreadTitles.has(session.threadId)) {
+        fixtureThreadTitles.set(session.threadId, [...text.trim()].slice(0, MAX_FIXTURE_THREAD_TITLE_CHARS).join(""));
+      }
+    }
     chatHandler({ kind: "user", ...id, message_id: userId, text: display });
     chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    if (htmlTool) {
+      chatHandler({ kind: "tool_call_start", ...id, message_id: assistantId, name: htmlTool.name, id: htmlTool.id });
+      chatHandler({ kind: "tool_call_result", ...id, message_id: assistantId, name: htmlTool.name, id: htmlTool.id, summary: htmlTool.summary, isError: false, metadata: htmlTool.metadata });
+      chatHandler({ kind: "text_delta", ...id, message_id: assistantId, text: fixtureAssistantText });
+      chatHandler({ kind: "done", ...id, message_id: assistantId });
+      return;
+    }
     chatHandler({
       kind: "text_delta",
       ...id,
@@ -1232,7 +1281,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       clearFixtureScenario();
       fixturePinned = false;
-      session = { ...FIXTURE_SESSION, models: sessionModels, messages: [] };
+      session = { ...FIXTURE_SESSION, models: sessionModels, messages: scenario === "html-artifacts" ? htmlArtifactMessages() : [] };
       return { ...session };
     },
     async switchSessionProvider(providerId, model) {
@@ -1269,6 +1318,23 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async listThreads() {
       const threads: ThreadSummary[] = [];
+      if (scenario === "html-artifacts" && session.threadId !== "fixture" && !deletedFixtureThreads.has("fixture")) {
+        threads.push({
+          id: "fixture", createdAt: 0, updatedAt: fixtureEpochSeconds,
+          title: fixtureThreadTitles.get("fixture"), pinned: false, providerId: "codex",
+          messageCount: fixtureTranscripts.get("fixture")?.length ?? 0, gitContext: FIXTURE_THREAD_GIT,
+        });
+      }
+      if (scenario === "html-artifacts") {
+        for (const [id, messages] of fixtureTranscripts) {
+          if (id === session.threadId || id === "fixture" || id === "fixture-local" || id === LONG_THREAD_ID || deletedFixtureThreads.has(id) || messages.length === 0) continue;
+          threads.push({
+            id, createdAt: 0, updatedAt: fixtureEpochSeconds,
+            title: fixtureThreadTitles.get(id) || "Fixture", pinned: false,
+            providerId: "codex", messageCount: messages.length, gitContext: FIXTURE_THREAD_GIT,
+          });
+        }
+      }
       // Seeded rows stay visible. A freshly opened empty draft does not — the
       // desktop store also waits for the first user message before writing one.
       if (
@@ -1654,6 +1720,10 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         startFixtureScenario(text, attachments);
         return;
       }
+      if (scenario === "html-artifacts" && text.trim() === "Publish an HTML artifact") {
+        emitFixtureEcho(text, attachments, { ...FIXTURE_HTML_DOCUMENT, title: "Published counter" });
+        return;
+      }
       emitFixtureEcho(text, attachments);
     },
     async updateQueuedInput(threadId: string, inputId: string, text: string) {
@@ -1729,6 +1799,34 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       link.click();
       URL.revokeObjectURL(url);
       return filename;
+    },
+    async prepareHtmlView(document) {
+      const valid = parseHtmlDocument(document);
+      const response = await fetch("/__zest_html", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(valid),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const value: unknown = await response.json();
+      if (!value || typeof value !== "object" || !("token" in value) || !("url" in value) ||
+          typeof value.token !== "string" || typeof value.url !== "string") throw new Error("Invalid HTML view response.");
+      const prepared: PreparedHtmlView = { token: value.token, url: value.url };
+      const expected = new URL(`/__zest_html/${encodeURIComponent(prepared.token)}`, window.location.origin);
+      if (prepared.url !== expected.href) throw new Error("HTML view returned an unexpected URL.");
+      return prepared;
+    },
+    async releaseHtmlView(token) {
+      const response = await fetch(`/__zest_html/${encodeURIComponent(token)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error("Could not release HTML view.");
+    },
+    async saveHtmlDocument(document) {
+      const valid = parseHtmlDocument(document);
+      const url = URL.createObjectURL(new Blob([isolatedHtml(valid)], { type: "text/html;charset=utf-8" }));
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = htmlFilename(valid.title);
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
     },
     async cancelTurn(threadId?: string) {
       splitStreams.get(threadId ?? session.threadId)?.();

@@ -3,6 +3,66 @@ import { describe, it } from "node:test";
 
 import { createFixtureBackend, type FixtureScenario } from "./fixtureBackend.ts";
 import type { ChatEvent, DelegationEvent } from "./types.ts";
+import { FIXTURE_HTML_DOCUMENT } from "./fixtureBackend.ts";
+import { htmlDocumentFromFence, htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
+
+describe("restored HTML artifact fixture", () => {
+  it("seeds durable inline source and explicit fences with no execution tokens", async () => {
+    const backend = createFixtureBackend({ scenario: "html-artifacts" });
+    const initial = await backend.startSession("fixture");
+    const assistant = initial.messages.find((message) => message.id === "html-assistant-restored");
+    assert.ok(assistant?.role === "assistant");
+    assert.deepEqual(htmlDocumentFromMetadata(assistant.tools[2].metadata), FIXTURE_HTML_DOCUMENT);
+    const fence = initial.messages.find((message) => message.id === "html-fence-assistant-restored");
+    assert.ok(fence);
+    assert.equal(htmlDocumentFromFence(fence.text)?.html, FIXTURE_HTML_DOCUMENT.html);
+    assert.equal(JSON.stringify(initial.messages).includes("/__zest_html/"), false);
+    await backend.newThread();
+    assert.ok((await backend.listThreads()).some((thread) => thread.id === "fixture"));
+    const reopened = await backend.openProjectChat({ root: ".", threadId: "fixture" });
+    assert.deepEqual(reopened.messages, initial.messages);
+    const reloaded = await createFixtureBackend({ scenario: "html-artifacts" }).startSession("fixture");
+    assert.deepEqual(reloaded.messages, initial.messages);
+  });
+
+  it("rejects invalid HTML before contacting the viewer", async () => {
+    const backend = createFixtureBackend({ scenario: "html-artifacts" });
+    await assert.rejects(backend.prepareHtmlView({ title: "x", html: "" }), /nonempty/);
+    await assert.rejects(backend.saveHtmlDocument({ title: "x", html: "x\0" }), /NUL/);
+  });
+
+  it("publishes HTML through native events and retains the new chat after switching", async () => {
+    const backend = createFixtureBackend({ scenario: "html-artifacts" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const created = await backend.newThread();
+    await backend.sendMessage("Publish an HTML artifact");
+    const result = events.find((event) => event.kind === "tool_call_result");
+    assert.ok(result?.kind === "tool_call_result");
+    assert.equal(htmlDocumentFromMetadata(result.metadata)?.title, "Published counter");
+    await backend.openProjectChat({ root: ".", threadId: "fixture" });
+    assert.equal((await backend.listThreads()).find((thread) => thread.id === created.threadId)?.title, "Publish an HTML artifact");
+    const reopened = await backend.openProjectChat({ root: ".", threadId: created.threadId });
+    const assistant = reopened.messages.find((message) => message.role === "assistant");
+    assert.ok(assistant?.role === "assistant");
+    assert.equal(htmlDocumentFromMetadata(assistant.tools[0].metadata)?.html, FIXTURE_HTML_DOCUMENT.html);
+  });
+});
+
+describe("current GPT catalogue fixture", () => {
+  it("keeps the selected model and its published capabilities", async () => {
+    const backend = createFixtureBackend();
+    for (const model of ["gpt-6.1-sol", "gpt-6-astra"]) {
+      await backend.updateSessionOptions({ model, effort: "high" });
+      const session = await backend.sessionInfo();
+      assert.equal(session?.model, model);
+      const capability = session?.models.find((item) => item.id === model);
+      assert.equal(capability?.contextWindow, 1_050_000);
+      assert.equal(capability?.supportsVision, true);
+      assert.deepEqual(capability?.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+  });
+});
 
 describe("temporary side conversations", () => {
   it("keeps side followups out of the main transcript, queue, and thread list", async () => {

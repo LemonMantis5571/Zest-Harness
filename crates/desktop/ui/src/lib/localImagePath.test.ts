@@ -89,6 +89,34 @@ describe("hoistLocalImages", () => {
     assert.equal(hoistLocalImages(remote), remote);
   });
 
+  for (const marker of ["`", "~"]) {
+    it(`keeps ${marker} fence contents exact until a matching closing boundary`, () => {
+      const fence = marker.repeat(4);
+      const source = [
+        `${fence}zest-html Paths`,
+        "<script>",
+        'const forward = "C:/example/chart.png";',
+        String.raw`const backward = "C:\\example\\chart.png";`,
+        'const markdown = "![chart](C:/example/chart.png)";',
+        marker.repeat(3),
+        'const shorter = "C:/example/shorter.png";',
+        marker === "`" ? "~~~~" : "````",
+        'const mismatched = "C:/example/mismatched.png";',
+        `${fence}not-a-close`,
+        'const url = "file:///C:/example/chart.png";',
+        "</script>",
+        fence,
+      ].join("\r\n");
+      assert.equal(hoistLocalImages(source), source);
+      assert.equal(
+        hoistLocalImages(`${source}\r\nC:/example/chart.png`),
+        `${source}\r\n![chart.png](file:///C:/example/chart.png)\n\nC:/example/chart.png`,
+      );
+      const unclosed = source.slice(0, -fence.length);
+      assert.equal(hoistLocalImages(unclosed), unclosed);
+    });
+  }
+
   it("does not duplicate a path already used as a markdown image", () => {
     const line = "![shot](/tmp/shot.png)";
     assert.equal(

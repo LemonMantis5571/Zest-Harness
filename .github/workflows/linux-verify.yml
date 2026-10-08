@@ -44,6 +44,9 @@ jobs:
           node-version: 24.16.0
           cache: npm
 
+      - name: Use repository npm version
+        run: npm install --global $(node -p "'npm@' + require('./package.json').engines.npm")
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 

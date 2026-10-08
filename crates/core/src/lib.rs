@@ -25,6 +25,8 @@ pub mod delegation;
 pub mod error;
 pub mod fsutil;
 pub mod handoff;
+pub mod html;
+pub mod html_preview;
 pub mod inbox;
 pub mod jobs;
 pub mod mcp;

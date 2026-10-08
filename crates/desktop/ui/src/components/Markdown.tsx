@@ -5,12 +5,14 @@ import remarkGfm from "remark-gfm";
 import { ArrowUpRightIcon, Globe2Icon } from "lucide-react";
 
 import { CodeBlock } from "@/components/CodeBlock";
+import { HtmlArtifactCard } from "@/components/HtmlArtifactCard";
 import { MermaidBlock } from "@/components/MermaidBlock";
 import { ZoomableImage } from "@/components/ZoomableImage";
 import { safeHttpUrl } from "@/lib/externalLinks";
 import { linkClassName } from "@/lib/linkify";
 import { hoistLocalImages } from "@/lib/localImagePath";
 import { splitRenderableBlocks } from "@/lib/markdownBlocks";
+import { htmlDocumentFromFence } from "@/lib/htmlArtifacts";
 import { useResponseBlockStreaming } from "@/lib/responseStreaming";
 import { cn } from "@/lib/utils";
 
@@ -190,8 +192,10 @@ type Props = {
  * buffered, so each visible block is settled and skips later re-parsing. That
  * is the difference between O(n²) and O(n) over a long answer.
  */
-const Block = memo(function Block({ text, streaming }: { text: string; streaming: boolean }) {
+const Block = memo(function Block({ text, streaming, settled }: { text: string; streaming: boolean; settled: boolean }) {
   const components = streaming ? STREAMING_COMPONENTS : STATIC_COMPONENTS;
+  const document = settled ? htmlDocumentFromFence(text) : null;
+  if (document) return <HtmlArtifactCard {...document} previewNotRun />;
 
   return (
     <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
@@ -236,6 +240,7 @@ export const Markdown = memo(function Markdown({
         <Block
           key={block.key}
           text={block.text}
+          settled={!streaming}
           streaming={streaming && !blockStreaming}
         />
       ))}

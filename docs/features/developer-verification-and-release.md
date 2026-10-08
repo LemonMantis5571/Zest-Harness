@@ -25,6 +25,7 @@ paths:
   - .githooks/pre-commit
   - .github/workflows/
 tests:
+  - crates/desktop/ui/src/lib/sourceMapSecurity.test.mjs
   - scripts/check-output-artifacts.test.mjs
   - scripts/feature-map.test.mjs
   - crates/desktop/ui/.oxlint-plugins/test.mjs
@@ -40,6 +41,8 @@ verify:
 # Verification gates and release tooling
 
 ## Behavior
+- npm is pinned to 11.21.0 in the root manifest. CI verification and desktop packaging install that declared version after Node setup so overrides propagate through workspace links. Older npm releases can retain an unpatched transitive version or mark a valid override as invalid. The Mermaid KaTeX override is exercised by the UI security regression and the unchanged dependency-audit gate.
+- The build tooling locks `source-map-js` to patched 1.2.2. Its regression test resolves the consumer through PostCSS, checks ordinary indexed mappings, rejects malformed or excessive section offsets, and bounds a large-offset conversion in a separate process so a regression cannot hang the test runner.
 - `npm run verify` (`scripts/dev-verify.mjs`) runs these steps in order and stops at the first failure: output-policy tests, output policy, feature-map tests, feature-map check, control CLI tests, UI unit tests, UI lint, lint-plugin tests, UI build, Playwright e2e (`npm run ui:e2e`), the control CLI smoke test (`zest-control.mjs check`, see [ui-control-cli](ui-control-cli.md)), `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace --lib`, `git diff --check`.
 - `scripts/release-verify.ps1` and `release-verify.sh` are the CI and release gate. They run the same checks in the same order (toolchain version print or warning; output policy tests and check; feature map tests and check; control CLI tests; `npm ci`; ts-rs binding drift; UI test, lint, plugin-rule tests, build; Playwright e2e with `npx playwright install chromium`, plus `--with-deps` on Linux CI; the control CLI smoke test; fmt; clippy; `cargo test --workspace --all-targets`; `npm audit --omit=dev` with 3 tries; `cargo audit` or `cargo deny`; `git diff --check` for unstaged and staged changes).
 - CI (`windows-verify.yml`, `linux-verify.yml`) runs the release gate on push to main/master and on PRs, first checks every commit in a PR with `check-output-artifacts.mjs --range`, and uploads `crates/desktop/ui/test-results/` as `playwright-traces-windows` / `playwright-traces-linux` on failure. Linux also builds and tests `zest serve` and the JSONL run protocol without WebKit, using local provider and worker fixtures.

@@ -100,6 +100,8 @@ provider drivers in [provider-runtime](provider-runtime.md).
   `options-failing` (first save fails), `model-catalogue` (long catalogue,
   several providers, a no-effort model).
 - `model-picker.spec.ts`: pending lock, rollback, dismiss during save, reset.
+  The pending-lock check controls the fixture clock so the save cannot finish
+  before every disabled control is inspected, then advances it to check persistence.
   `model-picker-search.spec.ts`: search, capabilities, long catalogue at 1280 and
   720 px. `picker-keyboard.spec.ts`: keyboard paths and focus restoration.
 
@@ -113,4 +115,9 @@ provider drivers in [provider-runtime](provider-runtime.md).
   Claude slot and made Claude unselectable.
 - `DEFAULT_CODEX_MODEL` in `models.ts` is only a fallback label source, not an
   availability list; `CODEX_MODELS` is legacy fixture data.
+- Current choices include GPT-6.1 Sol and GPT-6 Astra on both Codex transports,
+  and Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 on the native API
+  and as explicit Claude Code ids. Saved selections and configured defaults are
+  unchanged. The builtin Codex list no longer offers retired GPT-5.4 choices;
+  a configured model allow-list remains authoritative.
 - `providerSupportsModelPicker` is deprecated; use `sessionSupportsModelPicker`.

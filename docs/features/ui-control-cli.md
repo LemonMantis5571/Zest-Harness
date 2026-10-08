@@ -15,6 +15,8 @@ verify:
 
 ## Behavior
 
+- `inspect html` returns the accessibility trees of open artifact frames. `html-click "Name"` and `html-value "Label" "Value"` interact with those frames (`--nth` chooses one).
+
 - `node scripts/zest-control.mjs <command>` prints JSON (`snapshot` prints YAML)
   and exits 0 on success, 1 when the command failed, 2 for bad usage, 3 when no
   session is running. Failures carry an `error` and, where the cause is known,
