@@ -13,7 +13,7 @@ Use the toolchain versions pinned in `rust-toolchain.toml`, `.nvmrc`, and
 
 - Rust 1.97.1
 - Node.js 24.16.0+
-- npm 11.13.0+
+- npm 11.21.0. Older npm releases mishandle dependency overrides through workspace links.
 
 ## Local development
 
