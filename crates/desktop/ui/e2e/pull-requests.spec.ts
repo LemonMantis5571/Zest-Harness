@@ -34,12 +34,20 @@ test("clicking the active chat from pull requests reveals its transcript", async
 });
 
 test("pull request review shows progress before a slow diff fetch completes", async ({ page }) => {
-  await page.goto("/?fixture=1&scenario=pull-request-delayed");
+  await page.goto("/?fixture=1&scenario=pull-request-delayed&holdPullRequestDiff=1");
   await page.getByRole("button", { name: "Pull requests", exact: true }).click();
   const panel = page.getByRole("region", { name: "Pull requests", exact: true });
   await panel.getByRole("link", { name: "Bot CI", exact: true }).click();
   const diff = page.getByRole("dialog");
+  const progress = diff.getByRole("status").filter({ hasText: "Fetching the pull request diff" });
   await expect(diff).toBeVisible();
-  await expect(diff.getByRole("status").filter({ hasText: "Fetching the pull request diff" })).toBeVisible();
+  await expect(progress).toBeVisible();
+  await expect(diff.getByRole("button", { name: "Clean", exact: true })).toBeDisabled();
+  await expect(diff.getByRole("button", { name: "Raw", exact: true })).toBeDisabled();
+  await expect(diff.getByText("src/example.ts", { exact: true })).toHaveCount(0);
+  await page.evaluate(() => window.dispatchEvent(new Event("zest:fixture-release-pull-request-diff")));
   await expect(diff.getByText("src/example.ts", { exact: true })).toBeVisible({ timeout: 2_000 });
+  await expect(progress).toHaveCount(0);
+  await expect(diff.getByRole("button", { name: "Clean", exact: true })).toBeEnabled();
+  await expect(diff.getByRole("button", { name: "Raw", exact: true })).toBeEnabled();
 });

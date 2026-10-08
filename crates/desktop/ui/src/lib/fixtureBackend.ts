@@ -189,6 +189,7 @@ export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" 
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
+  pullRequestDiffReady?: Promise<void>;
 };
 
 function scenarioFromLocation(): FixtureScenario | undefined {
@@ -2100,7 +2101,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async pullRequestDiff(number = 13): Promise<WorkspaceChange> {
       if (scenario === "pull-request-delayed") {
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        if (options.pullRequestDiffReady) {
+          await options.pullRequestDiffReady;
+        } else if (
+          typeof window !== "undefined" &&
+          new URLSearchParams(window.location.search).get("holdPullRequestDiff") === "1"
+        ) {
+          await new Promise<void>((resolve) => {
+            window.addEventListener("zest:fixture-release-pull-request-diff", () => resolve(), { once: true });
+          });
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
       }
       return {
         changeId: `pr:${number}`,

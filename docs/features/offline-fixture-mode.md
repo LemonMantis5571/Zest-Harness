@@ -39,6 +39,12 @@ verify:
 6. Playwright (`playwright.config.ts`): tests in `e2e/`, 2 workers, fully parallel, base URL `http://127.0.0.1:1420`, 1280x800, traces kept on failure. Its `webServer` runs `npm run dev -- --host 127.0.0.1` and reuses an already running dev server outside CI. `vite.config.ts` pins port 1420 (`strictPort`) and the `@` alias.
 
 ## Verify
+- The delayed PR fixture accepts `&holdPullRequestDiff=1` to keep each diff
+  request pending until the browser dispatches
+  `zest:fixture-release-pull-request-diff`. Node tests can supply the
+  `pullRequestDiffReady` promise instead. Without a hold, its 800 ms delay
+  remains unchanged. The browser tests release the response only after
+  asserting the loading state, without pausing UI rendering timers.
 - `node scripts/zest-control.mjs start` drives this fixture one command at a time and `check` smoke-tests it; see [ui-control-cli](ui-control-cli.md).
 - `npm run ui:test` runs `fixtureBackend.test.ts` (side conversations, rename, free chats, search, delegation lifecycle, plugins and files, safety scenarios, windowed open, PR review, queued-message recovery).
 - `npm run ui:e2e` or one spec: `npm run ui:e2e -- split-workspace`. Every spec except `streaming-performance` opens `/?fixture=1`; that one loads the standalone harness `e2e/fixtures/streaming.html`. Needs `npx playwright install chromium` once.

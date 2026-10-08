@@ -431,6 +431,45 @@ describe("fixture windowed open", () => {
 });
 
 describe("fixture pull request review", () => {
+  it("holds the delayed diff until its response is released", async () => {
+    const gate = new EventTarget();
+    const pullRequestDiffReady = new Promise<void>((resolve) => {
+      gate.addEventListener("release", () => resolve(), { once: true });
+    });
+    const backend = createFixtureBackend({ scenario: "pull-request-delayed", pullRequestDiffReady });
+    let completed = false;
+    const pending = backend.pullRequestDiff(13).then((change) => {
+      completed = true;
+      return change;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(completed, false);
+    gate.dispatchEvent(new Event("release"));
+    const change = await pending;
+    assert.equal(completed, true);
+    assert.equal(change.unavailable, false);
+    assert.equal(change.changedFiles[0]?.path, "src/example.ts");
+    assert.match(change.diff, /hello from pull request 13/);
+  });
+
+  it("keeps the normal delay when no response hold is requested", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const backend = createFixtureBackend({ scenario: "pull-request-delayed" });
+    let completed = false;
+    const pending = backend.pullRequestDiff(13).then((change) => {
+      completed = true;
+      return change;
+    });
+    t.mock.timers.tick(799);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(completed, false);
+    t.mock.timers.tick(1);
+    const change = await pending;
+    assert.equal(completed, true);
+    assert.equal(change.changedFiles[0]?.path, "src/example.ts");
+    assert.match(change.diff, /hello from pull request 13/);
+  });
+
   it("returns a local patch for the linked pull request", async () => {
     const backend = createFixtureBackend();
     const context = await backend.gitContext();
