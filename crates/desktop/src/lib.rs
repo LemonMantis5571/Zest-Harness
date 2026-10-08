@@ -10,6 +10,9 @@ mod browser;
 mod btw;
 mod context_meter;
 mod delegation;
+mod html;
+#[cfg(debug_assertions)]
+mod html_native_check;
 mod plugins;
 #[cfg(test)]
 mod scratch_dir;
@@ -997,6 +1000,10 @@ fn provider_method(config: &ProviderConfig) -> String {
     ts(export, export_to = "ToolMetaView.ts", rename_all = "snake_case")
 )]
 enum ToolMetaView {
+    HtmlDocument {
+        title: String,
+        html: String,
+    },
     Delegation {
         provider_id: String,
         model: String,
@@ -1021,6 +1028,7 @@ enum ToolMetaView {
 impl From<ToolMetadata> for ToolMetaView {
     fn from(meta: ToolMetadata) -> Self {
         match meta {
+            ToolMetadata::HtmlDocument { title, html } => Self::HtmlDocument { title, html },
             ToolMetadata::Delegation {
                 provider_id,
                 model,
@@ -4117,6 +4125,9 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             ..
         } => {
             let core_meta = metadata.clone().map(|m| match m {
+                ToolMetaView::HtmlDocument { title, html } => {
+                    ToolMetadata::HtmlDocument { title, html }
+                }
                 ToolMetaView::Delegation {
                     provider_id,
                     model,
@@ -4311,6 +4322,7 @@ async fn start_session_inner(
         .with_policy(state.policy.clone())
         .with_ledger(state.ledger.clone())
         .with_browser_adapter(state.browser.adapter())
+        .with_html_artifacts(true)
         .with_job_registry(state.jobs.clone())
         .with_job_owner(thread.id.clone())
         .with_parent_thread_id(&thread.id)
@@ -9023,13 +9035,18 @@ timeout_secs = 900
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|arg| arg == "--html-native-check") {
+        html_native_check::run();
+        return;
+    }
     if let Err(err) = zest_core::ensure_user_config() {
         eprintln!("warning: could not create the user config: {err}");
     }
     zest_core::load_env();
     remove_implicit_internal_workspace();
 
-    tauri::Builder::default()
+    html::install(tauri::Builder::default())
         .plugin(tauri_plugin_notification::init())
         .manage({
             let ledger = Arc::new(Mutex::new(Ledger::load()));
@@ -9074,125 +9091,137 @@ pub fn run() {
             remove_retired_spaces_state();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            list_providers,
-            refresh_providers,
-            list_external_agents,
-            set_external_agent,
-            set_external_agent_mcp,
-            set_external_agent_model,
-            check_external_agent,
-            list_mcp_servers,
-            save_mcp_server,
-            set_mcp_server_enabled,
-            remove_mcp_server,
-            check_mcp_server,
-            set_provider_key,
-            delete_provider_key,
-            provider_key_present,
-            configure_api_provider,
-            configure_anthropic_provider,
-            configure_claude_code_provider,
-            configure_cursor_provider,
-            configure_codex_cli_provider,
-            configure_codex_oauth_provider,
-            codex_cli_available,
-            open_project_config,
-            open_external_url,
-            set_window_chrome,
-            usage_snapshot,
-            provider_quota,
-            list_plugins,
-            open_plugins_folder,
-            set_plugin_enabled,
-            now_playing,
-            control_now_playing,
-            set_now_playing_volume,
-            wallpaper,
-            pick_wallpaper,
-            set_wallpaper_filter,
-            clear_wallpaper,
-            usage_report,
-            open_prices_file,
-            refresh_rates,
-            profile_stats,
-            set_local_offset,
-            last_provider,
-            start_login,
-            login_status,
-            cancel_login,
-            verify_provider,
-            start_session,
-            switch_session_provider,
-            update_session_options,
-            reset_session_options,
-            list_threads,
-            forget_workspace,
-            list_chat_projects,
-            search_chats,
-            open_project_chat,
-            load_older_thread_messages,
-            load_newer_thread_messages,
-            load_thread,
-            new_thread,
-            fork_thread,
-            fork_thread_from_checkpoint,
-            rewind_thread,
-            edit_message,
-            compact_context,
-            delete_thread,
-            set_thread_pinned,
-            rename_thread,
-            send_message,
-            btw::start_btw,
-            btw::send_btw,
-            btw::cancel_btw,
-            btw::close_btw,
-            update_queued_input,
-            remove_queued_input,
-            resume_queued_inputs,
-            list_jobs,
-            job_output,
-            job_kill,
-            save_markdown,
-            cancel_turn,
-            resolve_approval,
-            resolve_question,
-            generate_reading_diff,
-            set_approval_mode,
-            approval_mode,
-            end_session,
-            session_info,
-            get_system_prompt,
-            set_system_prompt,
-            list_skills,
-            list_commands,
-            get_workspace_folder,
-            reveal_workspace_folder,
-            list_workspace_files,
-            read_workspace_file,
-            pick_workspace_folder,
-            pick_files,
-            prepare_pasted_image,
-            git_branch,
-            git_context,
-            pull_request_diff,
-            workspace_changes,
-            verify_workspace,
-            context_usage,
-            get_user_profile,
-            set_user_profile,
-            list_delegation_jobs,
-            list_delegation_targets,
-            create_delegation_job,
-            update_delegation_job,
-            approve_delegation_job,
-            prepare_delegation_handoff,
-            get_delegation_job,
-            cancel_delegation_job,
-            retry_delegation_job,
-            apply_delegation_job
-        ])
+        .invoke_handler(|invoke| {
+            if !html::trusted_host(invoke.message.webview_ref(), invoke.message.headers()) {
+                invoke
+                    .resolver
+                    .reject("Commands require the trusted main host");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                html::prepare_html_view,
+                html::release_html_view,
+                html::save_html_document,
+                list_providers,
+                refresh_providers,
+                list_external_agents,
+                set_external_agent,
+                set_external_agent_mcp,
+                set_external_agent_model,
+                check_external_agent,
+                list_mcp_servers,
+                save_mcp_server,
+                set_mcp_server_enabled,
+                remove_mcp_server,
+                check_mcp_server,
+                set_provider_key,
+                delete_provider_key,
+                provider_key_present,
+                configure_api_provider,
+                configure_anthropic_provider,
+                configure_claude_code_provider,
+                configure_cursor_provider,
+                configure_codex_cli_provider,
+                configure_codex_oauth_provider,
+                codex_cli_available,
+                open_project_config,
+                open_external_url,
+                set_window_chrome,
+                usage_snapshot,
+                provider_quota,
+                list_plugins,
+                open_plugins_folder,
+                set_plugin_enabled,
+                now_playing,
+                control_now_playing,
+                set_now_playing_volume,
+                wallpaper,
+                pick_wallpaper,
+                set_wallpaper_filter,
+                clear_wallpaper,
+                usage_report,
+                open_prices_file,
+                refresh_rates,
+                profile_stats,
+                set_local_offset,
+                last_provider,
+                start_login,
+                login_status,
+                cancel_login,
+                verify_provider,
+                start_session,
+                switch_session_provider,
+                update_session_options,
+                reset_session_options,
+                list_threads,
+                forget_workspace,
+                list_chat_projects,
+                search_chats,
+                open_project_chat,
+                load_older_thread_messages,
+                load_newer_thread_messages,
+                load_thread,
+                new_thread,
+                fork_thread,
+                fork_thread_from_checkpoint,
+                rewind_thread,
+                edit_message,
+                compact_context,
+                delete_thread,
+                set_thread_pinned,
+                rename_thread,
+                send_message,
+                btw::start_btw,
+                btw::send_btw,
+                btw::cancel_btw,
+                btw::close_btw,
+                update_queued_input,
+                remove_queued_input,
+                resume_queued_inputs,
+                list_jobs,
+                job_output,
+                job_kill,
+                save_markdown,
+                cancel_turn,
+                resolve_approval,
+                resolve_question,
+                generate_reading_diff,
+                set_approval_mode,
+                approval_mode,
+                end_session,
+                session_info,
+                get_system_prompt,
+                set_system_prompt,
+                list_skills,
+                list_commands,
+                get_workspace_folder,
+                reveal_workspace_folder,
+                list_workspace_files,
+                read_workspace_file,
+                pick_workspace_folder,
+                pick_files,
+                prepare_pasted_image,
+                git_branch,
+                git_context,
+                pull_request_diff,
+                workspace_changes,
+                verify_workspace,
+                context_usage,
+                get_user_profile,
+                set_user_profile,
+                list_delegation_jobs,
+                list_delegation_targets,
+                create_delegation_job,
+                update_delegation_job,
+                approve_delegation_job,
+                prepare_delegation_handoff,
+                get_delegation_job,
+                cancel_delegation_job,
+                retry_delegation_job,
+                apply_delegation_job
+            ];
+            handler(invoke)
+        })
         .build(tauri::generate_context!())
         .expect("error while building Zest desktop")
         .run(|_app_handle, _event| {});
@@ -9278,6 +9307,38 @@ mod persist_event_tests {
             }),
             PersistPriority::Delta
         ));
+    }
+
+    #[test]
+    fn html_tool_event_keeps_source_through_wire_view_and_thread_projection() {
+        let document =
+            zest_core::html::HtmlDocument::parse("Counter".into(), "<button>0</button>".into())
+                .unwrap();
+        let metadata = ToolMetadata::HtmlDocument {
+            title: document.title().into(),
+            html: document.source().into(),
+        };
+        let mut event = tool_result();
+        if let ChatEvent::ToolCallResult {
+            name,
+            metadata: view,
+            ..
+        } = &mut event
+        {
+            *name = "html_render".into();
+            *view = Some(ToolMetaView::from(metadata.clone()));
+        }
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["metadata"]["kind"], "html_document");
+        assert_eq!(wire["metadata"]["html"], document.source());
+        let mut thread = Thread::new();
+        thread.apply_assistant_start("m", None);
+        apply_event_to_thread(&mut thread, &event);
+        let StoredMessage::Assistant { tools, .. } = &thread.messages[0] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(tools[0].metadata, Some(metadata));
+        assert!(matches!(event_priority(&event), PersistPriority::Immediate));
     }
 }
 

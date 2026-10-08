@@ -26,7 +26,11 @@ use crate::fsutil;
 /// v3 adds anchored checkpoint metadata while keeping every new field
 /// optional so older thread files remain readable.
 /// v4 adds durable pending inputs and the thin lifecycle ledger.
-pub const THREAD_FORMAT_VERSION: u32 = 4;
+/// v5 adds interactive HTML document metadata.
+/// Readers must check the version before decoding typed metadata. Already-built
+/// v4 binaries can still rename v5 HTML threads as corrupt; this change cannot
+/// repair those readers, which must be upgraded separately.
+pub const THREAD_FORMAT_VERSION: u32 = 5;
 
 /// Anthropic Messages API content blocks (today's only wire format).
 pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
@@ -1448,6 +1452,7 @@ impl ThreadStore {
                 });
             }
         };
+        preflight_thread_version(&body, &tid)?;
         let mut thread: Thread = match serde_json::from_str(&body) {
             Ok(t) => t,
             Err(e) => {
@@ -1658,6 +1663,7 @@ impl ThreadStore {
             .join(format!("{}.json", checkpoint_id.as_str()));
         let raw = fs::read_to_string(&path)
             .map_err(|e| HarnessError::Other(format!("read checkpoint {}: {e}", path.display())))?;
+        preflight_thread_version(&raw, &thread_id)?;
         let mut snapshot: Thread = serde_json::from_str(&raw).map_err(|e| {
             HarnessError::Other(format!("checkpoint {} is corrupt: {e}", path.display()))
         })?;
@@ -1935,6 +1941,31 @@ impl ThreadStore {
     }
 }
 
+/// Reject newer documents before unknown metadata can be mistaken for corruption.
+fn preflight_thread_version(body: &str, id: &ThreadId) -> std::result::Result<(), ThreadLoadError> {
+    // Parse errors and invalid version fields still go through the typed decoder
+    // below so each loader keeps its existing corrupt-file handling.
+    #[derive(Deserialize)]
+    struct VersionHeader {
+        #[serde(default)]
+        version: u32,
+    }
+    // Unknown fields are skipped by serde without allocating the HTML/images
+    // and full transcript a second time.
+    let Ok(raw) = serde_json::from_str::<VersionHeader>(body) else {
+        return Ok(());
+    };
+    let found = raw.version;
+    if found > THREAD_FORMAT_VERSION {
+        return Err(ThreadLoadError::UnsupportedVersion {
+            id: id.as_str().to_string(),
+            found,
+            supported: THREAD_FORMAT_VERSION,
+        });
+    }
+    Ok(())
+}
+
 /// Rename a corrupt thread file aside so it is not overwritten.
 fn preserve_corrupt(path: &Path) -> Result<PathBuf> {
     let stamp = now_secs();
@@ -1951,6 +1982,50 @@ mod characterization {
 
     fn scratch(name: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::ScratchDir::new(&format!("zest-thread-{name}-"))
+    }
+
+    fn html_document_metadata() -> crate::tools::ToolMetadata {
+        let document = crate::html::HtmlDocument::parse(
+            "Counter é".into(),
+            r#"<!doctype html>
+<meta charset="utf-8">
+<button id="counter">Count é: 0</button>
+<script>
+let count = 0;
+document.getElementById('counter').onclick = event => {
+  event.target.textContent = `Count é: ${++count}`;
+};
+</script>"#
+                .into(),
+        )
+        .unwrap();
+        crate::tools::ToolMetadata::HtmlDocument {
+            title: document.title().to_string(),
+            html: document.source().to_string(),
+        }
+    }
+
+    fn html_thread(tool_started: bool) -> Thread {
+        let mut thread = Thread::new().with_provider("codex");
+        thread.apply_user("u1", "Make an interactive counter");
+        thread.apply_assistant_start("a1", None);
+        thread.apply_text_delta("a1", "Open the counter to interact with it.");
+        if tool_started {
+            thread.apply_tool_start("a1", "html-1", "html_render");
+        }
+        thread.apply_tool_result(
+            "a1",
+            "html-1",
+            "html_render",
+            "HTML document ready",
+            false,
+            None,
+            None,
+            Some(html_document_metadata()),
+        );
+        thread.apply_done("a1");
+        thread.set_agent_messages(vec![Message::user_text("Make an interactive counter")]);
+        thread
     }
 
     /// `exists` is the guard that stops a metadata-only write from creating a
@@ -2025,6 +2100,138 @@ mod characterization {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, thread.id);
         assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn html_metadata_survives_save_reopen_fork_and_source_delete() {
+        for tool_started in [false, true] {
+            let root = scratch("html-roundtrip");
+            let store = ThreadStore::open(&root).unwrap();
+            let source = html_thread(tool_started);
+            let messages = serde_json::to_value(&source.messages).unwrap();
+            let agent_messages = serde_json::to_value(&source.agent_messages).unwrap();
+            store.save(&source).unwrap();
+            let source_path = store.path_for(&ThreadId::parse(&source.id).unwrap());
+            let original = fs::read(&source_path).unwrap();
+            let saved: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            assert_eq!(saved["version"], THREAD_FORMAT_VERSION);
+            assert_eq!(
+                saved["messages"][1]["tools"][0]["metadata"],
+                serde_json::to_value(html_document_metadata()).unwrap()
+            );
+            drop(store);
+
+            let reopened_store = ThreadStore::open(&root).unwrap();
+            let loaded = reopened_store.load_typed(&source.id).unwrap();
+            assert!(loaded.warning.is_none());
+            assert_eq!(
+                serde_json::to_value(&loaded.thread.messages).unwrap(),
+                messages
+            );
+            match &loaded.thread.messages[1] {
+                StoredMessage::Assistant {
+                    tools, streaming, ..
+                } => {
+                    assert!(!streaming);
+                    assert_eq!(tools.len(), 1);
+                    assert_eq!(tools[0].status, "done");
+                    assert_eq!(tools[0].metadata, Some(html_document_metadata()));
+                }
+                other => panic!("expected assistant, got {other:?}"),
+            }
+            let fork = reopened_store
+                .fork(&loaded.thread, Some("Counter copy"))
+                .unwrap();
+            assert_ne!(fork.id, source.id);
+            assert_eq!(fs::read(&source_path).unwrap(), original);
+            reopened_store.delete(&source.id).unwrap();
+            assert!(!source_path.exists());
+            drop(reopened_store);
+
+            let fork_store = ThreadStore::open(&root).unwrap();
+            let fork = fork_store.load_typed(&fork.id).unwrap();
+            assert!(fork.warning.is_none());
+            assert_eq!(
+                serde_json::to_value(&fork.thread.messages).unwrap(),
+                messages
+            );
+            assert_eq!(
+                serde_json::to_value(&fork.thread.agent_messages).unwrap(),
+                agent_messages
+            );
+            assert!(fork.thread.checkpoints.is_empty());
+        }
+    }
+
+    #[test]
+    fn html_metadata_survives_checkpoint_rewind_and_checkpoint_fork() {
+        let root = scratch("html-checkpoint");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut source = html_thread(true);
+        let messages = serde_json::to_value(&source.messages).unwrap();
+        let agent_messages = serde_json::to_value(&source.agent_messages).unwrap();
+        let checkpoint = store
+            .create_checkpoint(&mut source, "Counter ready")
+            .unwrap();
+
+        source.apply_user("u2", "Replace the counter");
+        source.apply_tool_result(
+            "a2",
+            "html-2",
+            "html_render",
+            "Replacement ready",
+            false,
+            None,
+            None,
+            Some(crate::tools::ToolMetadata::HtmlDocument {
+                title: "Replacement".into(),
+                html: "<p>Different document</p>".into(),
+            }),
+        );
+        source.apply_done("a2");
+        source
+            .agent_messages
+            .push(Message::user_text("Replace the counter"));
+        let later_checkpoint = store
+            .create_checkpoint(&mut source, "Replacement ready")
+            .unwrap();
+        drop(store);
+
+        let store = ThreadStore::open(&root).unwrap();
+        let source = store.load(&source.id).unwrap();
+        let snapshot = store.load_checkpoint(&source.id, &checkpoint.id).unwrap();
+        assert_eq!(serde_json::to_value(&snapshot.messages).unwrap(), messages);
+        assert_eq!(
+            serde_json::to_value(&snapshot.agent_messages).unwrap(),
+            agent_messages
+        );
+        let fork = store
+            .fork_from_checkpoint(&source, &checkpoint.id, None)
+            .unwrap();
+        let restored = store.rewind_to_checkpoint(&source, &checkpoint.id).unwrap();
+        assert_eq!(serde_json::to_value(&restored.messages).unwrap(), messages);
+        assert_eq!(restored.checkpoints.len(), 1);
+        assert_eq!(restored.checkpoints[0].id, checkpoint.id);
+        assert!(store
+            .load_checkpoint(&source.id, &later_checkpoint.id)
+            .is_err());
+        let reopened = store.load(&source.id).unwrap();
+        assert_eq!(serde_json::to_value(&reopened.messages).unwrap(), messages);
+        assert_eq!(
+            serde_json::to_value(&reopened.agent_messages).unwrap(),
+            agent_messages
+        );
+
+        store.delete(&source.id).unwrap();
+        assert!(!store
+            .checkpoints_dir_for(&ThreadId::parse(&source.id).unwrap())
+            .exists());
+        let fork = store.load(&fork.id).unwrap();
+        assert_eq!(serde_json::to_value(&fork.messages).unwrap(), messages);
+        assert_eq!(
+            serde_json::to_value(&fork.agent_messages).unwrap(),
+            agent_messages
+        );
     }
 
     #[test]
@@ -2787,6 +2994,130 @@ mod characterization {
         );
         // Original file must remain (no rewrite).
         assert!(path.exists());
+    }
+
+    #[test]
+    fn newer_thread_with_unknown_metadata_is_left_untouched() {
+        let root = scratch("future-metadata");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = html_thread(true);
+        let path = store.path_for(&ThreadId::parse(&thread.id).unwrap());
+        let mut future = serde_json::to_value(&thread).unwrap();
+        future["version"] = serde_json::json!(THREAD_FORMAT_VERSION + 1);
+        future["messages"][1]["tools"][0]["metadata"]["kind"] =
+            serde_json::json!("future_html_document");
+        let original = serde_json::to_vec_pretty(&future).unwrap();
+        assert!(serde_json::from_slice::<Thread>(&original).is_err());
+        fs::write(&path, &original).unwrap();
+
+        for _ in 0..2 {
+            let err = store.load_typed(&thread.id).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ThreadLoadError::UnsupportedVersion { ref id, found, supported }
+                        if id == &thread.id
+                            && found == THREAD_FORMAT_VERSION + 1
+                            && supported == THREAD_FORMAT_VERSION
+                ),
+                "{err}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let files = fs::read_dir(store.dir()).unwrap().collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].as_ref().unwrap().path(), path);
+        }
+    }
+
+    #[test]
+    fn newer_checkpoint_with_unknown_metadata_is_left_untouched() {
+        let root = scratch("future-checkpoint-metadata");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = html_thread(true);
+        let checkpoint = store
+            .create_checkpoint(&mut thread, "Counter ready")
+            .unwrap();
+        let dir = store.checkpoints_dir_for(&ThreadId::parse(&thread.id).unwrap());
+        let path = dir.join(format!("{}.json", checkpoint.id));
+        let main_path = store.path_for(&ThreadId::parse(&thread.id).unwrap());
+        let main_original = fs::read(&main_path).unwrap();
+        let mut future: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        future["version"] = serde_json::json!(THREAD_FORMAT_VERSION + 1);
+        future["messages"][1]["tools"][0]["metadata"]["kind"] =
+            serde_json::json!("future_html_document");
+        let original = serde_json::to_vec_pretty(&future).unwrap();
+        assert!(serde_json::from_slice::<Thread>(&original).is_err());
+        fs::write(&path, &original).unwrap();
+        let expected = ThreadLoadError::UnsupportedVersion {
+            id: thread.id.clone(),
+            found: THREAD_FORMAT_VERSION + 1,
+            supported: THREAD_FORMAT_VERSION,
+        }
+        .to_string();
+
+        assert_eq!(
+            store
+                .load_checkpoint(&thread.id, &checkpoint.id)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(
+            store
+                .rewind_to_checkpoint(&thread, &checkpoint.id)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(
+            store
+                .fork_from_checkpoint(&thread, &checkpoint.id, None)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(&main_path).unwrap(), main_original);
+        let files = fs::read_dir(&dir).unwrap().collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].as_ref().unwrap().path(), path);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn version_preflight_keeps_existing_corrupt_thread_handling() {
+        for version in [
+            serde_json::json!(THREAD_FORMAT_VERSION),
+            serde_json::Value::Null,
+            serde_json::json!("future"),
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            let root = scratch("version-corruption");
+            let store = ThreadStore::open(&root).unwrap();
+            let thread = html_thread(true);
+            let path = store.path_for(&ThreadId::parse(&thread.id).unwrap());
+            let mut invalid = serde_json::to_value(&thread).unwrap();
+            invalid["version"] = version;
+            invalid["messages"][1]["tools"][0]["metadata"]["kind"] =
+                serde_json::json!("future_html_document");
+            let original = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &original).unwrap();
+
+            let err = store.load_typed(&thread.id).unwrap_err();
+            assert!(matches!(err, ThreadLoadError::Corrupt { .. }), "{err}");
+            assert!(!path.exists());
+            let files = fs::read_dir(store.dir()).unwrap().collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            let preserved = files[0].as_ref().unwrap().path();
+            assert!(preserved
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".json.corrupt-"));
+            assert_eq!(fs::read(&preserved).unwrap(), original);
+        }
     }
 
     #[test]

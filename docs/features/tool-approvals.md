@@ -37,6 +37,9 @@ verify:
 - Switching mode clears all session grants. Nothing is persisted; restarting the
   app is a clean slate. The mode itself lives in `AppState.policy` and survives
   switching projects.
+- `html_preview` uses a fingerprint of its validated title and source as its
+  target. Session approval for one document does not authorize changed HTML
+  or a different title.
 - Anything that is not an explicit allow denies: unknown decision strings,
   dropped waiters, cancelled turns, poisoned locks.
 - Only one card is shown at a time, anchored above the composer

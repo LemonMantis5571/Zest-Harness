@@ -24,6 +24,17 @@ test("a value flag at the end of argv becomes a boolean instead of eating nothin
   assert.deepEqual(parseArgs(["start", "--scenario"]).options, { scenario: true });
 });
 
+test("HTML interaction commands keep labels and frame selection explicit", () => {
+  assert.deepEqual(parseArgs(["html-click", "Increment", "--nth", "1"]), {
+    command: "html-click", args: ["Increment"], options: { nth: "1" },
+  });
+  assert.deepEqual(parseArgs(["html-value", "Amount", "42"]), {
+    command: "html-value", args: ["Amount", "42"], options: {},
+  });
+  assert.ok("html-click" in COMMANDS);
+  assert.ok("html-value" in COMMANDS);
+});
+
 test("the session file is per checkout and outside the repository", () => {
   const file = statePath("D:/Code/Zest-Harness");
   assert.equal(file, statePath("d:/code/zest-harness"));

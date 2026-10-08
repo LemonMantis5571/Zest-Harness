@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use rig_core::completion::message::{DocumentSourceKind, ToolResultContent};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -127,7 +128,7 @@ impl Provider for OpenAiCompatibleProvider {
             messages: convert_messages(
                 req.system.as_ref().map(SystemPrompt::text).as_deref(),
                 &req.messages,
-            ),
+            )?,
             // This provider has no cached prefix to protect, so a maintenance
             // turn simply withholds the tools rather than sending them with a
             // `none` choice these endpoints do not all agree on.
@@ -593,8 +594,10 @@ fn convert_tool(tool: &ToolDef) -> Value {
     })
 }
 
-fn convert_messages(system: Option<&str>, messages: &[Message]) -> Vec<Value> {
+fn convert_messages(system: Option<&str>, messages: &[Message]) -> Result<Vec<Value>> {
     let mut output = Vec::new();
+    let mut result_batch = Vec::new();
+    let mut screenshots = Vec::new();
     if let Some(system) = system.filter(|text| !text.is_empty()) {
         output.push(json!({"role": "system", "content": system}));
     }
@@ -613,28 +616,94 @@ fn convert_messages(system: Option<&str>, messages: &[Message]) -> Vec<Value> {
                         "arguments": serde_json::to_string(block.get("input").unwrap_or(&json!({}))).unwrap_or_else(|_| "{}".to_string()),
                     }
                 })),
-                Some("tool_result") => tool_results.push(json!({
-                    "role": "tool",
-                    "tool_call_id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
-                    "content": block.get("content").and_then(Value::as_str).unwrap_or(""),
-                })),
-                _ => {}
+                Some("tool_result") => {
+                    let result = super::rig_convert::tool_result(block).map_err(|error| {
+                        HarnessError::Other(format!("OpenAI-compatible history: {error}"))
+                    })?;
+                    let id = result.wire_call_id().to_string();
+                    let mut body = String::new();
+                    for content in result.content {
+                        match content {
+                            ToolResultContent::Text(text) => body.push_str(&text.text),
+                            ToolResultContent::Image(image) => {
+                                let DocumentSourceKind::Base64(data) = image.data else {
+                                    return Err(HarnessError::Other(
+                                        "unsupported OpenAI-compatible tool-result image source".into(),
+                                    ));
+                                };
+                                screenshots.push(json!({
+                                    "type":"text", "text":format!("Screenshot from tool call {id}:")
+                                }));
+                                screenshots.push(json!({
+                                    "type":"image_url",
+                                    "image_url":{"url":format!("data:image/png;base64,{data}")}
+                                }));
+                            }
+                            ToolResultContent::Json { .. } => {
+                                return Err(HarnessError::Other(
+                                    "unsupported OpenAI-compatible structured tool result".into(),
+                                ));
+                            }
+                        }
+                    }
+                    tool_results.push(json!({
+                        "role":"tool", "tool_call_id":id, "content":body
+                    }));
+                }
+                Some("thinking" | "redacted_thinking" | "reasoning_encrypted") => {}
+                other => {
+                    return Err(HarnessError::Other(format!(
+                        "unsupported OpenAI-compatible content block `{}`",
+                        other.unwrap_or("")
+                    )));
+                }
             }
         }
         if !tool_results.is_empty() {
-            if !text.is_empty() {
-                output.push(json!({"role":"user", "content":text}));
+            if message.role != "user" || !tool_calls.is_empty() {
+                return Err(HarnessError::Other(
+                    "OpenAI-compatible tool results must be in a user turn without tool calls"
+                        .into(),
+                ));
             }
-            output.extend(tool_results);
+            if !text.is_empty() {
+                result_batch.push(json!({"role":"user", "content":text}));
+            }
+            result_batch.extend(tool_results);
             continue;
         }
+        append_tool_results(&mut output, &mut result_batch, &mut screenshots);
         let mut message_json = json!({"role": message.role, "content": if text.is_empty() { Value::Null } else { Value::String(text) }});
         if !tool_calls.is_empty() {
             message_json["tool_calls"] = Value::Array(tool_calls);
         }
         output.push(message_json);
     }
-    output
+    append_tool_results(&mut output, &mut result_batch, &mut screenshots);
+    Ok(output)
+}
+
+fn append_tool_results(
+    output: &mut Vec<Value>,
+    batch: &mut Vec<Value>,
+    screenshots: &mut Vec<Value>,
+) {
+    if screenshots.is_empty() {
+        output.append(batch);
+        return;
+    }
+    // Chat Completions tool messages carry text. Every parallel call must be
+    // answered before a user message can supply their labeled screenshots.
+    let mut content = Vec::new();
+    for message in batch.drain(..) {
+        if message["role"] == "tool" {
+            output.push(message);
+        } else {
+            content.push(json!({"type":"text", "text":message["content"]}));
+        }
+    }
+    content.append(screenshots);
+    output.push(json!({"role":"user", "content":content}));
 }
 
 /// Saturate rather than wrap. A provider that reports a nonsense token count
@@ -646,6 +715,12 @@ fn bounded_u32(value: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZpVYAAAAASUVORK5CYII=";
+
+    fn screenshot() -> Value {
+        json!({"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":PNG}})
+    }
 
     #[tokio::test]
     async fn request_waiting_for_response_headers_has_a_deadline() {
@@ -785,11 +860,131 @@ mod tests {
                 json!({"type":"tool_result","tool_use_id":"b","content":"B"}),
             ]),
         ];
-        let converted = convert_messages(Some("system"), &messages);
+        let converted = convert_messages(Some("system"), &messages).unwrap();
         assert_eq!(converted[0]["role"], "system");
         assert_eq!(converted[1]["tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(converted[2]["role"], "tool");
         assert_eq!(converted[3]["tool_call_id"], "b");
+    }
+
+    #[test]
+    fn png_results_follow_all_parallel_tool_replies_including_split_turns() {
+        for split in [false, true] {
+            let results = vec![
+                json!({"type":"text", "text":"review these"}),
+                json!({"type":"tool_result", "tool_use_id":"a", "content":"A\n"}),
+                json!({"type":"tool_result", "tool_use_id":"b", "content":[
+                    {"type":"text", "text":"before\n"}, screenshot(), {"type":"text", "text":"after"}
+                ]}),
+                json!({"type":"tool_result", "tool_use_id":"c", "content":[screenshot()]}),
+            ];
+            let mut messages = vec![Message::assistant(vec![
+                json!({"type":"text", "text":"previewing"}),
+                json!({"type":"tool_use", "id":"a", "name":"read", "input":{}}),
+                json!({"type":"tool_use", "id":"b", "name":"html_preview", "input":{}}),
+                json!({"type":"tool_use", "id":"c", "name":"html_preview", "input":{}}),
+            ])];
+            if split {
+                messages.push(Message::user_blocks(results[..3].to_vec()));
+                messages.push(Message::user_blocks(results[3..].to_vec()));
+            } else {
+                messages.push(Message::user_blocks(results));
+            }
+            messages.push(Message::assistant(vec![
+                json!({"type":"text", "text":"reviewed"}),
+            ]));
+
+            let wire = convert_messages(None, &messages).unwrap();
+            assert_eq!(wire.len(), 6, "split={split}");
+            assert_eq!(wire[0]["tool_calls"].as_array().unwrap().len(), 3);
+            assert_eq!(
+                &wire[1..4],
+                &[
+                    json!({"role":"tool", "tool_call_id":"a", "content":"A\n"}),
+                    json!({"role":"tool", "tool_call_id":"b", "content":"before\nafter"}),
+                    json!({"role":"tool", "tool_call_id":"c", "content":""}),
+                ]
+            );
+            assert_eq!(
+                wire[4],
+                json!({"role":"user", "content":[
+                    {"type":"text", "text":"review these"},
+                    {"type":"text", "text":"Screenshot from tool call b:"},
+                    {"type":"image_url", "image_url":{"url":format!("data:image/png;base64,{PNG}")}},
+                    {"type":"text", "text":"Screenshot from tool call c:"},
+                    {"type":"image_url", "image_url":{"url":format!("data:image/png;base64,{PNG}")}}
+                ]})
+            );
+            assert_eq!(wire[5], json!({"role":"assistant", "content":"reviewed"}));
+        }
+    }
+
+    #[test]
+    fn text_only_history_keeps_its_exact_chat_completions_wire_shape() {
+        let messages = vec![
+            Message::user_blocks(vec![json!({"type":"text", "text":"hello\n"})]),
+            Message::assistant(vec![
+                json!({"type":"thinking", "thinking":"private", "signature":"sig"}),
+                json!({"type":"text", "text":"reading"}),
+                json!({"type":"tool_use", "id":"a", "name":"read", "input":{"path":"a"}}),
+                json!({"type":"tool_use", "id":"b", "name":"read", "input":{"path":"b"}}),
+            ]),
+            Message::user_blocks(vec![
+                json!({"type":"text", "text":"context"}),
+                json!({"type":"tool_result", "tool_use_id":"a", "content":"{\"ok\":true}\n"}),
+            ]),
+            Message::user_blocks(vec![
+                json!({"type":"tool_result", "tool_use_id":"b", "content":""}),
+            ]),
+            Message::assistant(vec![json!({"type":"text", "text":"done"})]),
+        ];
+        let expected = json!([
+            {"role":"system", "content":"system"},
+            {"role":"user", "content":"hello\n"},
+            {"role":"assistant", "content":"reading", "tool_calls":[
+                {"id":"a", "type":"function", "function":{"name":"read", "arguments":"{\"path\":\"a\"}"}},
+                {"id":"b", "type":"function", "function":{"name":"read", "arguments":"{\"path\":\"b\"}"}}
+            ]},
+            {"role":"user", "content":"context"},
+            {"role":"tool", "tool_call_id":"a", "content":"{\"ok\":true}\n"},
+            {"role":"tool", "tool_call_id":"b", "content":""},
+            {"role":"assistant", "content":"done"}
+        ]);
+        let wire = convert_messages(Some("system"), &messages).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&wire).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn nested_text_tool_results_concatenate_without_stringifying_the_array() {
+        let messages = vec![Message::user_blocks(vec![json!({
+            "type":"tool_result", "tool_use_id":"a", "content":[
+                {"type":"text", "text":"first\n"}, {"type":"text", "text":""}, {"type":"text", "text":"last"}
+            ]
+        })])];
+        assert_eq!(
+            convert_messages(None, &messages).unwrap(),
+            vec![json!({"role":"tool", "tool_call_id":"a", "content":"first\nlast"})]
+        );
+    }
+
+    #[test]
+    fn unsupported_or_malformed_screenshots_fail_before_a_request() {
+        for block in [
+            json!({"type":"tool_result", "tool_use_id":"", "content":[screenshot()]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"document"}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"text", "text":42}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"url"}}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"base64", "media_type":"image/jpeg", "data":PNG}}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"invalid"}}]}),
+            screenshot(),
+        ] {
+            let error = convert_messages(None, &[Message::user_blocks(vec![block])]).unwrap_err();
+            assert!(matches!(error, HarnessError::Other(_)));
+            assert!(error.to_string().contains("OpenAI-compatible"), "{error}");
+        }
     }
 
     #[test]

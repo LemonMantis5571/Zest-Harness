@@ -556,6 +556,7 @@ async fn run_with_sink_internal<S: EventSink>(
                 } => {
                     let delegation_job_id = metadata.as_ref().and_then(|metadata| match metadata {
                         ToolMetadata::Delegation { job_id, .. } => job_id.clone(),
+                        ToolMetadata::HtmlDocument { .. } => None,
                     });
                     // Whatever the model says next belongs to a new round.
                     round_break_pending = true;

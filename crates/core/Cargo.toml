@@ -28,6 +28,7 @@ base64 = "0.23"
 similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 toml.workspace = true
 toml_edit = "0.25"
 tempfile = "3"

@@ -1,4 +1,5 @@
 import type { ToolPart } from "./types";
+import { htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
 
 /**
  * A stretch of tool calls shown as one line.
@@ -130,7 +131,7 @@ export function groupToolRuns(
   };
 
   for (const tool of tools) {
-    if (tool.status === "awaiting_approval") {
+    if (tool.status === "awaiting_approval" || htmlDocumentFromMetadata(tool.metadata)) {
       flush();
       runs.push({ kind: "single", tool });
       continue;

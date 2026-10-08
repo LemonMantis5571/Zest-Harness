@@ -391,7 +391,7 @@ impl ExternalAgent {
                 provider_id: agent_id.to_string(),
                 model,
                 diff: (!run.diff.trim().is_empty()).then(|| run.diff.clone()),
-                usage: run.usage,
+                usage: run.usage.map(Box::new),
                 job_id: None,
                 stage: Some("direct".into()),
                 attempt: None,

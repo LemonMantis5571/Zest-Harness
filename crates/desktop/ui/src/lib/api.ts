@@ -1,5 +1,18 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { HtmlDocument, PreparedHtmlView } from "./htmlArtifacts";
+
+export function prepareHtmlView(document: HtmlDocument): Promise<PreparedHtmlView> {
+  return invoke("prepare_html_view", { document });
+}
+
+export function releaseHtmlView(token: string): Promise<void> {
+  return invoke("release_html_view", { token });
+}
+
+export function saveHtmlDocument(document: HtmlDocument): Promise<boolean> {
+  return invoke("save_html_document", { document });
+}
 
 export const startBtw = (sessionId: string): Promise<string> => invoke("start_btw", { sessionId });
 export const closeBtw = (id: string): Promise<void> => invoke("close_btw", { id });
