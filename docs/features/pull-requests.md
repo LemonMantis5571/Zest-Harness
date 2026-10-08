@@ -61,6 +61,11 @@ verify:
 The e2e specs run in `?fixture=1` (fixture PR #13, "Bot CI"): filtering and
 search, opening the review, back/forward navigation, and
 `&scenario=pull-request-delayed` for the loading state.
+The delayed test adds `&holdPullRequestDiff=1` to hold the fixture response.
+It checks the loading message and disabled Clean/Raw controls, then releases
+the response to verify the diff appears and the controls become enabled.
+This keeps lazy-loaded UI components running and does not rely on the CI
+runner observing the fixture's short loading window in real time.
 
 ## Pitfalls
 - `gh` must be installed and authenticated; without it no PR is detected and
