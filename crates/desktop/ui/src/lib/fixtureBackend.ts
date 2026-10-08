@@ -51,9 +51,9 @@ import type {
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
   id: m.id,
   efforts: ["low", "medium", "high", "xhigh", "max"],
-  contextWindow: 256000,
+  contextWindow: m.id.startsWith("gpt-6") ? 1_050_000 : 256000,
   supportsTools: true,
-  supportsVision: false,
+  supportsVision: m.id.startsWith("gpt-6"),
 }));
 const CATALOGUE_MODELS = [
   ...FIXTURE_MODELS,

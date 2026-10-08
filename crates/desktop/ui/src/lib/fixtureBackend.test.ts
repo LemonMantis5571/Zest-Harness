@@ -4,6 +4,21 @@ import { describe, it } from "node:test";
 import { createFixtureBackend, type FixtureScenario } from "./fixtureBackend.ts";
 import type { ChatEvent, DelegationEvent } from "./types.ts";
 
+describe("current GPT catalogue fixture", () => {
+  it("keeps the selected model and its published capabilities", async () => {
+    const backend = createFixtureBackend();
+    for (const model of ["gpt-6.1-sol", "gpt-6-astra"]) {
+      await backend.updateSessionOptions({ model, effort: "high" });
+      const session = await backend.sessionInfo();
+      assert.equal(session?.model, model);
+      const capability = session?.models.find((item) => item.id === model);
+      assert.equal(capability?.contextWindow, 1_050_000);
+      assert.equal(capability?.supportsVision, true);
+      assert.deepEqual(capability?.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+  });
+});
+
 describe("temporary side conversations", () => {
   it("keeps side followups out of the main transcript, queue, and thread list", async () => {
     const backend = createFixtureBackend();

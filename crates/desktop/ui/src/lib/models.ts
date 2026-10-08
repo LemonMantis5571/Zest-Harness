@@ -12,16 +12,27 @@ export type EffortOption = {
   shortLabel: string;
 };
 
-/** Display labels only — availability comes from Rust `ProviderView` / `SessionInfo.models`. */
-const MODEL_LABELS: Record<string, { label: string; shortLabel: string }> = {
+const CODEX_LABELS: Record<string, { label: string; shortLabel: string }> = {
   "gpt-5.6-sol": { label: "5.6 Sol", shortLabel: "Sol" },
+  "gpt-6.1-sol": { label: "6.1 Sol", shortLabel: "Sol" },
+  "gpt-6-astra": { label: "6 Astra", shortLabel: "Astra" },
   "gpt-6-sol": { label: "6 Sol", shortLabel: "Sol" },
   "gpt-6-luna": { label: "6 Luna", shortLabel: "Luna" },
   "gpt-5.6-terra": { label: "5.6 Terra", shortLabel: "Terra" },
   "gpt-5.6-luna": { label: "5.6 Luna", shortLabel: "Luna" },
   "gpt-5.5": { label: "5.5", shortLabel: "5.5" },
-  "gpt-5.4": { label: "5.4", shortLabel: "5.4" },
-  "gpt-5.4-mini": { label: "5.4 Mini", shortLabel: "Mini" },
+};
+
+/** Display labels only — availability comes from Rust `ProviderView` / `SessionInfo.models`. */
+const MODEL_LABELS: Record<string, { label: string; shortLabel: string }> = {
+  ...CODEX_LABELS,
+  "claude-opus-5-5": { label: "Opus 5.5", shortLabel: "Opus" },
+  "claude-sonnet-5-5": { label: "Sonnet 5.5", shortLabel: "Sonnet" },
+  "claude-haiku-5-5": { label: "Haiku 5.5", shortLabel: "Haiku" },
+  "claude-haiku-5-5-thinking": { label: "Haiku 5.5 Thinking", shortLabel: "Haiku" },
+  "claude-fable-5-1": { label: "Fable 5.1", shortLabel: "Fable" },
+  "composer-2.5": { label: "Composer 2.5", shortLabel: "Composer" },
+  "grok-4.7": { label: "Grok 4.7", shortLabel: "Grok" },
 };
 
 export const EFFORTS: EffortOption[] = [
@@ -224,6 +235,6 @@ export function providerSupportsModelPicker(provider: string): boolean {
 }
 
 /** Legacy constant for fixture defaults — not an availability source. */
-export const CODEX_MODELS: ModelOption[] = Object.entries(MODEL_LABELS).map(
+export const CODEX_MODELS: ModelOption[] = Object.entries(CODEX_LABELS).map(
   ([id, labels]) => ({ id, ...labels })
 );

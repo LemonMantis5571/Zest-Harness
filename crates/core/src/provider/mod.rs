@@ -131,6 +131,9 @@ fn heuristic_context_window(model: &str) -> u64 {
     let raw = model.to_ascii_lowercase();
     let model = raw.strip_prefix("cursor-").unwrap_or(raw.as_str());
 
+    if model.contains("haiku-5-5") {
+        return CLAUDE_WINDOW;
+    }
     if model.contains("haiku") {
         return CLAUDE_HAIKU_WINDOW;
     }
@@ -185,7 +188,7 @@ fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
 pub(super) fn model_supports_vision(model_id: &str) -> bool {
     matches!(
         model_id.to_ascii_lowercase().as_str(),
-        "gpt-6-sol" | "gpt-6-luna"
+        "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna"
     )
 }
 
@@ -248,6 +251,8 @@ pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
     DEFAULT_MODEL,
     "claude-opus-5-5",
     "claude-fable-5-1",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
     "claude-sonnet-5",
 ];
 
@@ -256,13 +261,13 @@ pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
 /// Mirrors the desktop picker (`CODEX_MODELS` in the UI). Keep these in sync.
 pub const CODEX_KNOWN_MODELS: &[&str] = &[
     "gpt-5.6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
 ];
 
 /// Whether a provider exposes a reasoning-effort selector, and which levels.
@@ -1129,10 +1134,16 @@ model = "deepseek-v4-flash"
             .collect();
         assert_eq!(ids, ANTHROPIC_KNOWN_MODELS);
         assert_eq!(ids[0], DEFAULT_MODEL, "the default leads the list");
-        assert!(
-            !ids.iter().any(|id| id.contains("haiku")),
-            "a model without adaptive thinking would reject every Zest turn"
-        );
+        for id in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+            let spec = descriptor_for_picker_id("anthropic")
+                .models
+                .into_iter()
+                .find(|model| model.id == id)
+                .expect(id);
+            assert_eq!(spec.context_window, 1_000_000);
+            assert_eq!(spec.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        }
+        assert!(!ids.iter().any(|id| id == "claude-haiku-4-5"));
     }
 
     #[test]
@@ -1144,6 +1155,10 @@ model = "deepseek-v4-flash"
             ("sonnet", CLAUDE_WINDOW),
             ("haiku", CLAUDE_HAIKU_WINDOW),
             ("claude-haiku-5", CLAUDE_HAIKU_WINDOW),
+            ("claude-haiku-5-5", CLAUDE_WINDOW),
+            ("claude-haiku-5-5-thinking", CLAUDE_WINDOW),
+            ("claude-sonnet-5-5", CLAUDE_WINDOW),
+            ("claude-fable-5-1", CLAUDE_WINDOW),
             ("gemini-3.1-pro", GEMINI_WINDOW),
             ("gemini-3.8-flash", GEMINI_WINDOW),
             ("composer-2.5", COMPOSER_WINDOW),
@@ -1151,6 +1166,8 @@ model = "deepseek-v4-flash"
             ("cursor-grok-4.6", GROK_WINDOW),
             ("cursor-grok-4.6-fast", GROK_WINDOW),
             ("gpt-5.6-sol", GPT_LONG_WINDOW),
+            ("gpt-6.1-sol", GPT_LONG_WINDOW),
+            ("gpt-6-astra", GPT_LONG_WINDOW),
             ("gpt-5.6-luna-fast", GPT_LONG_WINDOW),
             ("gpt-5.5", GPT_LONG_WINDOW),
             ("gpt-5.4", GPT_LONG_WINDOW),
@@ -1189,7 +1206,36 @@ model = "deepseek-v4-flash"
         assert_eq!(window("gpt-5.6-terra"), GPT_LONG_WINDOW);
         assert_eq!(window("gpt-5.6-luna"), GPT_LONG_WINDOW);
         assert_eq!(window("gpt-5.5"), GPT_LONG_WINDOW);
-        assert_eq!(window("gpt-5.4"), GPT_LONG_WINDOW);
-        assert_eq!(window("gpt-5.4-mini"), GPT_STANDARD_WINDOW);
+        assert_eq!(window("gpt-6.1-sol"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-6-astra"), GPT_LONG_WINDOW);
+    }
+
+    #[test]
+    fn current_gpt_choices_validate_on_both_codex_transports() {
+        for kind in ["codex_cli", "codex_oauth"] {
+            let config =
+                crate::config::Config::parse(&format!("[providers.openai]\nkind = \"{kind}\"\n"))
+                    .unwrap();
+            let descriptor = descriptor_from_config("openai", &config.providers["openai"]);
+            for id in ["gpt-6.1-sol", "gpt-6-astra"] {
+                assert_eq!(
+                    validate_against(&descriptor.models, "openai", id, "high"),
+                    Ok(())
+                );
+                assert!(validate_against(&descriptor.models, "openai", id, "none").is_err());
+                let spec = descriptor
+                    .models
+                    .iter()
+                    .find(|model| model.id == id)
+                    .unwrap();
+                assert!(spec.supports_tools && spec.supports_vision);
+                assert_eq!(spec.context_window, 1_050_000);
+            }
+            assert_eq!(
+                validate_against(&descriptor.models, "openai", "gpt-6-luna", "none"),
+                Ok(())
+            );
+            assert!(validate_against(&descriptor.models, "openai", "gpt-5.4", "high").is_err());
+        }
     }
 }

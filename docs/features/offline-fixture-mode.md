@@ -43,6 +43,7 @@ verify:
 - `npm run ui:e2e` or one spec: `npm run ui:e2e -- split-workspace`. Every spec except `streaming-performance` opens `/?fixture=1`; that one loads the standalone harness `e2e/fixtures/streaming.html`. Needs `npx playwright install chromium` once.
 
 ## Adding fixture behavior for a new e2e test
+- GPT-6 fixture choices carry their published 1,050,000-token context capacity and image capability, so model-picker tests exercise the displayed metadata as well as saved selections.
 - New backend method: implement it in `createFixtureBackend` (TypeScript requires it once it is on `DesktopBackend`). Prefer deterministic in-memory state over `notAvailable`.
 - New situation: add the name to the `FixtureScenario` union and to the `scenarioFromLocation` check, branch on `scenario` in the methods involved, cover it in `fixtureBackend.test.ts` via `createFixtureBackend({ scenario })`, and open `/?fixture=1&scenario=<name>` from the spec.
 - Preference-dependent UI can be pinned with `page.addInitScript` writing `localStorage` (the split spec sets `zest.responseBlockStreaming.v1`).

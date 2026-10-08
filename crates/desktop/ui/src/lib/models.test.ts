@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  CODEX_MODELS,
   effortsForModel,
   filterModelPickerGroups,
   formatContextWindow,
+  modelOptionsFromCapabilities,
   modelPickerGroups,
   modelPickerHasChoices,
   sameModelCatalogue,
@@ -19,6 +21,16 @@ const noEffortModel: ModelCapability = {
   supportsTools: true,
   supportsVision: false,
 };
+
+describe("current model display names", () => {
+  it("labels backend choices without adding other providers to the Codex fixture", () => {
+    const ids = ["gpt-6.1-sol", "gpt-6-astra", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "composer-2.5", "grok-4.7"];
+    const options = modelOptionsFromCapabilities(ids.map((id) => ({ ...noEffortModel, id })));
+    assert.deepEqual(options.map((model) => model.label), ["6.1 Sol", "6 Astra", "Sonnet 5.5", "Haiku 5.5", "Fable 5.1", "Composer 2.5", "Grok 4.7"]);
+    assert.deepEqual(options.map((model) => model.id), ids);
+    assert.equal(CODEX_MODELS.every((model) => model.id.startsWith("gpt-")), true);
+  });
+});
 
 describe("model catalogue search", () => {
   const groups = [

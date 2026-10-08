@@ -31,6 +31,7 @@ The `Provider` trait and native API clients are in
 sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
 
 ## Behavior
+- Desktop chats accept complete `zest-html` assistant fences as offline interactive cards. These CLI-owned loops do not receive Zest's native screenshot-preview tools and must not claim automatic preview feedback. See [Interactive HTML artifacts](html-artifacts.md).
 
 - All three return `owns_agent_loop() = true`: the vendor CLI owns the session,
   model and tool loop, so Zest registers no local tools for them and never offers
@@ -39,7 +40,8 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   --input-format stream-json --permission-prompt-tool stdio`, prompt as a stdin
   JSON message. Tools are narrowed with `--tools` to `ZEST_TOOL_SCOPE` (never
   `--allowedTools`). Legacy `default` permission mode maps to `auto`. `--effort`
-  is sent except for `haiku`. A stored session is resumed with `--resume` only if
+  is sent for explicit Haiku 5.5 as well as the larger models, but not legacy
+  Haiku ids or the deployment-dependent `haiku` alias. A stored session is resumed with `--resume` only if
   it was created for the same model; `/btw` side turns use `--fork-session`.
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
@@ -61,6 +63,10 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   `BUILTIN_MODELS`. Effort suffixes are split off into Zest's effort axis and
   rejoined by `wire_model`; `-fast` stays part of the model id. A configured
   `models` list is taken literally with no effort ladder.
+- Cursor's fallback shortlist includes Composer 2.5, Grok 4.7, Opus 5.5,
+  Sonnet 5.5, Haiku 5.5 Thinking and Fable 5.1. `none` is discovered as an
+  effort, not a separate GPT model, and round-trips through fast variants.
+  Composer and Gemini fallback choices have no invented effort control.
 - Cursor reuses one warm process per provider while the wire model is unchanged;
   cancel or error discards it. Side conversations get a separate `Ask`-mode
   instance so they do not evict the parent session.
@@ -111,3 +117,9 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   camelCase.
 - Cursor's `toolCallId` contains a newline; approval ids are Zest-minted instead.
 - `CodexAppServerProvider::discover_models` has no caller today.
+- Explicit current Claude ids need a sufficiently new Claude Code client:
+  Opus 5.5 requires 2.1.280, Sonnet 5.5 requires 2.1.284 and Haiku 5.5
+  requires 2.1.293. See the official [model configuration](https://code.claude.com/docs/en/model-config).
+- Cursor choices stay account-specific. Zest does not add API-only GPT ids to
+  Cursor when `cursor-agent models` does not offer them. See Cursor's
+  [model discovery command](https://cursor.com/docs/cli/reference/parameters).

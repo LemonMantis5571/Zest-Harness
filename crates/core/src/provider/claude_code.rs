@@ -44,10 +44,22 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 /// provider accepts. It was private, and the driver passed an empty builtin list
 /// instead: an entry with no `models` offered `[sonnet]` in the picker while the
 /// provider accepted `[sonnet, opus, haiku]`.
-pub(crate) const BUILTIN_MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+pub(crate) const BUILTIN_MODELS: &[&str] = &[
+    "sonnet",
+    "opus",
+    "haiku",
+    "fable",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-1",
+];
 
-/// The model family the CLI does not accept an `--effort` for.
-const NO_EFFORT_FAMILY: &str = "haiku";
+fn supports_effort(model: &str) -> bool {
+    // The alias can still resolve to Haiku 4.5 on older clients or third-party
+    // deployments. Only the explicit 5.5 id guarantees effort support.
+    !model.contains("haiku") || model == "claude-haiku-5-5"
+}
 
 /// What Claude Code may reach while it is standing in as Zest's parent agent.
 ///
@@ -255,9 +267,9 @@ impl ClaudeCodeProvider {
             args.push("--forward-subagent-text".into());
         }
 
-        // The CLI rejects an effort for the small model rather than ignoring it.
+        // Older Haiku models reject effort rather than ignoring it.
         if let Some(effort) = req.effort.as_deref().filter(|effort| !effort.is_empty()) {
-            if !req.model.contains(NO_EFFORT_FAMILY) {
+            if supports_effort(&req.model) {
                 args.push("--effort".into());
                 args.push(effort.to_string());
             }
@@ -294,8 +306,8 @@ impl ClaudeCodeProvider {
 ///
 /// The provider used to declare [`EffortPolicy::Unsupported`], which was true
 /// when it was written and is not now: CLI 2.1.220 takes `--effort` with the
-/// same five levels Zest already calls standard. Haiku is the exception and
-/// keeps an empty list, so the picker cannot offer a control that model rejects.
+/// same five levels Zest already calls standard. Explicit Haiku 5.5 supports
+/// them too; legacy Haiku ids and the deployment-dependent alias do not.
 pub(crate) fn effort_catalogue(default_model: &str, models: &[String]) -> Vec<ModelSpec> {
     let mut catalogue = catalogue(
         default_model,
@@ -304,7 +316,7 @@ pub(crate) fn effort_catalogue(default_model: &str, models: &[String]) -> Vec<Mo
         EffortPolicy::Standard(&[]),
     );
     for model in &mut catalogue {
-        if model.id.contains(NO_EFFORT_FAMILY) {
+        if !supports_effort(&model.id) {
             model.efforts.clear();
         }
     }
@@ -999,6 +1011,14 @@ mod tests {
         let mut haiku = request("haiku");
         haiku.effort = Some("xhigh".into());
         assert!(!args(&provider, &haiku).contains("--effort"));
+
+        let mut current = request("claude-haiku-5-5");
+        current.effort = Some("xhigh".into());
+        assert!(args(&provider, &current).contains("--effort xhigh"));
+
+        let mut legacy = request("claude-haiku-4-5-20251001");
+        legacy.effort = Some("xhigh".into());
+        assert!(!args(&provider, &legacy).contains("--effort"));
     }
 
     /// The picker must not offer a control the model rejects.
@@ -1017,6 +1037,14 @@ mod tests {
         assert!(efforts("sonnet").contains(&"xhigh".to_string()));
         assert!(efforts("opus").contains(&"low".to_string()));
         assert!(efforts("haiku").is_empty());
+        assert_eq!(
+            efforts("claude-haiku-5-5"),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            efforts("claude-sonnet-5-5"),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
     }
 
     #[test]

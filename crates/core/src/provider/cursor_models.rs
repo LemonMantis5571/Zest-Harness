@@ -30,7 +30,8 @@ use super::{context_window_for_model, ModelSpec, STANDARD_EFFORTS};
 /// that a week would go stale, and `cursor-agent models` costs about a second,
 /// which is far too slow to pay on every render of the provider list.
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const CACHE_FORMAT: u32 = 2;
+const CACHE_FORMAT: u32 = 3;
+const CURSOR_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
 
 /// Fallback when discovery has never succeeded.
 ///
@@ -40,7 +41,9 @@ const CACHE_FORMAT: u32 = 2;
 pub const BUILTIN_MODELS: &[&str] = &[
     "composer-2.5",
     "claude-opus-5-5",
-    "claude-sonnet-5-thinking",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5-thinking",
+    "claude-fable-5-1",
     "grok-4.7",
     "gpt-5.6-sol",
     "gemini-3.1-pro",
@@ -104,12 +107,16 @@ pub fn fallback() -> Vec<ModelSpec> {
         .collect()
 }
 
-/// Every family Cursor ships supports the standard ladder except the ones that
-/// take no effort at all, and we cannot tell which is which without discovery.
-/// Offering the ladder is the recoverable guess: a rejected effort is one clear
-/// error, while hiding a real one is invisible.
-fn efforts_for_fallback(_id: &str) -> Vec<String> {
-    STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect()
+/// Conservative capabilities for the fallback shortlist. Discovery replaces
+/// these with the account's own effort variants.
+fn efforts_for_fallback(id: &str) -> Vec<String> {
+    let efforts = match id {
+        "composer-2.5" | "gemini-3.1-pro" => &[][..],
+        "gpt-5.6-sol" => CURSOR_EFFORTS,
+        "grok-4.7" => &["low", "medium", "high", "xhigh"],
+        _ => STANDARD_EFFORTS,
+    };
+    efforts.iter().map(|s| (*s).to_string()).collect()
 }
 
 fn is_stale(fetched_at: u64) -> bool {
@@ -216,7 +223,7 @@ pub fn parse(stdout: &str) -> Vec<ModelSpec> {
         .map(|(family, (mut efforts, context))| {
             // Report the ladder in its own order, not discovery order.
             efforts.sort_by_key(|effort| {
-                STANDARD_EFFORTS
+                CURSOR_EFFORTS
                     .iter()
                     .position(|known| known == effort)
                     .unwrap_or(usize::MAX)
@@ -253,7 +260,7 @@ fn split_effort(id: &str) -> (String, Option<String>) {
         Some(body) => (body, true),
         None => (id, false),
     };
-    for effort in STANDARD_EFFORTS {
+    for effort in CURSOR_EFFORTS {
         if let Some(family) = body.strip_suffix(&format!("-{effort}")) {
             if family.is_empty() {
                 break;
@@ -277,9 +284,9 @@ fn with_fast(family: &str, fast: bool) -> String {
 /// The inverse of [`split_effort`], and the reason the family keeps `-fast` as
 /// a suffix: the effort goes *before* it, which is the order Cursor uses.
 pub fn wire_model(family: &str, effort: Option<&str>) -> String {
-    let effort = effort.map(str::trim).filter(|effort| {
-        !effort.is_empty() && STANDARD_EFFORTS.iter().any(|known| known == effort)
-    });
+    let effort = effort
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty() && CURSOR_EFFORTS.iter().any(|known| known == effort));
     let Some(effort) = effort else {
         return family.to_string();
     };
@@ -325,7 +332,12 @@ cursor-grok-4.6-xhigh - Cursor Grok 4.6 Extra High\n\
 claude-opus-5-thinking-max - Claude Opus 5 1M Max Thinking\n\
 gpt-5.4-high - GPT-5.4 1M High\n\
 gpt-5.4-high-fast - GPT-5.4 Fast\n\
-gpt-5.6-sol-high - GPT-5.6 Sol 1M High\n";
+gpt-5.6-sol-high - GPT-5.6 Sol 1M High\n\
+gpt-5.6-sol-none - GPT-5.6 Sol 1M None\n\
+gpt-5.6-sol-none-fast - GPT-5.6 Sol 1M None Fast\n\
+claude-sonnet-5-5-high - Claude Sonnet 5.5 High\n\
+claude-haiku-5-5-thinking-medium - Claude Haiku 5.5 Medium\n\
+claude-fable-5-1-high - Claude Fable 5.1 1M\n";
 
     fn find<'a>(models: &'a [ModelSpec], id: &str) -> &'a ModelSpec {
         models
@@ -345,6 +357,31 @@ gpt-5.6-sol-high - GPT-5.6 Sol 1M High\n";
         let models = parse(SAMPLE);
         let grok = find(&models, "cursor-grok-4.6");
         assert_eq!(grok.efforts, vec!["low", "medium", "high", "xhigh"]);
+    }
+
+    #[test]
+    fn current_claude_and_gpt_variants_keep_their_real_wire_ids() {
+        let models = parse(SAMPLE);
+        assert_eq!(find(&models, "gpt-5.6-sol").efforts, ["none", "high"]);
+        assert_eq!(
+            wire_model("gpt-5.6-sol-fast", Some("none")),
+            "gpt-5.6-sol-none-fast"
+        );
+        assert!(!ids(&models).contains(&"gpt-5.6-sol-none"));
+        for (id, effort, wire) in [
+            ("claude-sonnet-5-5", "high", "claude-sonnet-5-5-high"),
+            (
+                "claude-haiku-5-5-thinking",
+                "medium",
+                "claude-haiku-5-5-thinking-medium",
+            ),
+            ("claude-fable-5-1", "high", "claude-fable-5-1-high"),
+        ] {
+            let model = find(&models, id);
+            assert_eq!(model.efforts, [effort]);
+            assert_eq!(model.context_window, 1_000_000);
+            assert_eq!(wire_model(id, Some(effort)), wire);
+        }
     }
 
     #[test]
@@ -457,6 +494,33 @@ gpt-5.6-sol-high - GPT-5.6 Sol 1M High\n";
             "cursor-agent-not-installed",
         );
         assert_eq!(ids(&models), BUILTIN_MODELS.to_vec());
+        assert!(find(&models, "composer-2.5").efforts.is_empty());
+        assert_eq!(
+            find(&models, "claude-haiku-5-5-thinking").context_window,
+            1_000_000
+        );
+        assert_eq!(
+            find(&models, "grok-4.7").efforts,
+            ["low", "medium", "high", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn old_capability_caches_do_not_hide_the_updated_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cursor-models.json");
+        let old = CachedCatalogue {
+            format: 2,
+            fetched_at: now_secs(),
+            models: parse("obsolete-model - Obsolete\n"),
+        };
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let models = catalogue_with(Some(path), "cursor-agent-not-installed");
+        assert_eq!(
+            find(&models, "claude-haiku-5-5-thinking").context_window,
+            1_000_000
+        );
+        assert!(!ids(&models).contains(&"obsolete-model"));
     }
 
     #[test]

@@ -97,7 +97,7 @@ pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<Exter
 /// this small catalogue.
 pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
     match id {
-        "claude" => &["sonnet", "opus"],
+        "claude" => &["sonnet", "opus", "claude-haiku-5-5", "claude-fable-5-1"],
         "gemini" => &[
             "auto",
             "gemini-3-pro-preview",
@@ -112,9 +112,11 @@ pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
         // The *provider* never uses this list; it discovers instead.
         "cursor" => &[
             "composer-2.5",
-            "cursor-grok-4.6-high",
-            "claude-opus-5-thinking-high",
-            "claude-sonnet-5-thinking-high",
+            "grok-4.7-high",
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-high",
+            "claude-haiku-5-5-thinking-medium",
+            "claude-fable-5-1-high",
             "gpt-5.6-sol-high",
             "gemini-3.1-pro",
         ],
@@ -1149,7 +1151,21 @@ mod tests {
 
     #[test]
     fn model_options_are_scoped_to_builtin_workers() {
-        assert_eq!(external_agent_model_options("claude"), &["sonnet", "opus"]);
+        for (worker, model) in [
+            ("claude", "claude-haiku-5-5"),
+            ("claude", "claude-fable-5-1"),
+            ("cursor", "claude-sonnet-5-5-high"),
+            ("cursor", "claude-haiku-5-5-thinking-medium"),
+            ("cursor", "grok-4.7-high"),
+        ] {
+            assert!(external_agent_model_options(worker).contains(&model));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("zest.toml");
+            let preset = external_agent_preset_with_model(worker, false, Some(model)).unwrap();
+            upsert_external_agent(&path, &preset).unwrap();
+            let config = Config::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(config.agents[worker].model.as_deref(), Some(model));
+        }
         assert!(external_agent_model_options("custom").is_empty());
     }
 
