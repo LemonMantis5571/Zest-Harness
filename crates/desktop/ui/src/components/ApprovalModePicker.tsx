@@ -3,6 +3,7 @@ import { CheckIcon, ShieldIcon } from "lucide-react";
 
 import { APPROVAL_MODES, type ApprovalMode } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useViewportPopover } from "@/lib/useViewportPopover";
 
 type Props = {
   mode: ApprovalMode;
@@ -20,6 +21,9 @@ type Props = {
 export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useViewportPopover(open, triggerRef, panelRef);
   const current = APPROVAL_MODES.find((m) => m.id === mode) ?? APPROVAL_MODES[3];
 
   useEffect(() => {
@@ -63,20 +67,21 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
   return (
     <div ref={rootRef} className="relative shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] transition-colors",
+          "flex min-h-6 min-w-6 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] transition-colors",
           "hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
           disabled && "cursor-not-allowed opacity-50",
           // Bypass is the one mode worth noticing from across the room.
           mode === "bypass"
             ? "text-[var(--destructive,#e5484d)]"
             : mode === "plan"
-              ? "text-primary"
+              ? "text-link"
               : "text-muted-foreground"
         )}
         title={current.hint}
@@ -87,13 +92,14 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
 
       {open ? (
         <div
+          ref={panelRef}
           role="menu"
           className={cn(
-            "absolute right-0 bottom-[calc(100%+6px)] z-40 w-64 max-w-[calc(100vw-1rem)] max-h-[min(24rem,calc(100vh-1rem))] overflow-y-auto",
+            "absolute right-0 bottom-[calc(100%+6px)] z-40 w-64 max-w-[calc(100vw-1rem)] max-h-[min(24rem,calc(100dvh-1rem))] overflow-y-auto",
             "rounded-lg border border-border/80 bg-popover p-1 shadow-xl"
           )}
         >
-          <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             Mode
           </div>
           {APPROVAL_MODES.map((option, index) => {
@@ -129,11 +135,11 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
                   >
                     {option.label}
                   </span>
-                  <span className="block text-[10px] leading-snug text-muted-foreground/80">
+                  <span className="block text-[11px] leading-snug text-muted-foreground">
                     {option.hint}
                   </span>
                 </span>
-                <span className="mt-0.5 shrink-0 text-[10px] text-muted-foreground/50">
+                <span className="mt-0.5 shrink-0 text-[11px] text-muted-foreground">
                   {index + 1}
                 </span>
               </button>

@@ -185,11 +185,13 @@ function htmlArtifactMessages(): ChatMessage[] {
 }
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
   pullRequestDiffReady?: Promise<void>;
+  contextRecoveryReady?: Promise<void>;
+  contextFailureReady?: Promise<void>;
 };
 
 function scenarioFromLocation(): FixtureScenario | undefined {
@@ -200,7 +202,7 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
-    value === "btw-streaming" || value === "html-artifacts"
+    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery"
     ? value
     : undefined;
 }
@@ -222,6 +224,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     scenario === "cancel" || scenario === "tool-error";
   let optionAttempts = 0;
   let sessionAttempts = 0;
+  let contextUnavailable = false;
+  let contextRecovered = false;
+  if (scenario === "context-recovery") {
+    if (options.contextFailureReady) void options.contextFailureReady.then(() => { contextUnavailable = true; });
+    else if (typeof window !== "undefined") window.addEventListener("zest:fixture-fail-context", () => { contextUnavailable = true; }, { once: true });
+    if (options.contextRecoveryReady) void options.contextRecoveryReady.then(() => { contextRecovered = true; });
+    else if (typeof window !== "undefined") window.addEventListener("zest:fixture-recover-context", () => { contextRecovered = true; }, { once: true });
+  }
   const sessionModels = scenario === "model-catalogue" ? CATALOGUE_MODELS : FIXTURE_MODELS;
   async function saveFixtureOptions() {
     if (scenario === "options-delayed" || scenario === "options-failing") {
@@ -234,7 +244,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
-  let workspace = ".";
+  let workspace = scenario === "ui-stress" ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks" : ".";
   let fixturePinned = false;
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
@@ -253,6 +263,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     [LONG_THREAD_ID, longThreadMessages()],
   ]);
   if (scenario === "html-artifacts") fixtureTranscripts.set("fixture", htmlArtifactMessages());
+  if (scenario === "ui-stress") fixtureTranscripts.set("fixture", longThreadMessages().slice(0, 6));
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
 
@@ -1282,7 +1293,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       clearFixtureScenario();
       fixturePinned = false;
-      session = { ...FIXTURE_SESSION, models: sessionModels, messages: scenario === "html-artifacts" ? htmlArtifactMessages() : [] };
+      session = { ...FIXTURE_SESSION, root: workspace, models: sessionModels, messages: fixtureTranscripts.get("fixture") ?? [] };
       return { ...session };
     },
     async switchSessionProvider(providerId, model) {
@@ -2056,7 +2067,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async gitContext(): Promise<GitContext> {
       return {
-        branch: "master",
+        branch: scenario === "ui-stress" ? "feature/a-deliberately-long-branch-name-for-layout-checks" : "master",
         baseBranch: "master",
         branchChanged: false,
         additions: 12,
@@ -2147,6 +2158,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async contextUsage() {
+      if (scenario === "context-recovery" && contextUnavailable && !contextRecovered) {
+        throw new Error("Fixture context measurement is temporarily unavailable");
+      }
       // Like the desktop, a chat cannot be measured while a turn holds it.
       if (splitStreams.has(session.threadId) || pendingScenario) {
         throw new Error(
@@ -2154,25 +2168,25 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         );
       }
       return {
-        usedTokens: 12000,
-        windowTokens: 256000,
-        remainingTokens: 244000,
-        percentFull: 4.7,
+        usedTokens: scenario === "ui-stress" ? 109000 : 12000,
+        windowTokens: scenario === "ui-stress" ? 128000 : 256000,
+        remainingTokens: scenario === "ui-stress" ? 19000 : 244000,
+        percentFull: scenario === "ui-stress" ? 85.15625 : 4.7,
         source: "last_turn",
         systemTokens: 3200,
-        conversationTokens: 8800,
+        conversationTokens: scenario === "ui-stress" ? 105800 : 8800,
         toolSchemaTokens: 0,
         // A measured turn, so the three columns sum to usedTokens. Cache-heavy on
         // purpose: that is what a real session looks like, and it is the shape
         // that used to read as an almost-empty window.
-        inputTokens: 400,
+        inputTokens: scenario === "ui-stress" ? 97400 : 400,
         cacheReadTokens: 11200,
         cacheWriteTokens: 400,
         messageCount: session.messages.length,
         checkpointCount: session.checkpoints.length,
         canCompact: session.messages.length >= 4,
         autoCompactThresholdPercent: 80,
-        shouldAutoCompact: false,
+        shouldAutoCompact: scenario === "ui-stress",
       };
     },
     async getUserProfile() {

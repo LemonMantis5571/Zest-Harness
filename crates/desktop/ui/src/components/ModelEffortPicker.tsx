@@ -19,6 +19,7 @@ import {
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useOptionNavigation } from "@/lib/useOptionNavigation";
+import { useViewportPopover } from "@/lib/useViewportPopover";
 
 type Props = {
   model: string;
@@ -68,7 +69,9 @@ export function ModelEffortPicker({
   const open = onOpenChange ? (openProp ?? false) : internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  useViewportPopover(open, triggerRef, panelRef);
   const focusEffortAfterSave = useRef(false);
   const restoreTriggerAfterSave = useRef(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -254,11 +257,12 @@ export function ModelEffortPicker({
 
       {open ? (
         <div
+          ref={panelRef}
           id={panelId}
           role="dialog"
           aria-label={pickerLabel}
           aria-busy={pending}
-          className="absolute bottom-[calc(100%+6px)] left-0 z-50 flex w-[340px] max-w-[calc(100vw-2rem)] max-h-[min(30rem,calc(100dvh-10rem))] flex-col overflow-hidden rounded-lg border border-border/60 bg-popover p-1 text-popover-foreground"
+          className="absolute bottom-[calc(100%+6px)] left-0 z-50 flex w-[340px] max-w-[calc(100vw-2rem)] max-h-[min(30rem,calc(100dvh-2rem))] flex-col overflow-hidden rounded-lg border border-border/60 bg-popover p-1 text-popover-foreground"
         >
           {pending ? <div role="status" className="px-2 py-1 text-xs text-muted-foreground">Saving selection…</div> : null}
           <div className="shrink-0 px-2 py-1.5">

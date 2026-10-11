@@ -20,6 +20,9 @@ verify:
 # Tool approvals and permission modes
 
 ## Behavior
+- The mode chip has a minimum 24px hit area. Its non-portalled menu stays within
+  the viewport, and descriptions and shortcut digits keep readable contrast in
+  all built-in themes. This does not change permission decisions.
 - Risk comes from the prepared call: `Read` never asks; `Sensitive`, `Write`, and
   `Exec` go through `ApprovalPolicy::decide`. Reading or writing a likely secret
   (`.env`, keys) is `Sensitive`, never `Write`, so the modes that auto-apply

@@ -6,6 +6,37 @@ import type { ChatEvent, DelegationEvent } from "./types.ts";
 import { FIXTURE_HTML_DOCUMENT } from "./fixtureBackend.ts";
 import { htmlDocumentFromFence, htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
 
+it("UI stress fixture exposes long labels and a consistent high-context reading", async () => {
+  const backend = createFixtureBackend({ scenario: "ui-stress" });
+  const session = await backend.startSession();
+  assert.equal(session.root, "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks");
+  assert.equal(await backend.getWorkspaceFolder(), "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks");
+  assert.equal((await backend.gitContext()).branch, "feature/a-deliberately-long-branch-name-for-layout-checks");
+  const usage = await backend.contextUsage();
+  assert.equal(usage.usedTokens, 109000);
+  assert.equal(usage.remainingTokens, 19000);
+  assert.equal(usage.windowTokens, 128000);
+  assert.equal(usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens, 109000);
+  assert.equal(usage.shouldAutoCompact, true);
+  assert.equal(usage.canCompact, true);
+  assert.equal(usage.messageCount, 6);
+});
+
+it("context recovery fixture fails measurements until explicitly recovered", async () => {
+  let recover = () => {};
+  let fail = () => {};
+  const contextFailureReady = new Promise<void>((resolve) => { fail = resolve; });
+  const contextRecoveryReady = new Promise<void>((resolve) => { recover = resolve; });
+  const backend = createFixtureBackend({ scenario: "context-recovery", contextRecoveryReady, contextFailureReady });
+  assert.equal((await backend.contextUsage()).usedTokens, 12000);
+  fail();
+  await contextFailureReady;
+  await assert.rejects(backend.contextUsage(), /temporarily unavailable/);
+  recover();
+  await contextRecoveryReady;
+  assert.equal((await backend.contextUsage()).usedTokens, 12000);
+});
+
 describe("restored HTML artifact fixture", () => {
   it("seeds durable inline source and explicit fences with no execution tokens", async () => {
     const backend = createFixtureBackend({ scenario: "html-artifacts" });

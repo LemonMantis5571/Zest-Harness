@@ -49,6 +49,8 @@ verify:
 # Chat turns and streaming
 
 ## Behavior
+- Composer footer folder and pull-request controls have minimum 24px hit areas
+  without changing their navigation or approval behavior.
 - Enter sends (Shift+Enter is a newline, IME composition is ignored). An empty message with no usable attachment is refused (`empty message`).
 - While a turn runs, the Send button is Stop. Esc (when nothing else is open) or the `chat.stop` binding cancels via `cancel_turn`; the UI stays busy until the `cancelled` event arrives.
 - Sending while a turn runs, or while the chat already has queued messages, queues a durable **followup** instead of starting a turn. Queued messages show above the composer and can be edited or removed.

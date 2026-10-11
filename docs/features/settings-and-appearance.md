@@ -39,6 +39,8 @@ verify:
 - Desktop edits (providers, MCP servers, external agents) keep comments and formatting, go to the project `zest.toml` when one exists and to `~/.zest/zest.toml` otherwise, and are refused if the result would not parse.
 - Customize tabs: Appearance, Typography, Chat view, MCPs, Skills, Extras, Rules, Shortcuts. Appearance, typography, and chat view apply immediately and persist per machine in `localStorage` (`zest.selected_theme`, `zest.selected_font`, `zest.chatViewMode`).
 - Themes: `zest` (dark, default), `nights` (dark), `oceanic` (light). An unknown saved id falls back to the default. Fonts: Geist (default), ABC Arizona, Inter, Plus Jakarta Sans, JetBrains Mono, Fira Code, System UI; a font whose CSS fails to load reverts to Geist.
+- Oceanic uses a darker destructive color so small warning labels remain legible
+  on its light popovers.
 - Settings (Mod+,) is a right-hand dialog with User (name and photo), Response display (stream complete blocks), Provider, CLI delegation, and Usage sections.
 - CLI delegation model shortlists include explicit Claude Haiku 5.5 and Fable 5.1; Cursor presets use its confirmed current Opus/Sonnet/Haiku/Fable and Grok 4.7 wire ids. Existing worker configuration is not rewritten.
 - The avatar is stored as a JPEG of at most 48,000 bytes; the UI resizes a picked image to 128 px at quality 0.82 first. An empty photo deletes it. Without a photo the avatar shows the name's initial, then a generic icon.

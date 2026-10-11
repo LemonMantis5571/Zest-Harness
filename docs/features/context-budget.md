@@ -26,6 +26,9 @@ verify:
 ## Behavior
 - The composer footer shows `NN% · XK left`. Clicking it opens a popover with used/window tokens, whether the number is measured ("Based on the latest response.") or estimated ("Estimated from the conversation."), a System / Conversation / Tool schemas / Messages / Checkpoints breakdown, and fresh-input / cache-read / cache-write figures when measured.
 - The popover says automatic compaction starts at 80% full, or warns that the conversation will be compacted after this turn.
+- Context controls have at least 24px hit areas. The popover stays inside the
+  window and clipping containers, scrolls when necessary, and uses theme-aware
+  warning text. It rebinds positioning after a failed measurement recovers.
 - While a turn is running the backend cannot measure the chat (`context_usage` answers `busy`), so the meter keeps its last reading for that chat and refreshes when the turn ends. It never shows another chat's reading, and any other failure shows `Context —`. It refetches when the thread, message count, checkpoint count, or busy state changes.
 - After a turn finishes (`done`) in the open chat, if compaction is due, Zest compacts automatically. Sending is blocked while compaction runs.
 - Optional maintenance traces inherit the last successful turn's durable ID
