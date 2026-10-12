@@ -1022,6 +1022,8 @@ impl Agent {
                         {
                             // Prefer the short provenance label; full body stays on wire.
                             label
+                        } else if let Some(summary) = outcome.summary.clone() {
+                            summary
                         } else {
                             summarize_tool_body(&outcome.body)
                         };
@@ -1263,6 +1265,7 @@ impl Agent {
                                 diff,
                                 metadata: outcome.metadata,
                                 images: outcome.images,
+                                summary: outcome.summary,
                             },
                             Err(message) => {
                                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1398,6 +1401,7 @@ impl Agent {
                 diff: None,
                 metadata: None,
                 images: Vec::new(),
+                summary: None,
             },
             Ok(_) => ToolCallOutcome::failed("the user submitted an empty answer", ToolRisk::Read),
             Err(message) => ToolCallOutcome::failed(message, ToolRisk::Read),
@@ -1527,6 +1531,7 @@ impl Agent {
                 diff,
                 metadata: outcome.metadata,
                 images: outcome.images,
+                summary: outcome.summary,
             },
             Err(message) => {
                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1548,6 +1553,8 @@ struct ToolCallOutcome {
     diff: Option<String>,
     metadata: Option<crate::tools::ToolMetadata>,
     images: Vec<crate::tools::outcome::ToolImage>,
+    /// Replaces the one-line digest of `body` in the UI when the tool set one.
+    summary: Option<String>,
 }
 
 fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
@@ -1564,6 +1571,7 @@ impl ToolCallOutcome {
             diff: None,
             metadata: None,
             images: Vec::new(),
+            summary: None,
         }
     }
 }

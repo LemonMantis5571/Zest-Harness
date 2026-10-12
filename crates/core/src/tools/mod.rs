@@ -2,6 +2,7 @@ pub mod approval;
 pub mod bash;
 pub mod browser;
 pub mod capture;
+pub mod consult_advisor;
 pub mod delegate_feature;
 pub mod edit_file;
 pub mod external_agent;

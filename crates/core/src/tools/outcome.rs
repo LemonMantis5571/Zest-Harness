@@ -16,6 +16,10 @@ pub struct ToolOutcome {
     pub metadata: Option<ToolMetadata>,
     /// Validated screenshot pixels, separate from UI metadata and text spilling.
     pub images: Vec<ToolImage>,
+    /// What the transcript row shows in place of the default one-line digest of
+    /// `body`. For a result the user reads in full, such as an advisor's advice.
+    /// Never sent to the model.
+    pub summary: Option<String>,
 }
 
 impl ToolOutcome {
@@ -24,6 +28,7 @@ impl ToolOutcome {
             body: body.into(),
             metadata: None,
             images: Vec::new(),
+            summary: None,
         }
     }
 
@@ -32,7 +37,13 @@ impl ToolOutcome {
             body: body.into(),
             metadata: Some(metadata),
             images: Vec::new(),
+            summary: None,
         }
+    }
+
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
     }
 }
 

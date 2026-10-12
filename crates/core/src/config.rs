@@ -65,6 +65,11 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub usage: UsageConfig,
+    /// A stronger model the working model may consult mid-turn. Absent means
+    /// no advisor: nothing is registered and nothing leaves for a second
+    /// provider.
+    #[serde(default)]
+    pub advisor: Option<AdvisorConfig>,
     /// Set by [`Config::parse`] when it had to rewrite a legacy document.
     /// Never read from or written to TOML — the file on disk is left alone.
     #[serde(skip)]
@@ -704,6 +709,57 @@ impl ProviderConfig {
     }
 }
 
+/// `[advisor]`: the model `consult_advisor` asks. See `docs/plans/advisor.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisorConfig {
+    /// A provider id from `[providers]`. Must be one whose agent loop Zest
+    /// drives; a CLI provider runs its own tools and cannot simply answer.
+    pub provider: String,
+    /// The provider's default model when omitted.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Consultations allowed per user request.
+    #[serde(default = "default_advisor_max_uses")]
+    pub max_uses: u32,
+    /// Reply budget per consultation, reasoning included on providers that think.
+    #[serde(default = "default_advisor_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_advisor_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl AdvisorConfig {
+    /// Limits checked both by `Config::lint` and before the tool is registered,
+    /// so a bad value is reported once and never reaches a request.
+    pub fn validate_limits(&self) -> std::result::Result<(), String> {
+        if self.max_uses == 0 || self.max_uses > 20 {
+            return Err("[advisor] max_uses must be between 1 and 20".into());
+        }
+        if !(1_024..=64_000).contains(&self.max_tokens) {
+            return Err("[advisor] max_tokens must be between 1024 and 64000".into());
+        }
+        if self.timeout_secs == 0 || self.timeout_secs > 600 {
+            return Err("[advisor] timeout_secs must be between 1 and 600".into());
+        }
+        Ok(())
+    }
+}
+
+fn default_advisor_max_uses() -> u32 {
+    3
+}
+
+fn default_advisor_max_tokens() -> u32 {
+    4_096
+}
+
+fn default_advisor_timeout_secs() -> u64 {
+    120
+}
+
 fn default_anthropic_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
@@ -934,6 +990,7 @@ impl Config {
             legacy_routing: None,
             tools: ToolsConfig::default(),
             usage: UsageConfig::default(),
+            advisor: None,
             migrations: Vec::new(),
             unsupported: Vec::new(),
         }
@@ -1003,6 +1060,22 @@ impl Config {
         }
         for (id, server) in &self.mcp {
             if let Err(error) = server.validate(id) {
+                issues.push(error);
+            }
+        }
+        if let Some(advisor) = &self.advisor {
+            match self.providers.get(&advisor.provider) {
+                None => issues.push(format!(
+                    "[advisor] provider points at unknown provider `{}`",
+                    advisor.provider
+                )),
+                Some(provider) if provider.owns_agent_loop() => issues.push(format!(
+                    "[advisor] provider `{}` runs its own agent loop and cannot advise; choose an API provider",
+                    advisor.provider
+                )),
+                Some(_) => {}
+            }
+            if let Err(error) = advisor.validate_limits() {
                 issues.push(error);
             }
         }
@@ -1382,6 +1455,68 @@ provider = "typo"
         let issues = config.lint();
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].contains("typo"));
+    }
+
+    #[test]
+    fn an_advisor_section_parses_with_defaults_and_lints_clean() {
+        let config = Config::parse(
+            r#"
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[advisor]
+provider = "anthropic"
+model = "claude-opus-5-5"
+"#,
+        )
+        .expect("parses");
+        let advisor = config.advisor.as_ref().expect("advisor");
+        assert_eq!(advisor.provider, "anthropic");
+        assert_eq!(advisor.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            (advisor.max_uses, advisor.max_tokens, advisor.timeout_secs),
+            (3, 4_096, 120)
+        );
+        assert!(config.lint().is_empty(), "{:?}", config.lint());
+        assert!(Config::default().advisor.is_none());
+    }
+
+    #[test]
+    fn lint_rejects_an_advisor_that_cannot_answer() {
+        let config = Config::parse(
+            r#"
+[providers.claude]
+kind = "claude_code"
+
+[advisor]
+provider = "claude"
+max_uses = 0
+"#,
+        )
+        .expect("parses");
+        let issues = config.lint();
+        assert!(
+            issues.iter().any(|i| i.contains("runs its own agent loop")),
+            "{issues:?}"
+        );
+        assert!(issues.iter().any(|i| i.contains("max_uses")), "{issues:?}");
+
+        let config = Config::parse("[advisor]\nprovider = \"typo\"\n").expect("parses");
+        assert!(
+            config
+                .lint()
+                .iter()
+                .any(|i| i.contains("unknown provider `typo`")),
+            "{:?}",
+            config.lint()
+        );
+        assert!(Config::parse("[advisor]\nprovider = \"a\"\nmodle = \"x\"\n").is_err());
     }
 
     #[test]

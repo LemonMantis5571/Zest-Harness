@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::advisor::{Advisor, ADVISOR_PARENT_SYSTEM};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
@@ -21,6 +22,7 @@ use crate::provider::registry::{ProviderRegistry, Skipped};
 use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
 use crate::tools::approval::{AllowApprover, ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
+use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
@@ -405,6 +407,22 @@ impl RuntimeBuilder {
             && self.enable_external_agents
             && !provider_owns_agent_loop
             && !config.agents.is_empty();
+        // Resolved before the prompt is composed, for the same reason as the
+        // ACP tool above: the prompt mentions the advisor only when the tool is
+        // really there. An advisor that cannot load is a warning, never a
+        // reason the chat itself fails to start.
+        let advisor = match &config.advisor {
+            Some(settings) if is_parent && !provider_owns_agent_loop => {
+                match Advisor::resolve(settings, registry.get(&settings.provider)) {
+                    Ok(advisor) => Some(advisor),
+                    Err(reason) => {
+                        warnings.push(format!("The advisor is off for this chat: {reason}."));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let spill_thread_id = self
             .parent_thread_id
             .clone()
@@ -443,6 +461,10 @@ impl RuntimeBuilder {
             } else {
                 "For an interactive visualization in chat, build self-contained HTML with inline CSS/JavaScript and embedded data images. Use html_preview when available, inspect its real screenshot and diagnostics, correct errors, then publish with html_render. The user opens the isolated card. No external resources, network, or local-file access is available. If preview is unavailable or denied, state that explicitly; publication is still possible."
             });
+        }
+        if advisor.is_some() {
+            base_system.push_str("\n\n");
+            base_system.push_str(ADVISOR_PARENT_SYSTEM);
         }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
@@ -551,6 +573,13 @@ impl RuntimeBuilder {
         }
         if is_parent && self.html_artifacts && !provider_owns_agent_loop {
             crate::tools::html::register_html_tools(&mut tools, self.register_exec);
+        }
+        if let Some(advisor) = advisor {
+            tools.register(Arc::new(ConsultAdvisor::new(
+                advisor,
+                &provider_id,
+                Some(ledger.clone()),
+            )));
         }
 
         // Oversized results go to `.zest/spill/<chat-id>/` and the model gets a
@@ -877,6 +906,47 @@ mod tests {
             .agent
             .system_text()
             .contains("# Asking the user"));
+    }
+
+    #[test]
+    fn the_advisor_joins_parent_chats_only_and_a_broken_one_is_a_warning() {
+        let build = |advisor: &str, role: RuntimeRole| {
+            let root = two_provider_dir("advisor-runtime");
+            let raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            std::fs::write(root.join("zest.toml"), format!("{raw}\n{advisor}")).unwrap();
+            RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_role(role)
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap()
+        };
+        let configured = "[advisor]\nprovider = \"claude\"\nmodel = \"claude-opus-5\"\n";
+
+        let parent = build(configured, RuntimeRole::Parent);
+        assert!(parent.agent.tool_names().contains(&"consult_advisor"));
+        assert!(parent.agent.system_text().contains("consult_advisor"));
+        assert!(parent.warnings.is_empty(), "{:?}", parent.warnings);
+
+        let worker = build(configured, RuntimeRole::DelegationWorker);
+        assert!(!worker.agent.tool_names().contains(&"consult_advisor"));
+
+        let broken = build(
+            "[advisor]\nprovider = \"claude\"\nmodel = \"not-offered\"\n",
+            RuntimeRole::Parent,
+        );
+        assert!(!broken.agent.tool_names().contains(&"consult_advisor"));
+        assert!(!broken.agent.system_text().contains("consult_advisor"));
+        assert!(
+            broken.warnings.iter().any(|w| w.contains("advisor is off")),
+            "{:?}",
+            broken.warnings
+        );
+
+        let none = build("", RuntimeRole::Parent);
+        assert!(!none.agent.tool_names().contains(&"consult_advisor"));
     }
 
     #[test]

@@ -23,6 +23,7 @@ describe("mcp display names", () => {
   it("asks to run the tool on the server, not to allow mcp__", () => {
     assert.equal(approvalTitle("mcp__Haiku__manifest"), "Run manifest on Haiku?");
     assert.equal(approvalTitle("bash"), "Run this command?");
+    assert.equal(approvalTitle("consult_advisor"), "Share this chat with the advisor?");
     assert.equal(approvalTitle("write_file"), "Allow write_file?");
   });
 

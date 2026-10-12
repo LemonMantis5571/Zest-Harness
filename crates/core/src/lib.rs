@@ -3,6 +3,7 @@
 //! Deliberately headless — no UI, no terminal assumptions. The CLI crate is one
 //! front-end; a desktop app would be another.
 
+pub mod advisor;
 pub mod agent;
 #[cfg(test)]
 mod alpha_prove;

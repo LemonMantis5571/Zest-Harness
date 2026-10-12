@@ -4,6 +4,7 @@ import {
   FilePenLineIcon,
   FileTextIcon,
   GlobeIcon,
+  LightbulbIcon,
   ListIcon,
   Maximize2Icon,
   SearchIcon,
@@ -75,6 +76,8 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   // file; for it, `path` carries the command line verbatim.
   const isCommand = tool.name === "bash";
   const isDelegation = tool.name === "delegate_external";
+  // Sends the conversation to a second provider; the card names which one.
+  const isAdvisor = tool.name === "consult_advisor";
   const showArgs = hasDiff;
 
   if (awaiting && !asCard) {
@@ -86,6 +89,8 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
         <span className="grid size-5 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-400/90">
           {mcp ? (
             <ZapIcon className="size-3" />
+          ) : isAdvisor ? (
+            <LightbulbIcon className="size-3" />
           ) : isCommand || isDelegation ? (
             <TerminalIcon className="size-3" />
           ) : (
@@ -119,6 +124,8 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
           <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
             {mcp ? (
               <ZapIcon className="size-3.5 text-emerald-400" />
+            ) : isAdvisor ? (
+              <LightbulbIcon className="size-3.5" />
             ) : isCommand || isDelegation ? (
               <TerminalIcon className="size-3.5" />
             ) : (
@@ -302,6 +309,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
 function toolLabel(name: string): string {
   const labels: Record<string, string> = {
     bash: "Run",
+    consult_advisor: "Ask advisor",
     delegate_external: "Delegate",
     edit_file: "Edit",
     glob: "Find",
@@ -340,6 +348,7 @@ function toolTarget(
   if (tool.status === "running") {
     const runningTargets: Record<string, string> = {
       bash: "Running command",
+      consult_advisor: "Waiting for advice",
       delegate_external: "Working",
       edit_file: "Preparing edit",
       glob: "Searching files",
@@ -366,6 +375,8 @@ function ToolActionIcon({ tool }: { tool: ToolPart }) {
         return <TerminalIcon className="size-3.5" aria-hidden />;
       case "delegate_external":
         return <SparklesIcon className="size-3.5" aria-hidden />;
+      case "consult_advisor":
+        return <LightbulbIcon className="size-3.5" aria-hidden />;
       case "edit_file":
       case "write_file":
         return <FilePenLineIcon className="size-3.5" aria-hidden />;

@@ -94,6 +94,25 @@ enabled = true
 # model = "gpt-5"
 # credential = "openai"
 
+# Optional advisor: a stronger model the chat model can consult mid-turn with
+# the `consult_advisor` tool, before committing to an approach, when an error
+# keeps coming back, or before declaring a task done. It sees the conversation
+# as quoted text and cannot run tools. `provider` must be one Zest drives (an
+# API key, an OpenAI-compatible endpoint, or ChatGPT sign-in), not a CLI.
+# Chats on a CLI provider do not get the tool.
+#
+# When the advisor is on a different provider than the chat, the first
+# consultation asks before the conversation is sent there; "Allow for session"
+# covers the rest of the session. Advisor spend is recorded under its own model.
+#
+# [advisor]
+# provider = "anthropic"
+# model = "claude-opus-5-5"   # the provider's default model when omitted
+# effort = "high"
+# max_uses = 3                # per user request
+# max_tokens = 4096
+# timeout_secs = 120
+
 # Zest's own MCP servers are optional, and are reached by the chat provider
 # itself. Add them from Customize > MCPs, or here.
 #
