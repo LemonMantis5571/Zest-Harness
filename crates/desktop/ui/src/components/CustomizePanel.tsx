@@ -4,6 +4,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   FolderOpenIcon,
+  GitPullRequestIcon,
   KeyboardIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -1172,14 +1173,14 @@ function ChatViewPanel() {
             mode="compact"
             selected={mode === "compact"}
             title="Compact list"
-            description="Group chats by project and show the branch and recent time at a glance."
+            description="One line per chat under quiet project names. Marks appear only when a chat needs you."
             onSelect={selectMode}
           />
         </div>
         <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-          Compact list keeps more chats visible by showing the project, title, branch, and time in
-          a tight row. It changes the history presentation only; projects and chats keep the same
-          data and actions.
+          Compact list shows each chat as its title and one mark: a spinner while it works, an amber
+          dot when it needs approval, or a branch or pull request icon. A provider logo appears only
+          for chats on a different provider. Projects and chats keep the same data and actions.
         </p>
       </section>
 
@@ -1270,24 +1271,23 @@ function ChatViewPreview({ mode }: { mode: ChatViewMode }) {
     return (
       <div
         aria-hidden="true"
-        className="mt-3 overflow-hidden rounded-md border border-border/60 bg-[#101216] px-2 py-1.5 text-left text-[9px] text-white/75"
+        className="mt-3 overflow-hidden rounded-md border border-border/60 bg-background/70 px-2 py-1.5 text-left text-[9px]"
       >
-        <div className="flex items-center justify-between gap-2 text-[8px] text-white/45">
-          <span className="truncate">zest @ workspace</span>
-          <span className="shrink-0 tabular-nums">7m</span>
+        <div className="flex items-center justify-between px-1.5 py-0.5 text-muted-foreground">
+          <span className="truncate">zest-harness</span>
+          <PlusIcon className="size-2.5 shrink-0" />
         </div>
-        <div className="mt-0.5 flex min-w-0 items-center gap-1">
-          <MessageSquareIcon className="size-2.5 shrink-0 text-white/35" />
-          <span className="truncate font-medium text-white/85">Fix session shortcuts</span>
+        <div className="flex items-center gap-1.5 rounded bg-secondary/60 px-1.5 py-1 text-foreground/90">
+          <GitPullRequestIcon className="size-2.5 shrink-0 text-primary" />
+          <span className="truncate">Fix session shortcuts</span>
         </div>
-        <div className="mt-0.5 flex items-center gap-1 text-[8px] text-white/35">
-          <span>↳</span>
-          <span>fix/session-shortcuts</span>
-          <span className="ml-auto rounded bg-indigo-500/30 px-1 text-indigo-200">#12</span>
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-muted-foreground">
+          <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+          <span className="truncate text-foreground/80">Browser sidebar</span>
         </div>
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-white/10 pt-1 text-[8px] text-white/40">
-          <span className="truncate">Browser sidebar</span>
-          <span className="shrink-0 tabular-nums">2h</span>
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-muted-foreground">
+          <span className="size-1.5 shrink-0 rounded-full border border-muted-foreground/60" />
+          <span className="truncate text-foreground/80">Composer overflow</span>
         </div>
       </div>
     );

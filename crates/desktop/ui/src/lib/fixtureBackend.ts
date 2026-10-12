@@ -1359,7 +1359,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           updatedAt: fixtureEpochSeconds,
           title: fixtureThreadTitles.get(session.threadId) || "Fixture",
           pinned: fixturePinned,
-          providerId: "codex",
+          // The open chat runs on the session's provider, as in the real store.
+          providerId: session.provider,
           messageCount:
             fixtureTranscripts.get(session.threadId)?.length ??
             session.messages.length,

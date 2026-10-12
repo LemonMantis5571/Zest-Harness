@@ -14,6 +14,7 @@ paths:
   - crates/desktop/ui/src/lib/threadActivity.ts
   - crates/desktop/ui/src/lib/conversationTurns.ts
   - crates/desktop/ui/src/lib/chatView.ts
+  - crates/desktop/ui/src/lib/compactChatRow.ts
   - crates/desktop/ui/src/lib/navigationHistory.ts
   - crates/desktop/ui/src/lib/invokeErrors.ts
 tests:
@@ -21,11 +22,14 @@ tests:
   - crates/desktop/ui/src/lib/threadActivity.test.ts
   - crates/desktop/ui/src/lib/conversationTurns.test.ts
   - crates/desktop/ui/src/lib/chatView.test.ts
+  - crates/desktop/ui/src/lib/compactChatRow.test.ts
   - crates/desktop/ui/src/lib/navigationHistory.test.ts
   - crates/desktop/ui/e2e/sidebar-search.spec.ts
+  - crates/desktop/ui/e2e/compact-sidebar.spec.ts
 verify:
   - npm run ui:test
   - npm run ui:e2e -- sidebar-search
+  - npm run ui:e2e -- compact-sidebar
   - cargo test -p zest-core --lib -- thread::characterization
   - cargo test -p zest-core --lib -- thread_window::tests
   - cargo test -p zest-core --lib -- chat_persistence::tests
@@ -55,6 +59,7 @@ verify:
   do not support durable stream resume, so recovery continues to offer retry.
 - A chat whose saved provider is unknown or unavailable opens `ConversationRecoveryDialog`: choose a provider (older chats), open a copy with another provider, or configure the original. The original chat is left unchanged.
 - Sidebar layout is "project" or "compact" (`zest.chatViewMode`, set in Customize > Chat). Back/Forward in the sidebar header walk shell panels (`navigationHistory.ts`), not chats.
+- Compact layout: one heading tier (the project name, with an always-visible +; projectless chats sit under "No project"), an empty project is only its heading, and each chat is one 28 px line: a leading mark from `compactChatMark` (needs approval > working > pull request > changed branch > idle circle), the title, and only the exceptions — a provider logo when the chat is on a different provider than the session (`foreignProvider`), a pin when pinned, elapsed time while running. Pull request, pin, fork, and delete are hover actions. "Open a project folder" ends the list.
 
 ## How it works
 - Storage: `ThreadStore` (`thread.rs`) `save` via `fsutil::atomic_write_json` (temp file, sync, atomic replace). `load_typed` migrates older versions, refuses newer ones, moves corrupt files aside as `*.json.corrupt-<ts>`, and `terminalize_interrupted` closes running tool/approval cards. `Thread` holds UI `messages`, redacted `agent_messages`, `checkpoints`, `pending_inputs`, and a lifecycle `events` ledger.
