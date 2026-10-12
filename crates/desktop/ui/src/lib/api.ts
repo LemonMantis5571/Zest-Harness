@@ -24,6 +24,8 @@ export function sendBtw(id: string, text: string, onDelta: (text: string) => voi
 }
 
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
   ApprovalChoice,
   ApprovalMode,
   CommandView,
@@ -90,6 +92,18 @@ export function setExternalAgentMcp(id: string, enabled: boolean) {
 
 export function setExternalAgentModel(id: string, model: string | null) {
   return invoke<void>("set_external_agent_model", { id, model });
+}
+
+export function advisorSettings() {
+  return invoke<AdvisorSettings>("advisor_settings");
+}
+
+export function setAdvisor(choice: AdvisorChoice | null) {
+  return invoke<AdvisorSettings>("set_advisor", {
+    provider: choice?.provider ?? null,
+    model: choice?.model ?? null,
+    maxUses: choice?.maxUses ?? null,
+  });
 }
 
 export function checkExternalAgent(id: string) {

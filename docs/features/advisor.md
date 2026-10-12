@@ -4,22 +4,27 @@ summary: The chat model can consult a stronger model mid-turn with consult_advis
 paths:
   - crates/core/src/advisor.rs
   - crates/core/src/tools/consult_advisor.rs
+  - crates/desktop/ui/src/components/AdvisorSettings.tsx
   - docs/plans/advisor.md
 tests:
   - crates/desktop/ui/src/lib/mcpDisplay.test.ts
+  - crates/desktop/ui/e2e/advisor-settings.spec.ts
 verify:
   - cargo test -p zest-core --lib -- advisor
   - cargo test -p zest-core --lib -- config::tests::an_advisor_section_parses_with_defaults_and_lints_clean
   - cargo test -p zest-core --lib -- runtime::tests::the_advisor_joins_parent_chats_only_and_a_broken_one_is_a_warning
   - npm run ui:test
+  - npm run ui:e2e -- advisor-settings
+  - cargo test -p zest-core --lib -- config_edit::tests::set_advisor
 ---
 
 # Advisor
 
-Design, later steps, and open questions: [docs/plans/advisor.md](../plans/advisor.md). This entry describes what is built (step 1).
+Design, later steps, and open questions: [docs/plans/advisor.md](../plans/advisor.md). This entry describes what is built: the tool (step 1) and the Settings picker (step 5).
 
 ## Behavior
-- Configured with `[advisor]` in `zest.toml`: `provider` (a provider id), optional `model` (the provider's default otherwise) and `effort`, `max_uses` per user request (default 3, 1 to 20), `max_tokens` per consultation (default 4096, 1024 to 64000), `timeout_secs` (default 120, 1 to 600). Without the section nothing is registered.
+- Chosen in Settings > Advisor (also in the sidebar account menu): Off, or one of the configured providers Zest drives, with its model and consultations per request (1, 2, 3, or 5). Providers that are not keyed or signed in are listed but disabled; the chat's own provider is marked "same as this chat". Every choice saves at once and rebuilds the session so the open chat gains or loses the tool. A second provider shows the note that Zest asks before sending the conversation there; a chat on a CLI provider shows that it cannot consult the advisor.
+- Stored as `[advisor]` in `zest.toml` (the project file when one exists, otherwise the user file): `provider` (a provider id), optional `model` (the provider's default otherwise) and `effort`, `max_uses` per user request (default 3, 1 to 20), `max_tokens` per consultation (default 4096, 1024 to 64000), `timeout_secs` (default 120, 1 to 600). Without the section nothing is registered.
 - Parent chats on a provider Zest drives (Anthropic API, OpenAI-compatible, ChatGPT sign-in) get the `consult_advisor` tool and a short system-prompt paragraph about when to use it. Chats on Claude Code, Codex CLI, or Cursor do not, and neither do delegated workers or reviewers.
 - The advisor provider must also be one Zest drives. An advisor that cannot load (unknown provider, CLI provider, model not offered, limits out of range) is skipped with the session warning "The advisor is off for this chat: …"; the chat still starts. `Config::lint` reports the same problems.
 - The tool takes an optional `question`. The advisor receives the conversation as quoted text with a fixed system prompt and no tools, and its reply returns to the chat model as the tool result.
@@ -28,6 +33,7 @@ Design, later steps, and open questions: [docs/plans/advisor.md](../plans/adviso
 - The transcript row reads "Ask advisor · provider · model"; expanding it shows the advice (up to 4000 characters). Spend is recorded under the advisor's provider and model, with an `advisor` task trace when traces are on.
 
 ## How it works
+0. Settings: `AdvisorSettings.tsx` renders `advisorSettings()`; the Tauri `advisor_settings` command lists configured, non-CLI providers through `configured_provider_view` and reports the `[advisor]` lint issue, if any. `set_advisor` calls `config_edit::set_advisor`, which keeps `effort`, `max_tokens`, and `timeout_secs` and refuses an unknown provider, a CLI provider, or limits out of range without touching the file.
 1. `RuntimeBuilder::build` (`runtime.rs`) resolves `[advisor]` with `Advisor::resolve` (`advisor.rs`) against the same `ProviderRegistry` as the chat, before composing the prompt, then registers `ConsultAdvisor` (`tools/consult_advisor.rs`) after the HTML tools with the session ledger.
 2. `ConsultAdvisor::uses_context` makes the agent call `update_context` with the redacted staged conversation (`redact_sensitive_staged` in `agent.rs`) right before the call runs, the same copy delegation receives.
 3. `render_transcript` turns messages into `### User` / `### Agent` / `### Tool results` sections. It omits the last assistant message's tool calls (the pending ones, including this call), drops thinking and reasoning blocks, labels tool results with their tool name and failure, replaces images with `[image]`, keeps the head and tail of any block over 12,000 characters, and escapes `</transcript>`.
@@ -39,7 +45,7 @@ Design, later steps, and open questions: [docs/plans/advisor.md](../plans/adviso
 ## Verify
 - `cargo test -p zest-core --lib -- advisor` covers rendering (pending calls and thinking left out, failed results labelled, budget trimming, head-and-tail clipping, quote escaping, the request index) and the tool (a tool-free quoted request, ledger record under the advisor provider, the per-request limit and its reset, errors and timeouts as tool errors, approval only across providers).
 - The config and runtime tests in the frontmatter cover parsing, lint, parent-only registration, and the warning for an advisor that cannot load.
-- Live check: add `[advisor]` pointing at a second configured provider, ask the chat to "consult the advisor about X", approve the card, and expand the "Ask advisor" row.
+- Live check: choose an advisor in Settings > Advisor, ask the chat to "consult the advisor about X", approve the card if it is on another provider, and expand the "Ask advisor" row.
 
 ## Pitfalls
 - Never replay the conversation to the advisor as structured messages: the pending call has no result (OpenAI-format endpoints reject it), and tool history without tool definitions is refused by some endpoints.

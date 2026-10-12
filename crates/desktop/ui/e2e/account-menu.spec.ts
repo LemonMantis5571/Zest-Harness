@@ -23,6 +23,7 @@ test("the sidebar account menu opens Settings at the chosen section", async ({ p
     "Your profile",
     "Name and photo",
     "Provider",
+    "Advisor",
     "CLI delegation",
     "Usage",
     /^Settings/,

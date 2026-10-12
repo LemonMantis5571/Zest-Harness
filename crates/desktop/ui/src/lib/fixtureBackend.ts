@@ -25,6 +25,8 @@ import {
 } from "./threadWindow.ts";
 import type { DesktopBackend } from "./backend";
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
   ApprovalMode,
   AttachmentInput,
   ChatEvent,
@@ -290,6 +292,39 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
+  let fixtureAdvisor: AdvisorChoice | null = null;
+  const fixtureAdvisorSettings = (): AdvisorSettings => ({
+    provider: fixtureAdvisor?.provider ?? "",
+    model: fixtureAdvisor?.model ?? "",
+    maxUses: fixtureAdvisor?.maxUses ?? 3,
+    scope: "User zest.toml",
+    options: [
+      {
+        id: "fixture",
+        label: "Fixture",
+        statusLabel: "Ready",
+        ready: true,
+        defaultModel: DEFAULT_CODEX_MODEL,
+        models: sessionModels.map((model) => model.id),
+      },
+      {
+        id: "fixture-strong",
+        label: "Strong fixture",
+        statusLabel: "Ready",
+        ready: true,
+        defaultModel: "strong-large",
+        models: ["strong-large", "strong-medium"],
+      },
+      {
+        id: "fixture-keyless",
+        label: "Keyless fixture",
+        statusLabel: "Add a key",
+        ready: false,
+        defaultModel: "keyless-model",
+        models: ["keyless-model"],
+      },
+    ],
+  });
   /** Zest-owned MCP servers. One row so the Customize screen has something to
    *  render offline, including the never-checked state. */
   const fixtureMcpServers = new Map<string, McpServerRow>([
@@ -734,6 +769,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async setExternalAgentModel(id, model) {
       if (model?.trim()) fixtureExternalModels.set(id, model.trim());
       else fixtureExternalModels.delete(id);
+    },
+    async advisorSettings() {
+      return fixtureAdvisorSettings();
+    },
+    async setAdvisor(choice) {
+      fixtureAdvisor = choice;
+      return fixtureAdvisorSettings();
     },
     async checkExternalAgent() {
       return {

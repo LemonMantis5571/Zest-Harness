@@ -3,6 +3,7 @@ import {
   BotIcon,
   ChartColumnIcon,
   ChevronsUpDownIcon,
+  LightbulbIcon,
   type LucideIcon,
   ServerIcon,
   SettingsIcon,
@@ -100,6 +101,7 @@ export function AccountMenu({
       ? [
           { id: "user", label: "Name and photo", icon: UserPenIcon, run: settingsAt("user") },
           { id: "provider", label: "Provider", icon: ServerIcon, run: settingsAt("provider") },
+          { id: "advisor", label: "Advisor", icon: LightbulbIcon, run: settingsAt("advisor") },
           {
             id: "delegation",
             label: "CLI delegation",

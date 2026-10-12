@@ -826,6 +826,80 @@ pub fn remove_external_agent(path: &Path, id: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// The `[advisor]` fields the desktop edits. `effort`, `max_tokens`, and
+/// `timeout_secs` stay as the file has them.
+#[derive(Debug, Clone)]
+pub struct AdvisorInput {
+    pub provider: String,
+    /// `None` means the provider's default model.
+    pub model: Option<String>,
+    pub max_uses: u32,
+}
+
+/// Write `[advisor]`, or remove it with `None`.
+///
+/// Refuses an advisor the runtime would only skip with a warning — an unknown
+/// provider or one that runs its own agent loop — so Settings can never save a
+/// choice that silently does nothing.
+pub fn set_advisor(path: &Path, input: Option<&AdvisorInput>) -> Result<(), String> {
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+
+    match input {
+        None => {
+            doc.remove("advisor");
+        }
+        Some(input) => {
+            let provider = input.provider.trim();
+            validate_id(provider, "provider")?;
+            if !doc.contains_key("advisor") {
+                doc["advisor"] = Item::Table(Table::new());
+            }
+            let advisor = doc["advisor"]
+                .as_table_mut()
+                .ok_or_else(|| "[advisor] is not a table".to_string())?;
+            advisor["provider"] = toml_edit::value(provider);
+            match input
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                Some(model) => advisor["model"] = toml_edit::value(model),
+                None => {
+                    advisor.remove("model");
+                }
+            }
+            advisor["max_uses"] = toml_edit::value(i64::from(input.max_uses));
+        }
+    }
+
+    let rendered = doc.to_string();
+    let parsed = Config::parse(&rendered).map_err(|e| e.to_string())?;
+    if let Some(advisor) = &parsed.advisor {
+        match parsed.providers.get(&advisor.provider) {
+            None => {
+                return Err(format!(
+                    "`{}` is not a configured provider. Connect it first.",
+                    advisor.provider
+                ))
+            }
+            Some(provider) if provider.owns_agent_loop() => {
+                return Err(format!(
+                    "`{}` runs its own agent loop and cannot advise. Choose an API provider.",
+                    advisor.provider
+                ))
+            }
+            Some(_) => {}
+        }
+        advisor.validate_limits()?;
+    }
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 fn validate_id(id: &str, noun: &str) -> Result<(), String> {
     if id.is_empty()
         || !id
@@ -850,6 +924,96 @@ fn read_config(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ADVISOR_BASE: &str = r#"# keep me
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.claude]
+kind = "claude_code"
+"#;
+
+    #[test]
+    fn set_advisor_writes_updates_and_removes_the_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(
+            &path,
+            format!("{ADVISOR_BASE}\n[advisor]\nprovider = \"deepseek\"\ntimeout_secs = 90\n"),
+        )
+        .unwrap();
+
+        set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "anthropic".into(),
+                model: Some("claude-opus-5-5".into()),
+                max_uses: 2,
+            }),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep me"));
+        let advisor = Config::parse(&raw).unwrap().advisor.unwrap();
+        assert_eq!(advisor.provider, "anthropic");
+        assert_eq!(advisor.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(advisor.max_uses, 2);
+        assert_eq!(
+            advisor.timeout_secs, 90,
+            "keys Settings does not edit survive"
+        );
+
+        set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "anthropic".into(),
+                model: None,
+                max_uses: 3,
+            }),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(Config::parse(&raw)
+            .unwrap()
+            .advisor
+            .unwrap()
+            .model
+            .is_none());
+
+        set_advisor(&path, None).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(Config::parse(&raw).unwrap().advisor.is_none());
+        assert!(raw.contains("# keep me"));
+    }
+
+    #[test]
+    fn set_advisor_refuses_a_choice_that_would_do_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, ADVISOR_BASE).unwrap();
+        let input = |provider: &str, max_uses| AdvisorInput {
+            provider: provider.into(),
+            model: None,
+            max_uses,
+        };
+
+        let error = set_advisor(&path, Some(&input("claude", 3))).unwrap_err();
+        assert!(error.contains("runs its own agent loop"), "{error}");
+        let error = set_advisor(&path, Some(&input("missing", 3))).unwrap_err();
+        assert!(error.contains("not a configured provider"), "{error}");
+        let error = set_advisor(&path, Some(&input("deepseek", 0))).unwrap_err();
+        assert!(error.contains("max_uses"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            ADVISOR_BASE,
+            "a refused change must not touch the file"
+        );
+    }
 
     #[test]
     fn adds_provider_without_discarding_existing_config() {

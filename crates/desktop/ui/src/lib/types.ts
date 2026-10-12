@@ -1,3 +1,5 @@
+import type { AdvisorProviderOption } from "./generated/AdvisorProviderOption.ts";
+import type { AdvisorSettingsView } from "./generated/AdvisorSettingsView.ts";
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
 import type { ModelCapability } from "./generated/ModelCapability.ts";
 import type { CommandView as GeneratedCommandView } from "./generated/CommandView.ts";
@@ -84,6 +86,12 @@ export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
 };
 
 export type ExternalAgentRow = ExternalAgentView;
+
+/** `[advisor]` as Settings shows it, with the providers it may choose from. */
+export type AdvisorSettings = AdvisorSettingsView;
+export type AdvisorOption = AdvisorProviderOption;
+/** What Settings saves. `null` turns the advisor off. */
+export type AdvisorChoice = { provider: string; model: string | null; maxUses: number };
 export type ExternalAgentCheck = ExternalAgentCheckView;
 
 /** Zest's own MCP servers — not the CLI-owned ones behind `mcpAllowed`. */

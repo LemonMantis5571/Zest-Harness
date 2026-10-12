@@ -5,6 +5,8 @@ import { createFixtureBackend } from "./fixtureBackend";
 import type { ReadingDiffView, SkillSummary, SystemPromptInfo } from "./api";
 import type { HtmlDocument, PreparedHtmlView } from "./htmlArtifacts";
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
   ApprovalChoice,
   ApprovalMode,
   CommandView,
@@ -67,6 +69,9 @@ export type DesktopBackend = {
   setExternalAgent(id: string, enabled: boolean): Promise<void>;
   setExternalAgentMcp(id: string, enabled: boolean): Promise<void>;
   setExternalAgentModel(id: string, model: string | null): Promise<void>;
+  advisorSettings(): Promise<AdvisorSettings>;
+  /** Writes `[advisor]`; rebuild the session for the open chat to use it. */
+  setAdvisor(choice: AdvisorChoice | null): Promise<AdvisorSettings>;
   checkExternalAgent(id: string): Promise<ExternalAgentCheck>;
   listMcpServers(): Promise<McpServerRow[]>;
   /** Saving also refreshes the server's tool list; every row comes back. */
@@ -284,6 +289,8 @@ export function createTauriBackend(): DesktopBackend {
     setExternalAgent: (id, enabled) => tauriApi.setExternalAgent(id, enabled),
     setExternalAgentMcp: (id, enabled) => tauriApi.setExternalAgentMcp(id, enabled),
     setExternalAgentModel: (id, model) => tauriApi.setExternalAgentModel(id, model),
+    advisorSettings: () => tauriApi.advisorSettings(),
+    setAdvisor: (choice) => tauriApi.setAdvisor(choice),
     checkExternalAgent: (id) => tauriApi.checkExternalAgent(id),
     listMcpServers: () => tauriApi.listMcpServers(),
     saveMcpServer: (input) => tauriApi.saveMcpServer(input),

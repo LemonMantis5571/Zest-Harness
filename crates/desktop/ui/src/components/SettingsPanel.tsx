@@ -3,12 +3,14 @@ import {
   BotIcon,
   ChartColumnIcon,
   ChevronRightIcon,
+  LightbulbIcon,
   type LucideIcon,
   ServerIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
 
+import { AdvisorSettings } from "@/components/AdvisorSettings";
 import { Button } from "@/components/ui/button";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import {
@@ -22,6 +24,8 @@ import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/mod
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
 import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 import type {
+  AdvisorChoice,
+  AdvisorSettings as AdvisorSettingsData,
   ExternalAgentCheck,
   ExternalAgentRow,
   ProviderRow,
@@ -32,7 +36,7 @@ import type {
 import { cn } from "@/lib/utils";
 
 /** Sections the account menu can open Settings at. */
-export type SettingsSectionId = "user" | "provider" | "delegation" | "usage";
+export type SettingsSectionId = "user" | "provider" | "advisor" | "delegation" | "usage";
 
 type Props = {
   open: boolean;
@@ -75,6 +79,12 @@ function externalContextSummary(row: UsageSnapshot["externalWorkers"][number]) {
   }
   const value = row.contextUsed ?? row.contextSize;
   return value == null ? "Context not reported" : `Context ${value.toLocaleString()} reported`;
+}
+
+function advisorHint(advisor: AdvisorSettingsData | null): string {
+  const option = advisor?.options.find((candidate) => candidate.id === advisor.provider);
+  if (!advisor || !option) return "Off";
+  return `${option.label} · ${modelLabel(advisor.model || option.defaultModel)}`;
 }
 
 function SettingsSection({
@@ -187,6 +197,11 @@ export function SettingsPanel({
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState<string | null>(null);
 
+  const [advisor, setAdvisor] = useState<AdvisorSettingsData | null>(null);
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorSaving, setAdvisorSaving] = useState(false);
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
+
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
@@ -210,6 +225,8 @@ export function SettingsPanel({
     setExternalLoading(true);
     setExternalError(null);
     setExternalChecks({});
+    setAdvisorLoading(true);
+    setAdvisorError(null);
 
     const backend = getBackend();
     // Settled, not all: these are independent sections, and one of them
@@ -218,8 +235,9 @@ export function SettingsPanel({
       backend.listProviders(),
       backend.listExternalAgents(),
       backend.usageSnapshot(),
+      backend.advisorSettings(),
     ])
-      .then(([rowsR, externalR, snapR]) => {
+      .then(([rowsR, externalR, snapR, advisorR]) => {
         if (cancelled) return;
 
         if (rowsR.status === "fulfilled") {
@@ -240,11 +258,14 @@ export function SettingsPanel({
         }
 
         setUsage(snapR.status === "fulfilled" ? snapR.value : null);
+        if (advisorR.status === "fulfilled") setAdvisor(advisorR.value);
+        else setAdvisorError("Could not load advisor settings. Try again.");
       })
       .finally(() => {
         if (!cancelled) {
           setLoading(false);
           setExternalLoading(false);
+          setAdvisorLoading(false);
         }
       });
 
@@ -403,6 +424,29 @@ export function SettingsPanel({
       setExternalError(`Could not update the model for ${agent.label}. Try again.`);
     } finally {
       setExternalBusy(null);
+    }
+  }
+
+  async function saveAdvisor(choice: AdvisorChoice | null) {
+    if (sending) return;
+    setAdvisorSaving(true);
+    setAdvisorError(null);
+    try {
+      setAdvisor(await getBackend().setAdvisor(choice));
+      // The tool is registered when the session is built, so the open chat
+      // only gains or loses it after a rebuild.
+      if (onReloadSession) await onReloadSession();
+    } catch (error) {
+      // The backend explains a refused choice ("runs its own agent loop…").
+      setAdvisorError(
+        typeof error === "string"
+          ? error
+          : error instanceof Error
+            ? error.message
+            : "Could not save the advisor. Try again."
+      );
+    } finally {
+      setAdvisorSaving(false);
     }
   }
 
@@ -595,6 +639,25 @@ export function SettingsPanel({
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               Using {supportsEffort ? chipLabel(model, effort) : modelLabel(model)}. Change model{supportsEffort ? " and effort" : ""} in the composer.
             </p>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Advisor"
+            icon={LightbulbIcon}
+            hint={advisorHint(advisor)}
+            defaultOpen={focusSection === "advisor"}
+          >
+            <AdvisorSettings
+              settings={advisor}
+              loading={advisorLoading}
+              saving={advisorSaving}
+              error={advisorError}
+              chatProviderId={session.provider}
+              chatProviderLabel={session.label}
+              chatOwnsAgentLoop={session.ownsAgentLoop}
+              sending={sending}
+              onSave={(choice) => void saveAdvisor(choice)}
+            />
           </SettingsSection>
 
           <SettingsSection

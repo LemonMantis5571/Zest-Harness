@@ -746,6 +746,52 @@ struct ProviderView {
     models: Vec<ModelCapability>,
 }
 
+/// A provider Settings offers as the advisor: configured, and one whose agent
+/// loop Zest drives, so it can answer a plain request without running tools.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "AdvisorProviderOption.ts",
+        rename_all = "camelCase"
+    )
+)]
+struct AdvisorProviderOption {
+    id: String,
+    label: String,
+    status_label: String,
+    /// Keyed or signed in, so a consultation can actually be sent.
+    ready: bool,
+    default_model: String,
+    models: Vec<String>,
+}
+
+/// `[advisor]` as Settings shows it, with the providers it may choose from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "AdvisorSettingsView.ts", rename_all = "camelCase")
+)]
+struct AdvisorSettingsView {
+    /// Empty when no advisor is set.
+    provider: String,
+    /// Empty means the provider's default model.
+    model: String,
+    max_uses: u32,
+    /// Which `zest.toml` Settings writes to.
+    scope: String,
+    /// Why the saved advisor will not load, when it will not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    issue: Option<String>,
+    options: Vec<AdvisorProviderOption>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -1980,6 +2026,76 @@ fn set_external_agent_model(
     zest_core::config_edit::upsert_external_agent(&path, &preset)?;
     clear_workspace_config_cache(&state);
     Ok(())
+}
+
+fn advisor_settings_view(state: &AppState) -> AdvisorSettingsView {
+    let config = load_workspace_config(state);
+    let options = config
+        .providers
+        .iter()
+        .filter(|(_, provider)| !provider.owns_agent_loop())
+        .map(|(id, _)| {
+            let view = configured_provider_view(id, &config);
+            AdvisorProviderOption {
+                id: id.clone(),
+                label: view.label,
+                status_label: view.status_label,
+                ready: view.status_kind == "ready",
+                default_model: view.default_model,
+                models: view.models.into_iter().map(|model| model.id).collect(),
+            }
+        })
+        .collect();
+    let advisor = config.advisor.as_ref();
+    // The same text `Config::lint` gives, so Settings and the session warning
+    // never disagree about why an advisor is off.
+    let issue = advisor.and_then(|_| {
+        config
+            .lint()
+            .into_iter()
+            .find(|issue| issue.starts_with("[advisor]"))
+    });
+    AdvisorSettingsView {
+        provider: advisor
+            .map(|advisor| advisor.provider.clone())
+            .unwrap_or_default(),
+        model: advisor
+            .and_then(|advisor| advisor.model.clone())
+            .unwrap_or_default(),
+        max_uses: advisor.map(|advisor| advisor.max_uses).unwrap_or(3),
+        scope: external_agent_scope(state),
+        issue,
+        options,
+    }
+}
+
+#[tauri::command]
+fn advisor_settings(state: State<'_, AppState>) -> AdvisorSettingsView {
+    let _read_guard = state.config_edit.lock().ok();
+    advisor_settings_view(&state)
+}
+
+/// Save the advisor, or turn it off with no `provider`. The running chat picks
+/// it up when the front-end rebuilds the session.
+#[tauri::command]
+fn set_advisor(
+    state: State<'_, AppState>,
+    provider: Option<String>,
+    model: Option<String>,
+    max_uses: Option<u32>,
+) -> Result<AdvisorSettingsView, String> {
+    {
+        let _edit_guard = lock_config_edit(&state);
+        let path = editable_config_path(&state)?;
+        let input = provider.map(|provider| zest_core::config_edit::AdvisorInput {
+            provider,
+            model,
+            max_uses: max_uses.unwrap_or(3),
+        });
+        zest_core::config_edit::set_advisor(&path, input.as_ref())?;
+        clear_workspace_config_cache(&state);
+    }
+    Ok(advisor_settings_view(&state))
 }
 
 fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
@@ -9145,6 +9261,8 @@ pub fn run() {
                 set_external_agent,
                 set_external_agent_mcp,
                 set_external_agent_model,
+                advisor_settings,
+                set_advisor,
                 check_external_agent,
                 list_mcp_servers,
                 save_mcp_server,
@@ -9652,6 +9770,7 @@ mod export_bindings {
         SessionMeta::export_all(&config).expect("export SessionMeta bindings");
         ProviderView::export_all(&config).expect("export ProviderView bindings");
         ExternalAgentView::export_all(&config).expect("export ExternalAgentView bindings");
+        AdvisorSettingsView::export_all(&config).expect("export AdvisorSettingsView bindings");
         ExternalAgentCheckView::export_all(&config)
             .expect("export ExternalAgentCheckView bindings");
         ModelCapability::export_all(&config).expect("export ModelCapability bindings");
