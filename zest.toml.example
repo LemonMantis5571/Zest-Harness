@@ -112,6 +112,7 @@ enabled = true
 # max_uses = 3                # per user request
 # max_tokens = 4096
 # timeout_secs = 120
+# auto_review = true         # Zest also asks before finishing an edit and after repeated failures
 
 # Zest's own MCP servers are optional, and are reached by the chat provider
 # itself. Add them from Customize > MCPs, or here.

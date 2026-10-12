@@ -574,12 +574,17 @@ impl RuntimeBuilder {
         if is_parent && self.html_artifacts && !provider_owns_agent_loop {
             crate::tools::html::register_html_tools(&mut tools, self.register_exec);
         }
-        if let Some(advisor) = advisor {
-            tools.register(Arc::new(ConsultAdvisor::new(
+        // One instance serves both the model's tool calls and the agent's own
+        // consultations, so they share one per-request budget.
+        let consult_advisor = advisor.map(|advisor| {
+            Arc::new(ConsultAdvisor::new(
                 advisor,
                 &provider_id,
                 Some(ledger.clone()),
-            )));
+            ))
+        });
+        if let Some(advisor) = &consult_advisor {
+            tools.register(advisor.clone());
         }
 
         // Oversized results go to `.zest/spill/<chat-id>/` and the model gets a
@@ -625,6 +630,9 @@ impl RuntimeBuilder {
             RuntimeRole::DelegationReviewer => "reviewer",
         };
         agent = agent.with_usage_task_label(usage_task_kind, self.usage_correlation_id);
+        if let Some(advisor) = consult_advisor {
+            agent = agent.with_advisor(advisor);
+        }
         agent.model = model.clone();
         agent.effort = effort.clone();
 

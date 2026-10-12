@@ -41,6 +41,12 @@ test("the advisor is chosen in Settings, not in zest.toml", async ({ page }) => 
   await uses.getByRole("radio", { name: "2" }).click();
   await expect(uses.getByRole("radio", { name: "2" })).toHaveAttribute("aria-checked", "true");
 
+  // Zest's own reviews are on by default and can be switched off.
+  const autoReview = dialog.getByRole("switch", { name: "Review automatically" });
+  await expect(autoReview).toHaveAttribute("aria-checked", "true");
+  await autoReview.click();
+  await expect(autoReview).toHaveAttribute("aria-checked", "false");
+  await expect(uses.getByRole("radio", { name: "2" })).toHaveAttribute("aria-checked", "true");
 
   // The choice persists: reopened, the collapsed section names it.
   await dialog.getByRole("button", { name: "Close", exact: true }).click();

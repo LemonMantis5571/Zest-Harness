@@ -63,14 +63,20 @@ export function AdvisorSettings({
   // A newly chosen provider starts on its own default model.
   const choose = (provider: string) => {
     const option = settings.options.find((candidate) => candidate.id === provider);
-    onSave({ provider, model: option?.defaultModel || null, maxUses: settings.maxUses });
+    onSave({
+      provider,
+      model: option?.defaultModel || null,
+      maxUses: settings.maxUses,
+      autoReview: settings.autoReview,
+    });
   };
-  const update = (patch: { model?: string; maxUses?: number }) => {
+  const update = (patch: { model?: string; maxUses?: number; autoReview?: boolean }) => {
     if (!current) return;
     onSave({
       provider: current.id,
       model: patch.model ?? (settings.model || null),
       maxUses: patch.maxUses ?? settings.maxUses,
+      autoReview: patch.autoReview ?? settings.autoReview,
     });
   };
 
@@ -147,6 +153,37 @@ export function AdvisorSettings({
             </Chip>
           ))}
         </Group>
+      ) : null}
+
+      {current ? (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">Review automatically</div>
+            <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              Zest also asks the advisor itself: before a turn that changed files ends, and after
+              two failed commands in a row. Counts toward the consultations above.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.autoReview}
+            aria-label="Review automatically"
+            disabled={disabled}
+            onClick={() => update({ autoReview: !settings.autoReview })}
+            className={cn(
+              "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
+              settings.autoReview ? "bg-primary" : "bg-muted"
+            )}
+          >
+            <span
+              className={cn(
+                "pointer-events-none size-4 rounded-full bg-background shadow-sm transition-transform",
+                settings.autoReview ? "translate-x-4" : "translate-x-0"
+              )}
+            />
+          </button>
+        </div>
       ) : null}
 
       {current && chatOwnsAgentLoop ? (

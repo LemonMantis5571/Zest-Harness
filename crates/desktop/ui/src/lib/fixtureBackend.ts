@@ -297,6 +297,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     provider: fixtureAdvisor?.provider ?? "",
     model: fixtureAdvisor?.model ?? "",
     maxUses: fixtureAdvisor?.maxUses ?? 3,
+    autoReview: fixtureAdvisor?.autoReview ?? true,
     scope: "User zest.toml",
     options: [
       {

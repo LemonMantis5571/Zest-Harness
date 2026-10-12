@@ -783,6 +783,8 @@ struct AdvisorSettingsView {
     /// Empty means the provider's default model.
     model: String,
     max_uses: u32,
+    /// Zest consults on its own before finishing and after repeated failures.
+    auto_review: bool,
     /// Which `zest.toml` Settings writes to.
     scope: String,
     /// Why the saved advisor will not load, when it will not.
@@ -2063,6 +2065,7 @@ fn advisor_settings_view(state: &AppState) -> AdvisorSettingsView {
             .and_then(|advisor| advisor.model.clone())
             .unwrap_or_default(),
         max_uses: advisor.map(|advisor| advisor.max_uses).unwrap_or(3),
+        auto_review: advisor.is_none_or(|advisor| advisor.auto_review),
         scope: external_agent_scope(state),
         issue,
         options,
@@ -2083,6 +2086,7 @@ fn set_advisor(
     provider: Option<String>,
     model: Option<String>,
     max_uses: Option<u32>,
+    auto_review: Option<bool>,
 ) -> Result<AdvisorSettingsView, String> {
     {
         let _edit_guard = lock_config_edit(&state);
@@ -2091,6 +2095,7 @@ fn set_advisor(
             provider,
             model,
             max_uses: max_uses.unwrap_or(3),
+            auto_review: auto_review.unwrap_or(true),
         });
         zest_core::config_edit::set_advisor(&path, input.as_ref())?;
         clear_workspace_config_cache(&state);

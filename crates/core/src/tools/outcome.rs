@@ -20,6 +20,10 @@ pub struct ToolOutcome {
     /// `body`. For a result the user reads in full, such as an advisor's advice.
     /// Never sent to the model.
     pub summary: Option<String>,
+    /// The tool did its job, but what it ran failed: a command that exited
+    /// non-zero. Not an error for the model to correct, so `is_error` stays
+    /// false on the wire; the agent counts it toward repeated failures.
+    pub failed: bool,
 }
 
 impl ToolOutcome {
@@ -29,6 +33,7 @@ impl ToolOutcome {
             metadata: None,
             images: Vec::new(),
             summary: None,
+            failed: false,
         }
     }
 
@@ -38,11 +43,17 @@ impl ToolOutcome {
             metadata: Some(metadata),
             images: Vec::new(),
             summary: None,
+            failed: false,
         }
     }
 
     pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = Some(summary.into());
+        self
+    }
+
+    pub fn with_failed(mut self, failed: bool) -> Self {
+        self.failed = failed;
         self
     }
 }

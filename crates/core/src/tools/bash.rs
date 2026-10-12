@@ -734,7 +734,7 @@ impl Tool for Bash {
         // asked what happens and this is what happened. Returning it as an
         // error would be equally fine on the wire, but `is_error` is reserved
         // for "the tool could not do its job".
-        Ok(super::ToolOutcome::text(body))
+        Ok(super::ToolOutcome::text(body).with_failed(status.code() != Some(0)))
     }
 }
 
@@ -1355,8 +1355,12 @@ mod tests {
         let out = tool
             .run(json!({ "command": command, "cwd": "." }))
             .await
-            .unwrap()
-            .body;
+            .unwrap();
+        assert!(
+            out.failed,
+            "a non-zero exit counts as a failure for the harness"
+        );
+        let out = out.body;
         assert!(out.contains("exit 3"), "{out}");
     }
 

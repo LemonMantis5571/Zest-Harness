@@ -61,6 +61,31 @@ impl ConsultAdvisor {
         }
     }
 
+    /// `provider · model`: the row label, and what an approval grant covers.
+    pub fn approval_target(&self) -> String {
+        self.target()
+    }
+
+    /// A consultation sends the conversation to a second provider.
+    pub fn needs_approval(&self) -> bool {
+        self.cross_provider
+    }
+
+    /// Whether Zest may consult on its own (`[advisor] auto_review`).
+    pub fn auto_review(&self) -> bool {
+        self.advisor.auto_review
+    }
+
+    /// A consultation Zest starts itself, on the agent's behalf. Counts against
+    /// the same per-request budget as the model's own calls. The caller checks
+    /// consent first, because no approval card can be shown for it.
+    pub async fn review(&self, messages: &[Message], question: &str) -> Result<String, String> {
+        self.take_use(messages)?;
+        let transcript = render_transcript(messages, self.advisor.transcript_budget());
+        self.ask(&self.advisor.review_request(&transcript, question))
+            .await
+    }
+
     fn target(&self) -> String {
         format!("{} · {}", self.advisor.provider_id, self.advisor.model)
     }
@@ -326,6 +351,7 @@ mod tests {
             max_uses,
             max_tokens: 4_096,
             timeout: Duration::from_millis(200),
+            auto_review: true,
         }
     }
 

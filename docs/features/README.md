@@ -24,7 +24,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 <!-- feature-index:start -->
 | Feature | What it does | Checks |
 | --- | --- | --- |
-| [Advisor](advisor.md) | The chat model can consult a stronger model mid-turn with consult_advisor, on any provider Zest drives, behind an approval when the advisor is on a second provider. | 2 test files, 6 commands |
+| [Advisor](advisor.md) | The chat model can consult a stronger model mid-turn with consult_advisor, on any provider Zest drives, behind an approval when the advisor is on a second provider. | 2 test files, 7 commands |
 | [App shell and desktop plumbing](app-shell.md) | The desktop process, its Tauri command surface, window chrome, and the React root that boots into the picker or a chat. | 4 test files, 5 commands |
 | [Attachments](attachments.md) | Attach files, PDFs, and images to a message from the file picker or by pasting, within per-image and per-message limits. | 2 test files, 2 commands |
 | [Local browser and web search](browser-and-web.md) | The agent can drive a Zest browser window (open, read, click, type) behind approvals, and search the public web through DuckDuckGo without an API key. | 3 commands |

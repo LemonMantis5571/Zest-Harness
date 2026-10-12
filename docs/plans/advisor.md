@@ -1,6 +1,6 @@
 # Advisor: a stronger model the working model can consult
 
-Status: steps 1 and 5 (the Settings picker, moved up because nobody should have to edit `zest.toml`) built and tested; not yet tried against live providers.
+Status: steps 1, 2, and 5 (the Settings picker, moved up because nobody should have to edit `zest.toml`) built and tested; not yet tried against live providers. Step 2 consults only when no new approval is needed; see the feature entry.
 What exists is described in [docs/features/advisor.md](../features/advisor.md).
 
 ## Goal

@@ -91,7 +91,12 @@ export type ExternalAgentRow = ExternalAgentView;
 export type AdvisorSettings = AdvisorSettingsView;
 export type AdvisorOption = AdvisorProviderOption;
 /** What Settings saves. `null` turns the advisor off. */
-export type AdvisorChoice = { provider: string; model: string | null; maxUses: number };
+export type AdvisorChoice = {
+  provider: string;
+  model: string | null;
+  maxUses: number;
+  autoReview: boolean;
+};
 export type ExternalAgentCheck = ExternalAgentCheckView;
 
 /** Zest's own MCP servers — not the CLI-owned ones behind `mcpAllowed`. */

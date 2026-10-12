@@ -103,6 +103,7 @@ export function setAdvisor(choice: AdvisorChoice | null) {
     provider: choice?.provider ?? null,
     model: choice?.model ?? null,
     maxUses: choice?.maxUses ?? null,
+    autoReview: choice?.autoReview ?? null,
   });
 }
 

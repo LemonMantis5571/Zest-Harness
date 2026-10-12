@@ -834,6 +834,8 @@ pub struct AdvisorInput {
     /// `None` means the provider's default model.
     pub model: Option<String>,
     pub max_uses: u32,
+    /// Zest may consult on its own before finishing and after failures.
+    pub auto_review: bool,
 }
 
 /// Write `[advisor]`, or remove it with `None`.
@@ -873,6 +875,7 @@ pub fn set_advisor(path: &Path, input: Option<&AdvisorInput>) -> Result<(), Stri
                 }
             }
             advisor["max_uses"] = toml_edit::value(i64::from(input.max_uses));
+            advisor["auto_review"] = toml_edit::value(input.auto_review);
         }
     }
 
@@ -954,6 +957,7 @@ kind = "claude_code"
                 provider: "anthropic".into(),
                 model: Some("claude-opus-5-5".into()),
                 max_uses: 2,
+                auto_review: false,
             }),
         )
         .unwrap();
@@ -963,6 +967,7 @@ kind = "claude_code"
         assert_eq!(advisor.provider, "anthropic");
         assert_eq!(advisor.model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(advisor.max_uses, 2);
+        assert!(!advisor.auto_review);
         assert_eq!(
             advisor.timeout_secs, 90,
             "keys Settings does not edit survive"
@@ -974,6 +979,7 @@ kind = "claude_code"
                 provider: "anthropic".into(),
                 model: None,
                 max_uses: 3,
+                auto_review: true,
             }),
         )
         .unwrap();
@@ -1000,6 +1006,7 @@ kind = "claude_code"
             provider: provider.into(),
             model: None,
             max_uses,
+            auto_review: true,
         };
 
         let error = set_advisor(&path, Some(&input("claude", 3))).unwrap_err();

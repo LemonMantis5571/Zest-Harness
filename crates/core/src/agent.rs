@@ -32,6 +32,7 @@ use crate::tools::approval::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
     ToolRisk,
 };
+use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::prepared::PreparedToolCall;
 use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
@@ -150,6 +151,9 @@ pub struct Agent {
     pub turn_usage: Option<TurnUsageSummary>,
     /// Tool-use ids whose results must be redacted when persisting wire history.
     sensitive_tool_ids: Vec<String>,
+    /// The same advisor registered as `consult_advisor`, kept here so Zest can
+    /// also consult it on its own (`docs/plans/advisor.md`, step 2).
+    advisor: Option<Arc<ConsultAdvisor>>,
 }
 
 impl Agent {
@@ -177,7 +181,15 @@ impl Agent {
             last_usage: None,
             turn_usage: None,
             sensitive_tool_ids: Vec::new(),
+            advisor: None,
         }
+    }
+
+    /// Let Zest consult this advisor on its own. Register the same instance as
+    /// a tool so both paths share one per-request budget.
+    pub fn with_advisor(mut self, advisor: Arc<ConsultAdvisor>) -> Self {
+        self.advisor = Some(advisor);
+        self
     }
 
     /// Accepts a bare string for the common case where the whole prompt is
@@ -790,6 +802,12 @@ impl Agent {
         // Overwritten each provider round; only the final end_turn value is kept.
         #[allow(unused_assignments)]
         let mut last_usage: Option<Usage> = None;
+        // Zest's own advisor consultations: at most one before a turn that
+        // changed files ends, and one after two failed tool calls in a row.
+        let mut wrote_files = false;
+        let mut failure_streak = 0u32;
+        let mut reviewed_before_finish = false;
+        let mut consulted_on_failures = false;
 
         publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
 
@@ -925,6 +943,35 @@ impl Agent {
 
             match completion.stop_reason.as_deref() {
                 Some("end_turn") | None => {
+                    if wrote_files && !reviewed_before_finish {
+                        reviewed_before_finish = true;
+                        let review = self
+                            .harness_consult(
+                                &staged,
+                                &turn_sensitive,
+                                crate::advisor::FINISH_REVIEW_QUESTION,
+                                on_event,
+                                cancel,
+                            )
+                            .await;
+                        Self::check_cancel(cancel)?;
+                        if let Some(advice) =
+                            review.filter(|advice| !crate::advisor::approves(advice))
+                        {
+                            // One more round to act on it; the review does not
+                            // run again this turn.
+                            staged.push(Message::user_text(crate::advisor::finish_review_note(
+                                &advice,
+                            )));
+                            publish_side_context(
+                                self,
+                                &staged,
+                                &turn_sensitive,
+                                &mut on_side_context,
+                            );
+                            continue;
+                        }
+                    }
                     self.sensitive_tool_ids.extend(turn_sensitive);
                     // Live memory keeps real tool bodies; persist path redacts.
                     self.messages = staged;
@@ -1003,6 +1050,19 @@ impl Agent {
                         if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
                         }
+                        if outcome.risk == ToolRisk::Write && !outcome.is_error {
+                            wrote_files = true;
+                        }
+                        // The advisor's own failures (a spent budget, a timeout)
+                        // say nothing about the work, so they neither count nor
+                        // break a streak.
+                        if call.name != crate::advisor::ADVISOR_TOOL {
+                            if outcome.is_error || outcome.failed {
+                                failure_streak += 1;
+                            } else {
+                                failure_streak = 0;
+                            }
+                        }
                         if let Some(crate::tools::ToolMetadata::Delegation {
                             provider_id,
                             usage,
@@ -1058,6 +1118,25 @@ impl Agent {
 
                     // One user message carrying every result.
                     staged.push(Message::user_blocks(results));
+                    if failure_streak >= 2 && !consulted_on_failures {
+                        consulted_on_failures = true;
+                        let advice = self
+                            .harness_consult(
+                                &staged,
+                                &turn_sensitive,
+                                crate::advisor::FAILURE_QUESTION,
+                                on_event,
+                                cancel,
+                            )
+                            .await;
+                        Self::check_cancel(cancel)?;
+                        // Its own message, after the results: OpenAI-format
+                        // endpoints need tool results to follow their calls
+                        // directly, so text cannot ride in the results message.
+                        if let Some(advice) = advice {
+                            staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
+                        }
+                    }
                     publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
                 }
 
@@ -1132,6 +1211,64 @@ impl Agent {
     /// UI, but providers without an effort control must receive `None` rather
     /// than a plausible-looking `high` field that a vendor may reject or
     /// interpret differently.
+    /// A consultation Zest starts itself, shown as an ordinary "Ask advisor"
+    /// row. Only when it needs no approval right now: the advisor shares the
+    /// chat's provider, the user allowed it for the session, or the mode allows
+    /// everything. Otherwise it is skipped, and the model can still ask through
+    /// the tool, which shows the card.
+    async fn harness_consult(
+        &self,
+        staged: &[Message],
+        turn_sensitive: &[String],
+        question: &str,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Option<String> {
+        let advisor = self
+            .advisor
+            .as_ref()
+            .filter(|advisor| advisor.auto_review())?;
+        let target = advisor.approval_target();
+        if advisor.needs_approval() {
+            let allowed = self.policy.lock().is_ok_and(|policy| {
+                matches!(
+                    policy.decide(crate::advisor::ADVISOR_TOOL, &target, ToolRisk::Exec, false),
+                    PolicyOutcome::Allow
+                )
+            });
+            if !allowed {
+                return None;
+            }
+        }
+        let mut sensitive_ids = self.sensitive_tool_ids.clone();
+        sensitive_ids.extend(turn_sensitive.iter().cloned());
+        let messages = redact_sensitive_staged(staged.to_vec(), &sensitive_ids);
+        let id = new_id("advisor");
+        on_event(StreamEvent::ToolCallStart {
+            name: crate::advisor::ADVISOR_TOOL,
+            id: &id,
+        });
+        let result = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err("turn cancelled before the advisor answered".to_string()),
+            result = advisor.review(&messages, question) => result,
+        };
+        let summary = match &result {
+            Ok(advice) => advice.trim().chars().take(4_000).collect(),
+            Err(error) => error.clone(),
+        };
+        on_event(StreamEvent::ToolCallResult {
+            name: crate::advisor::ADVISOR_TOOL,
+            id: &id,
+            summary: &summary,
+            is_error: result.is_err(),
+            path: Some(&target),
+            diff: None,
+            metadata: None,
+        });
+        result.ok()
+    }
+
     fn effort_for_model(&self) -> Option<String> {
         let supports_effort = self
             .provider
@@ -1266,6 +1403,7 @@ impl Agent {
                                 metadata: outcome.metadata,
                                 images: outcome.images,
                                 summary: outcome.summary,
+                                failed: outcome.failed,
                             },
                             Err(message) => {
                                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1402,6 +1540,7 @@ impl Agent {
                 metadata: None,
                 images: Vec::new(),
                 summary: None,
+                failed: false,
             },
             Ok(_) => ToolCallOutcome::failed("the user submitted an empty answer", ToolRisk::Read),
             Err(message) => ToolCallOutcome::failed(message, ToolRisk::Read),
@@ -1532,6 +1671,7 @@ impl Agent {
                 metadata: outcome.metadata,
                 images: outcome.images,
                 summary: outcome.summary,
+                failed: outcome.failed,
             },
             Err(message) => {
                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1555,6 +1695,8 @@ struct ToolCallOutcome {
     images: Vec<crate::tools::outcome::ToolImage>,
     /// Replaces the one-line digest of `body` in the UI when the tool set one.
     summary: Option<String>,
+    /// The tool ran, but what it ran failed (a non-zero exit).
+    failed: bool,
 }
 
 fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
@@ -1572,6 +1714,7 @@ impl ToolCallOutcome {
             metadata: None,
             images: Vec::new(),
             summary: None,
+            failed: false,
         }
     }
 }
@@ -3493,5 +3636,347 @@ mod tests {
         assert_eq!(summary.usage.cache_creation_input_tokens, 42);
         assert_eq!(summary.usage.cache_read_input_tokens, 48);
         assert!(summary.usage_available);
+    }
+
+    mod advisor_reviews {
+        use super::*;
+        use crate::advisor::Advisor;
+        use crate::tools::approval::{AllowApprover, ApprovalMode};
+        use crate::tools::{Tool, ToolOutcome};
+        use std::collections::VecDeque;
+        use std::time::Duration;
+
+        /// Replays fixed completions in order, then answers "done".
+        struct Replay {
+            id: &'static str,
+            rounds: Mutex<VecDeque<Completion>>,
+            requests: Mutex<Vec<TurnRequest>>,
+        }
+
+        impl Replay {
+            fn new(id: &'static str, rounds: Vec<Completion>) -> Arc<Self> {
+                Arc::new(Self {
+                    id,
+                    rounds: Mutex::new(rounds.into()),
+                    requests: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn requests(&self) -> Vec<TurnRequest> {
+                self.requests.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl Provider for Replay {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn default_model(&self) -> &str {
+                "replay-model"
+            }
+            fn auth_status(&self) -> AuthStatus {
+                AuthStatus::Ready { account: None }
+            }
+            async fn stream_turn(
+                &self,
+                request: &TurnRequest,
+                _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+            ) -> Result<Completion> {
+                self.requests.lock().unwrap().push(request.clone());
+                Ok(self
+                    .rounds
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| text("done")))
+            }
+        }
+
+        fn text(body: &str) -> Completion {
+            Completion {
+                content: vec![json!({ "type": "text", "text": body })],
+                stop_reason: Some("end_turn".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            }
+        }
+
+        fn calls(names: &[&str]) -> Completion {
+            Completion {
+                content: names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        json!({"type":"tool_use","id":format!("c{index}"),"name":name,"input":{}})
+                    })
+                    .collect(),
+                stop_reason: Some("tool_use".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            }
+        }
+
+        /// A write that succeeds once approved.
+        struct WriteNote;
+
+        #[async_trait]
+        impl Tool for WriteNote {
+            fn name(&self) -> &str {
+                "write_note"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::Write
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("written"))
+            }
+        }
+
+        /// A command that runs and exits non-zero.
+        struct FailingCommand;
+
+        #[async_trait]
+        impl Tool for FailingCommand {
+            fn name(&self) -> &str {
+                "failing_command"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("$ make\nexit 2").with_failed(true))
+            }
+        }
+
+        fn advisor(
+            provider: Arc<Replay>,
+            chat_provider_id: &str,
+            auto_review: bool,
+        ) -> Arc<ConsultAdvisor> {
+            Arc::new(ConsultAdvisor::new(
+                Advisor {
+                    provider_id: provider.id.to_string(),
+                    model: "replay-model".into(),
+                    effort: None,
+                    provider,
+                    max_uses: 3,
+                    max_tokens: 4_096,
+                    timeout: Duration::from_secs(5),
+                    auto_review,
+                },
+                chat_provider_id,
+                None,
+            ))
+        }
+
+        fn agent(chat: Arc<Replay>, advisor: Arc<ConsultAdvisor>, mode: ApprovalMode) -> Agent {
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(WriteNote));
+            tools.register(Arc::new(FailingCommand));
+            tools.register(advisor.clone());
+            Agent::new(chat, tools)
+                .with_approver(Arc::new(AllowApprover))
+                .with_policy(Arc::new(Mutex::new(ApprovalPolicy::new(mode))))
+                .with_advisor(advisor)
+        }
+
+        fn last_text(request: &TurnRequest) -> String {
+            request.messages.last().unwrap().content[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        #[tokio::test]
+        async fn a_turn_that_changed_files_is_reviewed_once_before_it_ends() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["write_note"]),
+                    text("Done."),
+                    text("Ran the tests."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("Run the tests before finishing.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut rows = Vec::new();
+            let mut sink = |event: StreamEvent<'_>| {
+                if let StreamEvent::ToolCallResult { name, summary, .. } = event {
+                    rows.push((name.to_string(), summary.to_string()));
+                }
+            };
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+
+            let requests = chat.requests();
+            assert_eq!(requests.len(), 3, "one extra round to act on the advice");
+            let note = last_text(&requests[2]);
+            assert!(note.starts_with("[Zest: before you finish"), "{note}");
+            assert!(note.contains("Run the tests before finishing."), "{note}");
+            assert!(rows.contains(&(
+                "consult_advisor".to_string(),
+                "Run the tests before finishing.".to_string()
+            )));
+            let asked = strong.requests();
+            assert_eq!(
+                asked.len(),
+                1,
+                "reviewed once, not again after the extra round"
+            );
+            assert!(last_text(&asked[0]).contains("Zest, the harness running the agent"));
+        }
+
+        #[tokio::test]
+        async fn an_approving_review_lets_the_turn_end() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("chat", vec![text("APPROVE")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(chat.requests().len(), 2);
+            assert_eq!(strong.requests().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_second_provider_is_only_consulted_once_it_is_allowed() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("strong", vec![text("Run the tests.")]);
+            let mut asking = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            asking
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert!(
+                strong.requests().is_empty(),
+                "no card can be shown, so no consultation"
+            );
+            assert_eq!(chat.requests().len(), 2);
+
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let mut bypass = agent(
+                chat,
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Bypass,
+            );
+            bypass
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(strong.requests().len(), 1);
+
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let granted = agent(
+                chat,
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            granted
+                .policy()
+                .lock()
+                .unwrap()
+                .trust(crate::advisor::ADVISOR_TOOL, "strong · replay-model");
+            let mut granted = granted;
+            granted
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(strong.requests().len(), 2, "allowed for the session");
+        }
+
+        #[tokio::test]
+        async fn two_failures_in_a_row_bring_in_the_advisor_after_the_results() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["failing_command", "failing_command"]),
+                    text("Fixed the path."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("The build runs from the wrong folder.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Build it", &mut sink, None)
+                .await
+                .unwrap();
+
+            let requests = chat.requests();
+            assert_eq!(requests.len(), 2);
+            let messages = &requests[1].messages;
+            let results = &messages[messages.len() - 2];
+            assert!(
+                results
+                    .content
+                    .iter()
+                    .all(|block| block["type"] == "tool_result"),
+                "the results message stays pure: {results:?}"
+            );
+            let note = last_text(&requests[1]);
+            assert!(note.starts_with("[Zest: after repeated failures"), "{note}");
+            assert!(note.contains("wrong folder"), "{note}");
+            assert_eq!(strong.requests().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn automatic_reviews_can_be_turned_off() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("chat", vec![text("Run the tests.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", false),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert!(strong.requests().is_empty());
+            assert_eq!(chat.requests().len(), 2);
+        }
     }
 }

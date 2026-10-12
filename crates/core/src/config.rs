@@ -729,6 +729,11 @@ pub struct AdvisorConfig {
     pub max_tokens: u32,
     #[serde(default = "default_advisor_timeout_secs")]
     pub timeout_secs: u64,
+    /// Let Zest consult on its own: before a turn that changed files finishes,
+    /// and after two failed tool calls in a row. Only when that needs no new
+    /// approval; it counts against `max_uses`.
+    #[serde(default = "default_true")]
+    pub auto_review: bool,
 }
 
 impl AdvisorConfig {

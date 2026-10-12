@@ -14,6 +14,10 @@ provider: string,
  */
 model: string, maxUses: number, 
 /**
+ * Zest consults on its own before finishing and after repeated failures.
+ */
+autoReview: boolean, 
+/**
  * Which `zest.toml` Settings writes to.
  */
 scope: string, 
