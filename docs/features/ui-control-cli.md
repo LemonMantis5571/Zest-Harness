@@ -4,8 +4,10 @@ summary: One-line commands that drive the live UI, inspect it, and report every 
 paths:
   - scripts/zest-control.mjs
   - scripts/zest-control-daemon.mjs
+  - scripts/zest-ui-measure.mjs
 tests:
   - scripts/zest-control.test.mjs
+  - crates/desktop/ui/e2e/ui-quality.spec.ts
 verify:
   - npm run control:test
   - npm run control:check
@@ -14,6 +16,13 @@ verify:
 # UI control CLI (zest-control)
 
 ## Behavior
+
+- `viewport WIDTH HEIGHT` resizes the fixture window. `inspect ui-quality`
+  reports visible controls and text with their bounds, clipping ancestors,
+  font sizes, and measured contrast. `--selector CSS` narrows the measurement.
+  Images, filters, opacity, and missing opaque backgrounds report unknown
+  contrast, never a passing value. This diagnostic does not replace keyboard
+  journeys, screenshot review, or a full accessibility audit.
 
 - `inspect html` returns the accessibility trees of open artifact frames. `html-click "Name"` and `html-value "Label" "Value"` interact with those frames (`--nth` chooses one).
 

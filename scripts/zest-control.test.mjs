@@ -24,6 +24,15 @@ test("a value flag at the end of argv becomes a boolean instead of eating nothin
   assert.deepEqual(parseArgs(["start", "--scenario"]).options, { scenario: true });
 });
 
+test("UI measurements retain the selector and viewport dimensions", () => {
+  assert.deepEqual(parseArgs(["inspect", "ui-quality", "--selector", '[role="dialog"]']), {
+    command: "inspect", args: ["ui-quality"], options: { selector: '[role="dialog"]' },
+  });
+  assert.deepEqual(parseArgs(["viewport", "840", "560"]), {
+    command: "viewport", args: ["840", "560"], options: {},
+  });
+});
+
 test("HTML interaction commands keep labels and frame selection explicit", () => {
   assert.deepEqual(parseArgs(["html-click", "Increment", "--nth", "1"]), {
     command: "html-click", args: ["Increment"], options: { nth: "1" },

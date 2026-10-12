@@ -8,6 +8,7 @@ paths:
   - crates/desktop/ui/src/lib/modelMarks.ts
   - crates/desktop/ui/src/lib/sessionOptions.ts
   - crates/desktop/ui/src/lib/useOptionNavigation.ts
+  - crates/desktop/ui/src/lib/useViewportPopover.ts
   - crates/desktop/ui/src/lib/providerSelection.ts
   - crates/core/src/prefs.rs
 tests:
@@ -36,6 +37,10 @@ Intended behavior was specified in
 provider drivers in [provider-runtime](provider-runtime.md).
 
 ## Behavior
+
+- Model panels remain inside the viewport in split panes and reposition when
+  the window, pane, or catalogue changes size. They also respect the transcript
+  frame's clipping boundary in single view and remain non-portalled.
 
 - Availability comes only from Rust (`SessionInfo.models`, `ProviderView.models`);
   `MODEL_LABELS` in `models.ts` is display text only. Unknown ids show raw.

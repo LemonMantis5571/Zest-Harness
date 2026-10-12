@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 
 import { DEV_SERVER_URL, killTree, parseArgs } from "./zest-control.mjs";
+import { measureUiElements } from "./zest-ui-measure.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const uiRoot = path.join(repoRoot, "crates", "desktop", "ui");
@@ -371,7 +372,7 @@ function htmlFrames() {
   return page.frames().filter((frame) => matches(frame) && !frame.childFrames().some(matches));
 }
 
-async function inspect(probe = "state") {
+async function inspect(probe = "state", opts = {}) {
   switch (probe) {
     case "state":
       return { state: await uiState() };
@@ -402,8 +403,11 @@ async function inspect(probe = "state") {
     case "backend-calls":
       // Counted by the fixture backend per page load (recordFixtureCalls).
       return { backendCalls: await page.evaluate(() => globalThis.__zestFixtureCalls ?? {}) };
+    case "ui-quality":
+      await page.evaluate(() => document.fonts.ready);
+      return { viewport: page.viewportSize(), elements: await page.evaluate(measureUiElements, opts.selector) };
     default:
-      throw fail(`unknown probe "${probe}"`, "Probes: state, messages, code-blocks, meter, composer, toasts, backend-calls.");
+      throw fail(`unknown probe "${probe}"`, "Probes: state, messages, code-blocks, html, meter, composer, toasts, backend-calls, ui-quality.");
   }
 }
 
@@ -535,6 +539,14 @@ async function run(command, args, opts) {
       if (!args[0]) throw fail("press needs keys", "press Mod+K");
       await page.keyboard.press(modKey(args[0]));
       return settle(3_000);
+    case "viewport": {
+      const [width, height] = args.map(Number);
+      if (args.length !== 2 || !Number.isInteger(width) || !Number.isInteger(height) || width < 320 || height < 240 || width > 7680 || height > 4320) {
+        throw fail("viewport needs integer WIDTH HEIGHT between 320x240 and 7680x4320");
+      }
+      await page.setViewportSize({ width, height });
+      return { viewport: page.viewportSize(), ...(await settle(3_000)) };
+    }
     case "click":
       return click(args.join(" "), opts);
     case "html-click":
@@ -565,7 +577,7 @@ async function run(command, args, opts) {
       return { path: file };
     }
     case "inspect":
-      return inspect(args[0]);
+      return inspect(args[0], opts);
     case "errors":
       return eventsSince(opts, isError);
     case "console":

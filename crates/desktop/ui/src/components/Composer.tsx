@@ -793,7 +793,7 @@ export const Composer = memo(function Composer({
               type="button"
               title={folderLabel}
               onClick={onOpenFolder}
-              className="inline-flex max-w-[28ch] cursor-pointer items-center gap-1 truncate rounded-md px-1 py-0.5 hover:bg-secondary hover:text-foreground"
+              className="inline-flex min-h-6 min-w-6 max-w-[28ch] cursor-pointer items-center gap-1 truncate rounded-md px-1 py-0.5 hover:bg-secondary hover:text-foreground"
             >
               <FolderOpenIcon className="size-3 shrink-0 opacity-70" />
               <span className="truncate">{folderLabel}</span>
@@ -815,7 +815,7 @@ export const Composer = memo(function Composer({
               <a
                 {...pullRequestAnchorProps(gitContext.pullRequest.url)}
                 title={`${gitContext.pullRequest.title} · +${gitContext.additions} −${gitContext.deletions} · ${gitContext.changedFiles} files`}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                className="inline-flex min-h-6 min-w-6 shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
                 onClick={(event) => handlePullRequestClick(event, onOpenPullRequest)}
               >
                 <GitPullRequestIcon className="size-3 opacity-80" />
