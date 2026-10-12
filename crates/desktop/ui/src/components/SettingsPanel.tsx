@@ -31,6 +31,9 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+/** Sections the account menu can open Settings at. */
+export type SettingsSectionId = "user" | "provider" | "delegation" | "usage";
+
 type Props = {
   open: boolean;
   session: SessionInfo;
@@ -38,8 +41,8 @@ type Props = {
   effort: EffortId;
   sending: boolean;
   profile: UserProfile;
-  /** Open the User section first (avatar click). */
-  focusUser?: boolean;
+  /** Open this section first, and scroll to it. */
+  focusSection?: SettingsSectionId | null;
   onClose: () => void;
   onChangeProvider: () => void;
   /** Rebuild the session after credentials or an external worker change. */
@@ -97,9 +100,12 @@ function SettingsSection({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (defaultOpen) setOpen(true);
+    if (!defaultOpen) return;
+    setOpen(true);
+    rootRef.current?.scrollIntoView({ block: "nearest" });
   }, [defaultOpen]);
 
   useEffect(() => {
@@ -107,7 +113,12 @@ function SettingsSection({
   }, [openSignal]);
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border/50">
+    <Collapsible
+      ref={rootRef}
+      open={open}
+      onOpenChange={setOpen}
+      className="border-b border-border/50"
+    >
       <CollapsibleTrigger
         className={cn(
           "flex w-full cursor-pointer items-center gap-2.5 px-4 py-3 text-left outline-none transition-colors",
@@ -147,7 +158,7 @@ export function SettingsPanel({
   effort,
   sending,
   profile,
-  focusUser = false,
+  focusSection = null,
   onClose,
   onChangeProvider,
   onReloadSession,
@@ -444,7 +455,7 @@ export function SettingsPanel({
             title="User"
             icon={UserIcon}
             hint={displayName.trim() || "Name & photo"}
-            defaultOpen={focusUser}
+            defaultOpen={focusSection === "user"}
           >
             <div className="flex items-center gap-3">
               <button
@@ -511,6 +522,7 @@ export function SettingsPanel({
             title="Provider"
             icon={ServerIcon}
             hint={`${session.label} · ${provider?.statusLabel ?? session.provider}`}
+            defaultOpen={focusSection === "provider"}
           >
             <div className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5">
               <div className="text-sm font-medium">{session.label}</div>
@@ -588,6 +600,7 @@ export function SettingsPanel({
           <SettingsSection
             title="CLI delegation"
             icon={BotIcon}
+            defaultOpen={focusSection === "delegation"}
             hint={
               externalLoading
                 ? "Loading..."
@@ -729,6 +742,7 @@ export function SettingsPanel({
           <SettingsSection
             title="Usage"
             icon={ChartColumnIcon}
+            defaultOpen={focusSection === "usage"}
             hint={
               usage && (usage.providers.length || usage.externalWorkers.length)
                 ? `${usage.providers.length + usage.externalWorkers.length} source${usage.providers.length + usage.externalWorkers.length === 1 ? "" : "s"}`

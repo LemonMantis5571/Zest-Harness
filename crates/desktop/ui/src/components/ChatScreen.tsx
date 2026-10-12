@@ -18,7 +18,6 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   PencilIcon,
-  SettingsIcon,
   TriangleAlertIcon,
   XCircleIcon,
   XIcon,
@@ -32,7 +31,7 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
-import { SettingsPanel } from "@/components/SettingsPanel";
+import { SettingsPanel, type SettingsSectionId } from "@/components/SettingsPanel";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
 import { Composer } from "@/components/Composer";
 import { BtwPanel } from "@/components/BtwPanel";
@@ -818,7 +817,7 @@ export function ChatScreen({
   useEffect(() => {
     if (btw && btw.sessionId !== session.sessionId) setBtw(null);
   }, [btw, session.sessionId]);
-  const [focusUser, setFocusUser] = useState(false);
+  const [settingsFocus, setSettingsFocus] = useState<SettingsSectionId | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   /**
    * Too narrow to hold the sidebar, a checkpoint rail, and a readable
@@ -1402,8 +1401,8 @@ export function ChatScreen({
   }, []);
 
   const openSettings = useCallback(
-    (focusUser = false) => {
-      setFocusUser(focusUser);
+    (section: SettingsSectionId | null = null) => {
+      setSettingsFocus(section);
       setSettingsOpen(true);
       onOpenSettings?.();
     },
@@ -1519,7 +1518,7 @@ export function ChatScreen({
         description: "Configure Zest and keyboard shortcuts",
         shortcut: shortcutFor("view.settings"),
         group: "settings" as const,
-        run: openSettings,
+        run: () => openSettings(),
       },
       ...(onOpenProfile
         ? [
@@ -1566,19 +1565,19 @@ export function ChatScreen({
   // panel does not fly open on mount.
   useEffect(() => {
     if (settingsRequest <= 0) return;
-    setFocusUser(true);
+    setSettingsFocus("user");
     setSettingsOpen(true);
   }, [settingsRequest]);
 
   useEffect(() => {
     if (settingsOpenRequest <= 0) return;
-    setFocusUser(false);
+    setSettingsFocus(null);
     setSettingsOpen(true);
   }, [settingsOpenRequest]);
 
   const closeSettings = useCallback(() => {
     setSettingsOpen(false);
-    setFocusUser(false);
+    setSettingsFocus(null);
     onCloseSettings?.();
   }, [onCloseSettings]);
 
@@ -1688,6 +1687,7 @@ export function ChatScreen({
         profile={profile}
         providerLabel={providerLabel}
         onOpenProfile={openProfile}
+        onOpenSettings={openSettings}
         providers={providers}
         quotaRefreshKey={`${session.threadId}:${messages.length}`}
         onSearch={openPalette}
@@ -1757,17 +1757,9 @@ export function ChatScreen({
                 <FolderOpenIcon aria-hidden="true" />
               </Button>
             ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Settings (Ctrl+,)"
-              aria-label="Open settings"
-              aria-expanded={settingsOpen}
-              onClick={() => openSettings()}
-            >
-              <SettingsIcon />
-            </Button>
+            {/* Settings opens from the account menu at the bottom of the
+                sidebar, or Mod+, — not from a gear competing with the project
+                actions here. */}
           </div>
         </header>
 
@@ -1832,7 +1824,7 @@ export function ChatScreen({
                   onBack={() => onClosePanel?.()}
                   // Editing name and avatar stays in Settings; the profile
                   // page reports, it does not duplicate the form.
-                  onEditProfile={() => openSettings(true)}
+                  onEditProfile={() => openSettings("user")}
                   onOpenUsage={openUsage}
                 />
               ) : (
@@ -2120,7 +2112,7 @@ export function ChatScreen({
           effort={effort}
           sending={sending}
           profile={profile}
-          focusUser={focusUser}
+          focusSection={settingsFocus}
           onClose={closeSettings}
           onChangeProvider={() => {
             closeSettings();

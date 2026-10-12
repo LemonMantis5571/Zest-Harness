@@ -20,10 +20,11 @@ import {
   Trash2Icon,
 } from "lucide-react";
 
+import { AccountMenu } from "@/components/AccountMenu";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import { UserAvatar, UserAvatarButton } from "@/components/UserAvatarButton";
+import type { SettingsSectionId } from "@/components/SettingsPanel";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
@@ -83,6 +84,8 @@ type Props = {
   providerLabel?: string;
   /** Open the profile screen. */
   onOpenProfile?: () => void;
+  /** Open Settings, optionally at one section. */
+  onOpenSettings?: (section?: SettingsSectionId) => void;
   /** The profile screen is showing. */
   profileActive?: boolean;
   providers: ProviderRow[];
@@ -221,6 +224,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   profile,
   providerLabel,
   onOpenProfile,
+  onOpenSettings,
   profileActive = false,
   providers,
   quotaRefreshKey,
@@ -1593,56 +1597,21 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
        * branch the header is actually for.
        */}
       <div className="relative z-20 mt-auto shrink-0 border-t border-border/60 p-1.5">
-        {open ? (
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={onOpenProfile}
-              aria-current={profileActive ? "page" : undefined}
-              title="Your profile"
-              className={cn(
-                "flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors",
-                "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
-                profileActive && "bg-[var(--sidebar-accent)]"
-              )}
-            >
-              <UserAvatar
-                avatarDataUrl={profile.avatarDataUrl}
-                displayName={profile.displayName}
-                className="shrink-0"
-              />
-              <span className="min-w-0 flex-1 leading-tight">
-                <span className="block truncate text-[13px] font-medium text-foreground">
-                  {profile.displayName.trim() || "Zest"}
-                </span>
-                {providerLabel ? (
-                  <span className="block truncate text-[11px] text-muted-foreground">
-                    {providerLabel}
-                  </span>
-                ) : null}
-              </span>
-            </button>
-            <AgentQuotaButton
-              providers={providers}
-              refreshKey={quotaRefreshKey}
-              placement="above"
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-1">
-            <UserAvatarButton
-              avatarDataUrl={profile.avatarDataUrl}
-              displayName={profile.displayName}
-              title="Your profile"
-              onClick={() => onOpenProfile?.()}
-            />
-            <AgentQuotaButton
-              providers={providers}
-              refreshKey={quotaRefreshKey}
-              placement="above"
-            />
-          </div>
-        )}
+        <div className={open ? "flex items-center gap-0.5" : "flex flex-col items-center gap-1"}>
+          <AccountMenu
+            profile={profile}
+            providerLabel={providerLabel}
+            compact={!open}
+            profileActive={profileActive}
+            onOpenProfile={onOpenProfile}
+            onOpenSettings={onOpenSettings}
+          />
+          <AgentQuotaButton
+            providers={providers}
+            refreshKey={quotaRefreshKey}
+            placement="above"
+          />
+        </div>
       </div>
 
       <ConfirmDialog
