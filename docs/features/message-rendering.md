@@ -58,7 +58,7 @@ verify:
 - ` ```mermaid ` fences render as a diagram once the fence has settled; while streaming or when invalid they stay a copyable code block. Diagrams and images expand to a zoomable overlay (+/-/0, Esc closes).
 - Images: `http(s)` URLs, raster `data:` URLs, and absolute local image paths (served through Tauri's asset protocol). Local paths written in prose (bare path, code span, `file://`) get an image hoisted above the line. Backtick and tilde fenced contents are never rewritten, including image-like path strings and Markdown image syntax inside HTML scripts. Broken images are hidden.
 - Settled answers show "Copy Markdown" (raw source) and "Save as <name>.md" (native save dialog). Neither shows while the message streams.
-- Block streaming (Settings toggle, default on, key `zest.responseBlockStreaming.v1`) reveals an answer block by block instead of re-rendering a growing tail.
+- Block streaming (Customize > Chat view toggle, default on, key `zest.responseBlockStreaming.v1`) reveals an answer block by block instead of re-rendering a growing tail.
 - For turns produced by a command (for example Plan mode), an answer is framed as a document card once it is 400+ chars or contains a heading or ordered list (`looksLikeDocument`).
 
 ## How it works

@@ -35,6 +35,7 @@ import {
   validateMcpServerDraft,
 } from "@/lib/mcpServerForm";
 import type { CustomizeTab } from "@/lib/navigationHistory";
+import { setResponseBlockStreaming, useResponseBlockStreaming } from "@/lib/responseStreaming";
 import {
   applyChatViewMode,
   getSavedChatViewMode,
@@ -1139,6 +1140,7 @@ function TypographyPanel() {
 
 function ChatViewPanel() {
   const [mode, setMode] = useState<ChatViewMode>(() => getSavedChatViewMode());
+  const blockStreaming = useResponseBlockStreaming();
 
   useEffect(() => subscribeChatViewChange(() => setMode(getSavedChatViewMode())), []);
 
@@ -1148,37 +1150,74 @@ function ChatViewPanel() {
   }
 
   return (
-    <section className="flex flex-col gap-3">
-      <SectionHeading
-        title="Chat history"
-        hint="Choose how the chat list in the sidebar is organized. The change applies immediately."
-      />
-      <div
-        role="radiogroup"
-        aria-label="Chat history visualization"
-        className="grid gap-3 sm:grid-cols-2"
-      >
-        <ChatViewOption
-          mode="project"
-          selected={mode === "project"}
-          title="Project tree"
-          description="Keep the current expandable project folders and full chat rows."
-          onSelect={selectMode}
+    <div className="flex flex-col gap-6">
+      <section className="flex flex-col gap-3">
+        <SectionHeading
+          title="Chat history"
+          hint="Choose how the chat list in the sidebar is organized. The change applies immediately."
         />
-        <ChatViewOption
-          mode="compact"
-          selected={mode === "compact"}
-          title="Compact list"
-          description="Group chats by project and show the branch and recent time at a glance."
-          onSelect={selectMode}
+        <div
+          role="radiogroup"
+          aria-label="Chat history visualization"
+          className="grid gap-3 sm:grid-cols-2"
+        >
+          <ChatViewOption
+            mode="project"
+            selected={mode === "project"}
+            title="Project tree"
+            description="Keep the current expandable project folders and full chat rows."
+            onSelect={selectMode}
+          />
+          <ChatViewOption
+            mode="compact"
+            selected={mode === "compact"}
+            title="Compact list"
+            description="Group chats by project and show the branch and recent time at a glance."
+            onSelect={selectMode}
+          />
+        </div>
+        <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
+          Compact list keeps more chats visible by showing the project, title, branch, and time in
+          a tight row. It changes the history presentation only; projects and chats keep the same
+          data and actions.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-3 border-t border-border/60 pt-5">
+        <SectionHeading
+          title="Response display"
+          hint="Choose how answers appear while they stream. The change applies immediately."
         />
-      </div>
-      <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-        Compact list keeps more chats visible by showing the project, title, branch, and time in a
-        tight row. It changes the history presentation only; projects and chats keep the same data
-        and actions.
-      </p>
-    </section>
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">Stream complete blocks</div>
+            <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              Show each paragraph or code block once it is complete. Turn it off to show text as it
+              arrives.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={blockStreaming}
+            aria-label="Stream responses by complete blocks"
+            title="Stream responses by complete blocks"
+            onClick={() => setResponseBlockStreaming(!blockStreaming)}
+            className={cn(
+              "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+              blockStreaming ? "bg-primary" : "bg-muted"
+            )}
+          >
+            <span
+              className={cn(
+                "pointer-events-none size-4 rounded-full bg-background shadow-sm transition-transform",
+                blockStreaming ? "translate-x-4" : "translate-x-0"
+              )}
+            />
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 

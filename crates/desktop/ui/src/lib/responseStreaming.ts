@@ -34,7 +34,7 @@ export function setResponseBlockStreaming(enabled: boolean) {
   for (const listener of listeners) listener();
 }
 
-/** Defaults to block streaming until the user turns it off in Settings. */
+/** Defaults to block streaming until the user turns it off in Customize. */
 export function useResponseBlockStreaming(): boolean {
   return useSyncExternalStore(subscribe, readResponseBlockStreaming, () => true);
 }
