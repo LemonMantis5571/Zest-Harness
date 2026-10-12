@@ -8089,8 +8089,26 @@ fn prepare_pasted_image(
 
 #[tauri::command]
 fn git_branch(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let root = resolve_workspace_root(&state)?;
-    Ok(read_git_branch(&root))
+    let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
+    Ok(branch_for_session(
+        active_session_root.as_deref(),
+        active_session_root
+            .is_none()
+            .then(|| resolve_workspace_root(&state).ok())
+            .flatten(),
+    ))
+}
+
+/// The branch of the chat on screen, not of the selected project. A free chat
+/// keeps the last project selected for the next project chat, and reading that
+/// project's HEAD put its branch beside "No workspace".
+fn branch_for_session(
+    active_session_root: Option<&Path>,
+    fallback_root: Option<PathBuf>,
+) -> Option<String> {
+    project_root_for_session(active_session_root, fallback_root)
+        .as_deref()
+        .and_then(read_git_branch)
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {
@@ -8267,6 +8285,19 @@ struct GitContextInspection {
     view: GitContextView,
 }
 
+fn free_chat_git_context() -> GitContextView {
+    GitContextView {
+        branch: None,
+        base_branch: None,
+        branch_changed: false,
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        stats_source: "branch".to_string(),
+        pull_request: None,
+    }
+}
+
 async fn inspect_git_context(
     root: &Path,
     existing: Option<&ThreadGitContext>,
@@ -8340,6 +8371,12 @@ async fn git_context(state: State<'_, AppState>) -> Result<GitContextView, Strin
         .map_err(map_session_err)?
         .ok_or_else(|| "no active session".to_string())?;
     let (root, thread_id, existing) = snapshot;
+    // A free chat has no repository. `git rev-parse` would walk up from the
+    // free-chat store into whatever repo contains it, and a context copied in
+    // from a project chat would keep showing that project's branch.
+    if is_free_chat_root(&root) {
+        return Ok(free_chat_git_context());
+    }
     let inspection = inspect_git_context(&root, existing.as_ref()).await;
     let next_context = inspection.thread_context.clone();
     match state
@@ -9549,6 +9586,32 @@ mod workspace_root_tests {
         let stale = PathBuf::from(r"D:\Code\removed-project");
 
         assert_eq!(project_root_for_session(Some(&free), Some(stale)), None);
+    }
+
+    #[test]
+    fn free_chat_shows_no_branch_from_the_selected_project() {
+        let free = free_chats_root().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        std::fs::write(
+            project.path().join(".git").join("HEAD"),
+            "ref: refs/heads/feat/removed-project\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_for_session(Some(&free), Some(project.path().to_path_buf())),
+            None
+        );
+        assert_eq!(
+            branch_for_session(Some(project.path()), None).as_deref(),
+            Some("feat/removed-project")
+        );
+        assert_eq!(
+            branch_for_session(None, Some(project.path().to_path_buf())).as_deref(),
+            Some("feat/removed-project")
+        );
+        assert!(free_chat_git_context().branch.is_none());
     }
 
     /// The UI keys the "choose another folder" guidance off this token, so the
