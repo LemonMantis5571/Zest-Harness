@@ -51,6 +51,14 @@ describe("attention routes", () => {
       assert.equal(attentionRoute(kind, { onScreen: false, focused: true }), expected.elsewhereFocused, "elsewhere, focused");
       assert.equal(attentionRoute(kind, { onScreen: false, focused: false }), expected.elsewhereAway, "elsewhere, away");
     });
+
+    it(`says nothing about ${kind} when the user's own click caused it`, () => {
+      for (const onScreen of [true, false]) {
+        for (const focused of [true, false]) {
+          assert.equal(attentionRoute(kind, { onScreen, focused, byUser: true }), "none");
+        }
+      }
+    });
   }
 });
 

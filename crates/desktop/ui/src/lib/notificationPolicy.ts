@@ -35,6 +35,8 @@ export type AttentionContext = {
   onScreen: boolean;
   /** Zest is the focused, unminimized window. */
   focused: boolean;
+  /** The user's own click in this window caused the event, e.g. cancelling a delegation. */
+  byUser?: boolean;
 };
 
 /** Events whose card, answer, or error is drawn in their chat's transcript. */
@@ -52,11 +54,13 @@ const SHOWN_IN_TRANSCRIPT: ReadonlySet<AttentionKind> = new Set([
  * while they are not looking. An event already drawn in the visible
  * transcript says nothing while Zest is focused, and anything the user is
  * away for becomes an OS notification instead of a toast they cannot see.
+ * The user's own click needs no announcement; its result is what they see.
  */
 export function attentionRoute(
   kind: AttentionKind,
-  { onScreen, focused }: AttentionContext
+  { onScreen, focused, byUser = false }: AttentionContext
 ): AttentionRoute {
+  if (byUser) return "none";
   if (!focused) return "os";
   if (onScreen && SHOWN_IN_TRANSCRIPT.has(kind)) return "none";
   return "toast";

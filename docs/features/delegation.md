@@ -101,9 +101,11 @@ Entry points:
    `prepare_delegation_handoff`. Each one calls `DelegationCoordinator`.
    Coordinator events reach the UI through `TauriDelegationNotifier` (in
    `crates/desktop/src/delegation.rs`) as `delegation-event`, which `App.tsx`
-   handles in `handleDelegationEvent`. That handler shows a toast for
+   handles in `handleDelegationEvent`. That handler announces
    `ready_to_apply`, `changes_requested`, `blocked`, `failed`, `applied` and
-   `cancelled`.
+   `cancelled` through the notification policy (see
+   [notifications](notifications.md)); a cancel or apply the user clicked in
+   this window is not announced again.
 2. **`delegate_feature` tool** (`FeatureDelegator`). It has Exec risk and the
    approval target `agent/<id>/feature/<model>`. After the user approves, it
    validates the card and calls `DelegationStore::create` with origin

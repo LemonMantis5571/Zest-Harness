@@ -164,6 +164,22 @@ function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   });
 }
 
+type PendingConversationRecovery = {
+  recovery: ConversationRecovery;
+  root: string | null;
+};
+
+/**
+ * Whether Configure in the recovery dialog opens the project's zest.toml.
+ *
+ * A free chat has no project file, and a provider that is configured but not
+ * ready is fixed in the provider sheet instead.
+ */
+function configureOpensProjectFile(pending: PendingConversationRecovery | null) {
+  if (!pending || pending.root === null) return false;
+  return pending.recovery.kind === "unknown_owner" || !pending.recovery.configured;
+}
+
 type AttentionNotice = {
   title: string;
   description: string;
@@ -453,10 +469,8 @@ export default function App() {
   const [pickerError, setPickerError] = useState<PickerError | null>(null);
   const [continuing, setContinuing] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [pendingConversationRecovery, setPendingConversationRecovery] = useState<{
-    recovery: ConversationRecovery;
-    root: string | null;
-  } | null>(null);
+  const [pendingConversationRecovery, setPendingConversationRecovery] =
+    useState<PendingConversationRecovery | null>(null);
   const [conversationRecoveryBusy, setConversationRecoveryBusy] = useState(false);
 
   const [waitingTitle, setWaitingTitle] = useState("Sign in");
@@ -734,6 +748,8 @@ export default function App() {
   const resolvingApprovalIdsRef = useRef(new Set<string>());
   const resolvingQuestionIdsRef = useRef(new Set<string>());
   const notifiedDelegationEventsRef = useRef(new Set<string>());
+  /** `cancelled:<job>` / `applied:<job>` for delegation outcomes the user clicked here. */
+  const ownDelegationActionsRef = useRef(new Set<string>());
   const compactionInFlightRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -780,10 +796,15 @@ export default function App() {
 
   /** Announce an event as `attentionRoute` decides: nothing, a toast, or an OS notification. */
   const showAttention = useCallback(
-    async (kind: AttentionKind, threadId: string, notice: AttentionNotice) => {
+    async (
+      kind: AttentionKind,
+      threadId: string,
+      notice: AttentionNotice,
+      { byUser = false }: { byUser?: boolean } = {}
+    ) => {
       const onScreen = isChatOnScreen(threadId);
       const focused = await isWindowActuallyActive();
-      const route = attentionRoute(kind, { onScreen, focused });
+      const route = attentionRoute(kind, { onScreen, focused, byUser });
       if (route === "toast") {
         toast.add(notice);
       } else if (route === "os") {
@@ -839,11 +860,15 @@ export default function App() {
         cancelled: ["delegation_cancelled", "Delegation cancelled", "warning"],
       };
       const [kind, title, type] = copy[event.kind as keyof typeof copy];
-      void showAttention(kind, event.job.parentThreadId, {
-        title,
-        description: event.job.title,
-        type,
-      });
+      const byUser = ownDelegationActionsRef.current.delete(
+        `${event.kind}:${event.job.jobId}`
+      );
+      void showAttention(
+        kind,
+        event.job.parentThreadId,
+        { title, description: event.job.title, type },
+        { byUser }
+      );
     },
     [replaceDelegationJob, session?.root, showAttention]
   );
@@ -2076,11 +2101,6 @@ export default function App() {
       const info = await backend.forkThread();
       applySession(info, { clearDraft: true });
       showTranscript();
-      toast.add({
-        type: "success",
-        title: "Fork created",
-        description: "You are now in a new conversation with the same history.",
-      });
     } catch (err) {
       toast.add({
         type: "error",
@@ -2150,11 +2170,6 @@ export default function App() {
       try {
         const info = await backend.rewindThread(checkpointId);
         applySession(info, { clearDraft: true });
-        toast.add({
-          type: "success",
-          title: "Conversation rewound",
-          description: "Conversation restored. Your files were not changed.",
-        });
       } catch (err) {
         toast.add({
           type: "error",
@@ -2381,7 +2396,6 @@ export default function App() {
         providerId,
         copyThread: pending.recovery.kind === "owner_unavailable",
       });
-      const provider = pending.recovery.providers.find((item) => item.id === providerId);
       setPendingConversationRecovery(null);
       applySession(info);
       showTranscript();
@@ -2390,21 +2404,6 @@ export default function App() {
       );
       setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
-      toast.add({
-        type: "success",
-        title:
-          pending.recovery.kind === "owner_unavailable"
-            ? "Copy opened"
-            : pending.recovery.kind === "new_chat_unavailable"
-              ? "Chat opened"
-              : "Provider saved",
-        description:
-          pending.recovery.kind === "owner_unavailable"
-            ? `Opened a copy with ${provider?.label ?? providerId}. The original chat was kept.`
-            : pending.recovery.kind === "new_chat_unavailable"
-              ? `Opened a new chat with ${provider?.label ?? providerId}.`
-              : `This chat now uses ${provider?.label ?? providerId}.`,
-      });
     } catch (err) {
       const recovery = conversationRecovery(err);
       if (recovery) {
@@ -2437,7 +2436,7 @@ export default function App() {
       return;
     }
 
-    if (pending.recovery.kind !== "unknown_owner" && pending.recovery.configured) {
+    if (!configureOpensProjectFile(pending)) {
       // The provider is present in the project but no longer ready, which is
       // the API-key-deleted case. Open the provider sheet so the user can
       // replace the key or explicitly choose another provider; project config
@@ -2448,18 +2447,10 @@ export default function App() {
     }
 
     try {
+      // The dialog already said what to do in the file; the opened editor is
+      // the confirmation.
       await backend.openProjectConfig(pending.root);
       setPendingConversationRecovery(null);
-      toast.add({
-        type: "success",
-        title: "Project configuration opened",
-        description:
-          pending.recovery.kind === "owner_unavailable"
-            ? `Add ${pending.recovery.providerLabel} to this project's zest.toml, then open the chat again.`
-            : pending.recovery.kind === "new_chat_unavailable"
-              ? `Configure ${pending.recovery.providerLabel} or another provider in this project's zest.toml, then open the chat again.`
-              : "Add a provider to this project's zest.toml, then open the chat again.",
-      });
     } catch (err) {
       toast.add({
         type: "error",
@@ -2923,10 +2914,14 @@ export default function App() {
 
   const onCancelDelegation = useCallback(
     async (jobId: string) => {
+      // Recorded before the call: the `cancelled` event can beat its reply.
+      const ownAction = `cancelled:${jobId}`;
+      ownDelegationActionsRef.current.add(ownAction);
       try {
         const job = await backend.cancelDelegationJob(jobId);
         replaceDelegationJob(job);
       } catch (err) {
+        ownDelegationActionsRef.current.delete(ownAction);
         toast.add({
           type: "error",
           title: "Could not cancel feature card",
@@ -2957,9 +2952,16 @@ export default function App() {
 
   const onApplyDelegation = useCallback(
     async (jobId: string) => {
+      // This click confirms itself below, so its `applied` event stays quiet.
+      // Recorded before the call: the event can beat the reply.
+      const ownAction = `applied:${jobId}`;
+      ownDelegationActionsRef.current.add(ownAction);
       try {
         const job = await backend.applyDelegationJob(jobId);
         replaceDelegationJob(job);
+        if (job.status !== "accepted") {
+          ownDelegationActionsRef.current.delete(ownAction);
+        }
         if (job.status === "accepted") {
           toast.add({
             type: "success",
@@ -2975,6 +2977,7 @@ export default function App() {
           });
         }
       } catch (err) {
+        ownDelegationActionsRef.current.delete(ownAction);
         toast.add({
           type: "error",
           title: "Could not apply accepted changes",
@@ -3340,6 +3343,7 @@ export default function App() {
           if (!conversationRecoveryBusy) setPendingConversationRecovery(null);
         }}
         onConfigure={() => void configureConversationProvider()}
+        configureOpensProjectFile={configureOpensProjectFile(pendingConversationRecovery)}
         onChooseProvider={(providerId) => void chooseConversationProvider(providerId)}
       />
     </Toaster>
