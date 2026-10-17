@@ -75,6 +75,45 @@ export function attentionRoute(
   return "toast";
 }
 
+/** Is this event drawn in its chat's transcript, so that opening the chat shows it? */
+export function shownInTranscript(kind: AttentionKind) {
+  return SHOWN_IN_TRANSCRIPT.has(kind);
+}
+
+/** Events that hold the agent until the user answers; their alert is moot once the turn ends. */
+export const WAITS_FOR_USER: ReadonlySet<AttentionKind> = new Set([
+  "approval_needed",
+  "input_needed",
+]);
+
+/** A confirmation is read at a glance. */
+export const SUCCESS_TOAST_MS = 3_000;
+/** Long enough to reach the Open button; hovering pauses it. */
+export const ATTENTION_TOAST_MS = 8_000;
+
+/**
+ * How long a toast of this type stays, in ms, when its caller does not say.
+ * `0` keeps it until dismissed: an error is something to read, not to race.
+ * `undefined` leaves Base UI's default (5 s).
+ */
+export function toastTimeout(type: string | undefined): number | undefined {
+  if (type === "error") return 0;
+  if (type === "success") return SUCCESS_TOAST_MS;
+  return undefined;
+}
+
+/**
+ * How long an attention toast stays. What blocks the agent, and failures to
+ * read, stay until dismissed or until the chat is opened; the rest outlast a
+ * confirmation so the Open button can be reached.
+ */
+export function attentionToastTimeout(kind: AttentionKind) {
+  if (WAITS_FOR_USER.has(kind) || kind === "request_failed" || kind === "job_failed") {
+    return 0;
+  }
+  return ATTENTION_TOAST_MS;
+}
+
 const CHAT_NAME_MAX_CHARS = 48;
 const EXCERPT_MAX_CHARS = 140;
 

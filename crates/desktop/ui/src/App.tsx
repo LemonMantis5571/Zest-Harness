@@ -40,8 +40,11 @@ import {
   attentionChatName,
   attentionRoute,
   attentionTitle,
+  attentionToastTimeout,
   isLongTurn,
   replyExcerpt,
+  shownInTranscript,
+  WAITS_FOR_USER,
   type AttentionKind,
 } from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
@@ -834,6 +837,11 @@ export default function App() {
     };
   }, []);
 
+  /** Attention toasts for transcript events, per chat, so they can close when no longer needed. */
+  const attentionToastsRef = useRef(
+    new Map<string, { id: string; kind: AttentionKind }[]>()
+  );
+
   const openProjectChatRef = useRef<
     ((options: { root: string | null; threadId: string }) => Promise<boolean>) | null
   >(null);
@@ -892,9 +900,12 @@ export default function App() {
         await notifyWhenAway(title, notice.description, open ?? undefined);
         return;
       }
+      // The user may have opened the chat while it was being named.
+      if (shownInTranscript(kind) && isChatOnScreen(threadId)) return;
       const id = toast.add({
         ...notice,
         title,
+        timeout: attentionToastTimeout(kind),
         actionProps:
           !onScreen && open
             ? {
@@ -906,9 +917,43 @@ export default function App() {
               }
             : undefined,
       });
+      if (shownInTranscript(kind)) {
+        const entries = attentionToastsRef.current.get(threadId) ?? [];
+        attentionToastsRef.current.set(threadId, [...entries, { id, kind }]);
+      }
     },
     [chatOpener, describeChat, isChatOnScreen]
   );
+
+  /** Close a chat's attention toasts, or only those of the given kinds. */
+  const closeAttentionToasts = useCallback(
+    (threadId: string, kinds?: ReadonlySet<AttentionKind>) => {
+      const entries = attentionToastsRef.current.get(threadId);
+      if (!entries) return;
+      const kept = entries.filter((entry) => kinds && !kinds.has(entry.kind));
+      for (const entry of entries) {
+        if (!kept.includes(entry)) toast.close(entry.id);
+      }
+      if (kept.length) attentionToastsRef.current.set(threadId, kept);
+      else attentionToastsRef.current.delete(threadId);
+    },
+    []
+  );
+
+  // A toast that stays until dismissed must not outlive its reason: once its
+  // chat is on screen, the transcript says the same thing.
+  useEffect(() => {
+    for (const threadId of [...attentionToastsRef.current.keys()]) {
+      if (isChatOnScreen(threadId)) closeAttentionToasts(threadId);
+    }
+  }, [
+    closeAttentionToasts,
+    isChatOnScreen,
+    session?.threadId,
+    shellPanel,
+    splitSnapshot,
+    splitVisible,
+  ]);
 
   const recordThreadActivity = useCallback((event: ChatEvent) => {
     const previous = threadActivityRef.current;
@@ -1458,6 +1503,7 @@ export default function App() {
       }
       turnStartedAtByThreadRef.current.delete(threadKey);
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
+      closeAttentionToasts(threadKey, WAITS_FOR_USER);
       if (isCurrent) {
         refreshCheckpointMetadata();
         maybeAutoCompact();
@@ -1467,9 +1513,10 @@ export default function App() {
     if (event.kind === "error" || event.kind === "cancelled") {
       turnStartedAtByThreadRef.current.delete(threadKey);
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
+      closeAttentionToasts(threadKey, WAITS_FOR_USER);
     }
 
-  }, [maybeAutoCompact, refreshCheckpointMetadata, showAttention]);
+  }, [closeAttentionToasts, maybeAutoCompact, refreshCheckpointMetadata, showAttention]);
 
   /**
    * Publish at most one transcript update per thread for a rendered frame.

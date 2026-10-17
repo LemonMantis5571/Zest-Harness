@@ -3,10 +3,16 @@ import { describe, it } from "node:test";
 
 import {
   ATTENTION_KINDS,
+  ATTENTION_TOAST_MS,
   attentionChatName,
   attentionRoute,
   attentionTitle,
+  attentionToastTimeout,
   replyExcerpt,
+  shownInTranscript,
+  SUCCESS_TOAST_MS,
+  toastTimeout,
+  WAITS_FOR_USER,
   isLongTurn,
   LONG_TURN_NOTIFICATION_MS,
   mergeToastDescription,
@@ -64,6 +70,44 @@ describe("attention routes", () => {
       }
     });
   }
+});
+
+describe("toast timing", () => {
+  it("keeps errors until dismissed and success toasts short", () => {
+    assert.equal(toastTimeout("error"), 0);
+    assert.equal(toastTimeout("success"), SUCCESS_TOAST_MS);
+    assert.ok(SUCCESS_TOAST_MS <= 3_000);
+    assert.equal(toastTimeout("warning"), undefined);
+    assert.equal(toastTimeout("info"), undefined);
+    assert.equal(toastTimeout(undefined), undefined);
+  });
+
+  it("keeps what blocks the agent or failed until handled, and the rest long enough to open", () => {
+    const expected: Record<AttentionKind, number> = {
+      approval_needed: 0,
+      input_needed: 0,
+      response_ready: ATTENTION_TOAST_MS,
+      request_failed: 0,
+      job_finished: ATTENTION_TOAST_MS,
+      job_failed: 0,
+      delegation_ready: ATTENTION_TOAST_MS,
+      delegation_changes_requested: ATTENTION_TOAST_MS,
+      delegation_blocked: ATTENTION_TOAST_MS,
+      delegation_failed: ATTENTION_TOAST_MS,
+      delegation_applied: ATTENTION_TOAST_MS,
+      delegation_cancelled: ATTENTION_TOAST_MS,
+    };
+    for (const kind of ATTENTION_KINDS) {
+      assert.equal(attentionToastTimeout(kind), expected[kind], kind);
+    }
+    assert.ok(ATTENTION_TOAST_MS > SUCCESS_TOAST_MS);
+  });
+
+  it("closes only transcript events when their chat opens", () => {
+    const shown = ATTENTION_KINDS.filter(shownInTranscript);
+    assert.deepEqual(shown, ["approval_needed", "input_needed", "response_ready", "request_failed"]);
+    assert.deepEqual([...WAITS_FOR_USER].sort(), ["approval_needed", "input_needed"]);
+  });
 });
 
 describe("attention copy", () => {

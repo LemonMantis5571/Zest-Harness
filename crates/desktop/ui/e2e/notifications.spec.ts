@@ -44,6 +44,24 @@ test("an approval in another chat toasts with the chat's name and an Open action
   await expect(page.getByRole("region", { name: "Approval needed" })).toBeVisible();
 });
 
+test("an approval toast waits for the user and closes when its chat is opened", async ({
+  page,
+}) => {
+  await forceFocus(page);
+  await page.goto("/?fixture=1&scenario=background-approval");
+  await send(page, "hello");
+
+  const toast = page.locator(toasts).filter({ hasText: "Approval needed · Free chat" });
+  await expect(toast).toBeVisible();
+  // Past Base UI's 5 s default: an approval holds the agent until answered.
+  await page.waitForTimeout(6_000);
+  await expect(toast).toBeVisible();
+
+  await page.getByRole("button", { name: /^Free chat\./ }).click();
+  await expect(page.getByRole("region", { name: "Approval needed" })).toBeVisible();
+  await expect(toast).toHaveCount(0);
+});
+
 test("an approval in the chat on screen shows only its card", async ({ page }) => {
   await forceFocus(page);
   await page.goto("/?fixture=1&scenario=approval");
