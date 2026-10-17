@@ -37,6 +37,39 @@ it("context recovery fixture fails measurements until explicitly recovered", asy
   assert.equal((await backend.contextUsage()).usedTokens, 12000);
 });
 
+describe("fixture status sidebar", () => {
+  const scenarioThreads = ["fixture-approval", "fixture-question", "fixture-working", "fixture-finished"];
+
+  it("leaves a background chat in every state the status view groups by", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    await backend.startSession();
+    const events: ChatEvent[] = [];
+    await backend.boot?.((event) => events.push(event));
+    const lastKind = (threadId: string) =>
+      events.filter((event) => event.thread_id === threadId).at(-1)?.kind;
+    assert.equal(lastKind("fixture-approval"), "approval_needed");
+    assert.equal(lastKind("fixture-question"), "question_needed");
+    assert.equal(lastKind("fixture-working"), "tool_call_start");
+    assert.equal(lastKind("fixture-finished"), "done");
+    assert.ok(!events.some((event) => event.thread_id === "fixture"), "the open chat stays idle");
+
+    const [project] = await backend.listChatProjects();
+    assert.equal(project.name, "zest-app");
+    const listed = project.threads.map((thread) => thread.id);
+    for (const id of ["fixture", ...scenarioThreads]) assert.ok(listed.includes(id), id);
+  });
+
+  it("pins a background chat without pinning the open one", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    await backend.startSession();
+    await backend.openProjectChat({ root: "/fixture/zest-app", threadId: "fixture-finished" });
+    await backend.setThreadPinned("fixture", "/fixture/zest-app", true);
+    const [project] = await backend.listChatProjects();
+    const pinned = project.threads.filter((thread) => thread.pinned).map((thread) => thread.id);
+    assert.deepEqual(pinned, ["fixture"]);
+  });
+});
+
 describe("restored HTML artifact fixture", () => {
   it("seeds durable inline source and explicit fences with no execution tokens", async () => {
     const backend = createFixtureBackend({ scenario: "html-artifacts" });

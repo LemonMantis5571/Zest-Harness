@@ -187,7 +187,22 @@ function htmlArtifactMessages(): ChatMessage[] {
 }
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status";
+
+/**
+ * `?scenario=sidebar-status`: a chat in every state the status-grouped sidebar
+ * shows. boot() starts a background turn in each and leaves it there, except
+ * "Draft release notes", which ends at once and so reads as unread. Dispatch
+ * `zest:fixture-finish-working` to end "Run the test suite" and watch its row
+ * move from Working to Recent.
+ */
+const STATUS_SCENARIO_THREADS = [
+  { id: "fixture-approval", title: "Review the auth flow", ageSecs: 600, prompt: "Tighten the session checks." },
+  { id: "fixture-question", title: "Pick a migration path", ageSecs: 900, prompt: "Plan the database migration." },
+  { id: "fixture-working", title: "Run the test suite", ageSecs: 1200, prompt: "Run the whole test suite." },
+  { id: "fixture-finished", title: "Draft release notes", ageSecs: 60, prompt: "Draft the release notes." },
+] as const;
+export const FIXTURE_FINISH_WORKING_EVENT = "zest:fixture-finish-working";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -204,7 +219,8 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
-    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery"
+    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" ||
+    value === "sidebar-status"
     ? value
     : undefined;
 }
@@ -246,7 +262,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
-  let workspace = scenario === "ui-stress" ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks" : ".";
+  let workspace = scenario === "ui-stress"
+    ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks"
+    : scenario === "sidebar-status"
+      ? "/fixture/zest-app"
+      : ".";
   let fixturePinned = false;
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
@@ -266,6 +286,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   ]);
   if (scenario === "html-artifacts") fixtureTranscripts.set("fixture", htmlArtifactMessages());
   if (scenario === "ui-stress") fixtureTranscripts.set("fixture", longThreadMessages().slice(0, 6));
+  const statusScenarioPinned = new Set<string>();
+  if (scenario === "sidebar-status") {
+    for (const thread of STATUS_SCENARIO_THREADS) {
+      fixtureThreadTitles.set(thread.id, thread.title);
+      fixtureTranscripts.set(thread.id, [
+        { id: `user-${thread.id}`, role: "user", text: thread.prompt },
+      ]);
+    }
+  }
+  const isStatusScenarioThread = (id: string) =>
+    scenario === "sidebar-status" &&
+    (id === "fixture" || STATUS_SCENARIO_THREADS.some((thread) => thread.id === id));
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
 
@@ -488,6 +520,53 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     updateDelegation("review_running", "reviewer_completed");
     updateDelegation("ready_to_apply", "ready_to_apply");
     return delegationSnapshot();
+  }
+
+  function statusScenarioTurn(threadId: string) {
+    return { session_id: session.sessionId, thread_id: threadId, turn_id: `turn-${threadId}` };
+  }
+
+  function startStatusScenario(handler: (event: ChatEvent) => void) {
+    for (const thread of STATUS_SCENARIO_THREADS) {
+      handler({ kind: "user", ...statusScenarioTurn(thread.id), message_id: `user-${thread.id}`, text: thread.prompt });
+      handler({ kind: "assistant_start", ...statusScenarioTurn(thread.id), message_id: `assistant-${thread.id}` });
+    }
+    handler({
+      kind: "approval_needed",
+      ...statusScenarioTurn("fixture-approval"),
+      message_id: "assistant-fixture-approval",
+      approval_id: "approval-status-fixture",
+      tool_name: "write_file",
+      tool_call_id: "tool-status-approval",
+      risk: "write",
+      path: "src/auth.ts",
+      summary: "Write src/auth.ts",
+      diff: "",
+    });
+    handler({
+      kind: "question_needed",
+      ...statusScenarioTurn("fixture-question"),
+      message_id: "assistant-fixture-question",
+      question_id: "question-status-fixture",
+      tool_call_id: "tool-status-question",
+      prompt: "Migrate in place or copy to a new table?",
+      choices: ["In place", "New table"],
+      multiple: false,
+    });
+    handler({
+      kind: "tool_call_start",
+      ...statusScenarioTurn("fixture-working"),
+      message_id: "assistant-fixture-working",
+      name: "bash",
+      id: "tool-status-working",
+    });
+    handler({ kind: "done", ...statusScenarioTurn("fixture-finished"), message_id: "assistant-fixture-finished" });
+  }
+
+  if (scenario === "sidebar-status" && typeof window !== "undefined") {
+    window.addEventListener(FIXTURE_FINISH_WORKING_EVENT, () => {
+      chatHandler?.({ kind: "done", ...statusScenarioTurn("fixture-working"), message_id: "assistant-fixture-working" });
+    });
   }
 
   function fixtureIds() {
@@ -1410,6 +1489,24 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           gitContext: FIXTURE_THREAD_GIT,
         });
       }
+      if (scenario === "sidebar-status") {
+        const others = [
+          { id: "fixture", title: "Fixture", ageSecs: 0 },
+          ...STATUS_SCENARIO_THREADS,
+        ];
+        for (const thread of others) {
+          if (thread.id === session.threadId || deletedFixtureThreads.has(thread.id)) continue;
+          threads.push({
+            id: thread.id,
+            createdAt: fixtureEpochSeconds - thread.ageSecs,
+            updatedAt: fixtureEpochSeconds - thread.ageSecs,
+            title: fixtureThreadTitles.get(thread.id) || thread.title,
+            pinned: statusScenarioPinned.has(thread.id),
+            providerId: session.provider,
+            messageCount: fixtureTranscripts.get(thread.id)?.length ?? 1,
+          });
+        }
+      }
       // A provider Zest has no mark for, so the generic fallback is visible
       // offline. This is the ordinary case for a local model, and it is the
       // half of the mapping most likely to regress unnoticed.
@@ -1694,7 +1791,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       return { ...session };
     },
-    async setThreadPinned(_id, _projectPath, pinned) {
+    async setThreadPinned(id, _projectPath, pinned) {
+      if (isStatusScenarioThread(id) && id !== session.threadId) {
+        if (pinned) statusScenarioPinned.add(id);
+        else statusScenarioPinned.delete(id);
+        return;
+      }
       fixturePinned = pinned;
     },
     async renameThread(id, _projectPath, title) {
@@ -1706,7 +1808,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (
         id !== session.threadId &&
         id !== "fixture-local" &&
-        id !== LONG_THREAD_ID
+        id !== LONG_THREAD_ID &&
+        !isStatusScenarioThread(id)
       ) {
         throw new Error(`fixture: unknown thread ${id}`);
       }
@@ -2374,6 +2477,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async boot(handler) {
       chatHandlerGeneration += 1;
       chatHandler = handler;
+      if (scenario === "sidebar-status") startStatusScenario(handler);
       if (!scenario || safetyScenario) await runFixtureStream(handler);
     },
   };
