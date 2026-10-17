@@ -59,6 +59,17 @@ describe("fixture status sidebar", () => {
     for (const id of ["fixture", ...scenarioThreads]) assert.ok(listed.includes(id), id);
   });
 
+  it("gives the open chat more jobs than the sidebar shows, and another chat one", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    const session = await backend.startSession();
+    const jobs = await backend.listDelegationJobs();
+    const parents = jobs.map((job) => job.parentThreadId);
+    assert.equal(parents.filter((parent) => parent === "fixture").length, 4);
+    assert.deepEqual(parents.filter((parent) => parent === "fixture-question"), ["fixture-question"]);
+    assert.ok(jobs.every((job) => job.projectRoot === session.root));
+    assert.equal(new Set(jobs.map((job) => job.jobId)).size, jobs.length, "job ids are unique");
+  });
+
   it("pins a background chat without pinning the open one", async () => {
     const backend = createFixtureBackend({ scenario: "sidebar-status" });
     await backend.startSession();

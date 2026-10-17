@@ -73,6 +73,69 @@ test("groups compact chats by what they are doing and moves rows live", async ({
   expect(errors).toEqual([]);
 });
 
+test("nests delegation jobs under the chat that started them and opens each in the Workbench", async ({ page }) => {
+  const { sidebar, byStatus, errors } = await openStatusView(page);
+
+  // Nesting is part of the row, so the project grouping has it too.
+  await expect(
+    sidebar
+      .getByRole("list", { name: "Jobs started from Fixture" })
+      .getByRole("button", { name: "Port the session cache. Delegated job, Working" })
+  ).toBeVisible();
+
+  await byStatus.click();
+  const fixtureJobs = section(sidebar, "Recent").getByRole("list", { name: "Jobs started from Fixture" });
+  await expect(fixtureJobs.getByRole("listitem")).toHaveCount(4);
+  await expect(
+    fixtureJobs.getByRole("button", { name: "Port the session cache. Delegated job, Working" })
+  ).toBeVisible();
+  const ready = fixtureJobs.getByRole("button", {
+    name: "Write migration tests. Delegated job, Ready to apply",
+  });
+  await expect(ready).toBeVisible();
+  const approval = fixtureJobs.getByRole("button", {
+    name: "Add the fixture lifecycle. Delegated job, Needs approval",
+  });
+  await expect(approval).toBeVisible();
+  // The applied job is past the cap of three.
+  await expect(
+    fixtureJobs.getByRole("button", { name: "1 more job from Fixture, in the Workbench" })
+  ).toBeVisible();
+  await expect(sidebar.getByText("Bump the lockfile")).toHaveCount(0);
+  await expect(
+    section(sidebar, "Needs input")
+      .getByRole("list", { name: "Jobs started from Pick a migration path" })
+      .getByRole("button", { name: "Survey table sizes. Delegated job, Queued" })
+  ).toBeVisible();
+
+  // A child opens the Workbench's Delegation tab at that job.
+  await ready.click();
+  await expect(page.getByRole("tab", { name: "Delegation" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#workbench-delegation-fixture-delegation-ready")).toBeFocused();
+
+  // Its status follows the job live.
+  await approval.click();
+  const approvalCard = page.locator("#workbench-delegation-fixture-delegation-1");
+  await expect(approvalCard).toBeFocused();
+  await approvalCard.getByRole("button", { name: "Approve" }).click();
+  await expect(
+    fixtureJobs.getByRole("button", { name: "Add the fixture lifecycle. Delegated job, Ready to apply" })
+  ).toBeVisible();
+
+  // The jump focuses the card once; coming back to the tab later leaves focus
+  // on the tabs, so the arrow keys keep working.
+  await page.getByRole("tab", { name: "Outline" }).click();
+  await page.keyboard.press("ArrowRight");
+  const delegationTab = page.getByRole("tab", { name: "Delegation" });
+  await expect(delegationTab).toHaveAttribute("aria-selected", "true");
+  // Let any queued focus land before checking where it is.
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  );
+  await expect(delegationTab).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
 test("status rows keep keyboard access, pinning, rename, and clear bold when opened", async ({ page }) => {
   const { sidebar, byStatus, errors } = await openStatusView(page);
   await byStatus.click();
@@ -91,7 +154,8 @@ test("status rows keep keyboard access, pinning, rename, and clear bold when ope
   // Pinning moves a recent chat to the top of its section.
   await expect(recent.getByRole("listitem").first()).toContainText("Draft release notes");
   const fixture = recent.getByRole("listitem").filter({ hasText: /^Fixture/ });
-  await fixture.hover();
+  // Hover the row itself; the item also holds the row's nested jobs.
+  await fixture.getByRole("button", { name: /^Fixture\./ }).hover();
   await fixture.getByRole("button", { name: "Pin chat" }).click();
   await expect(recent.getByRole("button", { name: /^Fixture\..*pinned$/ })).toBeVisible();
   await expect(recent.getByRole("listitem").first()).toContainText("Fixture");

@@ -10,6 +10,8 @@ import {
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
+  CheckCircle2Icon,
+  CheckIcon,
   Columns2Icon,
   Clock3Icon,
   ChevronRightIcon,
@@ -29,6 +31,7 @@ import {
   SquarePenIcon,
   Trash2Icon,
   TriangleAlertIcon,
+  XCircleIcon,
 } from "lucide-react";
 
 import { AccountMenu } from "@/components/AccountMenu";
@@ -47,6 +50,12 @@ import {
   type ChatStatusSection,
 } from "@/lib/chatStatusGroups";
 import { compactChatMark, foreignProvider, type CompactChatMark } from "@/lib/compactChatRow";
+import {
+  delegationChildStatus,
+  delegationChildrenByThread,
+  type DelegationChildTone,
+  type DelegationChildren,
+} from "@/lib/delegationChildren";
 import { isBooleanRecord, parseJson } from "@/lib/json";
 import { formatChord } from "@/lib/keybindings";
 import {
@@ -65,7 +74,13 @@ import {
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
 import { getUnreadThreads, subscribeUnreadThreads } from "@/lib/threadUnread";
-import type { ProjectChats, ProviderRow, ThreadSummary, UserProfile } from "@/lib/types";
+import type {
+  DelegationJob,
+  ProjectChats,
+  ProviderRow,
+  ThreadSummary,
+  UserProfile,
+} from "@/lib/types";
 import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { cn } from "@/lib/utils";
 import {
@@ -129,6 +144,10 @@ type Props = {
   activeSplitGroupId?: string | null;
   onOpenSplitGroup?: (groupId: string) => void;
   onFocusSplitPane?: (groupId: string, paneId: string) => void;
+  /** Feature-card jobs for the open project, nested under the chat that started each. */
+  delegationJobs?: ReadonlyArray<DelegationJob>;
+  /** Open the Workbench on its Delegation tab at this job. */
+  onOpenDelegationJob?: (jobId: string) => void;
 };
 
 function threadTitle(thread: ThreadSummary) {
@@ -255,6 +274,31 @@ const STATUS_SECTION_META: Record<
   recent: { label: "Recent", Icon: Clock3Icon, iconClass: "text-muted-foreground" },
 };
 
+const NO_DELEGATION_JOBS: ReadonlyArray<DelegationJob> = [];
+
+function DelegationChildIcon({ tone }: { tone: DelegationChildTone }) {
+  const base = "size-3 shrink-0";
+  switch (tone) {
+    case "attention":
+      return <TriangleAlertIcon className={cn(base, "text-amber-400")} aria-hidden="true" />;
+    case "running":
+      return (
+        <LoaderCircleIcon
+          className={cn(base, "animate-spin text-[var(--sidebar-primary)] motion-reduce:animate-none")}
+          aria-hidden="true"
+        />
+      );
+    case "ready":
+      return <CheckCircle2Icon className={cn(base, "text-[var(--sidebar-primary)]")} aria-hidden="true" />;
+    case "waiting":
+      return <Clock3Icon className={cn(base, "text-muted-foreground")} aria-hidden="true" />;
+    case "done":
+      return <CheckIcon className={cn(base, "text-muted-foreground")} aria-hidden="true" />;
+    case "cancelled":
+      return <XCircleIcon className={cn(base, "text-muted-foreground")} aria-hidden="true" />;
+  }
+}
+
 type EditingThread = {
   key: string;
   id: string;
@@ -301,6 +345,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   activeSplitGroupId = null,
   onOpenSplitGroup,
   onFocusSplitPane,
+  delegationJobs = NO_DELEGATION_JOBS,
+  onOpenDelegationJob,
 }: Props) {
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [loading, setLoading] = useState(false);
@@ -441,6 +487,11 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   const statusGroups = useMemo(
     () => groupChatsByStatus(projects, threadActivity),
     [projects, threadActivity]
+  );
+
+  const delegationChildren = useMemo(
+    () => delegationChildrenByThread(delegationJobs),
+    [delegationJobs]
   );
 
   function chooseGrouping(next: ChatGrouping) {
@@ -875,11 +926,13 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
       .filter(Boolean)
       .join(". ");
 
+    const children = delegationChildren.get(thread.id);
+
     return (
-      <li key={key} className="group/thread">
+      <li key={key}>
         <div
           className={cn(
-            "relative flex h-7 items-center rounded-md",
+            "group/thread relative flex h-7 items-center rounded-md",
             isEditing || active
               ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]"
               : "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]"
@@ -1056,7 +1109,69 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
             </div>
           )}
         </div>
+        {children ? renderDelegationChildren(title, children) : null}
       </li>
+    );
+  }
+
+  /**
+   * Jobs a chat dispatched, hung off its row by a tree line that starts under
+   * the row's mark. Each opens the Workbench at that job.
+   */
+  function renderDelegationChildren(parentTitle: string, children: DelegationChildren) {
+    const more = children.hidden[0];
+    const rows = more ? [...children.shown, more] : children.shown;
+    return (
+      <ul aria-label={`Jobs started from ${parentTitle}`} className="m-0 flex list-none flex-col p-0">
+        {rows.map((job, index) => {
+          const last = index === rows.length - 1;
+          const isMore = more !== undefined && last;
+          const status = delegationChildStatus(job.status);
+          return (
+            <li key={isMore ? `delegation-more:${job.jobId}` : `delegation:${job.jobId}`} className="relative pl-[26px]">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-[15px] top-0 h-1/2 w-2 rounded-bl-[5px] border-b border-l border-border"
+              />
+              {last ? null : (
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute bottom-0 left-[15px] top-1/2 border-l border-border"
+                />
+              )}
+              {isMore ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenDelegationJob?.(job.jobId)}
+                  aria-label={`${children.hidden.length} more ${children.hidden.length === 1 ? "job" : "jobs"} from ${parentTitle}, in the Workbench`}
+                  className="flex h-6 w-full min-w-0 cursor-pointer items-center rounded-md pl-1 pr-2 text-left text-[11px] text-muted-foreground outline-none transition-colors hover:bg-[var(--sidebar-accent)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  {children.hidden.length} more
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onOpenDelegationJob?.(job.jobId)}
+                  title={`${job.title} · ${status.label}. Opens in the Workbench.`}
+                  aria-label={`${job.title}. Delegated job, ${status.label}`}
+                  className="flex h-6 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[12px] text-muted-foreground outline-none transition-colors hover:bg-[var(--sidebar-accent)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <DelegationChildIcon tone={status.tone} />
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate",
+                      status.tone === "running" && WORKING_TITLE_CLASS
+                    )}
+                  >
+                    {job.title}
+                  </span>
+                  <span className="shrink-0 text-[10px]">{status.label}</span>
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     );
   }
 

@@ -472,6 +472,37 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     };
   }
 
+  /**
+   * Extra jobs for `sidebar-status`, so one chat has more than the sidebar
+   * shows and another chat has a job of its own. They are read-only: the
+   * lifecycle actions still drive only `fixtureDelegationJob`.
+   */
+  function statusScenarioJobs(): DelegationJob[] {
+    const job = (
+      jobId: string,
+      parentThreadId: string,
+      title: string,
+      status: DelegationJob["status"],
+      minutesAgo: number
+    ): DelegationJob => ({
+      ...delegationSnapshot(),
+      jobId,
+      cardId: `card-${jobId}`,
+      parentThreadId,
+      title,
+      status,
+      approved: true,
+      origin: { coordinator: "fixture", chatId: null, threadId: parentThreadId },
+      updatedAt: fixtureEpochSeconds * 1000 - minutesAgo * 60_000,
+    });
+    return [
+      job("fixture-delegation-worker", "fixture", "Port the session cache", "worker_running", 2),
+      job("fixture-delegation-ready", "fixture", "Write migration tests", "ready_to_apply", 5),
+      job("fixture-delegation-applied", "fixture", "Bump the lockfile", "accepted", 30),
+      job("fixture-delegation-survey", "fixture-question", "Survey table sizes", "queued", 1),
+    ];
+  }
+
   function emitDelegation(kind: DelegationEvent["kind"]) {
     delegationHandler?.({ kind, job: delegationSnapshot() } as DelegationEvent);
   }
@@ -2355,7 +2386,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async listDelegationJobs(): Promise<DelegationJob[]> {
-      return [delegationSnapshot()];
+      return scenario === "sidebar-status"
+        ? [delegationSnapshot(), ...statusScenarioJobs()]
+        : [delegationSnapshot()];
     },
     async listDelegationTargets(): Promise<DelegationTargetOptionView[]> {
       return [
