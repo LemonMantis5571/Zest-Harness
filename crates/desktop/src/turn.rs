@@ -525,6 +525,7 @@ async fn run_with_sink_internal<S: EventSink>(
                         id: id.to_string(),
                         title: title.to_string(),
                         status: provider_activity_status(status).into(),
+                        parent_id: None,
                     }
                 }
                 StreamEvent::ToolCallStart { name, id } => ChatEvent::ToolCallStart {
@@ -703,17 +704,13 @@ async fn run_with_sink_internal<S: EventSink>(
 
             // The lock is released before the worker is told anything, so the
             // deferred read below can never wait on this event's own guard.
-            let priority = if matches!(&event, ChatEvent::ProviderActivity { .. }) {
-                None
-            } else {
-                match live_thread.lock() {
-                    Ok(mut thread) => {
-                        record_ledger_event(&mut thread, &event);
-                        apply_event_to_thread(&mut thread, &event);
-                        event_mutates_thread(&event).then(|| event_priority(&event))
-                    }
-                    Err(_) => None,
+            let priority = match live_thread.lock() {
+                Ok(mut thread) => {
+                    record_ledger_event(&mut thread, &event);
+                    apply_event_to_thread(&mut thread, &event);
+                    event_mutates_thread(&event).then(|| event_priority(&event))
                 }
+                Err(_) => None,
             };
 
             if let Some(priority) = priority {

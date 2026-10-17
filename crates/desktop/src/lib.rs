@@ -1301,9 +1301,9 @@ enum ChatEvent {
         message_id: String,
         text: String,
     },
-    /// Ephemeral activity from a provider-owned loop (for example Claude
-    /// Code reading a file). It is deliberately not persisted as a Zest tool
-    /// call and never enters the local tool executor.
+    /// Activity from a provider-owned loop (for example Claude Code reading a
+    /// file). Saved on the assistant message so a reopened chat still shows
+    /// it, but never a Zest tool call and never run by the local executor.
     ProviderActivity {
         session_id: String,
         thread_id: String,
@@ -1312,6 +1312,11 @@ enum ChatEvent {
         id: String,
         title: String,
         status: String,
+        /// The activity this one ran inside, such as a subagent's tool call
+        /// under its `Agent` row. No provider reports one yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        parent_id: Option<String>,
     },
     ToolCallStart {
         session_id: String,
@@ -4105,7 +4110,14 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::ThinkingDelta {
             message_id, text, ..
         } => thread.apply_thinking_delta(message_id, text),
-        ChatEvent::ProviderActivity { .. } => {}
+        ChatEvent::ProviderActivity {
+            message_id,
+            id,
+            title,
+            status,
+            parent_id,
+            ..
+        } => thread.apply_provider_activity(message_id, id, title, status, parent_id.as_deref()),
         ChatEvent::ToolCallStart {
             message_id,
             name,
@@ -4198,7 +4210,11 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
 
 fn event_priority(event: &ChatEvent) -> PersistPriority {
     match event {
-        ChatEvent::TextDelta { .. } | ChatEvent::ThinkingDelta { .. } => PersistPriority::Delta,
+        // A subagent retitles its row on every step it takes; those coalesce
+        // like deltas rather than forcing a write each.
+        ChatEvent::TextDelta { .. }
+        | ChatEvent::ThinkingDelta { .. }
+        | ChatEvent::ProviderActivity { .. } => PersistPriority::Delta,
         _ => PersistPriority::Immediate,
     }
 }
@@ -4206,8 +4222,7 @@ fn event_priority(event: &ChatEvent) -> PersistPriority {
 fn event_mutates_thread(event: &ChatEvent) -> bool {
     !matches!(
         event,
-        ChatEvent::ProviderActivity { .. }
-            | ChatEvent::ToolCallUpdate { .. }
+        ChatEvent::ToolCallUpdate { .. }
             | ChatEvent::QuestionNeeded { .. }
             | ChatEvent::WorkspaceChanged { .. }
             | ChatEvent::InputQueued { .. }
@@ -9743,6 +9758,67 @@ mod characterization {
             },
         );
         assert_eq!(thread.messages.len(), 2);
+    }
+
+    /// A Claude Code subagent used to vanish on reopen: its `Agent` row was
+    /// only ever in the live UI.
+    #[test]
+    fn provider_activity_is_saved_in_order_and_settles_on_done() {
+        let activity = |id: &str, title: &str, status: &str, parent: Option<&str>| {
+            ChatEvent::ProviderActivity {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "a1".into(),
+                id: id.into(),
+                title: title.into(),
+                status: status.into(),
+                parent_id: parent.map(str::to_string),
+            }
+        };
+        let mut thread = Thread::new();
+        let first = activity("agent-1", "Agent Map the parser", "running", None);
+        assert!(event_mutates_thread(&first));
+        assert_eq!(event_priority(&first), PersistPriority::Delta);
+        apply_event_to_thread(&mut thread, &first);
+        apply_event_to_thread(
+            &mut thread,
+            &activity("read-1", "Read src/lib.rs", "done", Some("agent-1")),
+        );
+        apply_event_to_thread(
+            &mut thread,
+            &activity(
+                "agent-1",
+                "Agent Map the parser: Read src/lib.rs",
+                "running",
+                None,
+            ),
+        );
+        apply_event_to_thread(
+            &mut thread,
+            &ChatEvent::Done {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "a1".into(),
+            },
+        );
+
+        let saved = serde_json::to_value(&thread.messages[0]).unwrap();
+        assert_eq!(saved["providerActivity"][0]["id"], "agent-1");
+        assert_eq!(
+            saved["providerActivity"][0]["title"],
+            "Agent Map the parser: Read src/lib.rs"
+        );
+        assert_eq!(saved["providerActivity"][0]["status"], "done");
+        assert_eq!(saved["providerActivity"][1]["parentId"], "agent-1");
+        assert_eq!(
+            saved["steps"],
+            serde_json::json!([
+                { "kind": "activity", "id": "agent-1" },
+                { "kind": "activity", "id": "read-1" }
+            ])
+        );
     }
 
     #[test]
