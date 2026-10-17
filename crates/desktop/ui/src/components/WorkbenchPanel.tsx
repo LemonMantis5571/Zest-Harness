@@ -24,13 +24,14 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button";
 import { OrchestrationStatus } from "@/components/OrchestrationStatus";
+import { agentLabel } from "@/lib/subagents";
 import { getBackend } from "@/lib/backend";
 import {
   blobatarToneFor,
   getSavedTheme,
   subscribeThemeChange,
 } from "@/lib/themes";
-import { cn } from "@/lib/utils";
+import { cn, scrollBehavior } from "@/lib/utils";
 import type {
   ChatMessage,
   DelegationCreateInput,
@@ -62,6 +63,8 @@ type PanelProps = {
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
   onReconnectProvider?: (providerId: string) => void;
+  /** A card a chat line asked to see; a new nonce asks again. */
+  delegationFocus?: { jobId: string; nonce: number } | null;
 };
 
 type Tab = "activity" | "outline" | "delegation" | "files";
@@ -110,15 +113,6 @@ function statusDotClass(status: string) {
   if (status === "error") return "bg-destructive";
   if (status === "awaiting_approval") return "bg-amber-400";
   return "animate-pulse bg-primary";
-}
-
-function subagentLabel(id: string) {
-  if (id === "claude") return "Claude Code";
-  if (id === "gemini") return "Gemini CLI";
-  if (id === "cursor") return "Cursor CLI";
-  return id
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function subagentStatus(status: string) {
@@ -398,6 +392,7 @@ function WorkbenchBody({
   onRetryDelegation,
   onApplyDelegation,
   onReconnectProvider,
+  delegationFocus,
 }: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
   const [blobatarTone, setBlobatarTone] = useState(
@@ -435,6 +430,19 @@ function WorkbenchBody({
       }),
     []
   );
+
+  // A chat line asked for a card: show it open, in view.
+  useEffect(() => {
+    if (!delegationFocus) return;
+    setTab("delegation");
+    setExpandedDelegation({ jobId: delegationFocus.jobId, section: "worker" });
+    const frame = requestAnimationFrame(() => {
+      document
+        .getElementById(`delegation-job-${delegationFocus.jobId}`)
+        ?.scrollIntoView({ block: "nearest", behavior: scrollBehavior() });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [delegationFocus]);
 
   useEffect(() => {
     if (tab !== "delegation") return;
@@ -502,7 +510,7 @@ function WorkbenchBody({
       if (latest.has(id)) continue;
       latest.set(id, {
         id,
-        label: subagentLabel(id),
+        label: agentLabel(id),
         model: task.metadata.model,
         status: task.status,
         messageId: task.messageId,
@@ -1063,7 +1071,9 @@ function WorkbenchBody({
                   return (
                     <article
                       key={job.jobId}
-                      className="rounded-lg border border-border/70 bg-secondary/20 p-2.5"
+                      id={`delegation-job-${job.jobId}`}
+                      data-focused={delegationFocus?.jobId === job.jobId || undefined}
+                      className="scroll-mt-2 rounded-lg border border-border/70 bg-secondary/20 p-2.5 data-focused:border-primary/60"
                     >
                       <div className="flex items-start gap-2">
                         <span className="mt-0.5 shrink-0" aria-hidden="true">

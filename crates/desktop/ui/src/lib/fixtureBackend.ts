@@ -184,8 +184,75 @@ function htmlArtifactMessages(): ChatMessage[] {
   ];
 }
 
+/** The board job the restored `delegate_feature` call created. */
+const FIXTURE_DELEGATION_JOB_ID = "fixture-delegation-1";
+
+/**
+ * A chat that handed work to three kinds of subagent: a CLI worker
+ * (`delegate_external`), a board feature card (`delegate_feature`), and a
+ * Claude Code `Agent` whose own steps arrive nested under it.
+ */
+function subagentMessages(): ChatMessage[] {
+  const at = 1_700_000_000_000;
+  const tools: ToolPart[] = [
+    { id: "sub-read-1", name: "read_file", path: "src/cache.ts", status: "done", summary: "export function cacheKey(…)" },
+    { id: "sub-read-2", name: "read_file", path: "src/cache.test.ts", status: "done", summary: "describe(\"cache\", …)" },
+    {
+      id: "sub-worker", name: "delegate_external", status: "done", path: "codex",
+      summary: "[codex · gpt-5.1-codex] The cache key ignores the locale, so the two flaky tests share one entry. Keying on the locale fixes both.",
+      diff: "--- a/src/cache.ts\n+++ b/src/cache.ts\n@@ -1 +1 @@\n-export const cacheKey = (path) => path;\n+export const cacheKey = (path, locale) => `${locale}:${path}`;\n",
+      metadata: { kind: "delegation", provider_id: "codex", model: "gpt-5.1-codex", stage: "direct" },
+      startedAt: at, finishedAt: at + 48_000,
+    },
+    {
+      id: "sub-card", name: "delegate_feature", status: "done", path: "claude",
+      summary: `Feature card \`${FIXTURE_DELEGATION_JOB_ID}\` created in lane \`product\`.`,
+      metadata: {
+        kind: "delegation", provider_id: "claude", model: "sonnet",
+        job_id: FIXTURE_DELEGATION_JOB_ID, stage: "card_created", attempt: 0, review_status: "pending",
+      },
+      startedAt: at + 50_000, finishedAt: at + 51_000,
+    },
+  ];
+  const agentAt = at + 120_000;
+  return [
+    { id: "sub-user-1", role: "user", text: "Why are the cache tests flaky?" },
+    {
+      id: "sub-assistant-1", role: "assistant", streaming: false,
+      thinking: "**Reading the cache**\nThe flaky tests both touch cacheKey.**Handing off**\nCodex can confirm the cause; the fix belongs on the board.",
+      text: "Codex found the cause: the cache key ignores the locale. The fix is on the board as a feature card.",
+      tools,
+      steps: [
+        { kind: "thinking", text: "**Reading the cache**\nThe flaky tests both touch cacheKey." },
+        { kind: "tool", id: "sub-read-1" },
+        { kind: "tool", id: "sub-read-2" },
+        { kind: "tool", id: "sub-worker" },
+        { kind: "thinking", text: "**Handing off**\nCodex can confirm the cause; the fix belongs on the board." },
+        { kind: "tool", id: "sub-card" },
+      ],
+    },
+    { id: "sub-user-2", role: "user", text: "Map every caller of cacheKey." },
+    {
+      id: "sub-assistant-2", role: "assistant", streaming: false, thinking: "", tools: [],
+      text: "Three modules call cacheKey; only the image loader passes a locale.",
+      providerActivity: [
+        { id: "sub-agent", title: "Agent Map the cacheKey callers: Read src/images.ts", status: "done", startedAt: agentAt, finishedAt: agentAt + 34_000 },
+        { id: "sub-agent-grep", title: "Grep cacheKey in src", status: "done", parentId: "sub-agent", startedAt: agentAt + 2_000, finishedAt: agentAt + 3_000 },
+        { id: "sub-agent-read", title: "Read src/images.ts", status: "done", parentId: "sub-agent", startedAt: agentAt + 4_000, finishedAt: agentAt + 5_000 },
+        { id: "sub-agent-test", title: "Bash npm test -- cache", status: "error", parentId: "sub-agent", startedAt: agentAt + 6_000, finishedAt: agentAt + 30_000 },
+      ],
+      steps: [
+        { kind: "activity", id: "sub-agent" },
+        { kind: "activity", id: "sub-agent-grep" },
+        { kind: "activity", id: "sub-agent-read" },
+        { kind: "activity", id: "sub-agent-test" },
+      ],
+    },
+  ];
+}
+
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "subagents";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -202,7 +269,7 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
-    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery"
+    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" || value === "subagents"
     ? value
     : undefined;
 }
@@ -264,6 +331,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   ]);
   if (scenario === "html-artifacts") fixtureTranscripts.set("fixture", htmlArtifactMessages());
   if (scenario === "ui-stress") fixtureTranscripts.set("fixture", longThreadMessages().slice(0, 6));
+  if (scenario === "subagents") fixtureTranscripts.set("fixture", subagentMessages());
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
 
@@ -359,7 +427,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   let delegationHandler: ((event: DelegationEvent) => void) | null = null;
   let delegationHandlerGeneration = 0;
   let fixtureDelegationJob: DelegationJob = {
-    jobId: "fixture-delegation-1",
+    jobId: FIXTURE_DELEGATION_JOB_ID,
     parentThreadId: session.threadId,
     projectRoot: workspace,
     cardId: "fixture-card-1",
@@ -433,11 +501,33 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     ) {
       return delegationSnapshot();
     }
+    const attempt = fixtureDelegationJob.attempt + 1;
+    const started = BigInt(fixtureDelegationJob.updatedAt);
+    const worker = {
+      attemptId: `fixture-worker-${attempt}`,
+      role: "worker",
+      agent: fixtureDelegationJob.agent,
+      target: null,
+      usage: null,
+      resolvedTarget: null,
+      startedAt: started,
+      finishedAt: null,
+    };
+    const reviewer = {
+      ...worker,
+      attemptId: `fixture-reviewer-${attempt}`,
+      role: "reviewer",
+      agent: fixtureDelegationJob.reviewerAgent,
+      startedAt: started + 42_000n,
+    };
     updateDelegation("worker_running", "worker_started", {
-      attempt: fixtureDelegationJob.attempt + 1,
-      workerAttemptId: `fixture-worker-${fixtureDelegationJob.attempt + 1}`,
+      approved: true,
+      attempt,
+      workerAttemptId: worker.attemptId,
+      attempts: [...fixtureDelegationJob.attempts, worker],
       error: undefined,
     });
+    const workerDone = { ...worker, finishedAt: started + 42_000n };
     updateDelegation("worker_running", "worker_completed", {
       changedFiles: ["src/fixture.ts"],
       changedFileCount: 1,
@@ -445,11 +535,21 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       acceptanceChecks: [
         { command: "npm test", status: "passed", output: "fixture tests passed" },
       ],
+      attempts: fixtureDelegationJob.attempts.map((item) =>
+        item.attemptId === worker.attemptId ? workerDone : item
+      ),
     });
     updateDelegation("review_running", "reviewer_started", {
-      reviewerAttemptId: `fixture-reviewer-${fixtureDelegationJob.attempt}`,
+      reviewerAttemptId: reviewer.attemptId,
+      attempts: [...fixtureDelegationJob.attempts, reviewer],
     });
-    updateDelegation("review_running", "reviewer_completed");
+    updateDelegation("review_running", "reviewer_completed", {
+      attempts: fixtureDelegationJob.attempts.map((item) =>
+        item.attemptId === reviewer.attemptId
+          ? { ...reviewer, finishedAt: started + 60_000n }
+          : item
+      ),
+    });
     updateDelegation("ready_to_apply", "ready_to_apply");
     return delegationSnapshot();
   }
@@ -538,6 +638,59 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       text: text.trim() || "(attachment)",
     });
     chatHandler({ kind: "done", ...id, message_id: assistantId });
+  }
+
+  /**
+   * A live turn in which a Claude Code style `Agent` runs and reports its own
+   * steps under it. "slow" in the message spaces the steps out for watching.
+   */
+  function streamSubagentTurn(text: string) {
+    if (!chatHandler) return;
+    const { turnId, userId, assistantId } = fixtureIds();
+    const id = {
+      session_id: session.sessionId,
+      thread_id: session.threadId,
+      turn_id: turnId,
+      message_id: assistantId,
+    };
+    const gap = /slow/i.test(text) ? 1500 : 150;
+    const agent = (title: string, status: string) => ({
+      kind: "provider_activity" as const, ...id, id: "live-agent", title, status,
+    });
+    const child = (childId: string, title: string, status: string) => ({
+      kind: "provider_activity" as const, ...id, id: childId, title, status, parent_id: "live-agent",
+    });
+    const steps: ChatEvent[] = [
+      { kind: "thinking_delta", ...id, text: "**Splitting the work**\nOne agent maps the callers while I wait." },
+      agent("Agent Map the callers", "running"),
+      child("live-grep", "Grep cacheKey in src", "running"),
+      child("live-grep", "Grep cacheKey in src", "done"),
+      agent("Agent Map the callers: Grep cacheKey in src", "running"),
+      child("live-read", "Read src/images.ts", "running"),
+      child("live-read", "Read src/images.ts", "done"),
+      agent("Agent Map the callers: Read src/images.ts", "done"),
+      { kind: "text_delta", ...id, text: "The agent mapped three callers of cacheKey." },
+      { kind: "done", ...id },
+    ];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const finish = () => {
+      timers.forEach(clearTimeout);
+      splitStreams.delete(id.thread_id);
+    };
+    splitStreams.set(id.thread_id, () => {
+      finish();
+      chatHandler?.({ kind: "cancelled", ...id });
+    });
+    chatHandler({ kind: "user", ...id, message_id: userId, text });
+    chatHandler({ kind: "assistant_start", ...id });
+    steps.forEach((event, index) => {
+      timers.push(
+        setTimeout(() => {
+          chatHandler?.(event);
+          if (event.kind === "done") finish();
+        }, gap * (index + 1))
+      );
+    });
   }
 
   function finishScenario(kind: "allow" | "deny" | "answer" | "cancel") {
@@ -1734,6 +1887,10 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       if (scenario === "html-artifacts" && text.trim() === "Publish an HTML artifact") {
         emitFixtureEcho(text, attachments, { ...FIXTURE_HTML_DOCUMENT, title: "Published counter" });
+        return;
+      }
+      if (scenario === "subagents") {
+        streamSubagentTurn(text);
         return;
       }
       emitFixtureEcho(text, attachments);

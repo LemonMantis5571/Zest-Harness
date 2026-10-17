@@ -30,7 +30,9 @@ verify:
   has whitespace errors. It never runs project scripts or changes files.
 - Outline lists the conversation's messages; clicking one scrolls to it.
 - Delegation is the agent board for delegation jobs (create, approve, cancel,
-  retry, apply); its behavior belongs to the delegation feature.
+  retry, apply); its behavior belongs to the delegation feature. A chat line's
+  "Open in Delegation" opens the panel on this tab with that job's card
+  expanded, highlighted and scrolled into view (`delegationFocus`).
 - Files is a read-only, shallow browser rooted at the project: directories first,
   then files, max 400 entries per folder; text preview up to 200000 bytes
   (marked truncated); binary files have no preview.

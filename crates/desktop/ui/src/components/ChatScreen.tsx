@@ -284,6 +284,9 @@ type ChatMessageRowProps = {
   approvalMode: ApprovalMode;
   /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
   providerLabel: string;
+  /** The board, so a feature card this turn created shows its live state. */
+  delegationJobs: ReadonlyArray<DelegationJob>;
+  onOpenDelegation: (jobId: string) => void;
   isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
   onOpenDiff: (path: string, diff: string) => void;
@@ -382,6 +385,8 @@ const ChatMessageRow = memo(function ChatMessageRow({
   sending,
   approvalMode,
   providerLabel,
+  delegationJobs,
+  onOpenDelegation,
   isPlanToBuild = false,
   onBuildPlan,
   onOpenDiff,
@@ -505,7 +510,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
           <AssistantTrace
             message={msg}
             providerLabel={providerLabel}
+            delegationJobs={delegationJobs}
             onOpenDiff={onOpenDiff}
+            onOpenDelegation={onOpenDelegation}
           />
 
           {planningQuestion ? (
@@ -945,6 +952,16 @@ export function ChatScreen({
   }, [messages, scrollToTranscriptMessage, session.focusMessageId]);
 
   const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
+  // A subagent line's "Open in Delegation" lands on its card. The nonce lets
+  // the same card be asked for twice.
+  const [delegationFocus, setDelegationFocus] = useState<{
+    jobId: string;
+    nonce: number;
+  } | null>(null);
+  const openDelegation = useCallback((jobId: string) => {
+    setWorkbenchOpen(true);
+    setDelegationFocus((current) => ({ jobId, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
   const toggleWorkbench = useCallback(() => {
     if (session.isFreeChat) return;
     setWorkbenchOpen((value) => !value);
@@ -1834,6 +1851,8 @@ export function ChatScreen({
                         sending={sending}
                         approvalMode={approvalMode}
                         providerLabel={providerLabel}
+                        delegationJobs={delegationJobs}
+                        onOpenDelegation={openDelegation}
                         isPlanToBuild={planToBuild === msg.id}
                         onBuildPlan={onBuildPlan}
                         onOpenDiff={openDiff}
@@ -2113,6 +2132,7 @@ export function ChatScreen({
             onRetryDelegation={onRetryDelegation}
             onApplyDelegation={onApplyDelegation}
             onReconnectProvider={onReconnectProvider}
+            delegationFocus={delegationFocus}
           />
         </Suspense>
       ) : null}
