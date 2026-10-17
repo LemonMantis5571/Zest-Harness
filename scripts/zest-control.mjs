@@ -25,8 +25,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { probeDevServer, reuseRefusal, uiPort, uiUrl } from "../crates/desktop/ui/devServer.ts";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const DEV_SERVER_URL = "http://127.0.0.1:1420";
 const DAEMON_SCRIPT = path.join(repoRoot, "scripts", "zest-control-daemon.mjs");
 const FIXTURE_BACKEND = path.join(repoRoot, "crates", "desktop", "ui", "src", "lib", "fixtureBackend.ts");
 
@@ -89,6 +90,12 @@ export function parseArgs(argv) {
 }
 
 const VALUE_FLAGS = new Set(["scenario", "timeout", "role", "nth", "selector", "since", "level"]);
+
+/** The dev server this checkout's session uses: ZEST_UI_PORT, or 1420. */
+export function devServer(env = process.env) {
+  const port = uiPort(env);
+  return { port, url: uiUrl(port) };
+}
 
 /** One session per checkout, kept outside the repo. */
 export function statePath(root = repoRoot) {
@@ -220,19 +227,14 @@ async function doctor() {
   const vite = path.join(repoRoot, "node_modules", "vite", "bin", "vite.js");
   add("vite", existsSync(vite), vite, "Run `npm ci` at the repository root.");
 
-  let server = "free";
-  try {
-    const response = await fetch(DEV_SERVER_URL, { signal: AbortSignal.timeout(2_000) });
-    const body = await response.text();
-    server = body.includes('id="root"') ? "zest-ui" : "other";
-  } catch {
-    server = "free";
-  }
+  const { port, url } = devServer();
+  const probe = await probeDevServer(url);
+  const refusal = reuseRefusal(probe, port);
   add(
-    "port 1420",
-    server !== "other",
-    server === "free" ? "free; the session will start Vite" : server === "zest-ui" ? "serving the Zest UI" : "in use by another program",
-    "Stop whatever is using port 1420; the UI dev server needs it (strictPort).",
+    `port ${port}`,
+    !refusal,
+    refusal?.error ?? (probe.status === "free" ? "free; the session will start Vite" : `serving this checkout's Zest UI (pid ${probe.pid})`),
+    refusal?.hint,
   );
 
   const state = readState();
@@ -286,6 +288,12 @@ async function main() {
     return EXIT.usage;
   }
 
+  try {
+    devServer();
+  } catch (error) {
+    print({ ok: false, error: error.message });
+    return EXIT.usage;
+  }
   if (command === "doctor") {
     const result = await doctor();
     print(result);

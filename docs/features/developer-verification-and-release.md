@@ -71,5 +71,5 @@ verify:
   A shared resource is linked into every artifact on both MSVC and GNU targets;
   Tauri's separate binary resource still supplies icons and version metadata.
 - In `release-verify.sh`, every step goes through `step`, which captures the exit code with `set +e`; an `if cmd; then` wrapper once let a failing `cargo test` pass.
-- Playwright reuses a dev server already on port 1420 outside CI.
+- Playwright reuses a dev server already on its port (`ZEST_UI_PORT`, default 1420) outside CI, but only one from the same checkout.
 - Stale comments: the `release-verify.ps1` header mentions sidecar fetching (there is no sidecar step), and `build-signed.ps1` mentions a `postbuild` hook that `crates/desktop/package.json` does not define.

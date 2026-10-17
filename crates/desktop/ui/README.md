@@ -26,8 +26,10 @@ From this directory: `npm run build` / `npm test` / `npm run lint`.
 
 After `npm ci`, install the test browser once with
 `npm exec -w ui -- playwright install chromium`. From the repository root, run
-`npm run test:e2e -w ui`. Playwright starts Vite on port 1420 (or uses an existing
-local dev server). Tests use synthetic fixture data and do not call live providers.
+`npm run test:e2e -w ui`. Playwright starts Vite on port 1420, or on
+`ZEST_UI_PORT` when set, or reuses a dev server already running there from this
+checkout; a server from another checkout is refused. Tests use synthetic
+fixture data and do not call live providers.
 Traces and screenshots for failures are written to `test-results/`.
 
 The growing-code benchmark is opt-in. In PowerShell:

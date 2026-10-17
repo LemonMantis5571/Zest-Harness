@@ -5,6 +5,7 @@ paths:
   - scripts/zest-control.mjs
   - scripts/zest-control-daemon.mjs
   - scripts/zest-ui-measure.mjs
+  - crates/desktop/ui/devServer.ts
 tests:
   - scripts/zest-control.test.mjs
   - crates/desktop/ui/e2e/ui-quality.spec.ts
@@ -30,9 +31,13 @@ verify:
   and exits 0 on success, 1 when the command failed, 2 for bad usage, 3 when no
   session is running. Failures carry an `error` and, where the cause is known,
   a `hint` with the next command to run.
-- `start` launches one session per checkout: the Vite dev server on port 1420
-  (reused if the Zest UI is already served there) and headless Chromium on
-  `/?fixture=1`. It waits for the seeded chat's canned boot turn to finish, so
+- `start` launches one session per checkout: the Vite dev server on port
+  `ZEST_UI_PORT` (default 1420) and headless Chromium on `/?fixture=1`. A
+  server already on that port is reused only when its `/__zest_dev_server`
+  identity names this checkout's UI root. A server from another checkout, an
+  older Zest UI without the endpoint, or another program fails `start` with a
+  hint to stop it or set another `ZEST_UI_PORT`; `doctor` reports the same.
+  An invalid `ZEST_UI_PORT` exits 2 before anything starts. It waits for the seeded chat's canned boot turn to finish, so
   the first `send` is not queued. `--scenario` picks a fixture scenario;
   `--headed` shows the browser. A second `start` reuses the running session.
 - The session records console errors and warnings, uncaught page errors,
@@ -65,7 +70,10 @@ verify:
    loopback HTTP with a per-session token. `doctor` and `start` run in the
    client; `check` starts an ephemeral session when none is running.
 2. `zest-control-daemon.mjs` is spawned detached by `start`. `ensureServer`
-   reuses or starts Vite (`node_modules/vite/bin/vite.js` in `crates/desktop/ui`),
+   probes the port with `probeDevServer` (`crates/desktop/ui/devServer.ts`,
+   shared with Playwright and `vite.config.ts`), reuses this checkout's server,
+   refuses any other (`reuseRefusal`), or starts Vite
+   (`node_modules/vite/bin/vite.js --port <port> --strictPort` in `crates/desktop/ui`),
    `launchBrowser` opens a 1280x800 page (the Playwright specs' viewport),
    attaches the event listeners, and installs a `MutationObserver` init script
    that reports toasts through `console.debug` with a `[zest-control:toast]`
@@ -82,7 +90,12 @@ verify:
 ## Verify
 
 - `npm run control:test` covers argument parsing, the session path, scenario
-  discovery and validation, and help text.
+  discovery and validation, help text, `ZEST_UI_PORT` parsing, and the
+  dev-server probe against fake servers for this checkout, another checkout,
+  an unidentified server, and a free port.
+- Two checkouts at once: `ZEST_UI_PORT=1437 node scripts/zest-control.mjs start`
+  in one and `ZEST_UI_PORT=1439 npm run ui:e2e` in the other. Pointing either
+  at the other's port must fail with the other checkout's path.
 - `npm run control:check` exercises the whole CLI against the live UI. It runs
   in `npm run verify` and both release-verify scripts after the Playwright
   suite, so a broken probe fails the gate.
@@ -92,6 +105,8 @@ verify:
 - It drives the offline fixture UI, not the Tauri app. Bugs in Rust commands
   only show here if the fixture models them; when one slips through, fix the
   fixture too ([offline-fixture-mode](offline-fixture-mode.md)).
+- The session keeps the port it started on; to change `ZEST_UI_PORT`, `stop`
+  first.
 - One session per checkout: two agents in the same checkout share it, and
   `open`, `scenario`, `pref`, and `check` reload the page and reset fixture
   state.

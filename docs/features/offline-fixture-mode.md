@@ -7,6 +7,8 @@ paths:
   - crates/desktop/ui/src/lib/backend.ts
   - crates/desktop/ui/playwright.config.ts
   - crates/desktop/ui/vite.config.ts
+  - crates/desktop/ui/devServer.ts
+  - crates/desktop/ui/e2e/devServerSetup.ts
   - crates/desktop/ui/e2e/fixtures/
 tests:
   - crates/desktop/ui/src/lib/fixtureBackend.test.ts
@@ -26,7 +28,7 @@ verify:
   `contextFailureReady` and `contextRecoveryReady`, so failed and recovered
   popovers are deterministic and do not depend on request counts.
 - The `html-artifacts` scenario exercises publication and restored interactive HTML. A dev-only token endpoint serves bounded source with the isolated response CSP; it is not a production artifact store or native IPC proof.
-- `npm run ui:dev`, then `http://127.0.0.1:1420/?fixture=1`: the full chat shell runs with no Tauri, provider, or credentials. `?fixture` is honoured only by the Vite dev server (`import.meta.env.DEV`); release builds drop the module.
+- `npm run ui:dev`, then `http://127.0.0.1:1420/?fixture=1` (port `ZEST_UI_PORT` when set): the full chat shell runs with no Tauri, provider, or credentials. `?fixture` is honoured only by the Vite dev server (`import.meta.env.DEV`); release builds drop the module.
 - On load the fixture starts session `session-fixture` / thread `fixture` and streams one canned turn: user "What's in README.md?", a thinking delta, four `read_file` tool calls (exercising run grouping), then a word-by-word reply. A second thread, `fixture-local` (provider `ollama`), shows as busy with a `git_status` tool for about 9 s to exercise the sidebar activity mark.
 - Sending a message echoes it: `Fixture echo: <text>`. A `followup`/`steer`/`inject` target queues it (`input_queued`) instead, in every scenario, including during a live `split-streaming` turn.
 - Like the desktop, `contextUsage` rejects with a `busy` error envelope while a turn is in flight on the active chat (a live `split-streaming` send or a pending safety scenario).
@@ -42,7 +44,7 @@ verify:
 3. In fixture mode `App.tsx` calls `startSession("fixture")` (bounded by `BOOT_TIMEOUT_MS`, 15 s), then `backend.boot(handleChatEvent)`, which is not bounded; `boot` runs `runFixtureStream` (`fixture.ts`) only when there is no scenario or a safety scenario.
 4. Events go through the handler registered by `onChatEvent`/`onDelegationEvent`; a generation counter stops a StrictMode double subscription from clearing the live sink.
 5. Safety scenarios keep one `pendingScenario`; `resolveApproval`, `resolveQuestion`, and `cancelTurn` finish it (cancel also auto-fires after 5 s).
-6. Playwright (`playwright.config.ts`): tests in `e2e/`, 2 workers, fully parallel, base URL `http://127.0.0.1:1420`, 1280x800, traces kept on failure. Its `webServer` runs `npm run dev -- --host 127.0.0.1` and reuses an already running dev server outside CI. `vite.config.ts` pins port 1420 (`strictPort`) and the `@` alias.
+6. Playwright (`playwright.config.ts`): tests in `e2e/`, 2 workers, fully parallel, base URL `http://127.0.0.1:<port>`, 1280x800, traces kept on failure. The port is `ZEST_UI_PORT`, default 1420 (`uiPort` in `devServer.ts`). Its `webServer` runs `npm run dev -- --host 127.0.0.1 --port <port> --strictPort` and reuses an already running dev server outside CI; `e2e/devServerSetup.ts` then fails the run unless that server reports this checkout's root on `/__zest_dev_server` (the `devServerIdentity` plugin in `vite.config.ts`). `vite.config.ts` takes the same port (1420 under Tauri, whose devUrl, CSP, and `html.rs` pin it), `strictPort`, and the `@` alias.
 
 ## Verify
 - The delayed PR fixture accepts `&holdPullRequestDiff=1` to keep each diff
@@ -68,5 +70,5 @@ verify:
 - Default `sendMessage` responds synchronously with the full echo; only `split-streaming` leaves a turn running. Specs that need a live turn must use that scenario or add one.
 - A new empty thread is not listed until it has a message, matching the desktop store.
 - `lib/*.ts` modules loaded by `node --test` must import siblings with relative `.ts` paths; the `@/` alias only resolves under Vite.
-- A local `npm run ui:dev` on port 1420 is reused by Playwright; stale code there means stale test results.
+- A local `npm run ui:dev` from the same checkout is reused by Playwright; stale code there means stale test results. A server from another worktree is refused: set `ZEST_UI_PORT` per worktree.
 - Never `import("/src/...")` from `page.evaluate`. Once a dev server has served an edit, the app imports changed modules as `?t=<timestamp>` URLs, so a bare path loads a second copy with its own state (a second fixture backend that no component listens to). Use `globalThis.__zestFixtureBackend`.
