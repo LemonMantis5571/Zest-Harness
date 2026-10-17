@@ -125,6 +125,11 @@ pub const CLAUDE_CODE_CONTRACT: ContractSpec = ContractSpec {
         "assistant:thinking",
         "assistant:tool_use",
         "user:tool_result",
+        // Records a `Task` subagent produced, tagged with `parent_tool_use_id`.
+        // Counted apart from the parent's own, because they are read for the
+        // parent row and never shown as rows of their own.
+        "assistant:subagent",
+        "user:subagent",
         "result",
     ],
 };
@@ -325,6 +330,23 @@ mod tests {
         let report = ledger.report(&CLAUDE_CODE_CONTRACT, RunOutcome::Success);
         assert_eq!(report.status, ContractStatus::Ok);
         assert_eq!(report.counts.get("system:thinking_tokens"), Some(&1));
+    }
+
+    /// `--forward-subagent-text` is on whenever `Task` is in scope, so these
+    /// arrive on any turn that used a subagent.
+    #[test]
+    fn subagent_records_are_known_not_drift() {
+        let mut ledger = ContractLedger::new();
+        for discriminant in [
+            "system:init",
+            "assistant:subagent",
+            "user:subagent",
+            "result",
+        ] {
+            ledger.observe(&CLAUDE_CODE_CONTRACT, discriminant);
+        }
+        let report = ledger.report(&CLAUDE_CODE_CONTRACT, RunOutcome::Success);
+        assert_eq!(report.status, ContractStatus::Ok, "{report:?}");
     }
 
     /// The child process picks the discriminants, so the report must not grow
