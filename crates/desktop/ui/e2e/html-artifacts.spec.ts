@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import type { DesktopBackend } from "../src/lib/backend";
+
 function card(page: Page, title = "Offline counter"): Locator {
   return page.getByRole("region", { name: title, exact: true });
 }
@@ -144,9 +146,9 @@ for (const fence of ["```", "~~~"]) {
       ].join(newline);
       // A textarea normalizes CRLF. Emit a raw assistant response through the fixture instead.
       await page.evaluate(async (text) => {
-        const modulePath = "/src/lib/backend.ts";
-        const { getBackend }: typeof import("../src/lib/backend") = await import(modulePath);
-        await getBackend().sendMessage(text);
+        const backend = (globalThis as { __zestFixtureBackend?: DesktopBackend }).__zestFixtureBackend;
+        if (!backend) throw new Error("The fixture backend is not on globalThis.__zestFixtureBackend.");
+        await backend.sendMessage(text);
       }, `HTML example${newline}${newline}${fence}zest-html Path strings${newline}${html}${newline}${fence}`);
       const artifact = card(page, "Path strings");
       await expect(artifact).toBeVisible();

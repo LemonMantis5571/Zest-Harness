@@ -6,6 +6,11 @@ import type { ChatEvent, DelegationEvent } from "./types.ts";
 import { FIXTURE_HTML_DOCUMENT } from "./fixtureBackend.ts";
 import { htmlDocumentFromFence, htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
 
+it("exposes the instance the page uses, so specs never import a second copy", () => {
+  const backend = createFixtureBackend();
+  assert.equal((globalThis as { __zestFixtureBackend?: unknown }).__zestFixtureBackend, backend);
+});
+
 it("UI stress fixture exposes long labels and a consistent high-context reading", async () => {
   const backend = createFixtureBackend({ scenario: "ui-stress" });
   const session = await backend.startSession();

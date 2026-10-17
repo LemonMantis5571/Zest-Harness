@@ -2333,7 +2333,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (!scenario || safetyScenario) await runFixtureStream(handler);
     },
   };
-  return recordFixtureCalls(backend);
+  const recorded = recordFixtureCalls(backend);
+  // Specs drive the page's own instance here. Importing /src/lib/backend.ts by
+  // path loads a second copy once the dev server has served an edit (?t= URLs).
+  (globalThis as { __zestFixtureBackend?: DesktopBackend }).__zestFixtureBackend = recorded;
+  return recorded;
 }
 
 /**
