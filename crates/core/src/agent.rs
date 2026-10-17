@@ -1017,11 +1017,13 @@ impl Agent {
                         }
                         let summary = if outcome.risk == ToolRisk::Sensitive {
                             "sensitive content (hidden)".to_string()
-                        } else if let Some(label) =
-                            outcome.metadata.as_ref().and_then(|m| m.delegation_label())
+                        } else if let Some(report) = outcome
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.delegation_summary(&outcome.body))
                         {
-                            // Prefer the short provenance label; full body stays on wire.
-                            label
+                            // The worker's report, bounded; the full body stays on the wire.
+                            report
                         } else {
                             summarize_tool_body(&outcome.body)
                         };

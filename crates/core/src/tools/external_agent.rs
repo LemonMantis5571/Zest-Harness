@@ -381,7 +381,7 @@ impl ExternalAgent {
         let model = external_model_label(config);
         let mut body = format!("[{agent_id} · {model}]\n{answer}");
         if !run.diff.trim().is_empty() {
-            body.push_str("\n\nChanges from the external workspace:\n");
+            body.push_str(super::outcome::WORKSPACE_CHANGES_HEADING);
             body.push_str(run.diff.trim_end());
         }
 

@@ -80,6 +80,11 @@ Queueing, locking and restart recovery are in
 - `accepted` and `cancelled` are final. Provider credentials are never written
   to a job. External worker processes run with secret-looking environment
   variables and the configured provider key names removed.
+- A delegated call's chat row carries the worker's report
+  (`ToolMetadata::delegation_summary`): its answer without the
+  `[agent · model]` line or the workspace diff, cut at 600 characters, or
+  "Delegated to <agent> · <model>" when the answer is empty. The model still
+  receives the whole body.
 
 ```text
 awaiting_approval -> queued -> worker_running -> review_running -> ready_to_apply -> accepted
