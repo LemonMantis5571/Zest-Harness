@@ -9,8 +9,10 @@ paths:
   - crates/desktop/src/context_meter.rs
   - crates/desktop/ui/src/components/ContextUsageButton.tsx
   - crates/desktop/ui/src/lib/contextUsageState.ts
+  - crates/desktop/ui/src/lib/transcriptNotices.ts
 tests:
   - crates/desktop/ui/src/lib/contextUsageState.test.ts
+  - crates/desktop/ui/src/lib/transcriptNotices.test.ts
   - crates/desktop/ui/e2e/context-meter.spec.ts
 verify:
   - cargo test -p zest-core --lib -- context_budget::tests
@@ -33,7 +35,7 @@ verify:
 - After a turn finishes (`done`) in the open chat, if compaction is due, Zest compacts automatically. Sending is blocked while compaction runs.
 - Optional maintenance traces inherit the last successful turn's durable ID
   from the thread lifecycle, even after the agent is idle or a later turn fails.
-- Compaction first tries trimming long tool results. If that is enough, nothing is summarized and the toast says "Trimmed long tool output"; otherwise the history is replaced by a model-written checkpoint ("Conversation compacted automatically"). Either way a "Before compaction" restore point is written first.
+- Compaction first tries trimming long tool results. If that is enough, nothing is summarized and the transcript gets a divider after the turn, "Trimmed N long tool results · full output kept in the restore point"; otherwise the history is replaced by a model-written checkpoint and the divider says "Conversation compacted automatically · restore point saved". Either way a "Before compaction" restore point is written first. The divider (`transcriptNotices.ts`, a separator `Marker` in `ChatScreen`) lasts for this app session; it is not a toast. A failed compaction still shows an "Automatic compaction paused" warning toast.
 - Compaction never fires for small conversations: it needs more than 4,000 estimated conversation tokens and at least 4 wire messages, whatever the percentage.
 
 ## How it works

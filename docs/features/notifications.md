@@ -10,8 +10,10 @@ paths:
   - crates/desktop/capabilities/default.json
 tests:
   - crates/desktop/ui/src/lib/notificationPolicy.test.ts
+  - crates/desktop/ui/e2e/notifications.spec.ts
 verify:
   - npm run ui:test
+  - npm run ui:e2e -- notifications
 ---
 
 # Notifications and toasts
@@ -24,6 +26,7 @@ verify:
 - A chat is on screen when it is the open chat in single view with no panel (Customize, Usage, Profile, Pull requests) covering the transcript, or a pane of the split group being shown.
 - Delegation outcomes live in the workbench panel, not the transcript, so they toast while focused whichever chat is open.
 - The user's own clicks are not confirmed when the result is on screen: forking, rewinding, choosing a provider in the recovery dialog ("Copy opened", "Chat opened", "Provider saved"), and opening the project configuration all happen without a toast. Cancelling a delegation says nothing (its `cancelled` event is marked as the user's), and applying one shows only the "Accepted changes applied" toast from the click, not a second one from the `applied` event.
+- Housekeeping is not news: automatic compaction draws a quiet divider in the transcript after the turn it followed (see [context budget](context-budget.md)) instead of a toast. Only a failed compaction warns.
 - What those toasts used to explain now sits beside the control: the Rewind button's tooltip says files are not changed, and the recovery dialog says what to add to zest.toml before Configure opens it.
 - Each approval id notifies once per turn, and each delegation event (kind, job, update time) once.
 - Notification permission is asked at most once per session, on first use; if it is refused, nothing is sent and nothing fails.
@@ -40,6 +43,7 @@ verify:
 
 ## Verify
 - `npm run ui:test` runs `notificationPolicy.test.ts`: a table of every attention kind × on screen × focused, plus the long-turn threshold, fingerprints, and description merge.
+- `npm run ui:e2e -- notifications` runs `e2e/notifications.spec.ts`: in `scenario=ui-stress` a sent turn ends with the compaction divider and no toast.
 - Fixture: `/?fixture=1&scenario=approval`, send a message and look for the approval card. OS notifications need the desktop app with the window in the background.
 
 ## Pitfalls

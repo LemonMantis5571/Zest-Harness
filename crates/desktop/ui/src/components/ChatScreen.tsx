@@ -1,4 +1,5 @@
 import {
+  Fragment,
   lazy,
   memo,
   Suspense,
@@ -49,6 +50,7 @@ import { ToolCallRow } from "@/components/ToolCallRow";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { ThinkingReasoning } from "@/components/ThinkingReasoning";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
+import { Marker, MarkerContent } from "@/components/ui/marker";
 import { visibleInterval } from "@/lib/visibleInterval";
 import {
   Attachment,
@@ -76,6 +78,7 @@ import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { openExternalUrl } from "@/lib/externalLinks";
 import { buildConversationTurns } from "@/lib/conversationTurns";
+import { noticesByMessage, type TranscriptNotice } from "@/lib/transcriptNotices";
 import { ensureFontLoaded } from "@/lib/fonts";
 import { LinkifyText } from "@/lib/linkify";
 import {
@@ -158,6 +161,8 @@ export type ChatScreenProps = {
   hasOlderMessages?: boolean;
   hasNewerMessages?: boolean;
   hiddenUserTurns?: number;
+  /** Housekeeping dividers for this chat, such as automatic compaction. */
+  transcriptNotices?: readonly TranscriptNotice[];
   loadingOlder?: boolean;
   loadingNewer?: boolean;
   onLoadOlder?: () => void;
@@ -732,6 +737,7 @@ export function ChatScreen({
   hasOlderMessages = false,
   hasNewerMessages = false,
   hiddenUserTurns = 0,
+  transcriptNotices,
   loadingOlder = false,
   loadingNewer = false,
   onLoadOlder,
@@ -910,6 +916,10 @@ export function ChatScreen({
         windowed: hasOlderMessages || hasNewerMessages,
       }),
     [hasNewerMessages, hasOlderMessages, hiddenUserTurns, messages, session.checkpoints]
+  );
+  const noticesAfterMessage = useMemo(
+    () => noticesByMessage(transcriptNotices),
+    [transcriptNotices]
   );
   const conversationMessageIds = useMemo(
     () => messages.map((message) => message.id),
@@ -1904,40 +1914,53 @@ export function ChatScreen({
                     const isLast = index === messages.length - 1;
                     const isActiveWorking = showTurnWorking && isLast;
                     return (
-                      <ChatMessageRow
-                        key={msg.id}
-                        message={msg}
-                        isLast={isLast}
-                        sending={sending}
-                        approvalMode={approvalMode}
-                        providerLabel={providerLabel}
-                        isPlanToBuild={planToBuild === msg.id}
-                        onBuildPlan={onBuildPlan}
-                        onResolveApproval={onResolveApproval}
-                        onOpenDiff={openDiff}
-                        onReconnectProvider={onReconnectProvider}
-                        onOpenProviderSwitch={refreshAndOpenProviderSwitch}
-                        onSend={onSend}
-                        editing={editingMessageId === msg.id}
-                        editingText={
-                          editingMessageId === msg.id ? editingMessageText : ""
-                        }
-                        editingBusy={editingMessageBusy}
-                        onStartEdit={startEditingMessage}
-                        onChangeEdit={setEditingMessageText}
-                        onCancelEdit={cancelEditingMessage}
-                        onSubmitEdit={submitEditingMessage}
-                        onResolveQuestion={onResolveQuestion}
-                        pinQuestion={
-                          pendingApprovals.length === 0 &&
-                          pendingQuestion?.messageId === msg.id
-                        }
-                        showWorking={isActiveWorking && msg.role === "assistant"}
-                        workingStartedAt={
-                          isActiveWorking ? turnActivity?.startedAt : undefined
-                        }
-                        workingAction={isActiveWorking ? workingAction : undefined}
-                      />
+                      <Fragment key={msg.id}>
+                        <ChatMessageRow
+                          message={msg}
+                          isLast={isLast}
+                          sending={sending}
+                          approvalMode={approvalMode}
+                          providerLabel={providerLabel}
+                          isPlanToBuild={planToBuild === msg.id}
+                          onBuildPlan={onBuildPlan}
+                          onResolveApproval={onResolveApproval}
+                          onOpenDiff={openDiff}
+                          onReconnectProvider={onReconnectProvider}
+                          onOpenProviderSwitch={refreshAndOpenProviderSwitch}
+                          onSend={onSend}
+                          editing={editingMessageId === msg.id}
+                          editingText={
+                            editingMessageId === msg.id ? editingMessageText : ""
+                          }
+                          editingBusy={editingMessageBusy}
+                          onStartEdit={startEditingMessage}
+                          onChangeEdit={setEditingMessageText}
+                          onCancelEdit={cancelEditingMessage}
+                          onSubmitEdit={submitEditingMessage}
+                          onResolveQuestion={onResolveQuestion}
+                          pinQuestion={
+                            pendingApprovals.length === 0 &&
+                            pendingQuestion?.messageId === msg.id
+                          }
+                          showWorking={isActiveWorking && msg.role === "assistant"}
+                          workingStartedAt={
+                            isActiveWorking ? turnActivity?.startedAt : undefined
+                          }
+                          workingAction={isActiveWorking ? workingAction : undefined}
+                        />
+                        {noticesAfterMessage.get(msg.id)?.map((notice) => (
+                          <MessageScrollerItem key={notice.id} messageId={notice.id}>
+                            <Marker
+                              variant="separator"
+                              role="note"
+                              data-transcript-notice=""
+                              className="text-xs"
+                            >
+                              <MarkerContent>{notice.text}</MarkerContent>
+                            </Marker>
+                          </MessageScrollerItem>
+                        ))}
+                      </Fragment>
                     );
                   })}
                   {hasNewerMessages || loadingNewer ? (

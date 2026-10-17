@@ -72,6 +72,11 @@ import {
 } from "@/lib/navigationHistory";
 import { markStartup, measureStartup } from "@/lib/startupPerf";
 import {
+  addTranscriptNotice,
+  compactionNoticeText,
+  type TranscriptNoticeMap,
+} from "@/lib/transcriptNotices";
+import {
   reduceThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
@@ -516,6 +521,7 @@ export default function App() {
   const [threadQueues, setThreadQueues] = useState<ThreadQueueMap>({});
   const [resumingQueuedThread, setResumingQueuedThread] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const [transcriptNotices, setTranscriptNotices] = useState<TranscriptNoticeMap>({});
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
   // Mirrors DESKTOP_DEFAULT_MODE in Rust; reconciled on session start.
@@ -1097,7 +1103,13 @@ export default function App() {
   const maybeAutoCompact = useCallback(() => {
     if (splitVisibleRef.current) return;
     const targetSessionId = sessionIdRef.current;
-    if (!targetSessionId || compactionInFlightRef.current || sendingRef.current) {
+    const targetThreadId = threadIdRef.current;
+    if (
+      !targetSessionId ||
+      !targetThreadId ||
+      compactionInFlightRef.current ||
+      sendingRef.current
+    ) {
       return;
     }
 
@@ -1139,24 +1151,23 @@ export default function App() {
               } catch {
                 /* checkpoint metadata refresh is best-effort */
               }
-              // Trimming long tool output and summarizing are different things
-              // to have happened to a conversation, so they get different copy.
-              toast.add(
-                result.prunedOnly
-                  ? {
-                      type: "success",
-                      title: "Trimmed long tool output",
-                      description: `Shortened ${result.resultsPruned} long tool ${
-                        result.resultsPruned === 1 ? "result" : "results"
-                      }. The conversation was kept as it was; the full output is in the restore point.`,
-                    }
-                  : {
-                      type: "success",
-                      title: "Conversation compacted automatically",
-                      description:
-                        "You can restore the conversation from before compaction.",
-                    }
-              );
+              // Housekeeping, not news: a divider after the turn it followed
+              // instead of a toast. Compaction rewrites the model's history,
+              // not the transcript, so that message is still there.
+              const transcript =
+                targetThreadId === threadIdRef.current
+                  ? messagesRef.current
+                  : chatStatesRef.current.get(targetThreadId)?.messages;
+              const afterMessageId = transcript?.at(-1)?.id;
+              if (afterMessageId) {
+                setTranscriptNotices((current) =>
+                  addTranscriptNotice(current, targetThreadId, {
+                    id: newId("notice"),
+                    afterMessageId,
+                    text: compactionNoticeText(result),
+                  })
+                );
+              }
             })
             .catch((err) => {
               toast.add({
@@ -3221,6 +3232,7 @@ export default function App() {
             hasOlderMessages={hasOlderMessages}
             hasNewerMessages={hasNewerMessages}
             hiddenUserTurns={hiddenUserTurns}
+            transcriptNotices={transcriptNotices[session.threadId]}
             loadingOlder={loadingOlder}
             loadingNewer={loadingNewer}
             onLoadOlder={onLoadOlder}
