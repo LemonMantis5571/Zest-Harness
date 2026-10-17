@@ -1,4 +1,4 @@
-import type { ThreadActivity } from "./threadActivity.ts";
+import { needsInput, type ThreadActivity } from "./threadActivity.ts";
 
 /**
  * The one mark at the start of a compact chat row.
@@ -8,7 +8,7 @@ import type { ThreadActivity } from "./threadActivity.ts";
  * said nothing. Most urgent first, because the row only has room for one.
  */
 export type CompactChatMark =
-  | "awaiting_approval"
+  | "needs_input"
   | "working"
   | "pull_request"
   | "branch"
@@ -23,7 +23,7 @@ export function compactChatMark({
   hasPullRequest: boolean;
   branchChanged: boolean;
 }): CompactChatMark {
-  if (activity?.state === "awaiting_approval") return "awaiting_approval";
+  if (needsInput(activity)) return "needs_input";
   if (activity?.state === "working") return "working";
   if (hasPullRequest) return "pull_request";
   if (branchChanged) return "branch";

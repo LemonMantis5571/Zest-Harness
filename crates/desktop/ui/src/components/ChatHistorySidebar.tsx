@@ -41,6 +41,7 @@ import {
 } from "@/lib/chatView";
 import {
   elapsedLabel,
+  needsInput,
   type ThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
@@ -185,7 +186,9 @@ function navItemClass(active = false) {
 }
 
 function activityStateLabel(activity: ThreadActivity) {
-  return activity.state === "awaiting_approval" ? "Needs approval" : "Working";
+  if (activity.state === "awaiting_approval") return "Needs approval";
+  if (activity.state === "awaiting_input") return "Needs your answer";
+  return "Working";
 }
 
 function activityDescription(activity: ThreadActivity, now: number) {
@@ -200,7 +203,7 @@ function activityDescription(activity: ThreadActivity, now: number) {
 function CompactChatMarkIcon({ mark }: { mark: CompactChatMark }) {
   return (
     <span className="flex size-3.5 shrink-0 items-center justify-center" aria-hidden="true">
-      {mark === "awaiting_approval" ? (
+      {mark === "needs_input" ? (
         <span className="size-2 rounded-full bg-amber-400" />
       ) : mark === "working" ? (
         <LoaderCircleIcon className="size-3.5 animate-spin text-[var(--sidebar-primary)] motion-reduce:animate-none" />
@@ -678,7 +681,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                 className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground"
                 aria-hidden="true"
               >
-                {activity.state === "awaiting_approval" ? (
+                {needsInput(activity) ? (
                   <span className="size-1.5 rounded-full bg-amber-400" />
                 ) : (
                   <span className="flex items-center gap-0.5">

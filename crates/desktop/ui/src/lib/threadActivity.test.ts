@@ -6,6 +6,7 @@ import {
   currentTurnAction,
   elapsedLabel,
   formatActivityAction,
+  needsInput,
   reduceThreadActivity,
   type ThreadActivityMap,
 } from "./threadActivity.ts";
@@ -89,6 +90,64 @@ describe("thread activity", () => {
 
     assert.equal(map.a.state, "awaiting_approval");
     assert.equal(map.a.lastAction, "write_file needs approval");
+  });
+
+  it("says when a chat is waiting on an answer to its question", () => {
+    const map = feed([
+      { kind: "user", ...ident("a"), message_id: "u1", text: "x" },
+      {
+        kind: "question_needed",
+        ...ident("a"),
+        message_id: "a1",
+        question_id: "q1",
+        tool_call_id: "c1",
+        prompt: "Which branch?",
+        choices: ["main", "dev"],
+        multiple: false,
+      },
+    ] as ChatEvent[]);
+
+    assert.equal(map.a.state, "awaiting_input");
+    assert.equal(map.a.startedAt, T0, "the turn keeps its clock");
+    assert.equal(map.a.lastAction, "Waiting for your answer");
+    assert.ok(!map.a.lastAction?.includes("Which branch"), "no question text is stored");
+    assert.ok(needsInput(map.a));
+  });
+
+  it("goes back to working once the question is answered", () => {
+    const map = feed([
+      { kind: "user", ...ident("a"), message_id: "u1", text: "x" },
+      {
+        kind: "question_needed",
+        ...ident("a"),
+        message_id: "a1",
+        question_id: "q1",
+        tool_call_id: "c1",
+        prompt: "Which branch?",
+        choices: [],
+        multiple: false,
+      },
+      {
+        kind: "tool_call_result",
+        ...ident("a"),
+        message_id: "a1",
+        name: "ask_user",
+        id: "c1",
+        summary: "main",
+        isError: false,
+      },
+    ] as ChatEvent[]);
+
+    assert.equal(map.a.state, "working");
+    assert.ok(!needsInput(map.a));
+  });
+
+  it("counts approvals and questions as needing input, nothing else", () => {
+    assert.ok(needsInput({ state: "awaiting_approval" }));
+    assert.ok(needsInput({ state: "awaiting_input" }));
+    assert.ok(!needsInput({ state: "working" }));
+    assert.ok(!needsInput({ state: "idle" }));
+    assert.ok(!needsInput(undefined));
   });
 
   it("marks a failed tool without ending the turn", () => {

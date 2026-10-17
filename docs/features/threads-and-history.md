@@ -45,7 +45,7 @@ verify:
 ## Behavior
 - Interactive HTML source is inline in conversation metadata/fences and follows existing save, checkpoint, fork and deletion ownership. New metadata uses thread format v5; older binaries are not compatible. Future-version files are rejected before typed decoding, not renamed as corrupt.
 - Each chat is `<workspace>/.zest/threads/<id>.json` (format v4). Chats opened without a project live in the "Free chats" bucket (`<zest config dir>/free-chats`). A new chat gets no history row until its first message.
-- The sidebar lists known projects plus Free chats; within a project, pinned chats first, then most recently updated. Rows show live activity (working, awaiting approval, elapsed time) for chats running in the background.
+- The sidebar lists known projects plus Free chats; within a project, pinned chats first, then most recently updated. Rows show live activity (working, awaiting approval, waiting on an answer to a question, elapsed time) for chats running in the background; approval and a pending question both count as needing input (`needsInput` in `threadActivity.ts`).
 - Rows support rename (Enter/blur saves, empty cancels, disabled on the row whose turn is live), pin/unpin, and delete (with confirmation). The open chat's row also has "Fork conversation" (disabled while it is working). Deleting a busy chat cancels its turn; deleting the open chat switches to an unsaved draft.
 - "Search chats" opens the shared command palette on its Chats tab; hits can open a chat scrolled to the matching message.
 - A chat opens on its last 10 user turns. Scrolling to the top (or "Earlier turns") loads 20 more without moving the viewport; "Later turns" pages forward after opening around a search hit.
