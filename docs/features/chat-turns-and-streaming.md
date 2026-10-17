@@ -55,7 +55,7 @@ verify:
 - While a turn runs, the Send button is Stop. Esc (when nothing else is open) or the `chat.stop` binding cancels via `cancel_turn`; the UI stays busy until the `cancelled` event arrives.
 - Sending while a turn runs, or while the chat already has queued messages, queues a durable **followup** instead of starting a turn. Queued messages show above the composer and can be edited or removed.
 - After a turn **completes**, the next followup starts automatically (FIFO). After cancel or error, queued followups stay put; "Resume queued" starts the oldest. Idle queues never spend quota by themselves.
-- Text and thinking stream live. Thinking shows as an open, height-capped trace while streaming, then folds to "Thought for Ns" (or "Thought through N steps" for a reopened chat).
+- Text and thinking stream live. Each thinking block is a Reasoning line in the turn's Trace: it reads "Thinking", shimmers and stays open (height-capped, following the newest line) while it streams, then folds to "Thought for Ns" (or "Thought through N steps" for a reopened chat). Once the user opens or closes it, their choice wins.
 - Text from separate provider rounds (split by a tool call) is separated by a blank line, never glued together.
 - Each assistant turn records its steps in the order they happened: a thinking block, a tool call, a provider activity, then another thinking block if the model thought again. Provider activity is saved with the message, so a reopened Claude Code chat still shows what it did.
 - A failed or cancelled turn keeps its partial transcript, marks running/awaiting-approval tool rows as interrupted, and does not change the model's wire history.

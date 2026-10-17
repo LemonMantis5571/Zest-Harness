@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import {
-  ChevronRightIcon,
   FilePenLineIcon,
   FileTextIcon,
   GlobeIcon,
@@ -9,20 +8,32 @@ import {
   SearchIcon,
   SparklesIcon,
   TerminalIcon,
+  WrenchIcon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
 
 import { DiffPreview } from "@/components/CodeBlock";
 import { HtmlArtifactCard } from "@/components/HtmlArtifactCard";
-import { htmlDocumentFromMetadata } from "@/lib/htmlArtifacts";
+import { TraceHoverTitle } from "@/components/TraceHoverTitle";
 import { Button } from "@/components/ui/button";
+import { CodeBlock, CodeBlockContent } from "@/components/ui/code-block";
+import {
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceIcon,
+  TraceLine,
+} from "@/components/ui/trace";
+import { htmlDocumentFromMetadata } from "@/lib/htmlArtifacts";
 import {
   approvalTitle,
   isEmptyArgsPreview,
   parseMcpToolName,
 } from "@/lib/mcpDisplay";
 import { displayToolSummary, wasInterrupted } from "@/lib/toolDisplay";
+import { countDiffLines } from "@/lib/toolRuns";
 import type { ApprovalChoice, ToolPart } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -46,13 +57,32 @@ type Props = {
 };
 
 /**
- * Compact tool row — quiet chrome, expands for detail.
- * Rows with a diff open the full DiffViewer on click.
+ * A tool call: the approval card while it waits on a decision and `asCard` is
+ * set, otherwise one line of the turn's `Trace`.
  */
 export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Props) {
-  const awaiting = tool.status === "awaiting_approval";
+  if (tool.status === "awaiting_approval" && asCard) {
+    return (
+      <ApprovalCard
+        tool={tool}
+        onResolveApproval={onResolveApproval}
+        onOpenDiff={onOpenDiff}
+      />
+    );
+  }
+  return <ToolLine tool={tool} onOpenDiff={onOpenDiff} />;
+}
+
+function ApprovalCard({
+  tool,
+  onResolveApproval,
+  onOpenDiff,
+}: {
+  tool: ToolPart;
+  onResolveApproval: Props["onResolveApproval"];
+  onOpenDiff?: Props["onOpenDiff"];
+}) {
   const [busy, setBusy] = useState<ApprovalChoice | null>(null);
-  const [open, setOpen] = useState(false);
   const mcp = parseMcpToolName(tool.name);
   const hasDiff = Boolean(tool.diff?.trim()) && !isEmptyArgsPreview(tool.diff);
 
@@ -76,321 +106,276 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   const isCommand = tool.name === "bash";
   const isDelegation = tool.name === "delegate_external";
   const showArgs = hasDiff;
-
-  if (awaiting && !asCard) {
-    return (
-      <div
-        data-tool-id={tool.id}
-        className="flex min-h-8 w-full max-w-full items-center gap-2 rounded-lg px-2 py-1 text-left"
-      >
-        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-400/90">
+  const subtitle =
+    (isDelegation && tool.summary) ||
+    tool.path ||
+    tool.summary ||
+    (isCommand
+      ? "Run a command"
+      : isDelegation
+        ? "Run an external worker"
+        : mcp
+          ? `Run ${mcp.tool} on the ${mcp.server} MCP server`
+          : "Write to project file");
+  return (
+    <div data-tool-id={tool.id} className="w-full max-w-full overflow-visible">
+      <div className="flex items-start gap-2.5 px-1 py-1">
+        <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
           {mcp ? (
-            <ZapIcon className="size-3" />
+            <ZapIcon className="size-3.5 text-emerald-400" />
           ) : isCommand || isDelegation ? (
-            <TerminalIcon className="size-3" />
+            <TerminalIcon className="size-3.5" />
           ) : (
-            <FilePenLineIcon className="size-3" />
+            <FilePenLineIcon className="size-3.5" />
           )}
-        </span>
-        <TruncateWithHover
-          text={tool.path || tool.summary || tool.name}
-          className="min-w-0 flex-1 font-mono text-[11.5px] text-muted-foreground/75"
-        />
-        <span className="shrink-0 text-[10px] text-amber-400/80">Awaiting approval</span>
-      </div>
-    );
-  }
-
-  if (awaiting) {
-    const subtitle =
-      (isDelegation && tool.summary) ||
-      tool.path ||
-      tool.summary ||
-      (isCommand
-        ? "Run a command"
-        : isDelegation
-          ? "Run an external worker"
-          : mcp
-            ? `Run ${mcp.tool} on the ${mcp.server} MCP server`
-            : "Write to project file");
-    return (
-      <div data-tool-id={tool.id} className="w-full max-w-full overflow-visible">
-        <div className="flex items-start gap-2.5 px-1 py-1">
-          <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
-            {mcp ? (
-              <ZapIcon className="size-3.5 text-emerald-400" />
-            ) : isCommand || isDelegation ? (
-              <TerminalIcon className="size-3.5" />
-            ) : (
-              <FilePenLineIcon className="size-3.5" />
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-foreground">
-              {approvalTitle(tool.name)}
-            </div>
-            <TruncateWithHover
-              text={subtitle}
-              side="below"
-              className="mt-0.5 text-[11px] text-muted-foreground"
-            />
-          </div>
-          {hasDiff && !mcp && onOpenDiff ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Open full diff"
-              className="shrink-0"
-              onClick={openDiff}
-            >
-              <Maximize2Icon className="size-3.5" />
-            </Button>
-          ) : null}
         </div>
-        {showArgs && mcp && tool.diff ? (
-          <pre className="mx-1 mb-1 max-h-40 overflow-auto rounded-md bg-muted/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            {tool.diff}
-          </pre>
-        ) : showArgs && tool.diff && !mcp ? (
-          <button
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-medium text-foreground">
+            {approvalTitle(tool.name)}
+          </div>
+          <TruncateWithHover
+            text={subtitle}
+            side="below"
+            className="mt-0.5 text-[11px] text-muted-foreground"
+          />
+        </div>
+        {hasDiff && !mcp && onOpenDiff ? (
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-sm"
             title="Open full diff"
-            className="block w-full cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
+            className="shrink-0"
             onClick={openDiff}
           >
-            <DiffPreview diff={tool.diff} />
-          </button>
+            <Maximize2Icon className="size-3.5" />
+          </Button>
         ) : null}
-        <div className="flex flex-wrap items-center justify-end gap-2 px-1 py-1.5">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => {
-              void resolve("deny");
-            }}
-          >
-            {busy === "deny" ? "Denying…" : "Deny"}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={busy !== null}
-            // The grant covers this tool and this exact target only, which is
-            // what the row above is showing.
-            title={
-              isDelegation
-                ? "Allow this external worker for the rest of the session"
-                : isCommand
-                  ? "Stop asking about this exact command for the rest of the session"
-                  : `Stop asking about ${tool.path || "this file"} for the rest of the session`
-            }
-            onClick={() => {
-              void resolve("session");
-            }}
-          >
-            {busy === "session" ? "Allowing…" : "Allow for session"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => {
-              void resolve("once");
-            }}
-          >
-            {busy === "once" ? (isCommand ? "Running…" : "Allowing…") : "Allow once"}
-          </Button>
-        </div>
       </div>
-    );
-  }
-
-  const htmlDocument = tool.status === "done" ? htmlDocumentFromMetadata(tool.metadata) : null;
-  if (htmlDocument) return <HtmlArtifactCard {...htmlDocument} />;
-
-  const delegation =
-    tool.metadata?.kind === "delegation" ? tool.metadata : null;
-  const label = delegation ? "Delegate" : toolLabel(tool.name);
-  const target = toolTarget(tool, delegation);
-  const summaryText = displayToolSummary(tool.summary);
-  const hasBody =
-    (Boolean(summaryText) && summaryText !== (tool.path?.trim() ?? "")) || hasDiff;
-  const canOpenDiff = hasDiff && Boolean(onOpenDiff) && !mcp;
-
-  return (
-    <div
-      className={cn(
-        "group/tool-row w-full max-w-full rounded-md",
-        tool.status === "error" && "bg-destructive/5"
-      )}
-    >
-      <button
-        type="button"
-        disabled={!hasBody}
-        onClick={() => {
-          if (canOpenDiff) {
-            openDiff();
-            return;
-          }
-          if (hasBody) setOpen((v) => !v);
-        }}
-        className={cn(
-          "flex min-h-7 w-full items-center gap-2 rounded-md px-1 py-1 text-left outline-none transition-colors",
-          "hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
-          hasBody ? "cursor-pointer" : "cursor-default"
-        )}
-      >
-        <span className="relative flex size-4 shrink-0 items-center justify-center text-muted-foreground/80">
-          <span
-            className={cn(
-              "transition-opacity duration-100",
-              hasBody && "group-hover/tool-row:opacity-0",
-              open && "opacity-0"
-            )}
-          >
-            <ToolActionIcon tool={tool} />
-          </span>
-          {hasBody ? (
-            <ChevronRightIcon
-              className={cn(
-                "absolute size-3 transition-[opacity,transform] duration-150 group-hover/tool-row:opacity-100",
-                open ? "rotate-90 opacity-100" : "opacity-0"
-              )}
-            />
-          ) : null}
-        </span>
-        <span
-          className={cn(
-            "shrink-0 text-xs font-medium text-foreground/90",
-            tool.status === "running" && "shimmer-text text-foreground/80"
-          )}
+      {showArgs && mcp && tool.diff ? (
+        <pre className="mx-1 mb-1 max-h-40 overflow-auto rounded-md bg-muted/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {tool.diff}
+        </pre>
+      ) : showArgs && tool.diff && !mcp ? (
+        <button
+          type="button"
+          title="Open full diff"
+          className="block w-full cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
+          onClick={openDiff}
         >
-          {label}
-        </span>
-        <TruncateWithHover
-          text={target}
-          className="min-w-0 flex-1 rounded-sm bg-muted/70 px-1.5 py-0.5 font-mono text-[11.5px] text-muted-foreground transition-colors group-hover/tool-row:bg-accent group-hover/tool-row:text-foreground"
-        />
-        {canOpenDiff ? (
-          <Maximize2Icon className="size-3 shrink-0 text-muted-foreground/50" />
-        ) : hasBody ? (
-          <ChevronRightIcon
-            className={cn(
-              "size-3 shrink-0 text-muted-foreground/50 transition-transform duration-150",
-              open && "rotate-90"
-            )}
-          />
-        ) : null}
-      </button>
-      {open && !canOpenDiff ? (
-        <div className="mt-0.5 mb-1 ml-2 flex flex-col gap-1 border-l border-border/60 py-0.5 pl-3.5 pr-2">
-          {summaryText ? (
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/90">
-              {summaryText}
-            </pre>
-          ) : null}
-        </div>
+          <DiffPreview diff={tool.diff} />
+        </button>
       ) : null}
+      <div className="flex flex-wrap items-center justify-end gap-2 px-1 py-1.5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={busy !== null}
+          onClick={() => {
+            void resolve("deny");
+          }}
+        >
+          {busy === "deny" ? "Denying…" : "Deny"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={busy !== null}
+          // The grant covers this tool and this exact target only, which is
+          // what the row above is showing.
+          title={
+            isDelegation
+              ? "Allow this external worker for the rest of the session"
+              : isCommand
+                ? "Stop asking about this exact command for the rest of the session"
+                : `Stop asking about ${tool.path || "this file"} for the rest of the session`
+          }
+          onClick={() => {
+            void resolve("session");
+          }}
+        >
+          {busy === "session" ? "Allowing…" : "Allow for session"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={busy !== null}
+          onClick={() => {
+            void resolve("once");
+          }}
+        >
+          {busy === "once" ? (isCommand ? "Running…" : "Allowing…") : "Allow once"}
+        </Button>
+      </div>
     </div>
   );
 }
 
-function toolLabel(name: string): string {
-  const labels: Record<string, string> = {
-    bash: "Run",
-    delegate_external: "Delegate",
-    edit_file: "Edit",
-    glob: "Find",
-    grep: "Search",
-    list_dir: "List",
-    read_file: "Read",
-    web_search: "Search web",
-    write_file: "Write",
-  };
-  const mcp = parseMcpToolName(name);
-  if (mcp) return mcp.server;
-  return labels[name] ?? name.replaceAll("_", " ");
+/** Running / done / failed wording for each built-in tool. */
+const VERBS: Record<string, [string, string, string]> = {
+  bash: ["Running", "Ran", "Failed to run"],
+  edit_file: ["Editing", "Edited", "Failed to edit"],
+  glob: ["Finding files", "Found files", "Failed to find files"],
+  grep: ["Searching", "Searched", "Failed to search"],
+  list_dir: ["Listing", "Listed", "Failed to list"],
+  read_file: ["Reading", "Read", "Failed to read"],
+  web_search: ["Searching the web", "Searched the web", "Failed to search the web"],
+  write_file: ["Writing", "Wrote", "Failed to write"],
+};
+
+/** The verb a line opens with, in the tense its status calls for. */
+function toolVerb(tool: ToolPart): string {
+  if (tool.status === "awaiting_approval") return "Waiting for approval:";
+  const mcp = parseMcpToolName(tool.name);
+  const [running, done, failed] =
+    VERBS[tool.name] ??
+    (mcp
+      ? [`Running ${mcp.tool} on`, `Ran ${mcp.tool} on`, `Failed ${mcp.tool} on`]
+      : (() => {
+          const label = tool.name.replaceAll("_", " ");
+          return [`Running ${label}`, `Ran ${label}`, `Failed ${label}`];
+        })());
+  if (tool.status === "running") return running;
+  if (tool.status === "error") return failed;
+  return done;
 }
 
-function toolTarget(
-  tool: ToolPart,
-  delegation: Extract<
-    NonNullable<ToolPart["metadata"]>,
-    { kind: "delegation" }
-  > | null
-): string {
-  if (delegation) return `${delegation.provider_id} · ${delegation.model}`;
+/** What the call acted on: the path or command, else its result. */
+function toolTarget(tool: ToolPart): string | undefined {
   const mcp = parseMcpToolName(tool.name);
   if (mcp) {
     const path = tool.path?.trim() ?? "";
     const sep = " · ";
     const at = path.indexOf(sep);
-    if (at >= 0) return path.slice(at + sep.length);
-    return mcp.tool;
+    return `${mcp.server}${at >= 0 ? `: ${path.slice(at + sep.length)}` : ""}`;
   }
-  if (tool.path?.trim()) return tool.path;
+  if (tool.path?.trim()) return tool.path.trim();
+  const summary = displayToolSummary(tool.summary);
+  if (summary) return summary;
+  if (wasInterrupted(tool.summary)) return "(interrupted)";
+  return undefined;
+}
+
+/** The line's title as one sentence, such as "Ran npm test". */
+export function toolTitleText(tool: ToolPart): string {
+  const verb = toolVerb(tool);
+  const target = toolTarget(tool);
+  return target ? `${verb} ${target}` : verb;
+}
+
+function lineStatus(tool: ToolPart): "running" | "error" | "pending" | undefined {
+  if (tool.status === "running") return "running";
+  if (tool.status === "error") return "error";
+  if (tool.status === "awaiting_approval") return "pending";
+  return undefined;
+}
+
+/**
+ * One tool call as a `TraceLine`, as the AI Elements Tool pattern draws it.
+ *
+ * A call with a diff opens the full diff viewer on click; a call with output
+ * expands to show it in a small code block; anything else is a plain line.
+ * Must sit inside a `Trace`.
+ */
+export function ToolLine({
+  tool,
+  onOpenDiff,
+}: {
+  tool: ToolPart;
+  onOpenDiff?: (path: string, diff: string) => void;
+}) {
+  const htmlDocument = tool.status === "done" ? htmlDocumentFromMetadata(tool.metadata) : null;
+  if (htmlDocument) return <HtmlArtifactCard {...htmlDocument} />;
+
+  const mcp = parseMcpToolName(tool.name);
+  const hasDiff = Boolean(tool.diff?.trim()) && !isEmptyArgsPreview(tool.diff);
+  const canOpenDiff = hasDiff && Boolean(onOpenDiff) && !mcp;
+  const verb = toolVerb(tool);
+  const target = toolTarget(tool);
   const summaryText = displayToolSummary(tool.summary);
-  if (summaryText) return summaryText;
-  if (wasInterrupted(tool.summary)) return "Interrupted";
+  const hasBody =
+    tool.status !== "awaiting_approval" &&
+    Boolean(summaryText) &&
+    summaryText !== (tool.path?.trim() ?? "");
+  const counts = hasDiff && !mcp ? countDiffLines(tool.diff) : null;
 
-  if (tool.status === "running") {
-    const runningTargets: Record<string, string> = {
-      bash: "Running command",
-      delegate_external: "Working",
-      edit_file: "Preparing edit",
-      glob: "Searching files",
-      grep: "Searching text",
-      list_dir: "Listing files",
-      read_file: "Reading file",
-      web_search: "Searching web",
-      write_file: "Preparing file",
-    };
-    return runningTargets[tool.name] ?? "Working";
+  const line = (
+    <TraceLine status={lineStatus(tool)} data-tool-id={tool.id}>
+      <TraceIcon>
+        <ToolActionIcon tool={tool} />
+      </TraceIcon>
+      <TraceHoverTitle text={toolTitleText(tool)}>
+        {verb}
+        {target ? <span className="font-mono text-[0.92em]"> {target}</span> : null}
+      </TraceHoverTitle>
+      {counts && (counts.added > 0 || counts.removed > 0) ? (
+        <TraceDescription className="font-mono text-[11px]">
+          {counts.added > 0 ? <span className="text-primary">+{counts.added}</span> : null}
+          {counts.added > 0 && counts.removed > 0 ? " " : null}
+          {counts.removed > 0 ? (
+            <span className="text-destructive">-{counts.removed}</span>
+          ) : null}
+        </TraceDescription>
+      ) : null}
+      {canOpenDiff ? (
+        <TraceIcon>
+          <Maximize2Icon className="size-3" />
+        </TraceIcon>
+      ) : null}
+    </TraceLine>
+  );
+
+  if (canOpenDiff) {
+    return (
+      <button
+        type="button"
+        title="Open full diff"
+        onClick={() => onOpenDiff?.(tool.path || tool.name, tool.diff as string)}
+      >
+        {line}
+      </button>
+    );
   }
-
-  return tool.status === "error" ? "Failed" : "Completed";
+  if (!hasBody) return line;
+  return (
+    <TraceCollapsible>
+      <TraceCollapsibleTrigger>{line}</TraceCollapsibleTrigger>
+      <TraceCollapsibleContent>
+        <CodeBlock size="sm" variant={tool.status === "error" ? "destructive" : "default"}>
+          <CodeBlockContent wrap className="max-h-48">
+            {summaryText}
+          </CodeBlockContent>
+        </CodeBlock>
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
+  );
 }
 
 function ToolActionIcon({ tool }: { tool: ToolPart }) {
-  if (tool.status === "error") {
-    return <XIcon className="size-3 text-destructive" aria-hidden />;
+  if (tool.status === "error") return <XIcon />;
+  switch (tool.name) {
+    case "bash":
+      return <TerminalIcon />;
+    case "delegate_external":
+      return <SparklesIcon />;
+    case "edit_file":
+    case "write_file":
+      return <FilePenLineIcon />;
+    case "glob":
+    case "grep":
+      return <SearchIcon />;
+    case "list_dir":
+      return <ListIcon />;
+    case "web_search":
+      return <GlobeIcon />;
+    case "read_file":
+      return <FileTextIcon />;
+    default:
+      if (parseMcpToolName(tool.name)) return <ZapIcon className="text-emerald-400" />;
+      return <WrenchIcon />;
   }
-
-  const icon = (() => {
-    switch (tool.name) {
-      case "bash":
-        return <TerminalIcon className="size-3.5" aria-hidden />;
-      case "delegate_external":
-        return <SparklesIcon className="size-3.5" aria-hidden />;
-      case "edit_file":
-      case "write_file":
-        return <FilePenLineIcon className="size-3.5" aria-hidden />;
-      case "glob":
-      case "grep":
-        return <SearchIcon className="size-3.5" aria-hidden />;
-      case "list_dir":
-        return <ListIcon className="size-3.5" aria-hidden />;
-      case "web_search":
-        return <GlobeIcon className="size-3.5" aria-hidden />;
-      case "read_file":
-        return <FileTextIcon className="size-3.5" aria-hidden />;
-      default:
-        if (parseMcpToolName(tool.name)) {
-          return <ZapIcon className="size-3.5 text-emerald-400" aria-hidden />;
-        }
-        return <FileTextIcon className="size-3.5" aria-hidden />;
-    }
-  })();
-
-  return (
-    <span className={cn(tool.status === "running" && "animate-pulse")}>
-      {icon}
-    </span>
-  );
 }
 
 /** Single-line truncate with in-tree hover card (no portal - WebView-safe). */

@@ -2,6 +2,12 @@
 title: Message rendering
 summary: Assistant answers render as Markdown with highlighted code, Mermaid diagrams, zoomable images, safe links, and copy/save actions, even while they stream.
 paths:
+  - crates/desktop/ui/src/components/AssistantTrace.tsx
+  - crates/desktop/ui/src/components/ActivityLine.tsx
+  - crates/desktop/ui/src/components/TraceHoverTitle.tsx
+  - crates/desktop/ui/src/components/ui/trace.tsx
+  - crates/desktop/ui/src/components/ui/code-block.tsx
+  - crates/desktop/ui/src/lib/assistantTrace.ts
   - crates/desktop/ui/src/components/Markdown.tsx
   - crates/desktop/ui/src/components/MarkdownActions.tsx
   - crates/desktop/ui/src/components/CodeBlock.tsx
@@ -23,6 +29,7 @@ paths:
   - crates/desktop/ui/src/lib/resumableHighlight.ts
   - crates/desktop/ui/src/lib/oneByteString.ts
 tests:
+  - crates/desktop/ui/src/lib/assistantTrace.test.ts
   - crates/desktop/ui/src/lib/markdownBlocks.test.ts
   - crates/desktop/ui/src/lib/markdownStreaming.test.ts
   - crates/desktop/ui/src/lib/markdownExport.test.ts
@@ -50,6 +57,7 @@ verify:
 # Message rendering
 
 ## Behavior
+- The work behind an answer renders above it as one shadcn `Trace`, in the order it happened (AI Elements patterns): each thinking block is a Reasoning line, each tool call a Tool line, two or more plain calls in a row one Chain of Thought line, and provider activity (Claude Code, Codex, Cursor) Tool lines labelled with the provider. A running line shimmers; a failed one is red; a pending approval is a dimmed "Waiting for approval" line while its card stays above the composer. Truncated titles show their full text on hover.
 - Explicitly closed `zest-html` fences and completed native HTML tool results show interactive artifact cards; ordinary HTML code stays inert. See [Interactive HTML artifacts](html-artifacts.md) for isolation and verification.
 - Assistant text renders as GitHub-flavoured Markdown (tables, lists, headings). User bubbles are plain text with bare URLs linkified (`LinkifyText`, trailing punctuation trimmed).
 - Only `http(s)` links become anchors; any other scheme renders as plain text. A paragraph that is a single link renders as a link-preview card with its host and an Open button.
@@ -62,6 +70,7 @@ verify:
 - For turns produced by a command (for example Plan mode), an answer is framed as a document card once it is 400+ chars or contains a heading or ordered list (`looksLikeDocument`).
 
 ## How it works
+- `ChatScreen.tsx` `ChatMessageRow` (and each split pane) -> `AssistantTrace.tsx`: `buildTrace` (`assistantTrace.ts`) resolves the message's `steps` to its parts (older threads: thinking, tools, then activity; a part no step names is appended, never dropped), nests activities under their `parentId`, and folds runs of at least `COLLAPSE_THRESHOLD` plain calls. Lines are `ThinkingReasoning`, `ToolLine` / `ToolRunGroup`, and `ActivityLine` / `ActivityGroup`, all on `components/ui/trace.tsx`; tool output sits in the shadcn `components/ui/code-block.tsx` at `size="sm"`.
 - `ChatScreen.tsx` `ChatMessageRow` -> `Markdown.tsx` (`react-markdown` + `remark-gfm`). `hoistLocalImages` (`localImagePath.ts`) rewrites prose only, preserving fenced bytes until the same marker closes with at least the opening length and no suffix other than whitespace. Then `splitRenderableBlocks` (`markdownBlocks.ts`) cuts top-level blocks keyed by index; each `Block` is memoized. With block streaming on, the incomplete tail is withheld and fences reach `CodeBlock` with `streaming=false`; with it off, the tail renders and `streaming` is forwarded.
 - `pre` -> `CodeBlock.tsx` (`normalizeLang`/`languageLabel` from `codeLanguage.ts`, which maps a few spellings and otherwise passes the fence tag through) -> ReUI `code-block.tsx`: `useDeferredValue` source, plain lines as the floor, `highlightCode` (`code-block-highlight.tsx`, shiki core on the JavaScript regex engine, grammars lazy-loaded from a static import map); a growing fence resumes the grammar after its last complete line (`createResumableHighlight` in `resumableHighlight.ts`) instead of re-tokenizing the whole block, and `toOneByteIfLatin1` (`oneByteString.ts`) hands shiki a one-byte string when it can, which keeps its regexes off V8's slower two-byte path debounced 150 ms while streaming and immediate once complete. Highlight results are tagged with their source and spec so a swapped document never shows stale colours. The block sticks to the bottom while streaming and announces completion to screen readers.
 - `MermaidBlock.tsx`: dynamic `import("mermaid")`, `securityLevel: "strict"`, theme follows the app appearance, SVG inserted via `markTrustedHtml` (`safeHtml.ts`, a provenance brand, not a sanitizer). The browser regression covers math labels and the expanded diagram. The root dependency override selects KaTeX 0.18.2 for Mermaid without downgrading Mermaid. The security regression resolves Mermaid's actual math renderer and proves inherited `trust` cannot enable HTML links, while explicit trusted links and ordinary math still render.
@@ -80,3 +89,6 @@ verify:
 - The grammar list lives only in `codeBlockLanguages` (`code-block-highlight.tsx`). `codeLanguage.ts` must not keep its own allowlist: it once did, and silently turned ruby, kotlin, swift, php and others into plain text. Add a language by adding a grammar line there.
 - Do not hand `transformers` a new array per render; it re-tokenizes the whole block per chunk (dev warning in `code-block.tsx`).
 - The overlays use `react-dom` `createPortal`; the UI README's ban is on Base UI Menu/Portal.
+- Two code blocks on purpose: Markdown fences use the ReUI block (highlighting that resumes while it streams); tool output in Trace lines uses the plain shadcn `ui/code-block`.
+- Trace rows clip (`overflow: hidden`) for their open/close animation, so hover text is `TraceHoverTitle`: in the tree (no portal, which the WebView drops) but `position: fixed` at the title's rectangle.
+- The shadcn CLI writes new components with `import { cn } from "cn"` and adds the `cn` npm package; point them at `@/lib/utils` instead, as the existing components do.

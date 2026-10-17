@@ -12,6 +12,7 @@ import {
 import { Markdown } from "@/components/Markdown";
 import { ModelEffortPicker } from "@/components/ModelEffortPicker";
 import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
+import { AssistantTrace } from "@/components/AssistantTrace";
 import { ToolCallRow } from "@/components/ToolCallRow";
 import { readSidebarOpen, writeSidebarOpen } from "@/components/ChatHistorySidebar";
 import { Button } from "@/components/ui/button";
@@ -1037,9 +1038,10 @@ function SplitConversation({
               </div>
             ) : (
               <>
-                {message.thinking ? <details className="mb-2 text-xs text-muted-foreground"><summary>Thinking</summary><p className="whitespace-pre-wrap py-2">{message.thinking}</p></details> : null}
+                <AssistantTrace message={message} providerLabel={session.label} className="mb-3" />
                 <Markdown streaming={message.streaming}>{message.text}</Markdown>
-                {message.tools.map((tool) => <ToolCallRow key={tool.id} tool={tool} asCard={tool.status === "awaiting_approval"} onResolveApproval={async (id, choice) => {
+                {/* A pane has no shared approval bar above its composer, so the card stays inline. */}
+                {message.tools.filter((tool) => tool.status === "awaiting_approval").map((tool) => <ToolCallRow key={tool.id} tool={tool} asCard onResolveApproval={async (id, choice) => {
                   try {
                     await getBackend().resolveApproval(id, choice, session.threadId);
                   } catch (error) {

@@ -23,6 +23,7 @@ verify:
 - Pane header actions: "Fork into other pane" (forks the chat into an empty or new pane; disabled while that chat is streaming), "Add pane" (fills an empty pane first, otherwise splits the pane top/bottom), "Continue in single view", "Close …", and a drag grip that moves the pane to the nearest edge of another pane.
 - Nested panes are named "Left top chat", "Right bottom chat", and so on.
 - Each pane keeps its own draft (saved under `zest.splitDraft.<threadId>`), model and effort, and send/stop. Two panes can stream at once, and stopping one leaves the other running.
+- A pane draws a turn's thinking and tool calls as the same Trace as single view (`AssistantTrace`). A pane has no approval bar above its composer, so a pending approval's card shows inline under the answer.
 - The divider ("Resize split panes") stays between 30% and 70%: arrow keys move 2%, Home/End jump to the limits, double-click resets to 50%. At 700 px wide or less, panes stack vertically and the divider is hidden.
 - Groups survive leaving split view: the sidebar lists "Split view with N chats" and reopens the group. Panes without a chat are not counted.
 - Deleting a chat empties any pane showing it and removes it from the chooser. Closing the last pane that holds a chat returns to single view, or to another saved group if there is one.
