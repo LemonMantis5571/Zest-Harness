@@ -12,6 +12,7 @@ paths:
   - crates/desktop/ui/src/components/ConversationRecoveryDialog.tsx
   - crates/desktop/ui/src/lib/threadWindow.ts
   - crates/desktop/ui/src/lib/threadActivity.ts
+  - crates/desktop/ui/src/lib/threadUnread.ts
   - crates/desktop/ui/src/lib/conversationTurns.ts
   - crates/desktop/ui/src/lib/chatView.ts
   - crates/desktop/ui/src/lib/compactChatRow.ts
@@ -20,6 +21,7 @@ paths:
 tests:
   - crates/desktop/ui/src/lib/threadWindow.test.ts
   - crates/desktop/ui/src/lib/threadActivity.test.ts
+  - crates/desktop/ui/src/lib/threadUnread.test.ts
   - crates/desktop/ui/src/lib/conversationTurns.test.ts
   - crates/desktop/ui/src/lib/chatView.test.ts
   - crates/desktop/ui/src/lib/compactChatRow.test.ts
@@ -46,6 +48,7 @@ verify:
 - Interactive HTML source is inline in conversation metadata/fences and follows existing save, checkpoint, fork and deletion ownership. New metadata uses thread format v5; older binaries are not compatible. Future-version files are rejected before typed decoding, not renamed as corrupt.
 - Each chat is `<workspace>/.zest/threads/<id>.json` (format v4). Chats opened without a project live in the "Free chats" bucket (`<zest config dir>/free-chats`). A new chat gets no history row until its first message.
 - The sidebar lists known projects plus Free chats; within a project, pinned chats first, then most recently updated. Rows show live activity (working, awaiting approval, waiting on an answer to a question, elapsed time) for chats running in the background; approval and a pending question both count as needing input (`needsInput` in `threadActivity.ts`).
+- A chat whose turn ends (done or error, not cancel) while another chat is open reads as bold in the compact list until you open it. The set lives in localStorage (`zest.unreadThreads`, capped at 200), so it survives a restart on this machine; a turn that ends while the app is closed is not marked.
 - Rows support rename (Enter/blur saves, empty cancels, disabled on the row whose turn is live), pin/unpin, and delete (with confirmation). The open chat's row also has "Fork conversation" (disabled while it is working). Deleting a busy chat cancels its turn; deleting the open chat switches to an unsaved draft.
 - "Search chats" opens the shared command palette on its Chats tab; hits can open a chat scrolled to the matching message.
 - A chat opens on its last 10 user turns. Scrolling to the top (or "Earlier turns") loads 20 more without moving the viewport; "Later turns" pages forward after opening around a search hit.
@@ -63,6 +66,7 @@ verify:
 
 ## How it works
 - Storage: `ThreadStore` (`thread.rs`) `save` via `fsutil::atomic_write_json` (temp file, sync, atomic replace). `load_typed` migrates older versions, refuses newer ones, moves corrupt files aside as `*.json.corrupt-<ts>`, and `terminalize_interrupted` closes running tool/approval cards. `Thread` holds UI `messages`, redacted `agent_messages`, `checkpoints`, `pending_inputs`, and a lifecycle `events` ledger.
+- Unread: `threadUnread.ts` folds every chat event (`App.tsx` `handleChatEvent`, against `threadIdRef`) into the set, and `markThreadSeen` clears a chat when it becomes the open one. `ThreadSummary` has no seen marker; `updatedAt` moves on every saved message and cannot say which chat was on screen. The sidebar reads the set with `useSyncExternalStore`.
 - Listing: Tauri `list_chat_projects` / `list_cached_threads` (`crates/desktop/src/lib.rs`) read summaries through a per-file mtime cache, hide zero-message chats, sort pinned then `updated_at`. `search_chats` scans titles and transcripts (24 hits max). `ChatHistorySidebar.tsx` reloads on open, focus, and chat changes.
 - Windows: `MessageWindow::{tail, around, before, after}` (`thread_window.rs`) cut on user-turn boundaries; `load_older_thread_messages` / `load_newer_thread_messages` serve pages from the live turn or idle session. `threadWindow.ts` mirrors the constants and merges pages in `App.tsx`; `ChatScreen.tsx` preserves scroll offset when prepending.
 - Checkpoints: `create_checkpoint_with_metadata` snapshots under `.zest/threads/checkpoints/<thread>/`, capped at 24 snapshots and 64 MiB (oldest automatic first, never the last one). `rewind_thread` -> `rewind_to_checkpoint`; `edit_message` -> `rewind_before_user_message`; `fork_thread` / `fork_thread_from_checkpoint` -> `ThreadStore::fork*`. `conversationTurns.ts` builds the rail index for `CheckpointRail.tsx`.

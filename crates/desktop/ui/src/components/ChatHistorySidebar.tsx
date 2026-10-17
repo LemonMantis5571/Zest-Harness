@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -45,6 +45,7 @@ import {
   type ThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
+import { getUnreadThreads, subscribeUnreadThreads } from "@/lib/threadUnread";
 import type { ProjectChats, ProviderRow, ThreadSummary, UserProfile } from "@/lib/types";
 import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { cn } from "@/lib/utils";
@@ -289,6 +290,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [chatViewMode, setChatViewMode] = useState<ChatViewMode>(() => getSavedChatViewMode());
+  const unreadThreads = useSyncExternalStore(subscribeUnreadThreads, getUnreadThreads);
 
   const hasActiveActivity = Object.values(threadActivity).some(
     (activity) => activity.state !== "idle"
@@ -787,6 +789,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     });
     const otherProvider = foreignProvider(thread.providerId, activeProviderId);
     const isEditing = editingThread?.key === key;
+    // Bold until opened, like unread mail. A running chat has nothing new yet.
+    const unread = unreadThreads.has(thread.id) && !active && !busy;
     const markText =
       mark === "pull_request" && pullRequest
         ? `Pull request #${pullRequest.number}`
@@ -798,6 +802,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     const ariaLabel = [
       title,
       markText,
+      unread ? "Finished since you last looked" : undefined,
       otherProvider ? `on ${otherProvider}` : undefined,
       thread.pinned ? "pinned" : undefined,
     ]
@@ -869,7 +874,14 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 pr-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
               <CompactChatMarkIcon mark={mark} />
-              <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate text-[13px]",
+                  unread && "font-semibold text-foreground"
+                )}
+              >
+                {title}
+              </span>
               {/* Exceptions only. The usual case (your provider, not pinned,
                   not running) adds nothing to the row. */}
               {otherProvider ? (
