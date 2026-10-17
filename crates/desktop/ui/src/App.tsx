@@ -37,8 +37,11 @@ import {
 } from "@/lib/invokeErrors";
 import { approvalNotice } from "@/lib/mcpDisplay";
 import {
+  attentionChatName,
   attentionRoute,
+  attentionTitle,
   isLongTurn,
+  replyExcerpt,
   type AttentionKind,
 } from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
@@ -800,7 +803,76 @@ export default function App() {
     return threadIdRef.current === threadId && shellPanelRef.current === null;
   }, []);
 
-  /** Announce an event as `attentionRoute` decides: nothing, a toast, or an OS notification. */
+  /**
+   * Name a chat for an alert and find where it lives.
+   *
+   * `root` is the project path (`null` for a free chat), or `undefined` when
+   * the chat is not in the catalogue and cannot be reopened from here.
+   */
+  const describeChat = useCallback(async (threadId: string) => {
+    let listed: { title?: string; root: string | null } | undefined;
+    try {
+      for (const project of await backend.listChatProjects()) {
+        const thread = project.threads.find((candidate) => candidate.id === threadId);
+        if (thread) {
+          listed = { title: thread.title, root: project.path };
+          break;
+        }
+      }
+    } catch (error) {
+      // The alert still goes out, named from the transcript instead.
+      ignoreExpectedFailure(error, "name chat for notification");
+    }
+    const transcript =
+      threadIdRef.current === threadId
+        ? messagesRef.current
+        : chatStatesRef.current.get(threadId)?.messages;
+    const firstPrompt = transcript?.find((message) => message.role === "user")?.text;
+    return {
+      name: attentionChatName(listed?.title, firstPrompt),
+      root: listed?.root,
+    };
+  }, []);
+
+  const openProjectChatRef = useRef<
+    ((options: { root: string | null; threadId: string }) => Promise<boolean>) | null
+  >(null);
+
+  /**
+   * Bring a chat on screen from an alert: its split pane, the transcript
+   * behind a panel, or the chat itself. Returns null when there is no way to
+   * reach it from here.
+   */
+  const chatOpener = useCallback(
+    (threadId: string, root: string | null | undefined) => {
+      const snapshot = splitSnapshotRef.current;
+      if (splitVisibleRef.current && snapshot) {
+        for (const group of snapshot.groups) {
+          const paneId = layoutPaneIds(group.root).find(
+            (candidate) => snapshot.panes[candidate]?.session?.threadId === threadId
+          );
+          if (paneId) return () => activateSplitLocation(group.id, paneId);
+        }
+      }
+      if (!splitVisibleRef.current && threadIdRef.current === threadId) {
+        return showTranscript;
+      }
+      if (root === undefined) return null;
+      return () => {
+        void openProjectChatRef.current?.({ root, threadId }).catch((error) =>
+          // onOpenProjectChat already toasted the failure.
+          ignoreExpectedFailure(error, "open chat from notification")
+        );
+      };
+    },
+    [activateSplitLocation, showTranscript]
+  );
+
+  /**
+   * Announce an event as `attentionRoute` decides: nothing, a toast, or an OS
+   * notification. Both name the chat, and a toast for a chat that is not on
+   * screen offers to open it.
+   */
   const showAttention = useCallback(
     async (
       kind: AttentionKind,
@@ -811,13 +883,31 @@ export default function App() {
       const onScreen = isChatOnScreen(threadId);
       const focused = await isWindowActuallyActive();
       const route = attentionRoute(kind, { onScreen, focused, byUser });
-      if (route === "toast") {
-        toast.add(notice);
-      } else if (route === "os") {
-        await notifyWhenAway(notice.title, notice.description);
+      if (route === "none") return;
+
+      const chat = await describeChat(threadId);
+      const title = attentionTitle(notice.title, chat.name);
+      const open = chatOpener(threadId, chat.root);
+      if (route === "os") {
+        await notifyWhenAway(title, notice.description, open ?? undefined);
+        return;
       }
+      const id = toast.add({
+        ...notice,
+        title,
+        actionProps:
+          !onScreen && open
+            ? {
+                children: "Open",
+                onClick: () => {
+                  toast.close(id);
+                  open();
+                },
+              }
+            : undefined,
+      });
     },
-    [isChatOnScreen]
+    [chatOpener, describeChat, isChatOnScreen]
   );
 
   const recordThreadActivity = useCallback((event: ChatEvent) => {
@@ -1357,9 +1447,12 @@ export default function App() {
     if (event.kind === "done") {
       const startedAt = turnStartedAtByThreadRef.current.get(threadKey);
       if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
+        const reply = state.messages.findLast(
+          (message) => message.role === "assistant" && message.text.trim()
+        );
         void showAttention("response_ready", threadKey, {
           title: "Response ready",
-          description: "Zest finished the turn.",
+          description: reply ? replyExcerpt(reply.text) : "Zest finished the turn.",
           type: "success",
         });
       }
@@ -2397,6 +2490,7 @@ export default function App() {
     },
     [applySession, loadProviders, showTranscript]
   );
+  openProjectChatRef.current = onOpenProjectChat;
 
   async function chooseConversationProvider(providerId: string) {
     const pending = pendingConversationRecovery;

@@ -3,7 +3,10 @@ import { describe, it } from "node:test";
 
 import {
   ATTENTION_KINDS,
+  attentionChatName,
   attentionRoute,
+  attentionTitle,
+  replyExcerpt,
   isLongTurn,
   LONG_TURN_NOTIFICATION_MS,
   mergeToastDescription,
@@ -61,6 +64,33 @@ describe("attention routes", () => {
       }
     });
   }
+});
+
+describe("attention copy", () => {
+  it("names the chat by title, then first prompt, then the sidebar fallback", () => {
+    assert.equal(attentionChatName("  Fix login  ", "ignored"), "Fix login");
+    assert.equal(attentionChatName(undefined, "Why does\n  the build fail?"), "Why does the build fail?");
+    assert.equal(attentionChatName("", "  "), "Untitled chat");
+    const long = attentionChatName("A".repeat(80), undefined);
+    assert.equal(long.length, 48);
+    assert.ok(long.endsWith("…"));
+  });
+
+  it("puts the chat after the event", () => {
+    assert.equal(attentionTitle("Approval needed", "Fix login"), "Approval needed · Fix login");
+  });
+
+  it("turns the start of a reply into plain text", () => {
+    assert.equal(
+      replyExcerpt("## Done\n\n- Fixed **the** `redirect`\n- See [the PR](https://example.test/1)"),
+      "Done Fixed the redirect See the PR"
+    );
+    assert.equal(replyExcerpt("Before\n```ts\nconst x = 1;\n```\nafter"), "Before after");
+    assert.equal(replyExcerpt("keep snake_case names"), "keep snake_case names");
+    const long = replyExcerpt("word ".repeat(60));
+    assert.equal(long.length, 140);
+    assert.ok(long.endsWith("…"));
+  });
 });
 
 describe("notification policy", () => {

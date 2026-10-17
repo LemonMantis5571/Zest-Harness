@@ -75,6 +75,43 @@ export function attentionRoute(
   return "toast";
 }
 
+const CHAT_NAME_MAX_CHARS = 48;
+const EXCERPT_MAX_CHARS = 140;
+
+function clip(text: string, max: number) {
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+/**
+ * How an alert names its chat: the sidebar title, else the first prompt (a
+ * chat is titled after its first turn), else what the sidebar shows.
+ */
+export function attentionChatName(title: string | undefined, firstPrompt: string | undefined) {
+  const name =
+    title?.trim() || firstPrompt?.replace(/\s+/g, " ").trim() || "Untitled chat";
+  return clip(name, CHAT_NAME_MAX_CHARS);
+}
+
+/** "Approval needed · Fix the login redirect" */
+export function attentionTitle(event: string, chatName: string) {
+  return `${event} · ${chatName}`;
+}
+
+/**
+ * The start of a reply as plain text, for a notification body. OS
+ * notifications show Markdown syntax literally, so the common marks go.
+ */
+export function replyExcerpt(text: string) {
+  const plain = text
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+])\s+/gm, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clip(plain, EXCERPT_MAX_CHARS);
+}
+
 /**
  * Group key for stacked toasts.
  *

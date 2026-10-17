@@ -394,6 +394,23 @@ describe("fixture safety scenarios", () => {
   });
 });
 
+describe("fixture background-approval scenario", () => {
+  it("echoes the open chat's turn, then stops the Free chat for approval", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const session = await backend.startSession();
+    await backend.sendMessage("hello");
+
+    const done = events.findIndex((event) => event.kind === "done");
+    const approval = events.findIndex((event) => event.kind === "approval_needed");
+    assert.ok(done >= 0 && approval > done);
+    assert.equal(events[done]?.thread_id, session.threadId);
+    assert.equal(events[approval]?.thread_id, "fixture-free");
+    assert.notEqual(session.threadId, "fixture-free");
+  });
+});
+
 describe("fixture windowed open", () => {
   it("opens a long chat on the last ten user turns and pages older ones", async () => {
     const backend = createFixtureBackend();
