@@ -1241,10 +1241,14 @@ export default function App() {
       return;
     }
     if (event.kind === "job_completed") {
-      void showAttention("job_finished", threadKey, {
-        title: "Background job finished",
-        description: `${event.label} · ${event.status}`,
-        type: event.status === "completed" ? "success" : "warning",
+      // `killed` was asked for by the user or the agent; only `failed` is news.
+      const failed = event.status === "failed";
+      void showAttention(failed ? "job_failed" : "job_finished", threadKey, {
+        title: failed ? "Background job failed" : "Background job finished",
+        description: [event.label, event.status, event.detail]
+          .filter(Boolean)
+          .join(" · "),
+        type: failed ? "error" : "success",
       });
       return;
     }

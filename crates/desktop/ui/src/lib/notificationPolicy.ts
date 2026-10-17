@@ -18,6 +18,7 @@ export const ATTENTION_KINDS = [
   "response_ready",
   "request_failed",
   "job_finished",
+  "job_failed",
   "delegation_ready",
   "delegation_changes_requested",
   "delegation_blocked",
@@ -48,6 +49,13 @@ const SHOWN_IN_TRANSCRIPT: ReadonlySet<AttentionKind> = new Set([
 ]);
 
 /**
+ * The agent already hears about every finished background job through a
+ * notice injected into its chat, so the user only needs to hear about a
+ * success when they are away.
+ */
+const AWAY_ONLY: ReadonlySet<AttentionKind> = new Set(["job_finished"]);
+
+/**
  * Where an attention event goes, if anywhere.
  *
  * Live state belongs on screen; a ping is for something that needs the user
@@ -62,6 +70,7 @@ export function attentionRoute(
 ): AttentionRoute {
   if (byUser) return "none";
   if (!focused) return "os";
+  if (AWAY_ONLY.has(kind)) return "none";
   if (onScreen && SHOWN_IN_TRANSCRIPT.has(kind)) return "none";
   return "toast";
 }
