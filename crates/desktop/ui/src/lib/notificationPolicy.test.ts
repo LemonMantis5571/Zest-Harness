@@ -2,11 +2,57 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  ATTENTION_KINDS,
+  attentionRoute,
   isLongTurn,
   LONG_TURN_NOTIFICATION_MS,
   mergeToastDescription,
   notificationFingerprint,
+  type AttentionKind,
+  type AttentionRoute,
 } from "./notificationPolicy.ts";
+
+/**
+ * Every event × on-screen × focused case, written out so a change to the
+ * policy has to change this table too.
+ */
+const ROUTES: Record<
+  AttentionKind,
+  {
+    onScreenFocused: AttentionRoute;
+    onScreenAway: AttentionRoute;
+    elsewhereFocused: AttentionRoute;
+    elsewhereAway: AttentionRoute;
+  }
+> = {
+  approval_needed: { onScreenFocused: "none", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  input_needed: { onScreenFocused: "none", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  response_ready: { onScreenFocused: "none", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  request_failed: { onScreenFocused: "none", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  job_finished: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  delegation_ready: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  delegation_changes_requested: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  delegation_blocked: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  delegation_failed: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  delegation_applied: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+  delegation_cancelled: { onScreenFocused: "toast", onScreenAway: "os", elsewhereFocused: "toast", elsewhereAway: "os" },
+};
+
+describe("attention routes", () => {
+  it("covers every attention kind", () => {
+    assert.deepEqual(Object.keys(ROUTES).sort(), [...ATTENTION_KINDS].sort());
+  });
+
+  for (const kind of ATTENTION_KINDS) {
+    const expected = ROUTES[kind];
+    it(`routes ${kind}`, () => {
+      assert.equal(attentionRoute(kind, { onScreen: true, focused: true }), expected.onScreenFocused, "on screen, focused");
+      assert.equal(attentionRoute(kind, { onScreen: true, focused: false }), expected.onScreenAway, "on screen, away");
+      assert.equal(attentionRoute(kind, { onScreen: false, focused: true }), expected.elsewhereFocused, "elsewhere, focused");
+      assert.equal(attentionRoute(kind, { onScreen: false, focused: false }), expected.elsewhereAway, "elsewhere, away");
+    });
+  }
+});
 
 describe("notification policy", () => {
   it("only marks turns at or above the long-turn threshold", () => {

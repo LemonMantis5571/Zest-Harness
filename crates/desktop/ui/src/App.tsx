@@ -36,7 +36,11 @@ import {
   type ConversationRecovery,
 } from "@/lib/invokeErrors";
 import { approvalNotice } from "@/lib/mcpDisplay";
-import { isLongTurn } from "@/lib/notificationPolicy";
+import {
+  attentionRoute,
+  isLongTurn,
+  type AttentionKind,
+} from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
 import {
   DEFAULT_CODEX_MODEL,
@@ -105,6 +109,7 @@ import type {
   WallpaperView,
 } from "@/lib/types";
 import {
+  layoutPaneIds,
   splitSidebarGroups,
   type SplitWorkspaceSnapshot,
 } from "@/lib/splitLayout";
@@ -159,17 +164,11 @@ function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   });
 }
 
-async function showAttention(
-  title: string,
-  description: string,
-  type: "warning" | "success"
-) {
-  if (await isWindowActuallyActive()) {
-    toast.add({ type, title, description });
-  } else {
-    await notifyWhenAway(title, description);
-  }
-}
+type AttentionNotice = {
+  title: string;
+  description: string;
+  type: "warning" | "success" | "error";
+};
 
 /**
  * What "Build plan" says on the user's behalf.
@@ -436,6 +435,8 @@ export default function App() {
    * transcript itself. Each Customize tab is its own history entry.
    */
   const [shellPanel, setShellPanel] = useState<ShellPanel | null>(null);
+  const shellPanelRef = useRef(shellPanel);
+  shellPanelRef.current = shellPanel;
   const [navigation, setNavigation] = useState<NavigationHistory>(createNavigationHistory);
   const navigationRef = useRef<NavigationHistory>(createNavigationHistory());
   const [providerSwitchRequest, setProviderSwitchRequest] = useState(0);
@@ -757,6 +758,41 @@ export default function App() {
     }
   );
 
+  /**
+   * Whether the user can see this chat's transcript right now: the open chat
+   * in single view with no panel covering it, or a pane of the split group on
+   * screen.
+   */
+  const isChatOnScreen = useCallback((threadId: string) => {
+    const snapshot = splitSnapshotRef.current;
+    if (splitVisibleRef.current && snapshot) {
+      const group = snapshot.groups.find(
+        (candidate) => candidate.id === snapshot.activeGroupId
+      );
+      if (group) {
+        return layoutPaneIds(group.root).some(
+          (paneId) => snapshot.panes[paneId]?.session?.threadId === threadId
+        );
+      }
+    }
+    return threadIdRef.current === threadId && shellPanelRef.current === null;
+  }, []);
+
+  /** Announce an event as `attentionRoute` decides: nothing, a toast, or an OS notification. */
+  const showAttention = useCallback(
+    async (kind: AttentionKind, threadId: string, notice: AttentionNotice) => {
+      const onScreen = isChatOnScreen(threadId);
+      const focused = await isWindowActuallyActive();
+      const route = attentionRoute(kind, { onScreen, focused });
+      if (route === "toast") {
+        toast.add(notice);
+      } else if (route === "os") {
+        await notifyWhenAway(notice.title, notice.description);
+      }
+    },
+    [isChatOnScreen]
+  );
+
   const recordThreadActivity = useCallback((event: ChatEvent) => {
     const previous = threadActivityRef.current;
     const next = reduceThreadActivity(previous, event, Date.now());
@@ -794,18 +830,22 @@ export default function App() {
       const notificationId = `${event.kind}:${event.job.jobId}:${event.job.updatedAt}`;
       if (notifiedDelegationEventsRef.current.has(notificationId)) return;
       notifiedDelegationEventsRef.current.add(notificationId);
-      const copy: Record<string, [string, "warning" | "success"]> = {
-        ready_to_apply: ["Changes ready to apply", "success"],
-        changes_requested: ["Review requested changes", "warning"],
-        blocked: ["Delegation needs attention", "warning"],
-        failed: ["Delegation failed", "warning"],
-        applied: ["Accepted changes applied", "success"],
-        cancelled: ["Delegation cancelled", "warning"],
+      const copy: Record<string, [AttentionKind, string, "warning" | "success"]> = {
+        ready_to_apply: ["delegation_ready", "Changes ready to apply", "success"],
+        changes_requested: ["delegation_changes_requested", "Review requested changes", "warning"],
+        blocked: ["delegation_blocked", "Delegation needs attention", "warning"],
+        failed: ["delegation_failed", "Delegation failed", "warning"],
+        applied: ["delegation_applied", "Accepted changes applied", "success"],
+        cancelled: ["delegation_cancelled", "Delegation cancelled", "warning"],
       };
-      const [title, type] = copy[event.kind as keyof typeof copy];
-      void showAttention(title, event.job.title, type);
+      const [kind, title, type] = copy[event.kind as keyof typeof copy];
+      void showAttention(kind, event.job.parentThreadId, {
+        title,
+        description: event.job.title,
+        type,
+      });
     },
-    [replaceDelegationJob, session?.root]
+    [replaceDelegationJob, session?.root, showAttention]
   );
 
   const updateQueuedTurn = useCallback(
@@ -1165,11 +1205,11 @@ export default function App() {
       return;
     }
     if (event.kind === "job_completed") {
-      void showAttention(
-        "Background job finished",
-        `${event.label} · ${event.status}`,
-        event.status === "completed" ? "success" : "warning"
-      );
+      void showAttention("job_finished", threadKey, {
+        title: "Background job finished",
+        description: `${event.label} · ${event.status}`,
+        type: event.status === "completed" ? "success" : "warning",
+      });
       return;
     }
 
@@ -1231,10 +1271,12 @@ export default function App() {
       }
     }
     if (effects.errorToast) {
-      toast.add({
-        type: "error",
+      // The error is also drawn on the failed message, so a chat on screen
+      // already shows it.
+      void showAttention("request_failed", threadKey, {
         title: "Request failed",
         description: effects.errorToast,
+        type: "error",
       });
     }
     if (effects.warningToast) {
@@ -1256,23 +1298,30 @@ export default function App() {
       notifiedApprovalIdsByThreadRef.current.set(threadKey, notified);
       if (!notified.has(event.approval_id)) {
         notified.add(event.approval_id);
-        const description = approvalNotice(event.tool_name, event.summary);
-        if (isCurrent) {
-          void notifyWhenAway("Approval needed", description);
-        } else {
-          void showAttention("Approval needed", description, "warning");
-        }
+        void showAttention("approval_needed", threadKey, {
+          title: "Approval needed",
+          description: approvalNotice(event.tool_name, event.summary),
+          type: "warning",
+        });
       }
     }
 
     if (event.kind === "question_needed") {
-      void showAttention("Input needed", event.prompt, "warning");
+      void showAttention("input_needed", threadKey, {
+        title: "Input needed",
+        description: event.prompt,
+        type: "warning",
+      });
     }
 
     if (event.kind === "done") {
       const startedAt = turnStartedAtByThreadRef.current.get(threadKey);
       if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
-        void showAttention("Response ready", "Zest finished the turn.", "success");
+        void showAttention("response_ready", threadKey, {
+          title: "Response ready",
+          description: "Zest finished the turn.",
+          type: "success",
+        });
       }
       turnStartedAtByThreadRef.current.delete(threadKey);
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
@@ -1287,7 +1336,7 @@ export default function App() {
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
     }
 
-  }, [maybeAutoCompact, refreshCheckpointMetadata]);
+  }, [maybeAutoCompact, refreshCheckpointMetadata, showAttention]);
 
   /**
    * Publish at most one transcript update per thread for a rendered frame.

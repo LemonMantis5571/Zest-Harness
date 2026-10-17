@@ -6,6 +6,63 @@ export function isLongTurn(durationMs: number) {
 }
 
 /**
+ * Events that may ask for the user's attention.
+ *
+ * Delegation events belong to their parent chat, but their state lives in the
+ * workbench panel rather than the transcript, so that chat being on screen
+ * does not mean the outcome is.
+ */
+export const ATTENTION_KINDS = [
+  "approval_needed",
+  "input_needed",
+  "response_ready",
+  "request_failed",
+  "job_finished",
+  "delegation_ready",
+  "delegation_changes_requested",
+  "delegation_blocked",
+  "delegation_failed",
+  "delegation_applied",
+  "delegation_cancelled",
+] as const;
+
+export type AttentionKind = (typeof ATTENTION_KINDS)[number];
+
+export type AttentionRoute = "none" | "toast" | "os";
+
+export type AttentionContext = {
+  /** The event's chat is visible: open in single view, or a pane of the active split group. */
+  onScreen: boolean;
+  /** Zest is the focused, unminimized window. */
+  focused: boolean;
+};
+
+/** Events whose card, answer, or error is drawn in their chat's transcript. */
+const SHOWN_IN_TRANSCRIPT: ReadonlySet<AttentionKind> = new Set([
+  "approval_needed",
+  "input_needed",
+  "response_ready",
+  "request_failed",
+]);
+
+/**
+ * Where an attention event goes, if anywhere.
+ *
+ * Live state belongs on screen; a ping is for something that needs the user
+ * while they are not looking. An event already drawn in the visible
+ * transcript says nothing while Zest is focused, and anything the user is
+ * away for becomes an OS notification instead of a toast they cannot see.
+ */
+export function attentionRoute(
+  kind: AttentionKind,
+  { onScreen, focused }: AttentionContext
+): AttentionRoute {
+  if (!focused) return "os";
+  if (onScreen && SHOWN_IN_TRANSCRIPT.has(kind)) return "none";
+  return "toast";
+}
+
+/**
  * Group key for stacked toasts.
  *
  * Errors keep the description so distinct failures stay separate. Success and
