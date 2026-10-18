@@ -69,6 +69,23 @@ const CATALOGUE_MODELS = [
     supportsVision: index === 1,
   })),
 ];
+/**
+ * Claude Code's built-in catalogue as an old CLI (2.1.220) reports it: Opus 5.5
+ * and Fable 5.1 are marked because the API refuses them from that client.
+ */
+const OLD_CLAUDE_CODE = { cli: "Claude Code", installed: "2.1.220", update: "claude update" };
+const CLAUDE_CODE_MODELS = [
+  { id: "claude-opus-5-5", needsCli: { ...OLD_CLAUDE_CODE, minimum: "2.1.280" } },
+  { id: "claude-sonnet-5-5" },
+  { id: "claude-haiku-5-5" },
+  { id: "claude-fable-5-1", needsCli: { ...OLD_CLAUDE_CODE, minimum: "2.1.251" } },
+].map((model) => ({
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  contextWindow: 1_000_000,
+  supportsTools: true,
+  supportsVision: false,
+  ...model,
+}));
 const FIXTURE_ARTWORK_DATA_URL =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%235e6ad2'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='96' height='96' rx='16' fill='url(%23g)'/%3E%3Ccircle cx='48' cy='48' r='22' fill='%23010102' opacity='.8'/%3E%3Ccircle cx='48' cy='48' r='7' fill='%23f4f4f5'/%3E%3C/svg%3E";
 /** One stand-in per look, so the fixture UI shows a real difference. */
@@ -104,6 +121,15 @@ const FIXTURE_SESSION: SessionInfo = {
   hasOlderMessages: false,
   hasNewerMessages: false,
   hiddenUserTurns: 0,
+};
+const CLAUDE_CODE_SESSION: SessionInfo = {
+  ...FIXTURE_SESSION,
+  provider: "claude-code",
+  label: "Claude Code",
+  model: "claude-sonnet-5-5",
+  defaultModel: "claude-sonnet-5-5",
+  ownsAgentLoop: true,
+  models: CLAUDE_CODE_MODELS,
 };
 
 function notAvailable(op: string): never {
@@ -187,7 +213,7 @@ function htmlArtifactMessages(): ChatMessage[] {
 }
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "claude-cli-outdated";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -204,7 +230,8 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
-    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery"
+    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" ||
+    value === "claude-cli-outdated"
     ? value
     : undefined;
 }
@@ -234,7 +261,10 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     if (options.contextRecoveryReady) void options.contextRecoveryReady.then(() => { contextRecovered = true; });
     else if (typeof window !== "undefined") window.addEventListener("zest:fixture-recover-context", () => { contextRecovered = true; }, { once: true });
   }
-  const sessionModels = scenario === "model-catalogue" ? CATALOGUE_MODELS : FIXTURE_MODELS;
+  const sessionModels = scenario === "model-catalogue"
+    ? CATALOGUE_MODELS
+    : scenario === "claude-cli-outdated" ? CLAUDE_CODE_MODELS : FIXTURE_MODELS;
+  const scenarioSession = scenario === "claude-cli-outdated" ? CLAUDE_CODE_SESSION : FIXTURE_SESSION;
   async function saveFixtureOptions() {
     if (scenario === "options-delayed" || scenario === "options-failing") {
       await new Promise((resolve) => setTimeout(resolve, 900));
@@ -243,7 +273,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     }
   }
-  let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
+  let session: SessionInfo = { ...scenarioSession, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
   let workspace = scenario === "ui-stress" ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks" : ".";
@@ -848,6 +878,22 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           defaultModel: DEFAULT_CODEX_MODEL,
           models: sessionModels,
         },
+        ...(scenario === "claude-cli-outdated" ? [
+          {
+            id: "claude-code",
+            label: "Claude Code",
+            method: "Claude Code subscription",
+            statusKind: "ready" as const,
+            statusLabel: "Ready",
+            detail: "Claude Code CLI 2.1.220",
+            selectable: true,
+            canConnect: false,
+            configured: true,
+            ownsAgentLoop: true,
+            defaultModel: "claude-sonnet-5-5",
+            models: CLAUDE_CODE_MODELS,
+          },
+        ] : []),
         ...(scenario === "provider-picker" || scenario === "model-catalogue" ? [
           {
             id: "fixture-research",
@@ -1336,7 +1382,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       clearFixtureScenario();
       fixturePinned = false;
-      session = { ...FIXTURE_SESSION, root: workspace, models: sessionModels, messages: fixtureTranscripts.get("fixture") ?? [] };
+      session = { ...scenarioSession, root: workspace, models: sessionModels, messages: fixtureTranscripts.get("fixture") ?? [] };
       return { ...session };
     },
     async switchSessionProvider(providerId, model) {

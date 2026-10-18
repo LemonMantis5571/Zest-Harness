@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, RotateCcwIcon, TriangleAlertIcon } from "lucide-react";
 
 import { ModelIcon } from "@/components/ModelIcon";
 import { ProviderIcon } from "@/components/ProviderIcon";
@@ -7,6 +7,8 @@ import { ProviderSourceTag } from "@/components/ProviderSourceTag";
 import {
   DEFAULT_EFFORT,
   capabilityForModel,
+  cliRequirementDetail,
+  cliRequirementLabel,
   effortsForModel,
   formatContextWindow,
   filterModelPickerGroups,
@@ -107,6 +109,10 @@ export function ModelEffortPicker({
   const currentLabel = catalogueModelLabel(models, model);
   const capability = capabilityForModel(models, model);
   const contextLabel = formatContextWindow(capability?.contextWindow);
+  // Warned, not disabled: the version check can be wrong, and if it is right
+  // the API's own refusal still reaches the chat.
+  const cliNeed = cliRequirementLabel(capability);
+  const cliNeedDetail = cliRequirementDetail(capability);
   const supportsEffort = effortOptions.length > 0;
   const pickerLabel = grouped
     ? "Model and provider"
@@ -246,7 +252,7 @@ export function ModelEffortPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={`Select model, currently ${currentLabel}`}
+        aria-label={`Select model, currently ${currentLabel}${cliNeed ? `. ${cliNeed}` : ""}`}
         title="Select model"
         className={cn(
           "inline-flex min-h-7 min-w-0 max-w-[min(180px,34vw)] cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-foreground/85 outline-none transition-colors",
@@ -259,6 +265,7 @@ export function ModelEffortPicker({
       >
         <ModelIcon modelId={model} providerId={currentProviderId} className="size-4 rounded-sm" />
         <span className="min-w-0 truncate">{currentLabel}</span>
+        {cliNeed ? <TriangleAlertIcon className="size-3 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden="true" /> : null}
         <ChevronDownIcon className="size-3 shrink-0 opacity-60" aria-hidden="true" />
       </button>
 
@@ -295,6 +302,12 @@ export function ModelEffortPicker({
                 </div>
                 {!supportsEffort ? (
                   <div className="mt-0.5 text-muted-foreground/75">No effort control</div>
+                ) : null}
+                {cliNeedDetail ? (
+                  <div role="note" className="mt-1 flex items-start gap-1.5 text-amber-700 dark:text-amber-400">
+                    <TriangleAlertIcon className="mt-px size-3 shrink-0" aria-hidden="true" />
+                    <span>{cliNeedDetail}</span>
+                  </div>
                 ) : null}
               </div>
             ) : null}
@@ -338,6 +351,9 @@ export function ModelEffortPicker({
                   ) : null}
                   {options.map((item) => {
                     const selected = group.current && item.id === model;
+                    const itemLabel = catalogueModelLabel(group.models, item.id);
+                    const itemNeed = cliRequirementLabel(item);
+                    const itemNeedDetail = cliRequirementDetail(item);
                     return (
                       <button
                         key={`${group.providerId}:${item.id}`}
@@ -346,7 +362,7 @@ export function ModelEffortPicker({
                         {...modelNavigation.optionProps(`${group.providerId}:${item.id}`)}
                         role="option"
                         aria-selected={selected}
-                        title={catalogueModelLabel(group.models, item.id)}
+                        title={itemNeedDetail ? `${itemLabel} — ${itemNeedDetail}` : itemLabel}
                         className={cn(
                           "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors",
                           "text-foreground/90 hover:bg-secondary/60 hover:text-foreground focus-visible:bg-secondary/60 focus-visible:text-foreground",
@@ -356,12 +372,13 @@ export function ModelEffortPicker({
                       >
                         <ModelIcon modelId={item.id} providerId={group.providerId} />
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate">{catalogueModelLabel(group.models, item.id)}</span>
+                          <span className="block truncate">{itemLabel}</span>
                           <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
                             {formatContextWindow(item.contextWindow) ? <span>{formatContextWindow(item.contextWindow)}</span> : null}
                             <span>{item.supportsTools ? "Tools" : "Text only"}</span>
                             {item.supportsVision ? <span>Vision</span> : null}
                             {item.efforts.length === 0 ? <span>No effort control</span> : null}
+                            {itemNeed ? <span className="text-amber-700 dark:text-amber-400">{itemNeed}</span> : null}
                           </span>
                         </span>
                         {selected ? <CheckIcon className="size-3.5 shrink-0" /> : null}
