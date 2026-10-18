@@ -160,7 +160,11 @@ export function sameModelCatalogue(
   return right.every((model) => ids.has(model.id));
 }
 
-/** Current session models first, then every other selectable provider. */
+/**
+ * Current session models first, then every other selectable provider the user
+ * has not hidden. The current provider is shown even when hidden, so the model
+ * in use can always be changed.
+ */
 export function modelPickerGroups(
   current: {
     providerId: string;
@@ -173,7 +177,8 @@ export function modelPickerGroups(
     selectable: boolean;
     models: ModelCapability[];
     defaultModel: string;
-  }>
+  }>,
+  hidden: ReadonlySet<string> = new Set()
 ): ModelPickerGroup[] {
   const currentModels = current.models ?? [];
   const groups: ModelPickerGroup[] = [
@@ -185,7 +190,7 @@ export function modelPickerGroups(
     },
   ];
   for (const row of providers) {
-    if (!row.selectable || row.id === current.providerId) continue;
+    if (!row.selectable || row.id === current.providerId || hidden.has(row.id)) continue;
     const models = modelsForRow(row);
     if (models.length === 0) continue;
     // ChatGPT Codex and Codex CLI advertise the same list. Showing both

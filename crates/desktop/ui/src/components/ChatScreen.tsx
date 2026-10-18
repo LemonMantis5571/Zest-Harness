@@ -82,6 +82,7 @@ import {
   modelPickerHasChoices,
   type EffortId,
 } from "@/lib/models";
+import { useHiddenPickerProviders } from "@/lib/pickerProviders";
 import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import type { SendTurnRequest } from "@/lib/sendTurn";
 import { btwQuestion, isModelCommandName, isModelSlash } from "@/lib/slashCommands";
@@ -859,6 +860,7 @@ export function ChatScreen({
   );
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const hiddenPickerProviders = useHiddenPickerProviders();
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const refreshAndOpenProviderSwitch = useCallback(() => {
     void onRefreshProviders()
@@ -1296,7 +1298,8 @@ export function ChatScreen({
       label: providerLabel,
       models: session.models,
     },
-    providers
+    providers,
+    hiddenPickerProviders
   );
   const showPicker = modelPickerHasChoices(pickerGroups) || modelPickerOpen;
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
@@ -1810,6 +1813,8 @@ export function ChatScreen({
               sending={sending}
               providerOwnsAgentLoop={session.ownsAgentLoop}
               providerLabel={providerLabel}
+              providers={providers}
+              currentProviderId={session.provider}
               onTabChange={(next) => onCustomizeTabChange?.(next)}
               onBack={() => onClosePanel?.()}
             />

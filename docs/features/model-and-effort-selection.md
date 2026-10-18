@@ -10,19 +10,23 @@ paths:
   - crates/desktop/ui/src/lib/useOptionNavigation.ts
   - crates/desktop/ui/src/lib/useViewportPopover.ts
   - crates/desktop/ui/src/lib/providerSelection.ts
+  - crates/desktop/ui/src/lib/pickerProviders.ts
   - crates/core/src/prefs.rs
 tests:
   - crates/desktop/ui/src/lib/models.test.ts
   - crates/desktop/ui/src/lib/modelMarks.test.ts
   - crates/desktop/ui/src/lib/sessionOptions.test.ts
   - crates/desktop/ui/src/lib/providerSelection.test.ts
+  - crates/desktop/ui/src/lib/pickerProviders.test.ts
   - crates/desktop/ui/e2e/model-picker.spec.ts
   - crates/desktop/ui/e2e/model-picker-search.spec.ts
   - crates/desktop/ui/e2e/picker-keyboard.spec.ts
+  - crates/desktop/ui/e2e/model-picker-providers.spec.ts
 verify:
   - npm run ui:test
   - npm run ui:e2e -- model-picker
   - npm run ui:e2e -- picker-keyboard
+  - npm run ui:e2e -- model-picker-providers
   - cargo test -p zest-core --lib prefs::tests
   - cargo test -p zest-core --lib remembered
   - cargo test -p zest-core --lib provider::tests
@@ -50,6 +54,11 @@ provider drivers in [provider-runtime](provider-runtime.md).
 - Groups: the current provider first, then every other *selectable* provider with
   models. A provider whose catalogue equals the current one (ChatGPT Codex vs
   Codex CLI) is not shown twice.
+- Customize > Models has a checkbox per provider the picker could list. An
+  unchecked provider is left out of the picker (it stays connected and in the
+  provider sheet); the chat's current provider is always listed and its box is
+  disabled. Saved per machine as the hidden ids in `localStorage`
+  (`zest.pickerHiddenProviders.v1`), so a provider added later is shown.
 - A model with `resolvesTo` (a provider-decided alias such as Claude Code's
   `opus`, once a turn has run it) is labelled "opus → Opus 5" in the list,
   the trigger and the composer chip (`catalogueModelLabel`); an unresolved

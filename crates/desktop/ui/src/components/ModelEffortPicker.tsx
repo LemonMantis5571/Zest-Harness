@@ -16,6 +16,7 @@ import {
   type ModelCapability,
   type ModelPickerGroup,
 } from "@/lib/models";
+import { useHiddenPickerProviders } from "@/lib/pickerProviders";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useOptionNavigation } from "@/lib/useOptionNavigation";
@@ -78,6 +79,7 @@ export function ModelEffortPicker({
   const effortListRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const [openTarget, setOpenTarget] = useState<PickerTarget>("model");
+  const hiddenProviders = useHiddenPickerProviders();
   const groups: ModelPickerGroup[] = currentProviderId
     ? modelPickerGroups(
         {
@@ -85,7 +87,8 @@ export function ModelEffortPicker({
           label: currentProviderLabel ?? currentProviderId,
           models,
         },
-        providers ?? []
+        providers ?? [],
+        hiddenProviders
       )
     : [
         {

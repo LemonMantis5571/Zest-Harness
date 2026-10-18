@@ -111,6 +111,22 @@ describe("model capability helpers", () => {
     assert.equal(modelPickerHasChoices(groups), true);
   });
 
+  it("leaves out providers the user hid, but never the current one", () => {
+    const providers = [
+      { id: "codex", label: "Codex", selectable: true, models: [noEffortModel], defaultModel: "local-model" },
+      { id: "deepseek", label: "DeepSeek", selectable: true, models: [], defaultModel: "deepseek-v4-flash" },
+      { id: "cursor", label: "Cursor", selectable: true, models: [], defaultModel: "composer-2.5" },
+    ];
+    const groups = modelPickerGroups(
+      { providerId: "codex", label: "Codex", models: [noEffortModel] },
+      providers,
+      new Set(["codex", "deepseek"])
+    );
+    assert.deepEqual(
+      groups.map((group) => group.providerId),
+      ["codex", "cursor"]
+    );
+  });
 
   it("does not list a sibling that advertises the same models", () => {
     const luna: ModelCapability = { ...noEffortModel, id: "gpt-5.6-luna" };
