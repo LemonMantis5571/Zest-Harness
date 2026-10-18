@@ -33,7 +33,7 @@ const PARENT_CLI_DEFAULTS: Record<
 > = {
   claude: {
     label: "Enable Claude Code",
-    model: "sonnet",
+    model: "claude-sonnet-5-5",
     configure: (id, model) => getBackend().configureClaudeCodeProvider({ id, model }),
   },
   codex: {

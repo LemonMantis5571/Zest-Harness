@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   CODEX_MODELS,
+  catalogueModelLabel,
   effortsForModel,
   filterModelPickerGroups,
   formatContextWindow,
@@ -110,6 +111,7 @@ describe("model capability helpers", () => {
     assert.equal(modelPickerHasChoices(groups), true);
   });
 
+
   it("does not list a sibling that advertises the same models", () => {
     const luna: ModelCapability = { ...noEffortModel, id: "gpt-5.6-luna" };
     const sol: ModelCapability = { ...noEffortModel, id: "gpt-5.6-sol" };
@@ -150,5 +152,44 @@ describe("model capability helpers", () => {
     assert.equal(formatContextWindow(128_000), "128k context");
     assert.equal(formatContextWindow(1_000_000), "1.0M context");
     assert.equal(formatContextWindow(0), null);
+  });
+});
+
+describe("catalogueModelLabel", () => {
+  const capability = (id: string, resolvesTo?: string): ModelCapability => {
+    const model: ModelCapability = {
+      id,
+      efforts: [],
+      contextWindow: 0,
+      supportsTools: true,
+      supportsVision: false,
+    };
+    if (resolvesTo) model.resolvesTo = resolvesTo;
+    return model;
+  };
+
+  it("names what a resolved alias actually runs", () => {
+    const models = [capability("opus", "claude-opus-5"), capability("haiku", "claude-haiku-4-5-20251001")];
+    assert.equal(catalogueModelLabel(models, "opus"), "opus → Opus 5");
+    assert.equal(catalogueModelLabel(models, "haiku"), "haiku → Haiku 4.5");
+  });
+
+  it("marks an alias no turn has resolved yet", () => {
+    assert.equal(catalogueModelLabel([capability("opus")], "opus"), "opus (alias)");
+  });
+
+  it("leaves explicit and unknown models as they were", () => {
+    const models = [capability("claude-opus-5-5")];
+    assert.equal(catalogueModelLabel(models, "claude-opus-5-5"), "Opus 5.5");
+    assert.equal(catalogueModelLabel(undefined, "some-local-model"), "some-local-model");
+  });
+
+  it("lets search find an alias by the model it resolves to", () => {
+    const groups = [
+      { providerId: "claude", label: "Claude", current: true, models: [capability("opus", "claude-opus-5"), capability("claude-opus-5-5")] },
+    ];
+    const found = filterModelPickerGroups(groups, "opus 5");
+    assert.deepEqual(found[0].models.map((model) => model.id), ["opus", "claude-opus-5-5"]);
+    assert.deepEqual(filterModelPickerGroups(groups, "opus 5.5")[0].models.map((model) => model.id), ["claude-opus-5-5"]);
   });
 });

@@ -2073,6 +2073,7 @@ mod tests {
                 context_window: 200_000,
                 supports_tools: true,
                 supports_vision: true,
+                resolves_to: None,
             }]
         }
         async fn stream_turn(
@@ -2375,6 +2376,7 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: false,
                 supports_vision: false,
+                resolves_to: None,
             }]
         }
 
@@ -2428,6 +2430,7 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: true,
                 supports_vision: false,
+                resolves_to: None,
             }]
         }
 
@@ -2476,6 +2479,7 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: true,
                 supports_vision: false,
+                resolves_to: None,
             }]
         }
 

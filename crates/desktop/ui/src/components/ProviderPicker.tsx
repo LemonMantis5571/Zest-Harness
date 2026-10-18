@@ -45,7 +45,7 @@ const PARENT_CLI_DEFAULTS: Record<
     title: "Use Claude Code subscription",
     body: "Zest will use your Claude Code CLI session as the parent agent, with no delegated worker involved.",
     label: "Enable Claude Code",
-    model: "sonnet",
+    model: "claude-sonnet-5-5",
     configure: (id, model) => getBackend().configureClaudeCodeProvider({ id, model }),
   },
   codex: {

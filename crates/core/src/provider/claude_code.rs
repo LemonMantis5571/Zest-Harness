@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::claude_aliases;
 use super::claude_control::{
     control_response, decide, grant_target, initialize_request_id, initialize_response,
     prepare_approval, preview_permission, remember_session_grant, render_diff, risk_for,
@@ -38,17 +39,17 @@ use crate::tools::external_agent::{
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-/// Aliases the Claude Code CLI accepts with no configuration.
+/// The models Zest offers for Claude Code when the config names none.
+///
+/// Explicit ids only. The CLI's bare aliases (`opus`, `sonnet`, ...) were here
+/// too, but the CLI resolves them to older models (`opus` ran as
+/// `claude-opus-5`, `haiku` as Haiku 4.5), so each family appeared twice with
+/// the short name quietly meaning the previous generation. A configured alias
+/// is still honoured and labelled; see [`super::claude_aliases`].
 ///
 /// `pub(crate)` so the driver builds the picker catalogue from the same list the
-/// provider accepts. It was private, and the driver passed an empty builtin list
-/// instead: an entry with no `models` offered `[sonnet]` in the picker while the
-/// provider accepted `[sonnet, opus, haiku]`.
+/// provider accepts.
 pub(crate) const BUILTIN_MODELS: &[&str] = &[
-    "sonnet",
-    "opus",
-    "haiku",
-    "fable",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
@@ -320,7 +321,7 @@ pub(crate) fn effort_catalogue(default_model: &str, models: &[String]) -> Vec<Mo
             model.efforts.clear();
         }
     }
-    catalogue
+    claude_aliases::label(catalogue)
 }
 
 #[async_trait]
@@ -334,7 +335,17 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn models(&self) -> Vec<ModelSpec> {
-        self.models.clone()
+        // Relabelled on every read: an alias resolves during the first turn
+        // that uses it, after this catalogue was built.
+        claude_aliases::label(self.models.clone())
+    }
+
+    fn successor_model(&self, model: &str) -> Option<String> {
+        let successor = claude_aliases::successor(model)?;
+        self.models
+            .iter()
+            .any(|spec| spec.id == successor)
+            .then(|| successor.to_string())
     }
 
     fn auth_status(&self) -> AuthStatus {
@@ -457,6 +468,14 @@ impl Provider for ClaudeCodeProvider {
         // likely explanation for a failure than for a success.
         report_stream_health(&normalizer, &outcome);
         let run = outcome?;
+
+        // What an alias ran as is known from `system:init`, whatever became of
+        // the turn after it.
+        if claude_aliases::is_alias(&req.model) {
+            if let Some(model) = normalizer.model() {
+                claude_aliases::record(&req.model, model);
+            }
+        }
 
         if req
             .cancel
@@ -830,13 +849,57 @@ mod tests {
     }
 
     #[test]
-    fn default_model_and_aliases_are_available() {
+    fn the_builtin_catalogue_is_explicit_models_only() {
         let provider = provider(ClaudeCodePermissionMode::AcceptEdits);
+        let ids: Vec<String> = provider
+            .models()
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
 
-        assert_eq!(provider.default_model(), "sonnet");
-        assert!(provider.models().iter().any(|model| model.id == "opus"));
-        assert!(provider.models().iter().any(|model| model.id == "fable"));
+        assert_eq!(provider.default_model(), "claude-sonnet-5-5");
+        assert_eq!(
+            ids,
+            [
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+                "claude-fable-5-1",
+            ]
+        );
         assert!(provider.owns_agent_loop());
+    }
+
+    /// An alias is no longer offered, but one the config names still is, and
+    /// a remembered one finds the explicit model of its family.
+    #[test]
+    fn a_configured_alias_is_kept_and_a_dropped_one_has_a_successor() {
+        let configured = ClaudeCodeProvider::new(
+            "claude",
+            ".",
+            "claude",
+            Some("opus".into()),
+            Vec::new(),
+            false,
+            ClaudeCodePermissionMode::Auto,
+            Vec::new(),
+            900,
+        )
+        .unwrap();
+        assert!(configured.models().iter().any(|model| model.id == "opus"));
+        assert!(configured.validate_selection("opus", "high").is_ok());
+
+        let builtin = provider(ClaudeCodePermissionMode::Auto);
+        assert!(builtin.validate_selection("opus", "high").is_err());
+        assert_eq!(
+            builtin.successor_model("opus").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            builtin.successor_model("haiku").as_deref(),
+            Some("claude-haiku-5-5")
+        );
+        assert_eq!(builtin.successor_model("gpt-6-sol"), None);
     }
 
     #[test]
@@ -1024,13 +1087,18 @@ mod tests {
     /// The picker must not offer a control the model rejects.
     #[test]
     fn the_catalogue_offers_effort_only_where_the_cli_takes_it() {
-        let provider = provider(ClaudeCodePermissionMode::Auto);
+        // Aliases are no longer built in, but a config can still list them.
+        let configured: Vec<String> = ["sonnet", "opus", "haiku"]
+            .into_iter()
+            .chain(BUILTIN_MODELS.iter().copied())
+            .map(str::to_string)
+            .collect();
+        let catalogue = effort_catalogue(DEFAULT_CLAUDE_CODE_MODEL, &configured);
         let efforts = |id: &str| {
-            provider
-                .models()
-                .into_iter()
+            catalogue
+                .iter()
                 .find(|model| model.id == id)
-                .map(|model| model.efforts)
+                .map(|model| model.efforts.clone())
                 .expect(id)
         };
 

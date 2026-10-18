@@ -325,10 +325,24 @@ impl RuntimeBuilder {
         // A remembered model that this provider cannot serve is discarded here,
         // before it can reach validation and make the provider unreachable.
         // Cross-provider bleed is the usual cause: a Codex model left in a
-        // Claude slot by an old single-provider preference file.
+        // Claude slot by an old single-provider preference file. One the
+        // provider stopped listing moves to its successor first, so a saved
+        // `opus` stays an Opus rather than falling back to the default.
+        let offers = |model: &str| {
+            provider.validate_selection(model, "high").is_ok()
+                || provider.models().iter().any(|spec| spec.id == model)
+        };
+        let remembered_model = remembered_model.map(|m| {
+            if offers(&m) {
+                return m;
+            }
+            provider
+                .successor_model(&m)
+                .filter(|next| offers(next))
+                .unwrap_or(m)
+        });
         let remembered_model = remembered_model.filter(|m| {
-            let ok = provider.validate_selection(m, "high").is_ok()
-                || provider.models().iter().any(|spec| spec.id == *m);
+            let ok = offers(m);
             if !ok {
                 warnings.push(format!(
                     "ignored remembered model `{m}`: provider `{provider_id}` does not offer it"
@@ -1319,6 +1333,71 @@ model = "gpt-a"
             .register_exec_tools(false)
             .build();
         assert!(explicit.is_err(), "explicit effort must not be swallowed");
+    }
+
+    fn claude_code_config(model_line: &str) -> Config {
+        Config::parse(&format!(
+            r#"
+[providers.claude]
+kind = "claude_code"
+{model_line}
+
+[default]
+provider = "claude"
+"#
+        ))
+        .unwrap()
+    }
+
+    /// Zest stopped listing Claude Code's bare aliases. A chat that remembered
+    /// `opus` must stay on an Opus, not drop to the Sonnet default.
+    #[test]
+    fn a_remembered_alias_moves_to_its_explicit_successor() {
+        let dir = scratch("remembered-alias");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(""))
+            .with_provider("claude")
+            .with_remembered_options(Some("opus".into()), None)
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "claude-opus-5-5");
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
+    }
+
+    /// An alias the user configured is still on offer, so it is kept as is.
+    #[test]
+    fn a_remembered_alias_the_config_names_is_kept() {
+        let dir = scratch("configured-alias");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(r#"model = "opus""#))
+            .with_provider("claude")
+            .with_remembered_options(Some("opus".into()), None)
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "opus");
+    }
+
+    #[test]
+    fn a_new_claude_code_chat_defaults_to_sonnet_5_5() {
+        let dir = scratch("claude-code-default");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(""))
+            .with_provider("claude")
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "claude-sonnet-5-5");
     }
 
     #[test]

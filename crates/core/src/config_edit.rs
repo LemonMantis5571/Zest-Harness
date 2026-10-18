@@ -97,7 +97,13 @@ pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<Exter
 /// this small catalogue.
 pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
     match id {
-        "claude" => &["sonnet", "opus", "claude-haiku-5-5", "claude-fable-5-1"],
+        // Explicit ids: the CLI's bare aliases run the previous generation.
+        "claude" => &[
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+        ],
         "gemini" => &[
             "auto",
             "gemini-3-pro-preview",

@@ -19,7 +19,8 @@ use serde::Deserialize;
 use crate::error::{HarnessError, Result};
 
 pub const CONFIG_FILE: &str = "zest.toml";
-pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "sonnet";
+/// Explicit, not the CLI's `sonnet` alias, which runs an older Sonnet.
+pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "claude-sonnet-5-5";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 
 /// Safe starter config embedded in every build. It contains provider metadata,

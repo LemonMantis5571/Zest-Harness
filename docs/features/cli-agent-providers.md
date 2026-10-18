@@ -2,6 +2,7 @@
 title: CLI agent providers
 summary: Use Claude Code, the Codex CLI, or Cursor as the main chat provider, with their own sign-in and agent loop and Zest's approval cards.
 paths:
+  - crates/core/src/provider/claude_aliases.rs
   - crates/core/src/provider/claude_code.rs
   - crates/core/src/provider/claude_control.rs
   - crates/core/src/provider/claude_stream.rs
@@ -14,6 +15,7 @@ paths:
   - scripts/acp-probe.mjs
   - scripts/acp-timing-report.mjs
 verify:
+  - cargo test -p zest-core --lib provider::claude_aliases
   - cargo test -p zest-core --lib provider::claude_code
   - cargo test -p zest-core --lib provider::claude_control
   - cargo test -p zest-core --lib provider::claude_stream
@@ -43,6 +45,18 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   is sent for explicit Haiku 5.5 as well as the larger models, but not legacy
   Haiku ids or the deployment-dependent `haiku` alias. A stored session is resumed with `--resume` only if
   it was created for the same model; `/btw` side turns use `--fork-session`.
+- Claude Code models: with no `models` in the config, Zest offers only explicit
+  ids (`BUILTIN_MODELS`: Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1) and the
+  default is `claude-sonnet-5-5`. The CLI's bare aliases (`opus`, `sonnet`,
+  `haiku`, `fable`) are no longer offered: the CLI resolves them to older
+  models (on 2.1.220, `opus` ran as `claude-opus-5` and `haiku` as Haiku 4.5).
+  An alias the config names is still offered and accepted. The model it ran
+  as is read from `system:init` (`ClaudeNormalizer::model`), saved by
+  `claude_aliases` to `<data dir>/zest/claude-code-aliases.json`, and sent as
+  `ModelSpec.resolves_to` so the picker reads "opus → Opus 5". A remembered
+  alias the catalogue no longer lists moves to its explicit successor
+  (`Provider::successor_model`) instead of to the default. "Enable Claude
+  Code" writes no `models` list, so the built-in catalogue applies.
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
 - Codex CLI (`codex_app_server`): JSON-RPC over `codex app-server --listen
@@ -117,9 +131,10 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   camelCase.
 - Cursor's `toolCallId` contains a newline; approval ids are Zest-minted instead.
 - `CodexAppServerProvider::discover_models` has no caller today.
-- Explicit current Claude ids need a sufficiently new Claude Code client:
-  Opus 5.5 requires 2.1.280, Sonnet 5.5 requires 2.1.284 and Haiku 5.5
-  requires 2.1.293. See the official [model configuration](https://code.claude.com/docs/en/model-config).
+- Some explicit Claude ids need a newer Claude Code client, and the API says
+  so in the turn's error. Checked on 2026-10-17 with 2.1.220: Sonnet 5.5 and
+  Haiku 5.5 ran; Opus 5.5 was refused ("2.1.280 or newer is required") and
+  so was Fable 5.1 (2.1.251). See the official [model configuration](https://code.claude.com/docs/en/model-config).
 - Cursor choices stay account-specific. Zest does not add API-only GPT ids to
   Cursor when `cursor-agent models` does not offer them. See Cursor's
   [model discovery command](https://cursor.com/docs/cli/reference/parameters).

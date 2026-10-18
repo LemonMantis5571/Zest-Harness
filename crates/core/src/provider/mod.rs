@@ -11,6 +11,7 @@
 //! anything above noticing.
 
 pub mod anthropic;
+pub mod claude_aliases;
 pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod claude_stream;
@@ -92,6 +93,10 @@ pub struct ModelSpec {
     /// Whether the catalogue explicitly opts into image input.
     #[serde(default)]
     pub supports_vision: bool,
+    /// For an alias whose meaning the provider decides, such as Claude Code's
+    /// `opus`: the model it last ran as, once a turn has shown it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves_to: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -182,6 +187,7 @@ fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
         efforts,
         supports_tools: true,
         supports_vision,
+        resolves_to: None,
     }
 }
 
@@ -859,6 +865,15 @@ pub trait Provider: Send + Sync {
     /// Reject unknown model / effort pairs before a turn spends quota.
     fn validate_selection(&self, model: &str, effort: &str) -> std::result::Result<(), String> {
         validate_against(&self.models(), self.id(), model, effort)
+    }
+
+    /// The model this provider offers in place of one it no longer lists.
+    ///
+    /// Consulted only for a *remembered* choice, so a model dropped from the
+    /// catalogue moves to its successor instead of to the provider default,
+    /// which may be a different family. Default: none.
+    fn successor_model(&self, _model: &str) -> Option<String> {
+        None
     }
 
     /// Whether this provider can be used right now. Rendered by the launch
