@@ -48,8 +48,10 @@ verify:
 - `job_list`, `job_output` (offset, optional wait up to 30 s), and `job_kill`
   (Exec risk) only see jobs owned by the calling chat's thread id.
 - When a job finishes, the desktop injects a notice into the owning chat
-  (live turn, idle session, or the saved thread on disk) and shows a
-  "Background job finished" attention toast.
+  (live turn, idle session, or the saved thread on disk). The user hears of it
+  only when they need to (see [notifications](notifications.md)): a `failed`
+  job toasts "Background job failed", and any other ending sends an OS
+  notification only while Zest is not focused.
 - `[tools.bash] enabled = false` removes `bash` but keeps the job tools.
 
 ## How it works

@@ -51,8 +51,20 @@ async function notificationPermission() {
   return permissionPromise;
 }
 
-/** Send an OS notification when Zest is not the active window. */
-export async function notifyWhenAway(title: string, body: string) {
+/**
+ * Send an OS notification when Zest is not the active window.
+ *
+ * `onClick` runs when the notification is clicked, where the platform reports
+ * that. The Web Notification API does. The Tauri notification plugin does not
+ * on desktop: it shows only title, body, icon and sound, and its `onAction`
+ * listener is mobile-only, so in the desktop app a click just raises the
+ * window (where the OS does so) without opening the chat.
+ */
+export async function notifyWhenAway(
+  title: string,
+  body: string,
+  onClick?: () => void
+) {
   if (await isWindowActuallyActive()) return false;
   if (!(await notificationPermission())) return false;
 
@@ -60,7 +72,14 @@ export async function notifyWhenAway(title: string, body: string) {
     if (isTauri()) {
       await sendNotification({ title, body });
     } else {
-      new Notification(title, { body });
+      const notification = new Notification(title, { body });
+      if (onClick) {
+        notification.onclick = () => {
+          window.focus();
+          notification.close();
+          onClick();
+        };
+      }
     }
     return true;
   } catch {

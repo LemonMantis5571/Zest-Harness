@@ -254,7 +254,7 @@ function subagentMessages(): ChatMessage[] {
 }
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status" | "subagents";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status" | "subagents" | "background-approval";
 
 /**
  * `?scenario=sidebar-status`: a chat in every state the status-grouped sidebar
@@ -287,7 +287,7 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
     value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" ||
-    value === "sidebar-status" || value === "subagents"
+    value === "sidebar-status" || value === "subagents" || value === "background-approval"
     ? value
     : undefined;
 }
@@ -784,6 +784,33 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       text: text.trim() || "(attachment)",
     });
     chatHandler({ kind: "done", ...id, message_id: assistantId });
+    if (scenario === "background-approval") emitBackgroundApproval();
+  }
+
+  /** A turn in the seeded "Free chat", not the open chat, stops for approval. */
+  function emitBackgroundApproval() {
+    if (!chatHandler) return;
+    const { turnId, assistantId } = fixtureIds();
+    const id = {
+      session_id: "fixture-free-session",
+      thread_id: "fixture-free",
+      turn_id: turnId,
+    };
+    const toolId = `tool-${crypto.randomUUID()}`;
+    chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    chatHandler({ kind: "tool_call_start", ...id, message_id: assistantId, name: "fixture_tool", id: toolId });
+    chatHandler({
+      kind: "approval_needed",
+      ...id,
+      message_id: assistantId,
+      approval_id: `approval-${crypto.randomUUID()}`,
+      tool_name: "fixture_tool",
+      tool_call_id: toolId,
+      risk: "exec",
+      path: "fixture_tool",
+      summary: "Run the fixture tool in the background chat",
+      diff: "{}",
+    });
   }
 
   /**

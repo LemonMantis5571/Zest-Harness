@@ -973,7 +973,7 @@ function WorkbenchBody({
                           type="button"
                           variant="ghost"
                           size="icon-xs"
-                          title={`Rewind to ${checkpoint.label}`}
+                          title={`Rewind to ${checkpoint.label}. Your files are not changed.`}
                           aria-label={`Rewind to ${checkpoint.label}`}
                           disabled={sending || busyAction !== null}
                           onClick={() => void runRewind(checkpoint.id)}
