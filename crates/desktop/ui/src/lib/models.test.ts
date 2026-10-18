@@ -4,6 +4,8 @@ import { describe, it } from "node:test";
 import {
   CODEX_MODELS,
   catalogueModelLabel,
+  cliRequirementDetail,
+  cliRequirementLabel,
   effortsForModel,
   filterModelPickerGroups,
   formatContextWindow,
@@ -209,6 +211,38 @@ describe("catalogueModelLabel", () => {
     const found = filterModelPickerGroups(groups, "opus 5");
     assert.deepEqual(found[0].models.map((model) => model.id), ["opus", "claude-opus-5-5"]);
     assert.deepEqual(filterModelPickerGroups(groups, "opus 5.5")[0].models.map((model) => model.id), ["claude-opus-5-5"]);
+  });
+});
+
+describe("models the installed CLI is too old for", () => {
+  const opus: ModelCapability = {
+    id: "claude-opus-5-5",
+    efforts: ["low", "high"],
+    contextWindow: 1_000_000,
+    supportsTools: true,
+    supportsVision: false,
+    needsCli: { cli: "Claude Code", minimum: "2.1.280", installed: "2.1.220", update: "claude update" },
+  };
+  const sonnet: ModelCapability = { ...opus, id: "claude-sonnet-5-5", needsCli: undefined };
+
+  it("says which CLI version a marked model needs and how to get it", () => {
+    assert.equal(cliRequirementLabel(opus), "Needs Claude Code 2.1.280+ · run claude update");
+    assert.equal(
+      cliRequirementDetail(opus),
+      "Claude Code 2.1.220 is installed. This model needs 2.1.280 or newer, so its turns may be refused. Run claude update, then restart Zest."
+    );
+  });
+
+  it("says nothing about a model with no known requirement", () => {
+    assert.equal(cliRequirementLabel(sonnet), null);
+    assert.equal(cliRequirementDetail(sonnet), null);
+    assert.equal(cliRequirementLabel(undefined), null);
+  });
+
+  it("keeps a marked model selectable and searchable", () => {
+    const groups = [{ providerId: "claude", label: "Claude Code", current: true, models: [opus, sonnet] }];
+    assert.deepEqual(filterModelPickerGroups(groups, "opus")[0].models.map((model) => model.id), ["claude-opus-5-5"]);
+    assert.deepEqual(effortsForModel(groups[0].models, "claude-opus-5-5").map((effort) => effort.id), ["low", "high"]);
   });
 });
 

@@ -272,14 +272,20 @@ struct ClaudeCodeDriver;
 
 impl ClaudeCodeDriver {
     fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
-        let ProviderConfig::ClaudeCode { model, models, .. } = config else {
+        let ProviderConfig::ClaudeCode {
+            command,
+            model,
+            models,
+            ..
+        } = config
+        else {
             unreachable!("driver_for routes only ClaudeCode entries here");
         };
         let default_model = model
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_CODE_MODEL.to_string());
-        let catalogue = super::claude_code::effort_catalogue(&default_model, models);
+        let catalogue = super::claude_code::picker_catalogue(&default_model, models, command);
         (default_model, catalogue)
     }
 }

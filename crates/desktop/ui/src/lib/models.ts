@@ -1,3 +1,5 @@
+import type { CliRequirementView } from "./generated/CliRequirement.ts";
+
 export type EffortId = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ModelOption = {
@@ -69,7 +71,11 @@ export type ModelCapability = {
   supportsVision: boolean;
   /** For an alias the provider resolves, such as Claude Code's `opus`: what it last ran as. */
   resolvesTo?: string;
+  /** Set when the installed vendor CLI is known to be too old for this model. */
+  needsCli?: CliRequirement;
 };
+
+export type CliRequirement = CliRequirementView;
 
 export function capabilityForModel(
   models: ModelCapability[] | undefined,
@@ -102,6 +108,26 @@ export function catalogueModelLabel(
 ): string {
   const resolvesTo = models?.find((item) => item.id === modelId)?.resolvesTo;
   return resolvesTo ? `${modelId} → ${modelLabel(resolvesTo)}` : modelLabel(modelId);
+}
+
+/**
+ * The short mark on a model the installed CLI is too old for:
+ * "Needs Claude Code 2.1.280+ · run claude update". Null when nothing is known
+ * against it.
+ */
+export function cliRequirementLabel(model: Pick<ModelCapability, "needsCli"> | undefined): string | null {
+  const needs = model?.needsCli;
+  return needs ? `Needs ${needs.cli} ${needs.minimum}+ · run ${needs.update}` : null;
+}
+
+/**
+ * The longer explanation. The model stays selectable because the version check
+ * can be wrong; if it is right, the API's own refusal reaches the chat.
+ */
+export function cliRequirementDetail(model: Pick<ModelCapability, "needsCli"> | undefined): string | null {
+  const needs = model?.needsCli;
+  if (!needs) return null;
+  return `${needs.cli} ${needs.installed} is installed. This model needs ${needs.minimum} or newer, so its turns may be refused. Run ${needs.update}, then restart Zest.`;
 }
 
 export function effortLabel(effortId: string): string {

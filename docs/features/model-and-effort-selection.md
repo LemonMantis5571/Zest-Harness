@@ -23,11 +23,13 @@ tests:
   - crates/desktop/ui/e2e/model-picker-search.spec.ts
   - crates/desktop/ui/e2e/picker-keyboard.spec.ts
   - crates/desktop/ui/e2e/model-picker-providers.spec.ts
+  - crates/desktop/ui/e2e/model-picker-cli-version.spec.ts
 verify:
   - npm run ui:test
   - npm run ui:e2e -- model-picker
   - npm run ui:e2e -- picker-keyboard
   - npm run ui:e2e -- model-picker-providers
+  - npm run ui:e2e -- model-picker-cli-version
   - cargo test -p zest-core --lib prefs::tests
   - cargo test -p zest-core --lib remembered
   - cargo test -p zest-core --lib provider::tests
@@ -70,6 +72,13 @@ provider drivers in [provider-runtime](provider-runtime.md).
   `opus`, once a turn has run it) is labelled "opus → Opus 5" in the list,
   the trigger and the composer chip (`catalogueModelLabel`); an unresolved
   alias reads "opus (alias)". Search matches either label.
+- A model with `needsCli` (the installed vendor CLI is known to be too old for
+  it, such as Opus 5.5 on Claude Code 2.1.220) shows "Needs Claude Code
+  2.1.280+ · run claude update" in its row (`cliRequirementLabel`). It is
+  warned, not disabled, since the version check can be wrong. Once selected,
+  the panel header adds a note with the installed version
+  (`cliRequirementDetail`) and the trigger shows a warning icon and says so in
+  its accessible name.
 - Picking a model in another provider's group switches provider
   (`onSwitchProvider(providerId, model)`), with the same thread/copy rules as the
   provider sheet.
@@ -123,12 +132,15 @@ provider drivers in [provider-runtime](provider-runtime.md).
 
 - Fixture scenarios: `/?fixture=1&scenario=options-delayed` (slow saves),
   `options-failing` (first save fails), `model-catalogue` (long catalogue,
-  several providers, a no-effort model).
+  several providers, a no-effort model), `claude-cli-outdated` (a Claude Code
+  session whose CLI is too old for Opus 5.5 and Fable 5.1).
 - `model-picker.spec.ts`: pending lock, rollback, dismiss during save, reset.
   The pending-lock check controls the fixture clock so the save cannot finish
   before every disabled control is inspected, then advances it to check persistence.
   `model-picker-search.spec.ts`: search, capabilities, long catalogue at 1280 and
   720 px. `picker-keyboard.spec.ts`: keyboard paths and focus restoration.
+  `model-picker-cli-version.spec.ts`: marks for an old Claude Code CLI, and
+  picking a marked model.
 
 ## Pitfalls
 

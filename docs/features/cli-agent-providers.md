@@ -3,6 +3,7 @@ title: CLI agent providers
 summary: Use Claude Code, the Codex CLI, or Cursor as the main chat provider, with their own sign-in and agent loop and Zest's approval cards.
 paths:
   - crates/core/src/provider/claude_aliases.rs
+  - crates/core/src/provider/claude_cli_version.rs
   - crates/core/src/provider/claude_code.rs
   - crates/core/src/provider/claude_control.rs
   - crates/core/src/provider/claude_stream.rs
@@ -16,6 +17,7 @@ paths:
   - scripts/acp-timing-report.mjs
 verify:
   - cargo test -p zest-core --lib provider::claude_aliases
+  - cargo test -p zest-core --lib provider::claude_cli_version
   - cargo test -p zest-core --lib provider::claude_code
   - cargo test -p zest-core --lib provider::claude_control
   - cargo test -p zest-core --lib provider::claude_stream
@@ -64,6 +66,16 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   alias the catalogue no longer lists moves to its explicit successor
   (`Provider::successor_model`) instead of to the default. "Enable Claude
   Code" writes no `models` list, so the built-in catalogue applies.
+- Claude Code CLI version: an explicit model the installed CLI is too old for
+  is marked in the catalogue (`ModelSpec.needs_cli`: CLI name, minimum,
+  installed version, `claude update`) and stays selectable; if the turn is
+  refused anyway, the API's error reaches the chat as before. Minimums are
+  `MIN_CLI_VERSIONS` beside `BUILTIN_MODELS` (Opus 5.5 2.1.280, Fable 5.1
+  2.1.251); a model not listed there, an alias, or an unknown CLI version is
+  never marked. `claude_cli_version` runs `claude --version` (offline, no
+  quota) once per process per configured command: `ClaudeCodeProvider::new`
+  starts it in the background, and `models()` and the driver's `descriptor()`
+  wait for it (8 s bound). Unit tests never spawn it; they `seed` a version.
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
 - Codex CLI (`codex_app_server`): JSON-RPC over `codex app-server --listen
@@ -141,7 +153,13 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
 - Some explicit Claude ids need a newer Claude Code client, and the API says
   so in the turn's error. Checked on 2026-10-17 with 2.1.220: Sonnet 5.5 and
   Haiku 5.5 ran; Opus 5.5 was refused ("2.1.280 or newer is required") and
-  so was Fable 5.1 (2.1.251). See the official [model configuration](https://code.claude.com/docs/en/model-config).
+  so was Fable 5.1 (2.1.251). The official [model configuration](https://code.claude.com/docs/en/model-config)
+  page names later releases (Sonnet 5.5 2.1.284, Haiku 5.5 2.1.293, Fable 5.1
+  2.1.257), which the API did not enforce on 2.1.220. `MIN_CLI_VERSIONS` follows
+  the API's refusals, so Sonnet and Haiku are not marked.
+- `claude --version` takes about a second on Windows, which is why it runs in
+  the background and is cached. The cache lasts for the process: after
+  `claude update`, the mark stays until Zest restarts.
 - Cursor choices stay account-specific. Zest does not add API-only GPT ids to
   Cursor when `cursor-agent models` does not offer them. See Cursor's
   [model discovery command](https://cursor.com/docs/cli/reference/parameters).

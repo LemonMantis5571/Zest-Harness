@@ -476,6 +476,11 @@ struct ModelCapability {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     resolves_to: Option<String>,
+    /// Set when the installed vendor CLI is known to be too old for this model.
+    /// The model is still selectable; the picker marks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    needs_cli: Option<CliRequirementView>,
 }
 
 impl From<zest_core::ModelSpec> for ModelCapability {
@@ -487,6 +492,37 @@ impl From<zest_core::ModelSpec> for ModelCapability {
             supports_tools: spec.supports_tools,
             supports_vision: spec.supports_vision,
             resolves_to: spec.resolves_to,
+            needs_cli: spec.needs_cli.map(CliRequirementView::from),
+        }
+    }
+}
+
+/// Desktop wire view of core `CliRequirement`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "CliRequirement.ts", rename_all = "camelCase")
+)]
+struct CliRequirementView {
+    /// The CLI's display name, such as "Claude Code".
+    cli: String,
+    /// The oldest version that runs the model.
+    minimum: String,
+    /// The version installed now.
+    installed: String,
+    /// The command that updates the CLI, such as `claude update`.
+    update: String,
+}
+
+impl From<zest_core::CliRequirement> for CliRequirementView {
+    fn from(requirement: zest_core::CliRequirement) -> Self {
+        Self {
+            cli: requirement.cli,
+            minimum: requirement.minimum,
+            installed: requirement.installed,
+            update: requirement.update,
         }
     }
 }
