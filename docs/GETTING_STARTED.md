@@ -7,8 +7,9 @@ delegate.
 ## Install and open a project
 
 Download the package for your platform from [GitHub Releases](https://github.com/LemonMantis5571/Zest-Harness/releases).
-Windows x64 installers and Linux x64 packages are available in beta. See the
-[platform table](../README.md#platforms) for source-only platforms and limitations.
+Windows x64 installers and Linux x64 packages are available as stable
+releases. See the [platform table](../README.md#platforms) for source-only
+platforms and limitations.
 
 Launch Zest. On **Choose a provider**, use **Open** beside **Project folder
 (optional)** to choose a repository. A chat without a folder is also supported;

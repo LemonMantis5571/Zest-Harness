@@ -6897,7 +6897,7 @@ dependencies = [
 
 [[package]]
 name = "zest"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6914,7 +6914,7 @@ dependencies = [
 
 [[package]]
 name = "zest-coordinator"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "libc",
@@ -6929,7 +6929,7 @@ dependencies = [
 
 [[package]]
 name = "zest-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6959,7 +6959,7 @@ dependencies = [
 
 [[package]]
 name = "zest-desktop"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6986,7 +6986,7 @@ dependencies = [
 
 [[package]]
 name = "zest-now-playing-plugin"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -6997,14 +6997,14 @@ dependencies = [
 
 [[package]]
 name = "zest-plugin-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "zest-wallpaper-plugin"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "image",
  "serde",

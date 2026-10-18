@@ -6,14 +6,14 @@
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/windows-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/windows-verify.yml)
 [![Linux verify](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/linux-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest-Harness/actions/workflows/linux-verify.yml)
-[![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest-Harness?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest-Harness/releases)
+[![Latest stable release](https://img.shields.io/github/v/release/LemonMantis5571/Zest-Harness?label=latest%20stable)](https://github.com/LemonMantis5571/Zest-Harness/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **A local-first coding workspace for your preferred AI providers.**
 
 Work on a repository, review changes, and delegate scoped tasks to separate workers when you need them.
 
-[Install the beta](https://github.com/LemonMantis5571/Zest-Harness/releases) · [Build from source](#build-from-source) · [Docs](#docs)
+[Download Zest](https://github.com/LemonMantis5571/Zest-Harness/releases) · [Build from source](#build-from-source) · [Docs](#docs)
 
 <img src="./docs/images/first-task.png" alt="Zest showing a completed conversation beside the branch diff" width="880" />
 
@@ -21,7 +21,7 @@ Work on a repository, review changes, and delegate scoped tasks to separate work
 
 </div>
 
-## Install the beta
+## Install Zest
 
 Packages live on [GitHub Releases](https://github.com/LemonMantis5571/Zest-Harness/releases).
 
@@ -102,8 +102,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pinned toolchain, Linux package
 
 | Platform | Status |
 | --- | --- |
-| Windows 10/11 x64 | Beta installer and CI-verified |
-| Linux x64 | Beta packages and CI-verified |
+| Windows 10/11 x64 | Installer and CI-verified |
+| Linux x64 | Packages and CI-verified |
 | Windows/Linux ARM64 | Source builds only |
 | macOS | Source paths exist; CI and installers are not available yet |
 

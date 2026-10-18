@@ -58,7 +58,7 @@ verify:
 - `npm run desktop:smoke` is opt-in (`ZEST_DESKTOP_SMOKE=1`): it starts `target/debug/zest-desktop` (or `ZEST_DESKTOP_PROFILE=release`, or `ZEST_DESKTOP_BINARY`), expects it alive after 4 s and responding on Windows, then kills it. It skips without the variable or binary and is in no gate.
 
 ## Release
-- Tags `v*` drive `.github/workflows/release.yml` (see `docs/RELEASING.md`). `check-release-version.mjs <tag>` requires that the tag, `Cargo.toml` `version`, and `crates/desktop/tauri.conf.json` `version` match semver.
+- Tags `v*` drive `.github/workflows/release.yml` (see `docs/RELEASING.md`). `check-release-version.mjs <tag>` requires that the tag, `Cargo.toml` `version`, and `crates/desktop/tauri.conf.json` `version` match semver. Plain SemVer tags create stable GitHub Releases; tags with a prerelease suffix add `--prerelease`. The workflow publishes only after platform verification and all package jobs pass.
 - `release-checksums.mjs --root <dir> --out <file>` writes `sha256  name` lines for `.msi .exe .deb .rpm .appimage .dmg` and a bare `zest` binary. It fails when nothing is found or two artifacts share a basename. `release-checksums.ps1` wraps it for `target/release/bundle`.
 - `build-signed.ps1 [-Thumbprint X] [-VerifyOnly]` checks that the certificate exists and has not expired, writes the ignored overlay `crates/desktop/tauri.signing.conf.json` (sha256, DigiCert timestamp), builds through `npm run build -- --config tauri.signing.conf.json`, then runs `signtool verify /pa` on every `.exe` and `.msi`. It never handles a private key.
 - `make-installer-art.ps1` regenerates the 24-bit WiX/NSIS BMPs in `crates/desktop/installer/` from `icons/zest-icon-512.png`.
