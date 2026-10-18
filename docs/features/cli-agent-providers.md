@@ -64,7 +64,9 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   `claude_aliases` to `<data dir>/zest/claude-code-aliases.json`, and sent as
   `ModelSpec.resolves_to` so the picker reads "opus → Opus 5". A remembered
   alias the catalogue no longer lists moves to its explicit successor
-  (`Provider::successor_model`) instead of to the default. "Enable Claude
+  (`Provider::successor_model`) instead of to the default. The same migration
+  applies to an alias in `[default].model`; aliases explicitly offered by the
+  provider configuration are kept. "Enable Claude
   Code" writes no `models` list, so the built-in catalogue applies.
 - Claude Code CLI version: an explicit model the installed CLI is too old for
   is marked in the catalogue (`ModelSpec.needs_cli`: CLI name, minimum,
@@ -72,10 +74,24 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   refused anyway, the API's error reaches the chat as before. Minimums are
   `MIN_CLI_VERSIONS` beside `BUILTIN_MODELS` (Opus 5.5 2.1.280, Fable 5.1
   2.1.251); a model not listed there, an alias, or an unknown CLI version is
-  never marked. `claude_cli_version` runs `claude --version` (offline, no
-  quota) once per process per configured command: `ClaudeCodeProvider::new`
-  starts it in the background, and `models()` and the driver's `descriptor()`
-  wait for it (8 s bound). Unit tests never spawn it; they `seed` a version.
+  never marked. Passive discovery never executes the configured command,
+  including bare `claude`, and never reads CLI-version environment overrides.
+  Only the exact bare default command `claude` is discovered, using absolute
+  entries in the parent process's PATH (and its extension order on Windows).
+  An empty or relative entry before the selected absolute candidate makes the
+  version unknown without inspecting the current directory; later entries do not
+  affect an already selected candidate. The first matching
+  candidate decides the result: an opaque wrapper stays unknown even if a later
+  PATH entry has readable metadata. Canonical npm `cli.js` links and an exact
+  supported npm Windows `.cmd` launcher template (LF or CRLF) use a
+  bounded regular `package.json` whose name is `@anthropic-ai/claude-code` and
+  whose version is an exact release. Shell wrappers, altered launchers, and
+  comments merely mentioning that package stay unknown; arbitrary shell syntax
+  is not parsed. Evident native `claude/versions` layouts
+  can supply the version from their canonical path. Windows standalone executables
+  also use bounded version resources, requiring ProductName `Claude Code` and a
+  valid fixed file-version record. Custom commands and explicit paths remain
+  unknown. Unit fixtures can still `seed` a version to exercise the warning contract.
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
 - Codex CLI (`codex_app_server`): JSON-RPC over `codex app-server --listen
@@ -131,6 +147,14 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
 ## Verify
 
 - Unit tests above use recorded shapes and fake hosts; no CLI needed.
+- `provider::claude_cli_version` exercises the production metadata lookup with
+  disposable npm/native-layout files and rejects malformed or oversized metadata,
+  earlier empty/relative PATH entries, misleading wrapper comments, and altered
+  npm launchers. Its Windows-only ignored
+  `installed_windows_resource_metadata` test accepts an absolute executable path
+  in `ZEST_TEST_CLAUDE_EXE` and an expected exact release in
+  `ZEST_TEST_CLAUDE_VERSION`. It reads that file's actual resources without
+  executing it; this separate host check is not CI coverage of every installer.
 - Live (spends account usage): `live_claude_code_session_survives_a_second_turn`
   and `live_cursor_latency` are ignored tests, e.g.
   `cargo test -p zest-core live_cursor_latency --lib -- --ignored --nocapture`.
@@ -157,9 +181,17 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   page names later releases (Sonnet 5.5 2.1.284, Haiku 5.5 2.1.293, Fable 5.1
   2.1.257), which the API did not enforce on 2.1.220. `MIN_CLI_VERSIONS` follows
   the API's refusals, so Sonnet and Haiku are not marked.
-- `claude --version` takes about a second on Windows, which is why it runs in
-  the background and is cached. The cache lasts for the process: after
-  `claude update`, the mark stays until Zest restarts.
+- The former automatic `--version` probe was removed. Project commands are
+  untrusted during passive metadata discovery, and waiting for a wrapper's
+  exit did not bound stdout collection when a descendant retained the pipe.
+  There are now no probe children, reader threads, output joins, or inherited
+  credentials to clean up. Metadata discovery never follows arbitrary wrapper
+  instructions. Windows resources are read from an absolute canonical filename
+  with [GetFileVersionInfoW](https://learn.microsoft.com/en-us/windows/win32/api/winver/nf-winver-getfileversioninfow)
+  and [VerQueryValueW](https://learn.microsoft.com/en-us/windows/win32/api/winver/nf-winver-verqueryvaluew);
+  returned subblock ranges and lengths are checked before reading them. Metadata
+  is an advisory label, not executable authentication, and an unrecognized
+  installation stays unknown.
 - Cursor choices stay account-specific. Zest does not add API-only GPT ids to
   Cursor when `cursor-agent models` does not offer them. See Cursor's
   [model discovery command](https://cursor.com/docs/cli/reference/parameters).

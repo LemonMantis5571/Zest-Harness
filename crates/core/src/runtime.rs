@@ -357,7 +357,16 @@ impl RuntimeBuilder {
             .or_else(|| {
                 config.default_target().and_then(|t| {
                     if t.provider == provider_id {
-                        t.model.clone()
+                        t.model.map(|model| {
+                            if offers(&model) {
+                                model
+                            } else {
+                                provider
+                                    .successor_model(&model)
+                                    .filter(|next| offers(next))
+                                    .unwrap_or(model)
+                            }
+                        })
                     } else {
                         None
                     }
@@ -1347,6 +1356,20 @@ provider = "claude"
 "#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn regression_configured_default_alias_migrates_to_its_successor() {
+        let root = scratch("configured-default-alias");
+        let mut config = claude_code_config("");
+        config.default.as_mut().unwrap().model = Some("opus".into());
+        let runtime = RuntimeBuilder::new(&root)
+            .with_config(config)
+            .enable_external_agents(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert_eq!(runtime.model, "claude-opus-5-5");
     }
 
     /// Zest stopped listing Claude Code's bare aliases. A chat that remembered

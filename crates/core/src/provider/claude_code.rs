@@ -207,9 +207,6 @@ impl ClaudeCodeProvider {
         let default_model = model
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_CODE_MODEL.to_string());
-        // The first catalogue read waits for this; starting it now means the
-        // picker rarely has to.
-        claude_cli_version::warm(&command);
         let models = if models.is_empty() {
             BUILTIN_MODELS
                 .iter()
@@ -1265,7 +1262,7 @@ mod tests {
     /// Both ways a catalogue leaves core, the live provider and the config-only
     /// picker descriptor, carry the mark for the CLI the config names.
     #[test]
-    fn the_provider_and_the_picker_both_ask_the_configured_cli() {
+    fn the_provider_and_the_picker_share_passive_version_metadata() {
         let command = "zest-test-claude-2-1-220";
         claude_cli_version::seed(command, Some(CliVersion::new(2, 1, 220)));
 
