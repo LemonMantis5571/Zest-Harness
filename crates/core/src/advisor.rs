@@ -208,23 +208,6 @@ impl Advisor {
     }
 }
 
-/// Identifies the user request a conversation is on: the number of user
-/// messages that carry text rather than only tool results. It changes exactly
-/// when a new request starts, which is when per-request limits reset. Zest's
-/// own notes are not requests.
-pub fn request_index(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .filter(|message| {
-            message.role == "user"
-                && message
-                    .content
-                    .iter()
-                    .any(|block| block_type(block) == Some("text") && !is_zest_note(block))
-        })
-        .count()
-}
-
 /// Render a conversation as quoted text for a model that did not take part in
 /// it, within `budget` characters.
 ///
@@ -521,35 +504,14 @@ mod tests {
     }
 
     #[test]
-    fn zest_notes_are_labelled_and_never_start_a_new_request() {
+    fn zest_notes_are_labelled_as_harness_messages() {
         let messages = vec![
             Message::user_text("Fix it"),
             assistant(vec![json!({"type":"text","text":"Fixed."})]),
             Message::user_text(finish_review_note("Run the tests.")),
         ];
-        assert_eq!(request_index(&messages), 1);
         let out = render_transcript(&messages, 10_000);
         assert!(out.contains("### Zest\n[Zest: before you finish"), "{out}");
         assert!(out.contains("Run the tests."), "{out}");
-    }
-
-    #[test]
-    fn the_request_index_moves_only_on_a_new_user_request() {
-        let mut messages = vec![Message::user_text("first")];
-        assert_eq!(request_index(&messages), 1);
-        messages.push(assistant(vec![
-            json!({"type":"tool_use","id":"a","name":"x","input":{}}),
-        ]));
-        messages.push(Message::user_blocks(vec![
-            json!({"type":"tool_result","tool_use_id":"a","content":"ok"}),
-        ]));
-        assert_eq!(
-            request_index(&messages),
-            1,
-            "a tool result is not a new request"
-        );
-        messages.push(assistant(vec![json!({"type":"text","text":"done"})]));
-        messages.push(Message::user_text("second"));
-        assert_eq!(request_index(&messages), 2);
     }
 }

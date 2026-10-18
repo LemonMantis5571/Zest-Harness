@@ -225,7 +225,7 @@ pub enum ProviderConfig {
         /// Executable name or absolute path. No shell is involved.
         #[serde(default = "default_claude_code_command")]
         command: String,
-        /// Optional CLI-owned model alias or model id. Omitted uses 'sonnet'.
+        /// Optional CLI-owned model alias or model id. Omitted uses Sonnet 5.5.
         #[serde(default)]
         model: Option<String>,
         /// Optional allow-list for the Claude Code model picker.
@@ -738,6 +738,37 @@ pub struct AdvisorConfig {
 }
 
 impl AdvisorConfig {
+    /// Validate the complete selection without loading credentials or calling
+    /// a provider. Settings and lint use the same catalogue as the runtime.
+    pub(crate) fn validate_selection(
+        &self,
+        provider: &ProviderConfig,
+    ) -> std::result::Result<(), String> {
+        if provider.owns_agent_loop() {
+            return Err(format!("[advisor] provider `{}` runs its own agent loop and cannot advise; choose an API provider", self.provider));
+        }
+        let descriptor = crate::provider::descriptor_from_config(&self.provider, provider);
+        let model = self.model.as_deref().unwrap_or(&descriptor.default_model);
+        let spec = descriptor
+            .models
+            .iter()
+            .find(|spec| spec.id == model)
+            .ok_or_else(|| {
+                format!(
+                    "[advisor] model `{model}` is not offered by provider `{}`",
+                    self.provider
+                )
+            })?;
+        let effort = crate::provider::normalize_effort(self.effort.as_deref().unwrap_or("high"));
+        if !spec.efforts.is_empty() && !spec.efforts.contains(&effort) {
+            return Err(format!(
+                "[advisor] effort `{effort}` is not offered for model `{model}` on provider `{}`",
+                self.provider
+            ));
+        }
+        Ok(())
+    }
+
     /// Limits checked both by `Config::lint` and before the tool is registered,
     /// so a bad value is reported once and never reaches a request.
     pub fn validate_limits(&self) -> std::result::Result<(), String> {
@@ -1075,11 +1106,11 @@ impl Config {
                     "[advisor] provider points at unknown provider `{}`",
                     advisor.provider
                 )),
-                Some(provider) if provider.owns_agent_loop() => issues.push(format!(
-                    "[advisor] provider `{}` runs its own agent loop and cannot advise; choose an API provider",
-                    advisor.provider
-                )),
-                Some(_) => {}
+                Some(provider) => {
+                    if let Err(error) = advisor.validate_selection(provider) {
+                        issues.push(error);
+                    }
+                }
             }
             if let Err(error) = advisor.validate_limits() {
                 issues.push(error);
@@ -1523,6 +1554,20 @@ max_uses = 0
             config.lint()
         );
         assert!(Config::parse("[advisor]\nprovider = \"a\"\nmodle = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn advisor_lint_reports_model_and_effort_issues_for_settings() {
+        let mut config = Config::parse(
+            "[providers.strong]\nkind = \"codex_oauth\"\nmodel = \"gpt-6-sol\"\n\n[advisor]\nprovider = \"strong\"\nmodel = \"gpt-6-astra\"\neffort = \"none\"\n",
+        ).unwrap();
+        let issues = config.lint();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].starts_with("[advisor] effort `none` is not offered"));
+        config.advisor.as_mut().unwrap().effort = Some("high".into());
+        assert!(config.lint().is_empty());
+        config.advisor.as_mut().unwrap().model = Some("not-offered".into());
+        assert!(config.lint()[0].starts_with("[advisor] model `not-offered` is not offered"));
     }
 
     #[test]

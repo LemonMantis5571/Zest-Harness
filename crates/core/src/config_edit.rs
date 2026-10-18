@@ -846,9 +846,8 @@ pub struct AdvisorInput {
 
 /// Write `[advisor]`, or remove it with `None`.
 ///
-/// Refuses an advisor the runtime would only skip with a warning — an unknown
-/// provider or one that runs its own agent loop — so Settings can never save a
-/// choice that silently does nothing.
+/// Validate the provider, model, retained effort, and limits before writing so
+/// Settings cannot save a selection that the runtime would disable.
 pub fn set_advisor(path: &Path, input: Option<&AdvisorInput>) -> Result<(), String> {
     let original = read_config(path)?;
     let mut doc: DocumentMut = original
@@ -895,13 +894,7 @@ pub fn set_advisor(path: &Path, input: Option<&AdvisorInput>) -> Result<(), Stri
                     advisor.provider
                 ))
             }
-            Some(provider) if provider.owns_agent_loop() => {
-                return Err(format!(
-                    "`{}` runs its own agent loop and cannot advise. Choose an API provider.",
-                    advisor.provider
-                ))
-            }
-            Some(_) => {}
+            Some(provider) => advisor.validate_selection(provider)?,
         }
         advisor.validate_limits()?;
     }
@@ -946,6 +939,46 @@ kind = "anthropic"
 [providers.claude]
 kind = "claude_code"
 "#;
+
+    #[test]
+    fn regression_set_advisor_validates_the_model_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("zest.toml");
+        std::fs::write(&path, ADVISOR_BASE).unwrap();
+        let result = set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "deepseek".into(),
+                model: Some("not-offered".into()),
+                max_uses: 3,
+                auto_review: true,
+            }),
+        );
+        assert!(result.is_err(), "an unsupported advisor must be rejected");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ADVISOR_BASE);
+    }
+
+    #[test]
+    fn regression_set_advisor_validates_preserved_effort_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("zest.toml");
+        let original = "[providers.strong]\nkind = \"codex_oauth\"\nmodel = \"gpt-6-sol\"\n\n[advisor]\nprovider = \"strong\"\nmodel = \"gpt-6-sol\"\neffort = \"none\"\n";
+        std::fs::write(&path, original).unwrap();
+        let result = set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "strong".into(),
+                model: Some("gpt-6-astra".into()),
+                max_uses: 3,
+                auto_review: true,
+            }),
+        );
+        assert!(
+            result.is_err(),
+            "an incompatible retained effort must be rejected"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
 
     #[test]
     fn set_advisor_writes_updates_and_removes_the_section() {

@@ -600,11 +600,11 @@ impl RuntimeBuilder {
         // One instance serves both the model's tool calls and the agent's own
         // consultations, so they share one per-request budget.
         let consult_advisor = advisor.map(|advisor| {
-            Arc::new(ConsultAdvisor::new(
-                advisor,
-                &provider_id,
-                Some(ledger.clone()),
-            ))
+            let entry = &config.providers[&advisor.provider_id];
+            Arc::new(
+                ConsultAdvisor::new(advisor, &provider_id, Some(ledger.clone()))
+                    .with_approval_scope(&root, entry),
+            )
         });
         if let Some(advisor) = &consult_advisor {
             tools.register(advisor.clone());

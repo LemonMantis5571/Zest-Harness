@@ -5,13 +5,15 @@
 //! per-request limit, the ledger records, and turning failures into tool errors
 //! so the working model carries on without advice.
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::advisor::{render_transcript, request_index, Advisor, ADVISOR_TOOL};
+use crate::advisor::{render_transcript, Advisor, ADVISOR_TOOL};
 use crate::anthropic::types::Message;
+use crate::config::ProviderConfig;
 use crate::provider::{Completion, StreamEvent, TurnRequest};
 use crate::usage::{Ledger, TaskTraceGuard};
 
@@ -22,6 +24,55 @@ use super::{Tool, ToolOutcome};
 /// How much of the advice the transcript row keeps. The model gets all of it.
 const SUMMARY_CHARS: usize = 4_000;
 
+// Endpoint URLs may contain credentials. Compare them only in memory, never
+// hash or format them into the approval target, saved transcript, or ledger.
+#[derive(PartialEq, Eq)]
+struct ConsentScope {
+    workspace: PathBuf,
+    config_file: PathBuf,
+    provider: String,
+    kind: &'static str,
+    endpoint: Option<String>,
+    credential: Option<String>,
+    key_env: Option<String>,
+}
+
+fn scoped_consent_id(workspace: &Path, id: &str, entry: &ProviderConfig) -> String {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let project_config = workspace.join(crate::config::CONFIG_FILE);
+    let config_file = if project_config.is_file() {
+        project_config
+    } else {
+        crate::config::user_config_path().unwrap_or(project_config)
+    };
+    let credentials = crate::provider::driver::credentials_for(id, entry);
+    let scope = ConsentScope {
+        workspace,
+        config_file: config_file.canonicalize().unwrap_or(config_file),
+        provider: id.into(),
+        kind: crate::provider::driver::driver_for(entry).kind().0,
+        endpoint: match entry {
+            ProviderConfig::OpenaiCompatible { base_url, .. } => Some(base_url.clone()),
+            _ => None,
+        },
+        credential: credentials.account.map(str::to_owned),
+        key_env: credentials.env.map(str::to_owned),
+    };
+    static SCOPES: OnceLock<Mutex<Vec<(ConsentScope, String)>>> = OnceLock::new();
+    if let Ok(mut scopes) = SCOPES.get_or_init(Default::default).lock() {
+        if let Some((_, token)) = scopes.iter().find(|(saved, _)| saved == &scope) {
+            return token.clone();
+        }
+        let token = crate::thread::new_id("consent");
+        scopes.push((scope, token.clone()));
+        return token;
+    }
+    // A fresh identity cannot accidentally reuse an existing grant.
+    crate::thread::new_id("consent")
+}
+
 pub struct ConsultAdvisor {
     advisor: Advisor,
     /// The advisor is on a different provider than the chat, so a consultation
@@ -29,10 +80,11 @@ pub struct ConsultAdvisor {
     cross_provider: bool,
     ledger: Option<Arc<Mutex<Ledger>>>,
     description: String,
+    consent_id: String,
     /// Redacted conversation, refreshed by the agent right before each call.
     context: RwLock<Vec<Message>>,
-    /// `(request index, consultations during that request)`.
-    uses: Mutex<(usize, u32)>,
+    /// Reset once by the agent at the start of a user request.
+    uses: Mutex<u32>,
 }
 
 impl ConsultAdvisor {
@@ -56,12 +108,26 @@ impl ConsultAdvisor {
             advisor,
             ledger,
             description,
+            consent_id: crate::thread::new_id("consent"),
             context: RwLock::new(Vec::new()),
-            uses: Mutex::new((0, 0)),
+            uses: Mutex::new(0),
         }
     }
 
-    /// `provider · model`: the row label, and what an approval grant covers.
+    /// Bind session consent to the effective destination and config scope.
+    pub(crate) fn with_approval_scope(mut self, workspace: &Path, entry: &ProviderConfig) -> Self {
+        self.consent_id = scoped_consent_id(workspace, &self.advisor.provider_id, entry);
+        self
+    }
+
+    /// Only the user-request lifecycle may replenish the shared allowance.
+    pub(crate) fn begin_request(&self) {
+        if let Ok(mut uses) = self.uses.lock() {
+            *uses = 0;
+        }
+    }
+
+    /// Provider and model plus an opaque, process-local consent identity.
     pub fn approval_target(&self) -> String {
         self.target()
     }
@@ -80,34 +146,33 @@ impl ConsultAdvisor {
     /// the same per-request budget as the model's own calls. The caller checks
     /// consent first, because no approval card can be shown for it.
     pub async fn review(&self, messages: &[Message], question: &str) -> Result<String, String> {
-        self.take_use(messages)?;
+        self.take_use()?;
         let transcript = render_transcript(messages, self.advisor.transcript_budget());
         self.ask(&self.advisor.review_request(&transcript, question))
             .await
     }
 
     fn target(&self) -> String {
-        format!("{} · {}", self.advisor.provider_id, self.advisor.model)
+        format!(
+            "{} · {} · {}",
+            self.advisor.provider_id, self.advisor.model, self.consent_id
+        )
     }
 
     /// Count this consultation against the current request, or refuse it.
-    fn take_use(&self, messages: &[Message]) -> Result<(), String> {
-        let index = request_index(messages);
+    fn take_use(&self) -> Result<(), String> {
         let mut uses = self
             .uses
             .lock()
             .map_err(|_| "the advisor is unavailable".to_string())?;
-        if uses.0 != index {
-            *uses = (index, 0);
-        }
-        if uses.1 >= self.advisor.max_uses {
+        if *uses >= self.advisor.max_uses {
             return Err(format!(
                 "The advisor has already been consulted {} time{} for this request. Continue with what you have.",
                 self.advisor.max_uses,
                 if self.advisor.max_uses == 1 { "" } else { "s" }
             ));
         }
-        uses.1 += 1;
+        *uses += 1;
         Ok(())
     }
 
@@ -242,9 +307,12 @@ impl Tool for ConsultAdvisor {
             self.risk(),
             input,
             ApprovalPreview {
-                // Also the approval target, so "Allow for session" trusts this
-                // provider and model only.
-                summary: format!("Send this conversation to {target} for advice"),
+                // The opaque scope binds session consent to this destination
+                // and configuration; the summary stays human-readable.
+                summary: format!(
+                    "Send this conversation to {} · {} for advice",
+                    self.advisor.provider_id, self.advisor.model
+                ),
                 path: target,
                 diff: String::new(),
             },
@@ -261,7 +329,7 @@ impl Tool for ConsultAdvisor {
                 .context
                 .read()
                 .map_err(|_| "the advisor is unavailable".to_string())?;
-            self.take_use(&context)?;
+            self.take_use()?;
             render_transcript(&context, self.advisor.transcript_budget())
         };
         let request = self.advisor.request(&transcript, question.as_deref());
@@ -419,9 +487,71 @@ mod tests {
         let mut next = conversation("first request");
         next.push(Message::user_text("second request"));
         tool.update_context(&next);
+        tool.begin_request();
         tool.run(json!({}))
             .await
             .expect("a new request gets a new allowance");
+    }
+
+    #[tokio::test]
+    async fn regression_runtime_notices_do_not_replenish_the_advisor_budget() {
+        let provider = Arc::new(Recording::default());
+        let tool = ConsultAdvisor::new(advisor(provider.clone(), 1), "cheap", None);
+        let mut messages = conversation("Build it");
+        tool.update_context(&messages);
+        tool.run(json!({})).await.unwrap();
+        messages.push(Message::user_text(
+            "Runtime context update:\nBackground job completed.",
+        ));
+        tool.update_context(&messages);
+        assert!(tool.run(json!({})).await.is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_and_model_consultations_share_one_request_budget() {
+        let provider = Arc::new(Recording::default());
+        let tool = ConsultAdvisor::new(advisor(provider.clone(), 1), "cheap", None);
+        let messages = conversation("Build it");
+        tool.update_context(&messages);
+        tool.run(json!({})).await.unwrap();
+        assert!(tool.review(&messages, "Review the work").await.is_err());
+        tool.begin_request();
+        tool.review(&messages, "Review the work").await.unwrap();
+        assert!(tool.run(json!({})).await.is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn consent_tracks_credential_references_without_exposing_endpoint_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::parse(
+            "[providers.strong]\nkind = \"openai_compatible\"\nmodel = \"strong-model\"\nbase_url = \"https://user:private-password@example.test/v1?key=private-key\"\napi_key_env = \"ORIGINAL_KEY\"\n",
+        ).unwrap();
+        let entry = config.providers.get_mut("strong").unwrap();
+        let first = scoped_consent_id(root.path(), "strong", entry);
+        if let ProviderConfig::OpenaiCompatible { api_key_env, .. } = entry {
+            *api_key_env = Some("OTHER_KEY".into());
+        }
+        let env_changed = scoped_consent_id(root.path(), "strong", entry);
+        if let ProviderConfig::OpenaiCompatible { credential, .. } = entry {
+            *credential = Some("other-account".into());
+        }
+        let account_changed = scoped_consent_id(root.path(), "strong", entry);
+        assert_ne!(first, env_changed);
+        assert_ne!(env_changed, account_changed);
+        for token in [first, env_changed, account_changed] {
+            assert!(token.starts_with("consent-"));
+            for secret in [
+                "private-password",
+                "private-key",
+                "ORIGINAL_KEY",
+                "OTHER_KEY",
+                "other-account",
+            ] {
+                assert!(!token.contains(secret));
+            }
+        }
     }
 
     #[tokio::test]
@@ -458,7 +588,11 @@ mod tests {
         assert_eq!(other.risk(), ToolRisk::Exec);
         let prepared = other.prepare(json!({})).unwrap();
         assert_eq!(prepared.risk, ToolRisk::Exec);
-        assert_eq!(prepared.preview.path, "strong · strong-model");
+        assert_eq!(prepared.preview.path, other.approval_target());
+        assert!(prepared
+            .preview
+            .path
+            .starts_with("strong · strong-model · consent-"));
         assert!(prepared.preview.summary.contains("Send this conversation"));
     }
 }

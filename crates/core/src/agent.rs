@@ -795,6 +795,9 @@ impl Agent {
     ) -> Result<()> {
         let mut staged = self.messages.clone();
         self.turn_usage = None;
+        if let Some(advisor) = &self.advisor {
+            advisor.begin_request();
+        }
         staged.push(user_message);
         // Track which tool_use ids were sensitive so tool_result redaction can
         // strip them from durable history while live memory keeps the body.
@@ -1949,25 +1952,38 @@ fn publish_side_context(
 }
 
 fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> Vec<Message> {
+    let mut sensitive_ids: HashSet<String> = sensitive_ids.iter().cloned().collect();
+    // Older saved chats redacted results but retained the original arguments.
+    // Their result marker preserves the sensitivity even after live IDs are lost.
+    for block in messages.iter().flat_map(|message| &message.content) {
+        if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            && block.get("content").and_then(serde_json::Value::as_str)
+                == Some(REDACTED_SENSITIVE_RESULT)
+        {
+            if let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) {
+                sensitive_ids.insert(id.to_owned());
+            }
+        }
+    }
     if sensitive_ids.is_empty() {
         return messages;
     }
     let mut out = messages;
     for msg in &mut out {
-        if msg.role != "user" {
-            continue;
-        }
         for block in &mut msg.content {
-            let is_result = block.get("type").and_then(|t| t.as_str()) == Some("tool_result");
-            if !is_result {
-                continue;
-            }
-            let id = block
-                .get("tool_use_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if sensitive_ids.iter().any(|s| s == id) {
-                block["content"] = serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into());
+            let (id_field, content_field) =
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("tool_use") => ("id", "input"),
+                    Some("tool_result") => ("tool_use_id", "content"),
+                    _ => continue,
+                };
+            let id = block.get(id_field).and_then(|v| v.as_str()).unwrap_or("");
+            if sensitive_ids.contains(id) {
+                block[content_field] = if content_field == "input" {
+                    serde_json::json!({"redacted": "sensitive tool arguments omitted from shared history"})
+                } else {
+                    serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into())
+                };
             }
         }
     }
@@ -3302,6 +3318,47 @@ mod tests {
         assert!(!json.contains("top-secret"));
     }
 
+    #[test]
+    fn regression_sensitive_arguments_are_redacted_from_shared_history() {
+        let messages = vec![
+            Message::assistant(vec![json!({
+                "type": "tool_use", "id": "secret-edit", "name": "edit_file",
+                "input": { "path": ".env", "old_string": "TOKEN=old-secret", "new_string": "TOKEN=new-secret" }
+            })]),
+            Message::user_blocks(vec![tool_result("secret-edit", "edited .env", false)]),
+            Message::assistant(vec![json!({"type":"text","text":"Checking the result."})]),
+        ];
+        let redacted = redact_sensitive_staged(messages.clone(), &["secret-edit".into()]);
+        let transcript = crate::advisor::render_transcript(&redacted, 100_000);
+        assert!(!transcript.contains("old-secret"), "{transcript}");
+        assert!(!transcript.contains("new-secret"), "{transcript}");
+        assert_eq!(redacted[0].content[0]["id"], "secret-edit");
+        assert_eq!(
+            messages[0].content[0]["input"]["new_string"],
+            "TOKEN=new-secret"
+        );
+    }
+
+    #[test]
+    fn regression_reopened_sensitive_history_redacts_arguments_without_live_ids() {
+        let messages = vec![
+            Message::assistant(vec![json!({
+                "type":"tool_use", "id":"old-edit", "name":"edit_file",
+                "input":{"path":".env","old_string":"TOKEN=old-secret","new_string":"TOKEN=new-secret"}
+            })]),
+            Message::user_blocks(vec![tool_result(
+                "old-edit",
+                REDACTED_SENSITIVE_RESULT,
+                false,
+            )]),
+        ];
+        let redacted = redact_sensitive_staged(messages, &[]);
+        let serialized = serde_json::to_string(&redacted).unwrap();
+        assert!(!serialized.contains("old-secret"));
+        assert!(!serialized.contains("new-secret"));
+        assert_eq!(redacted[0].content[0]["id"], "old-edit");
+    }
+
     /// The invariant that makes concurrency safe: tools may finish in any
     /// order, but `tool_result` blocks must come back in the order the model
     /// asked for them.
@@ -3819,6 +3876,101 @@ mod tests {
                 .to_string()
         }
 
+        #[test]
+        fn regression_advisor_grants_are_bound_to_destination_and_workspace() {
+            let root_a = tempfile::tempdir().unwrap();
+            let root_b = tempfile::tempdir().unwrap();
+            let target = |root: &std::path::Path, endpoint: &str| {
+                let config = crate::Config::parse(&format!(
+                    "[providers.chat]\nkind = \"openai_compatible\"\nbase_url = \"http://localhost:9\"\nmodel = \"chat-model\"\n\n[providers.strong]\nkind = \"openai_compatible\"\nbase_url = \"{endpoint}\"\nmodel = \"strong-model\"\n\n[advisor]\nprovider = \"strong\"\n"
+                )).unwrap();
+                let runtime = crate::runtime::RuntimeBuilder::new(root)
+                    .with_config(config)
+                    .with_provider("chat")
+                    .enable_external_agents(false)
+                    .register_exec_tools(false)
+                    .build()
+                    .unwrap();
+                runtime.agent.advisor.unwrap().approval_target()
+            };
+            let first = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let same = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let moved = target(
+                root_b.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let changed = target(root_a.path(), "https://other.example/v1?key=private-token");
+            let changed_secret =
+                target(root_a.path(), "https://trusted.example/v1?key=other-token");
+            std::fs::write(root_a.path().join("zest.toml"), "# Project config scope").unwrap();
+            let changed_scope = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            assert_eq!(first, same);
+            let mut policy = ApprovalPolicy::new(ApprovalMode::Manual);
+            policy.trust(crate::advisor::ADVISOR_TOOL, &first);
+            for target in [moved, changed, changed_secret, changed_scope] {
+                assert_eq!(
+                    policy.decide(crate::advisor::ADVISOR_TOOL, &target, ToolRisk::Exec, false),
+                    PolicyOutcome::Ask
+                );
+                assert!(!target.contains("private-token") && !target.contains("other-token"));
+            }
+        }
+
+        #[tokio::test]
+        async fn regression_advisor_budget_resets_after_a_cancelled_request() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["consult_advisor", "consult_advisor", "consult_advisor"]),
+                    calls(&["consult_advisor"]),
+                    text("Done."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("Advice.")]);
+            let mut agent = agent(
+                chat,
+                advisor(strong.clone(), "chat", false),
+                ApprovalMode::Manual,
+            );
+            let cancel = CancelToken::new();
+            let mut sink = |event: StreamEvent<'_>| {
+                if matches!(
+                    event,
+                    StreamEvent::ToolCallResult {
+                        name: "consult_advisor",
+                        ..
+                    }
+                ) {
+                    cancel.cancel();
+                }
+            };
+            assert!(matches!(
+                agent
+                    .send_cancellable("First request", &mut sink, Some(&cancel))
+                    .await,
+                Err(HarnessError::Cancelled)
+            ));
+            assert!(agent.messages.is_empty());
+            agent
+                .send("A different request", &mut |_| {})
+                .await
+                .unwrap();
+            assert_eq!(
+                strong.requests().len(),
+                4,
+                "the new request has its own allowance"
+            );
+        }
+
         #[tokio::test]
         async fn a_turn_that_changed_files_is_reviewed_once_before_it_ends() {
             let chat = Replay::new(
@@ -3920,11 +4072,10 @@ mod tests {
                 advisor(strong.clone(), "chat", true),
                 ApprovalMode::Manual,
             );
-            granted
-                .policy()
-                .lock()
-                .unwrap()
-                .trust(crate::advisor::ADVISOR_TOOL, "strong · replay-model");
+            granted.policy().lock().unwrap().trust(
+                crate::advisor::ADVISOR_TOOL,
+                &granted.advisor.as_ref().unwrap().approval_target(),
+            );
             let mut granted = granted;
             granted
                 .send_cancellable("Write the note", &mut sink, None)
