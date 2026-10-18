@@ -9,13 +9,14 @@ import {
   effortsForModel,
   formatContextWindow,
   filterModelPickerGroups,
-  modelLabel,
+  catalogueModelLabel,
   modelOptionsFromCapabilities,
   modelPickerGroups,
   type EffortId,
   type ModelCapability,
   type ModelPickerGroup,
 } from "@/lib/models";
+import { useHiddenPickerProviders } from "@/lib/pickerProviders";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useOptionNavigation } from "@/lib/useOptionNavigation";
@@ -78,6 +79,7 @@ export function ModelEffortPicker({
   const effortListRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const [openTarget, setOpenTarget] = useState<PickerTarget>("model");
+  const hiddenProviders = useHiddenPickerProviders();
   const groups: ModelPickerGroup[] = currentProviderId
     ? modelPickerGroups(
         {
@@ -85,7 +87,8 @@ export function ModelEffortPicker({
           label: currentProviderLabel ?? currentProviderId,
           models,
         },
-        providers ?? []
+        providers ?? [],
+        hiddenProviders
       )
     : [
         {
@@ -98,6 +101,7 @@ export function ModelEffortPicker({
   const grouped = groups.length > 1;
   const visibleGroups = filterModelPickerGroups(groups, query);
   const effortOptions = effortsForModel(models, model);
+  const currentLabel = catalogueModelLabel(models, model);
   const capability = capabilityForModel(models, model);
   const contextLabel = formatContextWindow(capability?.contextWindow);
   const supportsEffort = effortOptions.length > 0;
@@ -239,7 +243,7 @@ export function ModelEffortPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={`Select model, currently ${modelLabel(model)}`}
+        aria-label={`Select model, currently ${currentLabel}`}
         title="Select model"
         className={cn(
           "inline-flex min-h-7 min-w-0 max-w-[min(180px,34vw)] cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-foreground/85 outline-none transition-colors",
@@ -251,7 +255,7 @@ export function ModelEffortPicker({
         onClick={togglePicker}
       >
         <ModelIcon modelId={model} providerId={currentProviderId} className="size-4 rounded-sm" />
-        <span className="min-w-0 truncate">{modelLabel(model)}</span>
+        <span className="min-w-0 truncate">{currentLabel}</span>
         <ChevronDownIcon className="size-3 shrink-0 opacity-60" aria-hidden="true" />
       </button>
 
@@ -271,12 +275,12 @@ export function ModelEffortPicker({
             </div>
             <div
               className="mt-1 flex min-w-0 items-center gap-1.5 text-xs font-medium"
-              title={`${currentProviderLabel ?? ""} · ${modelLabel(model)}`}
+              title={`${currentProviderLabel ?? ""} · ${currentLabel}`}
             >
               <ModelIcon modelId={model} providerId={currentProviderId} />
               <span className="min-w-0 truncate">
                 {currentProviderLabel ? `${currentProviderLabel} · ` : ""}
-                {modelLabel(model)}
+                {currentLabel}
               </span>
             </div>
             {capability ? (
@@ -331,7 +335,7 @@ export function ModelEffortPicker({
                         {...modelNavigation.optionProps(`${group.providerId}:${item.id}`)}
                         role="option"
                         aria-selected={selected}
-                        title={modelLabel(item.id)}
+                        title={catalogueModelLabel(group.models, item.id)}
                         className={cn(
                           "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors",
                           "text-foreground/90 hover:bg-secondary/60 hover:text-foreground focus-visible:bg-secondary/60 focus-visible:text-foreground",
@@ -341,7 +345,7 @@ export function ModelEffortPicker({
                       >
                         <ModelIcon modelId={item.id} providerId={group.providerId} />
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate">{modelLabel(item.id)}</span>
+                          <span className="block truncate">{catalogueModelLabel(group.models, item.id)}</span>
                           <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
                             {formatContextWindow(item.contextWindow) ? <span>{formatContextWindow(item.contextWindow)}</span> : null}
                             <span>{item.supportsTools ? "Tools" : "Text only"}</span>

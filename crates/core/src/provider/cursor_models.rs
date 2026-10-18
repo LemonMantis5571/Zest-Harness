@@ -243,6 +243,7 @@ fn spec(id: String, efforts: Vec<String>, context: Option<u64>) -> ModelSpec {
         // reports `promptCapabilities.image: true` for the session rather than
         // per model.
         supports_vision: true,
+        resolves_to: None,
     }
 }
 

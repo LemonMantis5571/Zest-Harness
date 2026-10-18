@@ -42,7 +42,7 @@ verify:
 - Unknown keys are a parse error (`deny_unknown_fields`). A legacy `kind = "gateway"` provider still loads: `codex` becomes a Codex CLI provider, `claude` a Claude Code provider, others are skipped with a reason. The file on disk is not rewritten.
 - `Config::lint` reports non-fatal problems: migration notices first, a default provider that does not exist, ignored legacy `[routing]`, `[tools] max_result_bytes` below 4096, invalid MCP entries, empty commands, and timeouts outside 1..3600 s.
 - Desktop edits (providers, MCP servers, external agents) keep comments and formatting, go to the project `zest.toml` when one exists and to `~/.zest/zest.toml` otherwise, and are refused if the result would not parse.
-- Customize tabs: Appearance, Typography, Chat view, MCPs, Skills, Extras, Rules, Shortcuts. Appearance, typography, and chat view apply immediately and persist per machine in `localStorage` (`zest.selected_theme`, `zest.selected_font`, `zest.chatViewMode`). Chat view also holds Response display (stream complete blocks, `zest.responseBlockStreaming.v1`; see [message-rendering](message-rendering.md)).
+- Customize tabs: Appearance, Typography, Chat view, Models, MCPs, Skills, Extras, Rules, Shortcuts. Appearance, typography, and chat view apply immediately and persist per machine in `localStorage` (`zest.selected_theme`, `zest.selected_font`, `zest.chatViewMode`). Chat view also holds Response display (stream complete blocks, `zest.responseBlockStreaming.v1`; see [message-rendering](message-rendering.md)).
 - Themes: `zest` (dark, default), `nights` (dark), `oceanic` (light). An unknown saved id falls back to the default. Fonts: Geist (default), ABC Arizona, Inter, Plus Jakarta Sans, JetBrains Mono, Fira Code, System UI; a font whose CSS fails to load reverts to Geist.
 - Oceanic uses a darker destructive color so small warning labels remain legible
   on its light popovers.
@@ -69,4 +69,4 @@ verify:
 - `~/.zest/zest.toml` (config) and `<OS config dir>/zest/` (profile, avatar, plugin toggles, last workspace) are different folders.
 - A project `zest.toml` is an explicit boundary: the desktop does not borrow the user file's providers for it, which is why a provider can be "not configured for this project".
 - The fixture's `setUserProfile` echoes its input, so avatar size limits are enforced only by the real backend.
-- The MCP, Skills, Extras, Rules, and Shortcuts tabs render inside `CustomizePanel` but belong to their own features ([plugins](plugins.md), [command-palette-and-shortcuts](command-palette-and-shortcuts.md)).
+- The Models, MCP, Skills, Extras, Rules, and Shortcuts tabs render inside `CustomizePanel` but belong to their own features ([model-and-effort-selection](model-and-effort-selection.md), [plugins](plugins.md), [command-palette-and-shortcuts](command-palette-and-shortcuts.md)).

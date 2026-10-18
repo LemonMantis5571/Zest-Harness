@@ -482,7 +482,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   }
 
   const fixtureExternalModelOptions: Record<string, string[]> = {
-    claude: ["sonnet", "opus"],
+    claude: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
     gemini: [
       "auto",
       "gemini-3-pro-preview",

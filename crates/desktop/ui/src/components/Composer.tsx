@@ -44,9 +44,9 @@ import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { IconSwap } from "@/components/ui/icon-swap";
 import { ImageLightbox } from "@/components/ZoomableImage";
 import {
-  chipLabel,
+  catalogueModelLabel,
+  effortShort,
   effortsForModel,
-  modelLabel,
   type EffortId,
   type ModelCapability,
 } from "@/lib/models";
@@ -752,7 +752,9 @@ export const Composer = memo(function Composer({
                 <span className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
                   <ModelIcon modelId={model} providerId={currentProviderId} />
                   <span className="min-w-0 truncate">
-                    {supportsEffort ? chipLabel(model, effort) : modelLabel(model)}
+                    {supportsEffort
+                      ? `${catalogueModelLabel(models, model)} · ${effortShort(effort)}`
+                      : catalogueModelLabel(models, model)}
                   </span>
                 </span>
               )}
@@ -829,7 +831,7 @@ export const Composer = memo(function Composer({
               </a>
             ) : null}
             {showModelPicker ? (
-              <span className="hidden truncate sm:inline">· {modelLabel(model)}</span>
+              <span className="hidden truncate sm:inline">· {catalogueModelLabel(models, model)}</span>
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-1">

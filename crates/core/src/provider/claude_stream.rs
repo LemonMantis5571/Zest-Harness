@@ -69,6 +69,9 @@ pub struct ClaudeNormalizer {
     expected_session: Option<String>,
     session_id: Option<String>,
     session_mismatch: Option<String>,
+    /// The model the CLI says it is running, which for an alias like `opus` is
+    /// the only place its real meaning shows.
+    model: Option<String>,
     /// The tool names Zest put on `--tools`, and what the CLI actually resolved.
     requested_tools: Vec<String>,
     dropped_tools: Vec<String>,
@@ -88,6 +91,7 @@ impl ClaudeNormalizer {
             expected_session: None,
             session_id: None,
             session_mismatch: None,
+            model: None,
             requested_tools: Vec::new(),
             dropped_tools: Vec::new(),
         }
@@ -112,6 +116,11 @@ impl ClaudeNormalizer {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The model named in `system:init`.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     /// Set when the CLI reported a session id other than the one requested.
@@ -160,6 +169,14 @@ impl ClaudeNormalizer {
                     self.session_mismatch = Some(session.to_string());
                 }
             }
+        }
+
+        if let Some(model) = raw
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+        {
+            self.model = Some(model.to_string());
         }
 
         if !self.requested_tools.is_empty() {
@@ -728,6 +745,16 @@ mod tests {
 
         assert_eq!(normalizer.session_id(), Some("session-a"));
         assert_eq!(normalizer.session_mismatch(), None);
+    }
+
+    /// The only place an alias such as `haiku` shows what it really runs.
+    #[test]
+    fn init_records_the_model_the_cli_resolved() {
+        let mut normalizer = normalizer();
+        assert_eq!(normalizer.model(), None);
+        normalizer.normalize(&init("session-a"));
+
+        assert_eq!(normalizer.model(), Some("claude-haiku-4-5-20251001"));
     }
 
     /// Resuming into a different session silently would answer from the wrong

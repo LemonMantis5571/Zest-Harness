@@ -472,6 +472,23 @@ struct ModelCapability {
     context_window: u64,
     supports_tools: bool,
     supports_vision: bool,
+    /// For a provider-decided alias, the model it last ran as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    resolves_to: Option<String>,
+}
+
+impl From<zest_core::ModelSpec> for ModelCapability {
+    fn from(spec: zest_core::ModelSpec) -> Self {
+        Self {
+            id: spec.id,
+            efforts: spec.efforts,
+            context_window: spec.context_window,
+            supports_tools: spec.supports_tools,
+            supports_vision: spec.supports_vision,
+            resolves_to: spec.resolves_to,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -925,13 +942,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         models: descriptor
             .models
             .into_iter()
-            .map(|m| ModelCapability {
-                id: m.id,
-                efforts: m.efforts,
-                context_window: m.context_window,
-                supports_tools: m.supports_tools,
-                supports_vision: m.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -1002,13 +1013,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         models: descriptor
             .models
             .into_iter()
-            .map(|model| ModelCapability {
-                id: model.id,
-                efforts: model.efforts,
-                context_window: model.context_window,
-                supports_tools: model.supports_tools,
-                supports_vision: model.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -1748,13 +1753,7 @@ fn chatgpt_codex_offer_view() -> ProviderView {
         models: descriptor
             .models
             .into_iter()
-            .map(|model| ModelCapability {
-                id: model.id,
-                efforts: model.efforts,
-                context_window: model.context_window,
-                supports_tools: model.supports_tools,
-                supports_vision: model.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -2838,12 +2837,10 @@ fn configure_claude_code_provider(
             id,
             command: "claude".into(),
             model,
-            models: vec![
-                "sonnet".into(),
-                "opus".into(),
-                "haiku".into(),
-                "fable".into(),
-            ],
+            // No allow-list: the built-in catalogue applies and keeps up with
+            // new models. This used to write the CLI's bare aliases, which run
+            // the previous generation.
+            models: Vec::new(),
             allow_mcp: false,
             // Not `accept_edits`: that auto-approves inside the CLI before zest
             // is consulted, so edits would land with no approval card and no
@@ -4071,13 +4068,7 @@ fn session_capabilities(session: &Session) -> (String, Vec<ModelCapability>) {
         descriptor
             .models
             .into_iter()
-            .map(|m| ModelCapability {
-                id: m.id,
-                efforts: m.efforts,
-                context_window: m.context_window,
-                supports_tools: m.supports_tools,
-                supports_vision: m.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     )
 }

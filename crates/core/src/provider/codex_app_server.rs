@@ -1015,6 +1015,7 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
                 efforts,
                 supports_tools: true,
                 supports_vision,
+                resolves_to: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1030,6 +1031,7 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
                 context_window: super::context_window_for_model(default_model),
                 supports_tools: true,
                 supports_vision: super::model_supports_vision(default_model),
+                resolves_to: None,
             },
         );
     }

@@ -1,6 +1,7 @@
 import {
   ArrowLeftIcon,
   BookOpenIcon,
+  BoxesIcon,
   CheckIcon,
   ChevronRightIcon,
   FolderOpenIcon,
@@ -20,6 +21,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { FontPicker } from "@/components/FontPicker";
+import { ProviderIcon } from "@/components/ProviderIcon";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { ThemePicker } from "@/components/ThemePicker";
@@ -36,6 +38,7 @@ import {
   validateMcpServerDraft,
 } from "@/lib/mcpServerForm";
 import type { CustomizeTab } from "@/lib/navigationHistory";
+import { setPickerProviderShown, useHiddenPickerProviders } from "@/lib/pickerProviders";
 import { setResponseBlockStreaming, useResponseBlockStreaming } from "@/lib/responseStreaming";
 import {
   applyChatViewMode,
@@ -48,6 +51,7 @@ import type {
   McpServerRow,
   NowPlayingView,
   PluginView,
+  ProviderRow,
   WallpaperFilterId,
   WallpaperView,
 } from "@/lib/types";
@@ -59,6 +63,9 @@ type Props = {
   /** Whether MCP tools can reach this chat's provider at all. */
   providerOwnsAgentLoop: boolean;
   providerLabel: string;
+  /** The providers the model picker can list, and the one this chat uses. */
+  providers: ReadonlyArray<ProviderRow>;
+  currentProviderId: string;
   tab: CustomizeTab;
   sending: boolean;
   onTabChange: (tab: CustomizeTab) => void;
@@ -69,6 +76,7 @@ const TABS: { id: CustomizeTab; label: string; icon: typeof PlugIcon }[] = [
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
   { id: "typography", label: "Typography", icon: TypeIcon },
   { id: "chat", label: "Chat view", icon: MessageSquareIcon },
+  { id: "models", label: "Models", icon: BoxesIcon },
   { id: "mcp", label: "MCPs", icon: PlugIcon },
   { id: "skills", label: "Skills", icon: BookOpenIcon },
   { id: "plugins", label: "Extras", icon: PuzzleIcon },
@@ -150,6 +158,8 @@ function draftFrom(server: McpServerRow): ServerDraft {
 export function CustomizePanel({
   providerOwnsAgentLoop,
   providerLabel,
+  providers,
+  currentProviderId,
   tab,
   sending,
   onTabChange,
@@ -252,8 +262,72 @@ export function CustomizePanel({
         {tab === "appearance" ? <AppearancePanel /> : null}
         {tab === "typography" ? <TypographyPanel /> : null}
         {tab === "chat" ? <ChatViewPanel /> : null}
+        {tab === "models" ? (
+          <ModelsPanel providers={providers} currentProviderId={currentProviderId} />
+        ) : null}
       </div>
     </div>
+  );
+}
+
+function ModelsPanel({
+  providers,
+  currentProviderId,
+}: {
+  providers: ReadonlyArray<ProviderRow>;
+  currentProviderId: string;
+}) {
+  const hidden = useHiddenPickerProviders();
+  // The picker only ever lists providers you can switch to, plus the current one.
+  const rows = providers.filter(
+    (row) => row.id === currentProviderId || (row.selectable && row.models.length > 0)
+  );
+
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionHeading
+        title="Model picker"
+        hint="Choose which providers' models the composer's model picker lists. Unchecked providers stay connected and can still be picked in the provider sheet."
+      />
+      {rows.length === 0 ? (
+        <p className="m-0 text-[11px] text-muted-foreground">No providers are connected yet.</p>
+      ) : (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0" aria-label="Providers in the model picker">
+          {rows.map((row) => {
+            const current = row.id === currentProviderId;
+            const shown = current || !hidden.has(row.id);
+            const count = row.models.length || (row.defaultModel ? 1 : 0);
+            return (
+              <li key={row.id}>
+                <label
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5",
+                    current ? "cursor-default" : "cursor-pointer hover:bg-accent/40"
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    className="size-4 shrink-0 accent-[var(--primary)]"
+                    checked={shown}
+                    disabled={current}
+                    onChange={(event) => setPickerProviderShown(row.id, event.target.checked)}
+                  />
+                  <ProviderIcon providerId={row.id} className="size-4 shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">{row.label}</span>
+                    <span className="block text-[11px] text-muted-foreground">
+                      {current
+                        ? "In use in this chat, so always listed"
+                        : `${count} ${count === 1 ? "model" : "models"}`}
+                    </span>
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 
