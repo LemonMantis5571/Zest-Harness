@@ -12,6 +12,7 @@
 
 pub mod anthropic;
 pub mod claude_aliases;
+pub mod claude_cli_version;
 pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod claude_stream;
@@ -97,6 +98,24 @@ pub struct ModelSpec {
     /// `opus`: the model it last ran as, once a turn has shown it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolves_to: Option<String>,
+    /// Set when the vendor CLI that runs this model is known to be too old for
+    /// it. The model stays selectable: the version check can be wrong, and the
+    /// API's own refusal still reaches the user if it is right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_cli: Option<CliRequirement>,
+}
+
+/// A newer vendor CLI a model needs than the one installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliRequirement {
+    /// The CLI's display name, such as "Claude Code".
+    pub cli: String,
+    /// The oldest version that runs the model.
+    pub minimum: String,
+    /// The version installed now.
+    pub installed: String,
+    /// The command that updates the CLI, such as `claude update`.
+    pub update: String,
 }
 
 fn default_true() -> bool {
@@ -188,6 +207,7 @@ fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
         supports_tools: true,
         supports_vision,
         resolves_to: None,
+        needs_cli: None,
     }
 }
 

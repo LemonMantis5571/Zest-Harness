@@ -244,6 +244,7 @@ fn spec(id: String, efforts: Vec<String>, context: Option<u64>) -> ModelSpec {
         // per model.
         supports_vision: true,
         resolves_to: None,
+        needs_cli: None,
     }
 }
 
