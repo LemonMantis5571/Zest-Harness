@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "@playwright/test";
 
-import { DEV_SERVER_URL, killTree, parseArgs } from "./zest-control.mjs";
+import { probeDevServer, reuseRefusal } from "../crates/desktop/ui/devServer.ts";
+import { devServer, killTree, parseArgs } from "./zest-control.mjs";
 import { measureUiElements } from "./zest-ui-measure.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,6 +24,7 @@ const MAX_EVENTS = 2000;
 const TOAST_PREFIX = "[zest-control:toast]";
 
 const { options } = parseArgs(["__daemon", ...process.argv.slice(2)]);
+const { port: serverPort, url: serverUrl } = devServer();
 const stateFile = options.state;
 const logFile = options.log;
 
@@ -73,26 +75,15 @@ let browser = null;
 let page = null;
 let scenario = typeof options.scenario === "string" ? options.scenario : null;
 
-async function serverStatus() {
-  try {
-    const response = await fetch(DEV_SERVER_URL, { signal: AbortSignal.timeout(2_000) });
-    const body = await response.text();
-    return body.includes('id="root"') ? "zest-ui" : "other";
-  } catch {
-    return "free";
-  }
-}
-
+/** Reuse this checkout's dev server, or start one; never another checkout's. */
 async function ensureServer() {
-  const status = await serverStatus();
-  if (status === "zest-ui") return false;
-  if (status === "other") {
-    throw Object.assign(new Error("port 1420 is in use by another program"), {
-      hint: "Stop it; the UI dev server needs port 1420 (strictPort).",
-    });
-  }
+  const probe = await probeDevServer(serverUrl);
+  if (probe.status === "this-checkout") return false;
+  const refusal = reuseRefusal(probe, serverPort);
+  if (refusal) throw fail(refusal.error, refusal.hint);
   const out = openSync(logFile, "a");
-  serverChild = spawn(process.execPath, [path.join(repoRoot, "node_modules", "vite", "bin", "vite.js")], {
+  const vite = path.join(repoRoot, "node_modules", "vite", "bin", "vite.js");
+  serverChild = spawn(process.execPath, [vite, "--port", String(serverPort), "--strictPort"], {
     cwd: uiRoot,
     detached: process.platform !== "win32",
     stdio: ["ignore", out, out],
@@ -100,11 +91,11 @@ async function ensureServer() {
   });
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
-    if ((await serverStatus()) === "zest-ui") return true;
+    if ((await probeDevServer(serverUrl)).status === "this-checkout") return true;
     if (serverChild.exitCode !== null) break;
     await sleep(250);
   }
-  throw Object.assign(new Error("the Vite dev server did not start"), { hint: `See ${logFile}.` });
+  throw fail("the Vite dev server did not start", `See ${logFile}.`);
 }
 
 async function launchBrowser() {
@@ -121,7 +112,7 @@ async function launchBrowser() {
     }
     const level = message.type() === "error" ? "error" : message.type() === "warning" ? "warning" : "log";
     const where = message.location()?.url;
-    record("console", level, text, where ? { source: where.replace(DEV_SERVER_URL, "") } : {});
+    record("console", level, text, where ? { source: where.replace(serverUrl, "") } : {});
   });
   page.on("pageerror", (error) => record("pageerror", "error", error.stack || error.message));
   page.on("crash", () => record("crash", "error", "the page crashed"));
@@ -149,7 +140,7 @@ async function turnRunning() {
 }
 
 function fixtureUrl(name) {
-  return `${DEV_SERVER_URL}/?fixture=1${name ? `&scenario=${encodeURIComponent(name)}` : ""}`;
+  return `${serverUrl}/?fixture=1${name ? `&scenario=${encodeURIComponent(name)}` : ""}`;
 }
 
 async function signature() {
@@ -265,7 +256,7 @@ async function uiState() {
     ),
   );
   return {
-    url: page.url().replace(DEV_SERVER_URL, ""),
+    url: page.url().replace(serverUrl, ""),
     scenario,
     turnRunning: await turnRunning(),
     composer: (await composer().count()) > 0,
