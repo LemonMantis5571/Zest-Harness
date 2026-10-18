@@ -35,6 +35,17 @@ struct PendingTool {
     path: Option<String>,
 }
 
+impl PendingTool {
+    /// A completed edit is the only place the headless path can learn that a
+    /// file changed; there is no diff record in this stream.
+    fn edited_file(self) -> Option<ExternalAgentEvent> {
+        if !EDIT_TOOLS.contains(&self.name.as_str()) {
+            return None;
+        }
+        self.path.map(|path| ExternalAgentEvent::Diff { path })
+    }
+}
+
 /// Tools whose successful completion changed a file on disk.
 const EDIT_TOOLS: &[&str] = &["Edit", "Write", "NotebookEdit"];
 
@@ -46,6 +57,9 @@ pub struct ClaudeNormalizer {
     spec: &'static ContractSpec,
     ledger: ContractLedger,
     pending: HashMap<String, PendingTool>,
+    /// Tools a subagent started, by their own id. Kept apart from `pending`
+    /// because they have no row: they show on their parent `Task` row.
+    subagent_tools: HashMap<String, PendingTool>,
     /// Text assembled from partial-message deltas, used to decide whether the
     /// final result would repeat what the user already read.
     streamed_text: String,
@@ -67,6 +81,7 @@ impl ClaudeNormalizer {
             spec: &CLAUDE_CODE_CONTRACT,
             ledger: ContractLedger::new(),
             pending: HashMap::new(),
+            subagent_tools: HashMap::new(),
             streamed_text: String::new(),
             has_finish: false,
             result_error: None,
@@ -234,20 +249,47 @@ impl ClaudeNormalizer {
         events
     }
 
-    /// A subagent said something. Show it on the parent `Task` row rather than
-    /// in the transcript, which belongs to the parent agent.
+    /// A subagent said something or started a tool. Show it on the parent
+    /// `Task` row rather than in the transcript, which belongs to the parent
+    /// agent.
     fn subagent_progress(&mut self, parent: &str, content: &[Value]) -> Vec<ExternalAgentEvent> {
         self.observe("assistant:subagent");
-        let Some(pending) = self.pending.get(parent).cloned() else {
+
+        // Registered even when the parent row is unknown, so the result that
+        // follows is recognised as a subagent's and cannot open a row.
+        let mut started = None;
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            if let Some((id, tool)) = self.describe_tool(block) {
+                started = Some(tool.title.clone());
+                self.subagent_tools.insert(id, tool);
+            }
+        }
+
+        // The tool is what the subagent is doing now; text before it is only
+        // the subagent announcing it.
+        let activity = started.unwrap_or_else(|| {
+            content
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        self.parent_progress(parent, &activity)
+    }
+
+    /// Put a subagent's latest activity on its parent's row.
+    ///
+    /// Only while that row is open: an `in_progress` update after the parent's
+    /// own result would reopen a finished row.
+    fn parent_progress(&self, parent: &str, activity: &str) -> Vec<ExternalAgentEvent> {
+        let Some(pending) = self.pending.get(parent) else {
             return Vec::new();
         };
-        let text = content
-            .iter()
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|block| block.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let summary = first_line(text.trim(), SUBAGENT_TITLE_CHARS);
+        let summary = first_line(activity.trim(), SUBAGENT_TITLE_CHARS);
         if summary.is_empty() {
             return Vec::new();
         }
@@ -259,6 +301,18 @@ impl ClaudeNormalizer {
     }
 
     fn tool_start(&mut self, block: &Value) -> Option<ExternalAgentEvent> {
+        let (id, tool) = self.describe_tool(block)?;
+        let title = tool.title.clone();
+        self.pending.insert(id.clone(), tool);
+        Some(ExternalAgentEvent::ToolCall {
+            id,
+            title,
+            status: "in_progress".into(),
+        })
+    }
+
+    /// A `tool_use` block's id, and how a row for it should read.
+    fn describe_tool(&self, block: &Value) -> Option<(String, PendingTool)> {
         let id = block.get("id").and_then(Value::as_str)?.to_string();
         let name = block
             .get("name")
@@ -270,20 +324,7 @@ impl ClaudeNormalizer {
             .and_then(|input| string_field(input, &["file_path", "path", "notebook_path"]))
             .map(|raw| self.display_path(&raw));
         let title = self.tool_title(&name, input, path.as_deref());
-
-        self.pending.insert(
-            id.clone(),
-            PendingTool {
-                name: name.clone(),
-                title: title.clone(),
-                path: path.clone(),
-            },
-        );
-        Some(ExternalAgentEvent::ToolCall {
-            id,
-            title,
-            status: "in_progress".into(),
-        })
+        Some((id, PendingTool { name, title, path }))
     }
 
     /// What this tool call is about, in a few words.
@@ -336,12 +377,17 @@ impl ClaudeNormalizer {
             return Vec::new();
         };
 
+        let parent = subagent_parent(raw);
         let mut events = Vec::new();
         for item in content {
             if item.get("type").and_then(Value::as_str) != Some("tool_result") {
                 continue;
             }
-            self.observe("user:tool_result");
+            self.observe(if parent.is_some() {
+                "user:subagent"
+            } else {
+                "user:tool_result"
+            });
             let Some(id) = item.get("tool_use_id").and_then(Value::as_str) else {
                 continue;
             };
@@ -349,32 +395,51 @@ impl ClaudeNormalizer {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let pending = self.pending.remove(id);
-            let title = pending
-                .as_ref()
-                .map(|pending| pending.title.clone())
-                .unwrap_or_else(|| "tool".to_string());
-
-            events.push(ExternalAgentEvent::ToolCall {
-                id: id.to_string(),
-                title,
-                status: if is_error { "failed" } else { "completed" }.into(),
-            });
-
-            if is_error {
-                continue;
-            }
-            // A completed edit is the only place the headless path can learn
-            // that a file changed; there is no diff record in this stream.
-            if let Some(pending) = pending {
-                if EDIT_TOOLS.contains(&pending.name.as_str()) {
-                    if let Some(path) = pending.path {
-                        events.push(ExternalAgentEvent::Diff { path });
-                    }
-                }
+            match parent {
+                Some(parent) => events.extend(self.subagent_result(parent, id, is_error)),
+                None => events.extend(self.tool_finish(id, is_error)),
             }
         }
         events
+    }
+
+    fn tool_finish(&mut self, id: &str, is_error: bool) -> Vec<ExternalAgentEvent> {
+        let pending = self.pending.remove(id);
+        let title = pending
+            .as_ref()
+            .map(|pending| pending.title.clone())
+            .unwrap_or_else(|| "tool".to_string());
+
+        let mut events = vec![ExternalAgentEvent::ToolCall {
+            id: id.to_string(),
+            title,
+            status: if is_error { "failed" } else { "completed" }.into(),
+        }];
+        if !is_error {
+            events.extend(pending.and_then(PendingTool::edited_file));
+        }
+        events
+    }
+
+    /// A subagent's tool finished. It never gets a row of its own: the parent
+    /// row already names it, so only a failure is worth saying there.
+    fn subagent_result(
+        &mut self,
+        parent: &str,
+        id: &str,
+        is_error: bool,
+    ) -> Vec<ExternalAgentEvent> {
+        let Some(tool) = self.subagent_tools.remove(id) else {
+            return Vec::new();
+        };
+        if is_error {
+            // Clipped first, so a long command cannot push the word off the row.
+            const FAILED: &str = " failed";
+            let what = first_line(&tool.title, SUBAGENT_TITLE_CHARS - FAILED.len());
+            return self.parent_progress(parent, &format!("{what}{FAILED}"));
+        }
+        // A subagent's edit changed the workspace just as much as the parent's.
+        tool.edited_file().into_iter().collect()
     }
 
     fn result(&mut self, raw: &Value) -> Vec<ExternalAgentEvent> {
@@ -773,6 +838,160 @@ mod tests {
                 status: "in_progress".into(),
             }]
         );
+    }
+
+    /// A record the subagent behind `toolu_task` produced. The shape is the one
+    /// `claude 2.1.220` forwards: an ordinary record, tagged with the call it
+    /// serves.
+    fn from_subagent(mut record: Value) -> Value {
+        record["parent_tool_use_id"] = json!("toolu_task");
+        record["subagent_type"] = json!("general-purpose");
+        record["task_description"] = json!("audit the loader");
+        record
+    }
+
+    /// A normalizer with an open `Agent` row, `toolu_task`.
+    fn running_subagent() -> ClaudeNormalizer {
+        let mut normalizer = normalizer();
+        normalizer.normalize(&tool_use(
+            "toolu_task",
+            "Agent",
+            json!({"description": "audit the loader"}),
+        ));
+        normalizer
+    }
+
+    fn rows(events: &[ExternalAgentEvent]) -> Vec<(&str, &str)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ExternalAgentEvent::ToolCall { id, title, .. } => {
+                    Some((id.as_str(), title.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The defect: a subagent's tools were never registered, so each of their
+    /// results opened an orphan row titled `tool` in the parent transcript.
+    #[test]
+    fn a_subagent_tool_call_shows_on_the_parent_row_not_its_own() {
+        let mut normalizer = running_subagent();
+
+        let started = normalizer.normalize(&from_subagent(json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Let me search for it."},
+                {"type": "tool_use", "id": "toolu_sub", "name": "Grep",
+                 "input": {"pattern": "cacheKey", "path": absolute("scripts")}}
+            ]},
+        })));
+        assert_eq!(
+            started,
+            vec![ExternalAgentEvent::ToolCall {
+                id: "toolu_task".into(),
+                title: "Agent audit the loader: Grep cacheKey in scripts".into(),
+                status: "in_progress".into(),
+            }]
+        );
+
+        let finished = normalizer.normalize(&from_subagent(tool_result("toolu_sub", false)));
+        assert!(rows(&finished).is_empty(), "{finished:?}");
+    }
+
+    #[test]
+    fn the_parent_row_completes_when_its_own_result_arrives() {
+        let mut normalizer = running_subagent();
+        normalizer.normalize(&from_subagent(tool_use(
+            "toolu_sub",
+            "Read",
+            json!({"file_path": absolute("loader.js")}),
+        )));
+        normalizer.normalize(&from_subagent(tool_result("toolu_sub", false)));
+
+        assert_eq!(
+            normalizer.normalize(&tool_result("toolu_task", false)),
+            vec![ExternalAgentEvent::ToolCall {
+                id: "toolu_task".into(),
+                title: "Agent audit the loader".into(),
+                status: "completed".into(),
+            }]
+        );
+
+        // A straggler from the subagent must not reopen the finished row.
+        let late = normalizer.normalize(&from_subagent(tool_use(
+            "toolu_late",
+            "Glob",
+            json!({"pattern": "*.js"}),
+        )));
+        assert!(late.is_empty(), "{late:?}");
+    }
+
+    #[test]
+    fn a_failed_subagent_tool_is_reported_on_the_parent_row() {
+        let mut normalizer = running_subagent();
+        normalizer.normalize(&from_subagent(tool_use(
+            "toolu_sub",
+            "Bash",
+            json!({"command": "cargo test"}),
+        )));
+
+        assert_eq!(
+            normalizer.normalize(&from_subagent(tool_result("toolu_sub", true))),
+            vec![ExternalAgentEvent::ToolCall {
+                id: "toolu_task".into(),
+                title: "Agent audit the loader: Bash cargo test failed".into(),
+                status: "in_progress".into(),
+            }]
+        );
+    }
+
+    /// The file changed whichever agent changed it.
+    #[test]
+    fn a_subagent_edit_reports_the_file_it_changed() {
+        let mut normalizer = running_subagent();
+        normalizer.normalize(&from_subagent(tool_use(
+            "toolu_sub",
+            "Edit",
+            json!({"file_path": absolute("src/loader.rs")}),
+        )));
+
+        assert_eq!(
+            normalizer.normalize(&from_subagent(tool_result("toolu_sub", false))),
+            vec![ExternalAgentEvent::Diff {
+                path: "src/loader.rs".into()
+            }]
+        );
+    }
+
+    /// Every turn that used a subagent read as drift before these records
+    /// were declared.
+    #[test]
+    fn a_turn_with_a_subagent_satisfies_the_contract() {
+        let mut normalizer = normalizer();
+        normalizer.normalize(&init("session-a"));
+        normalizer.normalize(&tool_use(
+            "toolu_task",
+            "Agent",
+            json!({"description": "audit the loader"}),
+        ));
+        normalizer.normalize(&from_subagent(delta("Looking.")));
+        normalizer.normalize(&from_subagent(tool_use(
+            "toolu_sub",
+            "Grep",
+            json!({"pattern": "cacheKey"}),
+        )));
+        normalizer.normalize(&from_subagent(tool_result("toolu_sub", false)));
+        normalizer.normalize(&tool_result("toolu_task", false));
+        normalizer.normalize(&delta("done"));
+        normalizer.normalize(&result("done"));
+
+        let report = normalizer.report(RunOutcome::Success);
+        assert_eq!(report.status, ContractStatus::Ok, "{report:?}");
+        assert_eq!(report.counts.get("assistant:subagent"), Some(&1));
+        assert_eq!(report.counts.get("user:subagent"), Some(&1));
+        assert_eq!(report.counts.get("user:tool_result"), Some(&1));
     }
 
     #[test]

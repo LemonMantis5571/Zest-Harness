@@ -43,6 +43,13 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   is sent for explicit Haiku 5.5 as well as the larger models, but not legacy
   Haiku ids or the deployment-dependent `haiku` alias. A stored session is resumed with `--resume` only if
   it was created for the same model; `/btw` side turns use `--fork-session`.
+- With `Task` in scope Claude Code also gets `--forward-subagent-text`, so
+  subagent records (tagged `parent_tool_use_id`) reach the stream. They never
+  join the answer or open rows of their own: the subagent's latest message or
+  tool (`Agent <description>: Grep cacheKey in scripts`) and any failed tool
+  show on the parent `Agent` row, which completes with its own title when its
+  own result arrives. A subagent's successful edit still reports its file. The
+  contract counts them as `assistant:subagent` and `user:subagent`.
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
 - Codex CLI (`codex_app_server`): JSON-RPC over `codex app-server --listen
