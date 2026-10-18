@@ -5,11 +5,14 @@ import {
   buildTrace,
   orderedSteps,
   parseAgentTitle,
+  subagentDuration,
   type TraceItem,
 } from "./assistantTrace.ts";
+import { initialChatUiState, reduceChatEvent } from "./chatReducer.ts";
 import { COLLAPSE_THRESHOLD } from "./toolRuns.ts";
 import type {
   AssistantStep,
+  ChatEvent,
   ChatMessage,
   ProviderActivityPart,
   ToolPart,
@@ -65,6 +68,30 @@ function ids(items: TraceItem[]): string[] {
 }
 
 describe("orderedSteps", () => {
+  it("keeps later reasoning live after commentary and settles it when new text arrives", () => {
+    const identity = { session_id: "s", thread_id: "t", turn_id: "turn", message_id: "a" };
+    let state = initialChatUiState();
+    const apply = (event: ChatEvent) => {
+      state = reduceChatEvent(state, event).state;
+      const assistant = state.messages[0];
+      assert.ok(assistant?.role === "assistant");
+      return orderedSteps(assistant).filter((step) => step.kind === "thinking");
+    };
+    apply({ kind: "thinking_delta", ...identity, text: "Look first." });
+    apply({ kind: "text_delta", ...identity, text: "I will inspect the file." });
+    apply({ kind: "tool_call_start", ...identity, id: "read", name: "read_file" });
+    apply({ kind: "tool_call_result", ...identity, id: "read", name: "read_file", summary: "ok", isError: false });
+
+    const thinking = apply({ kind: "thinking_delta", ...identity, text: "Now check " });
+    assert.deepEqual(thinking.map((step) => [step.text, step.live]), [
+      ["Look first.", false],
+      ["Now check ", true],
+    ]);
+    assert.equal(apply({ kind: "thinking_delta", ...identity, text: "the caller." }).at(-1)?.live, true);
+    assert.equal(apply({ kind: "text_delta", ...identity, text: "The caller is correct." }).at(-1)?.live, false);
+    assert.ok(apply({ kind: "done", ...identity }).every((step) => !step.live));
+  });
+
   it("follows the recorded order, thinking between tools included", () => {
     const steps: AssistantStep[] = [
       { kind: "thinking", text: "Look first." },
@@ -124,6 +151,22 @@ describe("orderedSteps", () => {
       message({ tools: [tool({ id: "t1" })], steps, streaming: true, text: "Done." })
     );
     assert.ok(answering.every((step) => !(step.kind === "thinking" && step.live)));
+  });
+});
+
+describe("subagentDuration", () => {
+  it("does not invent elapsed time for a terminal tool or activity without an end", () => {
+    for (const status of ["done", "error", "awaiting_approval"] as const) {
+      assert.equal(subagentDuration({ status, startedAt: 1_000 }, 86_401_000), undefined);
+    }
+  });
+
+  it("keeps a known terminal duration fixed and lets a running subagent advance", () => {
+    const stopped = { status: "error" as const, startedAt: 1_000, finishedAt: 6_000 };
+    assert.equal(subagentDuration(stopped, 6_000), "5s");
+    assert.equal(subagentDuration(stopped, 86_401_000), "5s");
+    assert.equal(subagentDuration({ status: "running", startedAt: 1_000 }, 7_000), "6s");
+    assert.equal(subagentDuration({ status: "error" }, 7_000), undefined);
   });
 });
 

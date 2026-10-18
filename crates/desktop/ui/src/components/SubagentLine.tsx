@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/trace";
 import {
   parseAgentTitle,
+  subagentDuration,
   type ActivityNode,
   type StepStatus,
 } from "@/lib/assistantTrace";
@@ -31,7 +32,6 @@ import {
   delegationReport,
   jobProgress,
   jobSteps,
-  stepDuration,
   type JobStep,
 } from "@/lib/subagents";
 import type { DelegationJob, ToolPart } from "@/lib/types";
@@ -139,7 +139,15 @@ function jobDuration(job: DelegationJob, now: number): string | undefined {
   const finished = open
     ? undefined
     : Math.max(...job.attempts.map((attempt) => Number(attempt.finishedAt)));
-  return stepDuration(started, finished, now);
+  return subagentDuration(
+    {
+      startedAt: started,
+      finishedAt: finished,
+      status:
+        job.status === "worker_running" || job.status === "review_running" ? "running" : "done",
+    },
+    now
+  );
 }
 
 /**
@@ -258,7 +266,7 @@ export function SubagentToolLine({
       title={title}
       status={status}
       badge={meta?.model}
-      duration={stepDuration(tool.startedAt, tool.finishedAt, now)}
+      duration={subagentDuration(tool, now)}
     >
       {hasDetail ? (
         <>
@@ -312,7 +320,7 @@ export function SubagentActivityLine({
       title={title}
       status={status}
       badge={providerLabel}
-      duration={stepDuration(activity.startedAt, activity.finishedAt, now)}
+      duration={subagentDuration(activity, now)}
     >
       {children.length > 0 ? (
         <Trace>

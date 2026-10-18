@@ -1013,9 +1013,13 @@ impl Thread {
         true
     }
 
-    /// Convert interrupted approvals / still-running tools into terminal error
-    /// cards so a restart never leaves forever-pending UI state.
+    /// Close interrupted rows when a live turn ends, recording its end time.
     pub fn terminalize_interrupted(&mut self) -> bool {
+        self.terminalize_interrupted_at(Some(now_millis()))
+    }
+
+    /// Recovery cannot know when the old process stopped, so it supplies no end.
+    fn terminalize_interrupted_at(&mut self, finished_at: Option<u64>) -> bool {
         let mut changed = false;
         for msg in &mut self.messages {
             let Some(AssistantFields {
@@ -1031,8 +1035,15 @@ impl Thread {
                 *streaming = false;
                 changed = true;
             }
-            changed |= finish_activities(activity, "error");
+            for part in activity.iter_mut().filter(|part| part.status == "running") {
+                part.status = "error".into();
+                part.finished_at = part.finished_at.or(finished_at);
+                changed = true;
+            }
             for tool in tools.iter_mut() {
+                if matches!(tool.status.as_str(), "awaiting_approval" | "running") {
+                    tool.finished_at = tool.finished_at.or(finished_at);
+                }
                 match tool.status.as_str() {
                     "awaiting_approval" => {
                         tool.status = "error".into();
@@ -1629,7 +1640,7 @@ impl ThreadStore {
             Ok(None) => {}
             Err(e) => return Err(e),
         }
-        if thread.terminalize_interrupted() {
+        if thread.terminalize_interrupted_at(None) {
             warnings.push("interrupted tools/approvals were closed after restart".into());
             // Persist the terminalized projection so reopen stays stable.
             let _ = self.save(&thread);
@@ -2875,6 +2886,60 @@ document.getElementById('counter').onclick = event => {
         let (_, activity, _) = assistant_parts(&thread);
         assert_eq!(activity[0].status, "error");
         assert!(activity[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn terminalize_interrupted_records_live_tool_end_times_once() {
+        let mut thread = Thread::new();
+        thread.apply_tool_start("a1", "worker", "delegate_external");
+        thread.apply_approval_needed(
+            "a1",
+            "approval",
+            "delegate_external",
+            "ap",
+            "agent/codex",
+            "run",
+            "",
+        );
+        let before = now_millis();
+        assert!(thread.terminalize_interrupted());
+        let after = now_millis();
+        let (tools, _, _) = assistant_parts(&thread);
+        for tool in tools {
+            assert_eq!(tool.status, "error");
+            assert!(tool
+                .finished_at
+                .is_some_and(|end| end >= before && end <= after));
+        }
+        let ends: Vec<_> = tools.iter().map(|tool| tool.finished_at).collect();
+        assert!(!thread.terminalize_interrupted());
+        let (tools, _, _) = assistant_parts(&thread);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.finished_at)
+                .collect::<Vec<_>>(),
+            ends
+        );
+    }
+
+    #[test]
+    fn restart_terminalization_keeps_unknown_end_times_unknown() {
+        let root = scratch("unknown-interrupted-end");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = Thread::new();
+        thread.apply_tool_start("a1", "worker", "delegate_external");
+        thread.apply_provider_activity("a1", "agent", "Agent Audit", "running", None);
+        store.save(&thread).unwrap();
+
+        for _ in 0..2 {
+            let restored = store.load_with_recovery(&thread.id).unwrap().thread;
+            let (tools, activities, _) = assistant_parts(&restored);
+            assert_eq!(tools[0].status, "error");
+            assert_eq!(tools[0].finished_at, None);
+            assert_eq!(activities[0].status, "error");
+            assert_eq!(activities[0].finished_at, None);
+        }
     }
 
     /// Threads written before steps existed carry neither field. They must

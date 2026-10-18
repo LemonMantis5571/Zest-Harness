@@ -1,8 +1,24 @@
 import { htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
+import { stepDuration } from "./subagents.ts";
 import { COLLAPSE_THRESHOLD, summarizeTools, type ToolRunSummary } from "./toolRuns.ts";
 import type { ChatMessage, ProviderActivityPart, ToolPart } from "./types.ts";
 
 type AssistantMessage = Extract<ChatMessage, { role: "assistant" }>;
+
+/** Live UI state only; the persisted message and event formats do not change. */
+export type TraceMessage = AssistantMessage & {
+  /** Reply length when the latest thinking delta arrived. */
+  thinkingTextLength?: number;
+};
+
+/** Duration shown by a subagent row. */
+export function subagentDuration(
+  part: Pick<ToolPart, "status" | "startedAt" | "finishedAt">,
+  now: number
+): string | undefined {
+  if (part.status !== "running" && part.finishedAt == null) return undefined;
+  return stepDuration(part.startedAt, part.finishedAt, now);
+}
 
 /** One thing the turn did, resolved from a step reference to its part. */
 export type TraceStep =
@@ -33,7 +49,7 @@ export type TraceItem =
  * order of thinking, then tools, then activity. A part no step names is added
  * at the end rather than dropped, so a missed event can never hide a tool.
  */
-export function orderedSteps(message: AssistantMessage): TraceStep[] {
+export function orderedSteps(message: TraceMessage): TraceStep[] {
   const tools = new Map(message.tools.map((tool) => [tool.id, tool]));
   const activities = new Map(
     (message.providerActivity ?? []).map((activity) => [activity.id, activity])
@@ -76,7 +92,11 @@ export function orderedSteps(message: AssistantMessage): TraceStep[] {
   // Only the newest block can still be thinking, and only until anything —
   // a tool, an activity, the reply — comes after it.
   const last = steps[steps.length - 1];
-  if (last?.kind === "thinking" && message.streaming && !message.text) {
+  if (
+    last?.kind === "thinking" &&
+    message.streaming &&
+    message.text.length === (message.thinkingTextLength ?? 0)
+  ) {
     steps[steps.length - 1] = { ...last, live: true };
   }
   return steps;
@@ -167,7 +187,7 @@ function isSettled(tool: ToolPart): boolean {
  * approvals, HTML cards and subagents break a run, so the order stays honest.
  */
 export function buildTrace(
-  message: AssistantMessage,
+  message: TraceMessage,
   threshold: number = COLLAPSE_THRESHOLD
 ): TraceItem[] {
   const { roots, nodes } = activityTree(message.providerActivity ?? []);

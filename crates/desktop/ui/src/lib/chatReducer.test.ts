@@ -787,6 +787,19 @@ describe("reduceChatEvent characterization", () => {
    * order, a dead one shadowed the live card and could never be cleared.
    */
   for (const kind of ["done", "cancelled", "error"] as const) {
+    it(`${kind} freezes interrupted subagent tool durations at the terminal event`, () => {
+      let state = reduceChatEvent(initialChatUiState(), {
+        kind: "tool_call_start", ...ID, message_id: "a1", id: "worker", name: "delegate_external",
+      }, { now: () => 1_000 }).state;
+      const event: ChatEvent = kind === "error"
+        ? { kind, ...ID, message_id: "a1", message: "disconnected" }
+        : { kind, ...ID, message_id: "a1" };
+      state = reduceChatEvent(state, event, { now: () => 6_000 }).state;
+      assert.equal(assistant(state).tools[0].finishedAt, 6_000);
+      state = reduceChatEvent(state, event, { now: () => 9_000 }).state;
+      assert.equal(assistant(state).tools[0].finishedAt, 6_000);
+    });
+
     it(`${kind} terminalizes a tool still awaiting approval`, () => {
       const state = reduceAll([
         pendingApproval("ap1", "t1"),
@@ -797,6 +810,7 @@ describe("reduceChatEvent characterization", () => {
       const tool = assistant(state).tools[0];
       assert.equal(tool.status, "error");
       assert.match(tool.summary ?? "", /approval interrupted/);
+      assert.equal(tool.finishedAt, NOW);
       assert.equal(
         state.messages
           .filter((m) => m.role === "assistant")
@@ -806,6 +820,17 @@ describe("reduceChatEvent characterization", () => {
       );
     });
   }
+
+  it("preserves unknown end times on already interrupted older rows", () => {
+    const state = initialChatUiState([{
+      id: "old", role: "assistant", text: "", thinking: "", streaming: false,
+      tools: [{ id: "worker", name: "delegate_external", status: "error", startedAt: 1_000 }],
+      providerActivity: [{ id: "agent", title: "Agent Audit", status: "error", startedAt: 1_000 }],
+    }]);
+    const next = reduceChatEvent(state, { kind: "cancelled", ...ID, message_id: "new" }, { now: () => 86_401_000 }).state;
+    assert.equal(assistant(next).tools[0].finishedAt, undefined);
+    assert.equal(assistant(next).providerActivity?.[0].finishedAt, undefined);
+  });
 
   it("terminalizes a stale approval left in an earlier assistant message", () => {
     // The queue is flattened across messages, so the sweep has to be too.

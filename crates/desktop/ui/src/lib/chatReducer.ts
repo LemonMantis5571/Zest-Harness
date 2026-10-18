@@ -5,6 +5,7 @@ import type {
   ProviderActivityPart,
   ToolPart,
 } from "./types.ts";
+import type { TraceMessage } from "./assistantTrace.ts";
 
 /** Pure chat UI projection state reduced from desktop `chat-event` payloads. */
 export type ChatUiState = {
@@ -136,7 +137,7 @@ export function isStaleChatEvent(state: ChatUiState, event: ChatEvent): boolean 
  * could never advance. The restore-from-disk path in App.tsx has always done
  * this; the live path never did.
  */
-function terminalizeInterruptedTools(tools: ToolPart[]): ToolPart[] {
+function terminalizeInterruptedTools(tools: ToolPart[], now: number): ToolPart[] {
   if (
     !tools.some((t) => t.status === "awaiting_approval" || t.status === "running")
   ) {
@@ -152,16 +153,17 @@ function terminalizeInterruptedTools(tools: ToolPart[]): ToolPart[] {
       ...tool,
       status: "error" as const,
       summary: tool.summary ? `${tool.summary} (${note})` : note,
+      finishedAt: tool.finishedAt ?? now,
     };
   });
 }
 
 /** Apply {@link terminalizeInterruptedTools} across the whole transcript. */
-function sweepInterruptedTools(state: ChatUiState): ChatUiState {
+function sweepInterruptedTools(state: ChatUiState, now: number): ChatUiState {
   let changed = false;
   const messages = state.messages.map((message) => {
     if (message.role !== "assistant") return message;
-    const tools = terminalizeInterruptedTools(message.tools);
+    const tools = terminalizeInterruptedTools(message.tools, now);
     if (tools === message.tools) return message;
     changed = true;
     return { ...message, tools };
@@ -381,8 +383,9 @@ export function reduceChatEvent(
           ...m,
           thinking: joinThinkingStream(m.thinking, event.text),
           steps: withThinking(m.steps, event.text),
+          thinkingTextLength: m.text.length,
           streaming: true,
-        })),
+        } satisfies TraceMessage)),
         effects,
       };
     }
@@ -546,7 +549,7 @@ export function reduceChatEvent(
       }
       return {
         state: {
-          ...sweepInterruptedTools(next),
+          ...sweepInterruptedTools(next, now()),
           activeAssistantId: null,
           sending: false,
           currentTurnId: null,
@@ -565,7 +568,8 @@ export function reduceChatEvent(
               question: undefined,
               providerActivity: finishProviderActivities(m.providerActivity, "error", now()),
               error: m.error ?? "turn cancelled",
-            }))
+            })),
+            now()
           ),
           activeAssistantId: null,
           sending: false,
@@ -589,7 +593,8 @@ export function reduceChatEvent(
               // Only set when signing in again is the actual fix.
               reconnectProvider: event.reconnect_provider ?? undefined,
               providerSelection: event.provider_selection ?? undefined,
-            }))
+            })),
+            now()
           ),
           activeAssistantId: null,
           sending: false,
