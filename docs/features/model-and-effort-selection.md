@@ -4,6 +4,7 @@ summary: Pick a model and reasoning effort from the composer, search across prov
 paths:
   - crates/desktop/ui/src/components/ModelEffortPicker.tsx
   - crates/desktop/ui/src/components/ModelIcon.tsx
+  - crates/desktop/ui/src/components/ProviderSourceTag.tsx
   - crates/desktop/ui/src/lib/models.ts
   - crates/desktop/ui/src/lib/modelMarks.ts
   - crates/desktop/ui/src/lib/sessionOptions.ts
@@ -59,6 +60,12 @@ provider drivers in [provider-runtime](provider-runtime.md).
   provider sheet); the chat's current provider is always listed and its box is
   disabled. Saved per machine as the hidden ids in `localStorage`
   (`zest.pickerHiddenProviders.v1`), so a provider added later is shown.
+- Each provider is tagged **CLI** when its vendor CLI owns the agent loop
+  (`ownsAgentLoop`: Claude Code, Codex CLI, Cursor) and **API** when Zest calls
+  the model service itself, and shows how it connects (`ProviderView.method`,
+  such as "ChatGPT sign-in" or "API key"). Two providers can share a label
+  (a Codex gateway and Codex over ChatGPT sign-in): the picker header then adds
+  the method and the Customize row adds the config id (`sharedProviderLabels`).
 - A model with `resolvesTo` (a provider-decided alias such as Claude Code's
   `opus`, once a turn has run it) is labelled "opus → Opus 5" in the list,
   the trigger and the composer chip (`catalogueModelLabel`); an unresolved

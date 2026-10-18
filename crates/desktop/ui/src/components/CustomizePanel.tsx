@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { FontPicker } from "@/components/FontPicker";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { ProviderSourceTag } from "@/components/ProviderSourceTag";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { ThemePicker } from "@/components/ThemePicker";
@@ -37,6 +38,7 @@ import {
   messageFromError,
   validateMcpServerDraft,
 } from "@/lib/mcpServerForm";
+import { providerSource, sharedProviderLabels } from "@/lib/models";
 import type { CustomizeTab } from "@/lib/navigationHistory";
 import { setPickerProviderShown, useHiddenPickerProviders } from "@/lib/pickerProviders";
 import { setResponseBlockStreaming, useResponseBlockStreaming } from "@/lib/responseStreaming";
@@ -282,6 +284,7 @@ function ModelsPanel({
   const rows = providers.filter(
     (row) => row.id === currentProviderId || (row.selectable && row.models.length > 0)
   );
+  const sharedLabels = sharedProviderLabels(rows);
 
   return (
     <section className="flex flex-col gap-3">
@@ -297,6 +300,7 @@ function ModelsPanel({
             const current = row.id === currentProviderId;
             const shown = current || !hidden.has(row.id);
             const count = row.models.length || (row.defaultModel ? 1 : 0);
+            const models = `${count} ${count === 1 ? "model" : "models"}`;
             return (
               <li key={row.id}>
                 <label
@@ -314,11 +318,20 @@ function ModelsPanel({
                   />
                   <ProviderIcon providerId={row.id} className="size-4 shrink-0" />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">{row.label}</span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate text-sm font-medium">{row.label}</span>
+                      <ProviderSourceTag source={providerSource(row.ownsAgentLoop)} />
+                      {/* The config id is the one name two "Codex" rows never share. */}
+                      {sharedLabels.has(row.label) ? (
+                        <span className="truncate font-mono text-[11px] text-muted-foreground">
+                          {row.id}
+                        </span>
+                      ) : null}
+                    </span>
                     <span className="block text-[11px] text-muted-foreground">
-                      {current
-                        ? "In use in this chat, so always listed"
-                        : `${count} ${count === 1 ? "model" : "models"}`}
+                      {[row.method, current ? "in use in this chat, so always listed" : models]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </span>
                   </span>
                 </label>
