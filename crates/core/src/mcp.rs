@@ -1726,7 +1726,7 @@ rl.on("line", (line) => {
 "#,
         );
         std::env::set_var("ZEST_MCP_FIXTURE_KEY", "fixture");
-        std::env::set_var(crate::codex_oauth::SESSION_ENV, "fixture-session");
+        let _session_env = crate::provider::CodexSessionEnvGuard::set("fixture-session");
 
         let mut success_config = config();
         success_config.args = vec![script.path().display().to_string(), "success".into()];
@@ -1786,7 +1786,6 @@ rl.on("line", (line) => {
         assert!(error.contains("did not answer"), "{error}");
 
         std::env::remove_var("ZEST_MCP_FIXTURE_KEY");
-        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
     }
 
     #[tokio::test]

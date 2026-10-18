@@ -791,25 +791,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_oauth_is_required_to_load_and_does_not_read_vendor_files() {
+    fn codex_oauth_requires_its_session_environment() {
         let config = entry("[providers.p]\nkind = \"codex_oauth\"\n");
         let request = credentials_for("p", &config);
         assert_eq!(request.policy, CredentialPolicy::RequiredToLoad);
         assert_eq!(request.account, Some("p"));
         assert_eq!(request.env, Some(SESSION_ENV));
-        std::env::remove_var(SESSION_ENV);
-        let error = resolve_required(request).expect_err("a missing ChatGPT session must fail");
-        // Headless Linux has no Secret Service, so get() is Err, not Ok(None).
-        // The load still fails; it must not point at the vendor CLI store.
-        assert!(
-            error.contains("p")
-                || error.contains(SESSION_ENV)
-                || error.contains("could not read the saved API key"),
-            "{error}"
-        );
-        assert!(
-            !error.contains("auth.json"),
-            "must not mention the vendor CLI store: {error}"
+
+        let _session_env = crate::provider::CodexSessionEnvGuard::unset();
+        let error = resolve_required(CredentialRequest {
+            account: None,
+            ..request
+        })
+        .expect_err("a missing ChatGPT session must fail");
+        assert_eq!(
+            error,
+            "ZEST_CODEX_OAUTH_SESSION is not set in the environment"
         );
     }
 

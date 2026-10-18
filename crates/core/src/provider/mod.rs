@@ -40,6 +40,51 @@ use crate::config::ProviderConfig;
 use crate::error::Result;
 use crate::tools::approval::{ApprovalDecision, ApprovalPolicy};
 
+#[cfg(test)]
+static CODEX_SESSION_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct CodexSessionEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl CodexSessionEnvGuard {
+    fn capture() -> Self {
+        let lock = CODEX_SESSION_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(crate::codex_oauth::SESSION_ENV);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+
+    pub(crate) fn set(value: &str) -> Self {
+        let guard = Self::capture();
+        std::env::set_var(crate::codex_oauth::SESSION_ENV, value);
+        guard
+    }
+
+    pub(crate) fn unset() -> Self {
+        let guard = Self::capture();
+        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
+        guard
+    }
+}
+
+#[cfg(test)]
+impl Drop for CodexSessionEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(crate::codex_oauth::SESSION_ENV, value),
+            None => std::env::remove_var(crate::codex_oauth::SESSION_ENV),
+        }
+    }
+}
+
 /// Build a picker/validation catalogue from config without loading credentials.
 ///
 /// This used to be a second exhaustive match over [`ProviderConfig`], and it had
@@ -1110,8 +1155,7 @@ model = "deepseek-v4-flash"
             ),
         ];
 
-        std::env::set_var(
-            crate::codex_oauth::SESSION_ENV,
+        let _session_env = crate::provider::CodexSessionEnvGuard::set(
             r#"{"access_token":"t","refresh_token":"r","account_id":"acct","expires_at":9999999999}"#,
         );
         for (id, toml) in cases {
@@ -1143,7 +1187,6 @@ model = "deepseek-v4-flash"
             );
         }
         std::env::remove_var("ZEST_TEST_DRIFT_KEY");
-        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
     }
 
     #[test]
