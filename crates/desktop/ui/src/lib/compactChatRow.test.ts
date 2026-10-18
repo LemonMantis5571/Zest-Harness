@@ -11,7 +11,18 @@ describe("compactChatMark", () => {
         hasPullRequest: true,
         branchChanged: true,
       }),
-      "awaiting_approval"
+      "needs_input"
+    );
+  });
+
+  it("marks a chat waiting on an answer the same way as one waiting on approval", () => {
+    assert.equal(
+      compactChatMark({
+        activity: { state: "awaiting_input" },
+        hasPullRequest: true,
+        branchChanged: false,
+      }),
+      "needs_input"
     );
   });
 

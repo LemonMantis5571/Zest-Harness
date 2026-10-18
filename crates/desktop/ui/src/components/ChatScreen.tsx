@@ -884,6 +884,11 @@ export function ChatScreen({
    * interrupts you.
    */
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  /** A job the sidebar asked the Workbench to show; `request` re-fires a repeat click. */
+  const [workbenchJobFocus, setWorkbenchJobFocus] = useState<{
+    jobId: string;
+    request: number;
+  } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteFilter, setPaletteFilter] = useState<PaletteFilter>("all");
   useEffect(() => {
@@ -1020,9 +1025,23 @@ export function ChatScreen({
     scrollToTranscriptMessage(focusId);
   }, [messages, scrollToTranscriptMessage, session.focusMessageId]);
 
-  const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
+  // A jump request belongs to the click that made it; reopening the Workbench
+  // later starts on its usual tab.
+  const closeWorkbench = useCallback(() => {
+    setWorkbenchOpen(false);
+    setWorkbenchJobFocus(null);
+  }, []);
+  const openDelegationJob = useCallback(
+    (jobId: string) => {
+      if (session.isFreeChat) return;
+      setWorkbenchOpen(true);
+      setWorkbenchJobFocus((current) => ({ jobId, request: (current?.request ?? 0) + 1 }));
+    },
+    [session.isFreeChat]
+  );
   const toggleWorkbench = useCallback(() => {
     if (session.isFreeChat) return;
+    setWorkbenchJobFocus(null);
     setWorkbenchOpen((value) => !value);
   }, [session.isFreeChat]);
 
@@ -1708,6 +1727,8 @@ export function ChatScreen({
         activeSplitGroupId={activeSplitGroupId}
         onOpenSplitGroup={onOpenSplitGroup}
         onFocusSplitPane={onFocusSplitPane}
+        delegationJobs={delegationJobs}
+        onOpenDelegationJob={openDelegationJob}
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2183,6 +2204,7 @@ export function ChatScreen({
             onRetryDelegation={onRetryDelegation}
             onApplyDelegation={onApplyDelegation}
             onReconnectProvider={onReconnectProvider}
+            focusDelegationJob={workbenchJobFocus}
           />
         </Suspense>
       ) : null}

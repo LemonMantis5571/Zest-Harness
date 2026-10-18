@@ -92,7 +92,9 @@ blocked | failed | changes_requested | apply_conflict | queued -> awaiting_appro
 
 Entry points:
 
-1. **Desktop board.** The Workbench **Delegation** tab (`WorkbenchPanel.tsx`)
+1. **Desktop board.** The compact sidebar nests each job under the chat that
+   created it, with its status, and a click opens the board at that job
+   (see threads-and-history). The Workbench **Delegation** tab (`WorkbenchPanel.tsx`)
    calls `lib/api.ts`, which calls the Tauri commands in
    `crates/desktop/src/lib.rs`: `list_delegation_jobs` (runs `reconcile`
    first), `list_delegation_targets`, `create_delegation_job`,

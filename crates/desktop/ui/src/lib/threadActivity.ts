@@ -15,7 +15,11 @@ import { mcpToolLabel } from "./mcpDisplay.ts";
  * chat still going, and on what", not "what did it say".
  */
 
-export type ThreadActivityState = "working" | "awaiting_approval" | "idle";
+export type ThreadActivityState =
+  | "working"
+  | "awaiting_approval"
+  | "awaiting_input"
+  | "idle";
 
 export type ThreadActivity = {
   state: ThreadActivityState;
@@ -48,6 +52,8 @@ function describe(event: ChatEvent): string | undefined {
       return event.title;
     case "approval_needed":
       return `${toolActionName(event.tool_name)} needs approval`;
+    case "question_needed":
+      return "Waiting for your answer";
     default:
       return undefined;
   }
@@ -126,6 +132,15 @@ export function reduceThreadActivity(
         lastAction: describe(event),
       });
 
+    case "question_needed":
+      // The other way a turn stops on you. Answering resumes the turn, and the
+      // next tool or provider event puts it back to working.
+      return put({
+        state: "awaiting_input",
+        startedAt: current?.startedAt ?? now,
+        lastAction: describe(event),
+      });
+
     case "done":
     case "error":
     case "cancelled":
@@ -134,6 +149,11 @@ export function reduceThreadActivity(
     default:
       return map;
   }
+}
+
+/** The turn has stopped until a person approves something or answers. */
+export function needsInput(activity: ThreadActivity | undefined): boolean {
+  return activity?.state === "awaiting_approval" || activity?.state === "awaiting_input";
 }
 
 /** Threads that are doing something, for a count or a filter. */

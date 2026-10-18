@@ -71,6 +71,7 @@ import {
   reduceThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
+import { markThreadSeen, recordUnreadEvent } from "@/lib/threadUnread";
 import {
   pendingInputToQueuedTurn,
   updateThreadTurn,
@@ -1351,6 +1352,7 @@ export default function App() {
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
       recordThreadActivity(event);
+      recordUnreadEvent(event, threadIdRef.current);
       if (event.kind === "text_delta" || event.kind === "thinking_delta") {
         deltaQueueRef.current.push(event);
         if (deltaRafRef.current == null) {
@@ -1816,6 +1818,12 @@ export default function App() {
       cancelled = true;
     };
   }, [activeDelegationRoot]);
+
+  // Opening a chat is looking at it, so it stops reading as unread.
+  const openThreadId = session?.threadId;
+  useEffect(() => {
+    if (openThreadId) markThreadSeen(openThreadId);
+  }, [openThreadId]);
 
   // Persist sticky draft for the active thread.
   useEffect(() => {
