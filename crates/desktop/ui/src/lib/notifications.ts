@@ -63,10 +63,14 @@ async function notificationPermission() {
 export async function notifyWhenAway(
   title: string,
   body: string,
-  onClick?: () => void
+  { onClick, isCurrent = () => true }: {
+    onClick?: () => void;
+    isCurrent?: () => boolean;
+  } = {}
 ) {
-  if (await isWindowActuallyActive()) return false;
+  if ((await isWindowActuallyActive()) || !isCurrent()) return false;
   if (!(await notificationPermission())) return false;
+  if ((await isWindowActuallyActive()) || !isCurrent()) return false;
 
   try {
     if (isTauri()) {

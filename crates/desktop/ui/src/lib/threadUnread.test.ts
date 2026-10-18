@@ -42,21 +42,28 @@ function installStorage(initial: Record<string, string> = {}) {
 const NONE: UnreadThreads = new Set();
 
 describe("reduceUnreadThreads", () => {
+  it("uses actual visibility rather than one backend-active chat", () => {
+    const visible = reduceUnreadThreads(NONE, ended("left-pane"), true);
+    assert.deepEqual([...visible], []);
+    const hidden = reduceUnreadThreads(visible, ended("hidden-active-session"), false);
+    assert.deepEqual([...hidden], ["hidden-active-session"]);
+  });
+
   it("marks a chat whose turn ended while another chat was open", () => {
-    const next = reduceUnreadThreads(NONE, ended("a"), "b");
+    const next = reduceUnreadThreads(NONE, ended("a"), false);
     assert.deepEqual([...next], ["a"]);
   });
 
   it("leaves the chat you are looking at alone", () => {
-    assert.equal(reduceUnreadThreads(NONE, ended("a"), "a"), NONE);
+    assert.equal(reduceUnreadThreads(NONE, ended("a"), true), NONE);
   });
 
   it("counts a turn that failed, since there is something to read", () => {
-    assert.deepEqual([...reduceUnreadThreads(NONE, ended("a", "error"), "b")], ["a"]);
+    assert.deepEqual([...reduceUnreadThreads(NONE, ended("a", "error"), false)], ["a"]);
   });
 
   it("ignores a cancel, which you did yourself", () => {
-    assert.equal(reduceUnreadThreads(NONE, ended("a", "cancelled"), "b"), NONE);
+    assert.equal(reduceUnreadThreads(NONE, ended("a", "cancelled"), false), NONE);
   });
 
   it("ignores events that do not end a turn", () => {
@@ -67,18 +74,18 @@ describe("reduceUnreadThreads", () => {
       turn_id: "t",
       message_id: "m",
     } as ChatEvent;
-    assert.equal(reduceUnreadThreads(NONE, start, "b"), NONE);
+    assert.equal(reduceUnreadThreads(NONE, start, false), NONE);
   });
 
   it("keeps the same set when the chat is already marked", () => {
-    const once = reduceUnreadThreads(NONE, ended("a"), "b");
-    assert.equal(reduceUnreadThreads(once, ended("a"), "b"), once);
+    const once = reduceUnreadThreads(NONE, ended("a"), false);
+    assert.equal(reduceUnreadThreads(once, ended("a"), false), once);
   });
 
   it("drops the oldest marks past the cap", () => {
     let unread: UnreadThreads = NONE;
     for (let index = 0; index <= MAX_UNREAD_THREADS; index += 1) {
-      unread = reduceUnreadThreads(unread, ended(`t${index}`), null);
+      unread = reduceUnreadThreads(unread, ended(`t${index}`), false);
     }
     assert.equal(unread.size, MAX_UNREAD_THREADS);
     assert.ok(!unread.has("t0"));
@@ -113,7 +120,7 @@ describe("unread chat store", () => {
 
   it("survives a restart by persisting to storage", () => {
     const storage = installStorage();
-    recordUnreadEvent(ended("a"), "b");
+    recordUnreadEvent(ended("a"), false);
     assert.equal(storage.get(UNREAD_THREADS_STORAGE_KEY), JSON.stringify(["a"]));
     assert.ok(getUnreadThreads().has("a"));
 
@@ -126,7 +133,7 @@ describe("unread chat store", () => {
     installStorage({ [UNREAD_THREADS_STORAGE_KEY]: JSON.stringify(["a"]) });
     const first = getUnreadThreads();
     assert.equal(getUnreadThreads(), first);
-    recordUnreadEvent(ended("b"), null);
+    recordUnreadEvent(ended("b"), false);
     assert.notEqual(getUnreadThreads(), first);
   });
 

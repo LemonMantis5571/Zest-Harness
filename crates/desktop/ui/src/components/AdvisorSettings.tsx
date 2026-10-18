@@ -90,11 +90,11 @@ export function AdvisorSettings({
 
       <Group label="Advisor">
         <Option
-          selected={!current}
+          selected={!settings.provider}
           disabled={disabled}
           title="Off"
           onSelect={() => {
-            if (current) onSave(null);
+            if (settings.provider) onSave(null);
           }}
         />
         {settings.options.map((option) => (

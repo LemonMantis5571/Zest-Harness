@@ -11,6 +11,46 @@ it("exposes the instance the page uses, so specs never import a second copy", ()
   assert.equal((globalThis as { __zestFixtureBackend?: unknown }).__zestFixtureBackend, backend);
 });
 
+it("clears a saved advisor whose provider is no longer available", async () => {
+  const backend = createFixtureBackend({ scenario: "advisor-unavailable" });
+  const configured = await backend.advisorSettings();
+  assert.equal(configured.provider, "fixture-removed");
+  assert.equal(configured.issue, "[advisor] provider `fixture-removed` is not configured.");
+  assert.ok(!configured.options.some((option) => option.id === configured.provider));
+
+  await backend.setAdvisor(null);
+  await backend.startSession();
+  const cleared = await backend.advisorSettings();
+  assert.equal(cleared.provider, "");
+  assert.equal(cleared.model, "");
+  assert.equal(cleared.issue, undefined);
+});
+
+it("exposes a newly resolved alias only in metadata read after a completed turn", async () => {
+  const backend = createFixtureBackend({ scenario: "claude-alias-resolution" });
+  const initial = await backend.startSession();
+  assert.equal(initial.model, "opus");
+  assert.equal(initial.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+
+  let duringTurn: ReturnType<typeof backend.sessionInfo> | undefined;
+  const events: ChatEvent[] = [];
+  await backend.onChatEvent((event) => {
+    events.push(event);
+    if (event.kind === "text_delta" && !duringTurn) duringTurn = backend.sessionInfo();
+  });
+  await backend.sendMessage("Resolve this alias");
+  const during = await duringTurn;
+  assert.ok(during);
+  assert.equal(during.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+  assert.equal(events.at(-1)?.kind, "done");
+
+  const completed = await backend.sessionInfo();
+  assert.ok(completed);
+  assert.equal(completed.models.find((model) => model.id === "opus")?.resolvesTo, "claude-opus-5");
+  assert.equal(completed.threadId, initial.threadId);
+  assert.equal(initial.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+});
+
 it("UI stress fixture exposes long labels and a consistent high-context reading", async () => {
   const backend = createFixtureBackend({ scenario: "ui-stress" });
   const session = await backend.startSession();
@@ -492,6 +532,28 @@ describe("fixture safety scenarios", () => {
 });
 
 describe("fixture background-approval scenario", () => {
+  it("can cancel the background approval without cancelling the open chat", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("show a background approval");
+    await backend.cancelTurn("fixture-free");
+    assert.deepEqual(
+      events.flatMap((event) => event.thread_id === "fixture-free" ? [event.kind] : []),
+      ["assistant_start", "tool_call_start", "approval_needed", "cancelled"]
+    );
+    assert.equal((await backend.sessionInfo())?.threadId, "fixture");
+  });
+
+  it("renames a free chat while a project chat is open", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const renamed = await backend.renameThread("fixture-free", null, "Same title", true);
+    assert.equal(renamed.id, "fixture-free");
+    assert.equal(renamed.title, "Same title");
+    const freeChats = (await backend.listChatProjects()).find((project) => project.path === null);
+    assert.equal(freeChats?.threads.find((thread) => thread.id === "fixture-free")?.title, "Same title");
+  });
+
   it("echoes the open chat's turn, then stops the Free chat for approval", async () => {
     const backend = createFixtureBackend({ scenario: "background-approval" });
     const events: ChatEvent[] = [];

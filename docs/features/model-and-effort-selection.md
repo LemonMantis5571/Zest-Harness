@@ -71,7 +71,9 @@ provider drivers in [provider-runtime](provider-runtime.md).
 - A model with `resolvesTo` (a provider-decided alias such as Claude Code's
   `opus`, once a turn has run it) is labelled "opus → Opus 5" in the list,
   the trigger and the composer chip (`catalogueModelLabel`); an unresolved
-  alias reads "opus (alias)". Search matches either label.
+  alias reads "opus (alias)". Search matches either label. After a completed
+  turn, the open chat refreshes its model catalogue along with checkpoints,
+  so a newly resolved alias appears without reopening the chat or reloading.
 - A model with `needsCli` (the installed vendor CLI is known to be too old for
   it, such as Opus 5.5 on Claude Code 2.1.220) shows "Needs Claude Code
   2.1.280+ · run claude update" in its row (`cliRequirementLabel`). It is
@@ -139,8 +141,11 @@ provider drivers in [provider-runtime](provider-runtime.md).
   before every disabled control is inspected, then advances it to check persistence.
   `model-picker-search.spec.ts`: search, capabilities, long catalogue at 1280 and
   720 px. `picker-keyboard.spec.ts`: keyboard paths and focus restoration.
-  `model-picker-cli-version.spec.ts`: marks for an old Claude Code CLI, and
-  picking a marked model.
+  `model-picker-cli-version.spec.ts`: marks for an old Claude Code CLI,
+  picking a marked model, and a configured alias whose resolution becomes
+  available only after a turn (`claude-alias-resolution`). The last check
+  sends through the composer and checks the updated trigger and selected row
+  in the same chat.
 
 ## Pitfalls
 
@@ -155,7 +160,9 @@ provider drivers in [provider-runtime](provider-runtime.md).
 - Current choices include GPT-6.1 Sol and GPT-6 Astra on both Codex transports,
   and Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 on the native API
   and as Claude Code's only built-in ids (its bare aliases are offered only
-  when configured; see [cli-agent-providers](cli-agent-providers.md)). Saved selections and configured defaults are
-  unchanged. The builtin Codex list no longer offers retired GPT-5.4 choices;
+  when configured; see [cli-agent-providers](cli-agent-providers.md)). A saved
+  or configured default alias that is no longer offered migrates to its
+  explicit successor; a configured alias still in the catalogue is retained.
+  The builtin Codex list no longer offers retired GPT-5.4 choices;
   a configured model allow-list remains authoritative.
 - `providerSupportsModelPicker` is deprecated; use `sessionSupportsModelPicker`.

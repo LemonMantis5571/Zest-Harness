@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { XIcon, CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 const baseToast = ToastPrimitive.createToastManager()
-type ToastAddOptions = Parameters<typeof baseToast.add>[0]
+type ToastAddOptions = Parameters<typeof baseToast.add>[0] & { groupKey?: string }
 
 type GroupedToast = {
   id: string
@@ -41,7 +41,7 @@ function toastData(data: unknown, count: number) {
  */
 const toast = {
   ...baseToast,
-  add(requested: ToastAddOptions) {
+  add({ groupKey, ...requested }: ToastAddOptions) {
     const options = { ...requested, timeout: requested.timeout ?? toastTimeout(requested.type) }
     const title = textValue(options.title)
     const description = textValue(options.description)
@@ -49,7 +49,7 @@ const toast = {
       return baseToast.add(options)
     }
 
-    const fingerprint = notificationFingerprint(options.type, title, description)
+    const fingerprint = notificationFingerprint(options.type, title, description, groupKey)
     const existing = groupedToasts.get(fingerprint)
     if (existing) {
       existing.count += 1

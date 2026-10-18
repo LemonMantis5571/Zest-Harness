@@ -28,6 +28,14 @@ verify:
   `contextFailureReady` and `contextRecoveryReady`, so failed and recovered
   popovers are deterministic and do not depend on request counts.
 - The `subagents` scenario restores a chat with a `delegate_external` worker, a `delegate_feature` card tied to the board's fixture job, and a Claude Code `Agent` whose activities name it as `parentId`. A send streams a live agent with nested steps (150 ms apart; "slow" in the message spaces them 1.5 s apart). Approving the fixture job now records worker and reviewer attempts.
+- In `background-approval`, `zest:fixture-background-approval` accepts a CustomEvent detail of `fixture-free` or `fixture-local` to start another approval. `cancelTurn(threadId)` cancels that turn. Renaming either seeded chat works without opening it, so notification tests can exercise identical titles and delayed lookup.
+- `advisor-unavailable` starts with an advisor saved for a removed provider and
+  reports the configuration issue. Choosing Off clears the saved provider and
+  issue, including after the session rebuild and reopening Settings.
+- `claude-alias-resolution` starts a Claude Code chat on an unresolved `opus`
+  alias. Sending a message finishes a turn, then exposes `resolvesTo` as
+  `claude-opus-5` in `sessionInfo`. Earlier snapshots stay unresolved, so the
+  UI must refresh the catalogue to update the open chat's picker.
 - The `html-artifacts` scenario exercises publication and restored interactive HTML. A dev-only token endpoint serves bounded source with the isolated response CSP; it is not a production artifact store or native IPC proof.
 - `npm run ui:dev`, then `http://127.0.0.1:1420/?fixture=1` (port `ZEST_UI_PORT` when set): the full chat shell runs with no Tauri, provider, or credentials. `?fixture` is honoured only by the Vite dev server (`import.meta.env.DEV`); release builds drop the module.
 - On load the fixture starts session `session-fixture` / thread `fixture` and streams one canned turn: user "What's in README.md?", a thinking delta, four `read_file` tool calls (exercising run grouping), then a word-by-word reply. A second thread, `fixture-local` (provider `ollama`), shows as busy with a `git_status` tool for about 9 s to exercise the sidebar activity mark.
@@ -56,6 +64,12 @@ verify:
   asserting the loading state, without pausing UI rendering timers.
 - `node scripts/zest-control.mjs start` drives this fixture one command at a time and `check` smoke-tests it; see [ui-control-cli](ui-control-cli.md).
 - `npm run ui:test` runs `fixtureBackend.test.ts` (side conversations, rename, free chats, search, delegation lifecycle, plugins and files, safety scenarios, windowed open, PR review, queued-message recovery).
+- `advisor-settings.spec.ts` clicks Off for the unavailable advisor and checks
+  the saved setting as well as the radio state and cleared issue.
+  `model-picker-cli-version.spec.ts` checks that the alias trigger and selected
+  row update after a completed turn without reopening the chat or reloading.
+  The fixture unit tests cover clearing the unavailable advisor and keeping
+  alias metadata unresolved during a turn and in earlier snapshots.
 - `npm run ui:e2e` or one spec: `npm run ui:e2e -- split-workspace`. Every spec except `streaming-performance` opens `/?fixture=1`; that one loads the standalone harness `e2e/fixtures/streaming.html`. Needs `npx playwright install chromium` once.
 
 ## Adding fixture behavior for a new e2e test

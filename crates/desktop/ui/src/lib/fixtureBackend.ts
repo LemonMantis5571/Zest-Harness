@@ -27,6 +27,7 @@ import type { DesktopBackend } from "./backend";
 import type {
   AdvisorChoice,
   AdvisorSettings,
+  ApprovalChoice,
   ApprovalMode,
   AttachmentInput,
   ChatEvent,
@@ -280,7 +281,7 @@ function subagentMessages(): ChatMessage[] {
 }
 
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status" | "subagents" | "background-approval" | "claude-cli-outdated";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status" | "subagents" | "background-approval" | "claude-cli-outdated" | "advisor-unavailable" | "claude-alias-resolution";
 
 /**
  * `?scenario=sidebar-status`: a chat in every state the status-grouped sidebar
@@ -314,7 +315,7 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
     value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" ||
     value === "sidebar-status" || value === "subagents" || value === "background-approval" ||
-    value === "claude-cli-outdated"
+    value === "claude-cli-outdated" || value === "advisor-unavailable" || value === "claude-alias-resolution"
     ? value
     : undefined;
 }
@@ -344,10 +345,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     if (options.contextRecoveryReady) void options.contextRecoveryReady.then(() => { contextRecovered = true; });
     else if (typeof window !== "undefined") window.addEventListener("zest:fixture-recover-context", () => { contextRecovered = true; }, { once: true });
   }
-  const sessionModels = scenario === "model-catalogue"
+  const sessionModels: SessionInfo["models"] = scenario === "model-catalogue"
     ? CATALOGUE_MODELS
-    : scenario === "claude-cli-outdated" ? CLAUDE_CODE_MODELS : FIXTURE_MODELS;
-  const scenarioSession = scenario === "claude-cli-outdated" ? CLAUDE_CODE_SESSION : FIXTURE_SESSION;
+    : scenario === "claude-alias-resolution"
+      ? [{ ...CLAUDE_CODE_MODELS[1], id: "opus" }, ...CLAUDE_CODE_MODELS]
+      : scenario === "claude-cli-outdated" ? CLAUDE_CODE_MODELS : FIXTURE_MODELS;
+  const scenarioSession = scenario === "claude-alias-resolution"
+    ? { ...CLAUDE_CODE_SESSION, model: "opus", defaultModel: "opus" }
+    : scenario === "claude-cli-outdated" ? CLAUDE_CODE_SESSION : FIXTURE_SESSION;
   async function saveFixtureOptions() {
     if (scenario === "options-delayed" || scenario === "options-failing") {
       await new Promise((resolve) => setTimeout(resolve, 900));
@@ -356,7 +361,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     }
   }
-  let session: SessionInfo = { ...scenarioSession, messages: [] };
+  let session: SessionInfo = { ...scenarioSession, models: sessionModels, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
   let workspace = scenario === "ui-stress"
@@ -398,6 +403,29 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     (id === "fixture" || STATUS_SCENARIO_THREADS.some((thread) => thread.id === id));
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
+  const backgroundApprovals = new Map<string, (decision: ApprovalChoice) => void>();
+  const failBackgroundApprovalOnce = scenario === "background-approval" && typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("failBackgroundApprovalOnce");
+  let backgroundApprovalFailed = false;
+  const holdInteractionResults = (scenario === "background-approval" || scenario === "sidebar-status") &&
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).has("holdInteractionResults");
+  const interactionResults = new Map<string, () => void>();
+  let statusQuestionPending = scenario === "sidebar-status";
+
+  function finishInteraction(threadId: string, finish: () => void) {
+    if (holdInteractionResults) interactionResults.set(threadId, finish);
+    else finish();
+  }
+
+  if (holdInteractionResults) {
+    window.addEventListener("zest:fixture-release-interaction-result", (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail !== "fixture-free" && event.detail !== "fixture-local" && event.detail !== "fixture-question") return;
+      const finish = interactionResults.get(event.detail);
+      interactionResults.delete(event.detail);
+      finish?.();
+    });
+  }
 
   function windowSessionFor(
     threadId: string,
@@ -422,13 +450,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
-  let fixtureAdvisor: AdvisorChoice | null = null;
+  let fixtureAdvisor: AdvisorChoice | null = scenario === "advisor-unavailable"
+    ? { provider: "fixture-removed", model: "removed-large", maxUses: 3, autoReview: true }
+    : null;
   const fixtureAdvisorSettings = (): AdvisorSettings => ({
     provider: fixtureAdvisor?.provider ?? "",
     model: fixtureAdvisor?.model ?? "",
     maxUses: fixtureAdvisor?.maxUses ?? 3,
     autoReview: fixtureAdvisor?.autoReview ?? true,
     scope: "User zest.toml",
+    issue: fixtureAdvisor?.provider === "fixture-removed"
+      ? "[advisor] provider `fixture-removed` is not configured."
+      : undefined,
     options: [
       {
         id: "fixture",
@@ -705,6 +738,19 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       diff: "",
     });
     handler({
+      kind: "tool_call_start",
+      ...statusScenarioTurn("fixture-question"),
+      message_id: "assistant-fixture-question",
+      name: "ask_user",
+      id: "tool-status-question",
+    });
+    splitStreams.set("fixture-question", () => {
+      statusQuestionPending = false;
+      interactionResults.delete("fixture-question");
+      splitStreams.delete("fixture-question");
+      chatHandler?.({ kind: "cancelled", ...statusScenarioTurn("fixture-question"), message_id: "assistant-fixture-question" });
+    });
+    handler({
       kind: "question_needed",
       ...statusScenarioTurn("fixture-question"),
       message_id: "assistant-fixture-question",
@@ -814,32 +860,72 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       text: text.trim() || "(attachment)",
     });
     chatHandler({ kind: "done", ...id, message_id: assistantId });
+    // Native alias resolutions reach session metadata after the turn finishes.
+    // Replace the catalogue so an earlier SessionInfo stays an unresolved snapshot.
+    if (scenario === "claude-alias-resolution") {
+      session = {
+        ...session,
+        models: session.models.map((model) => model.id === "opus"
+          ? { ...model, resolvesTo: "claude-opus-5" }
+          : model),
+      };
+    }
     if (scenario === "background-approval") emitBackgroundApproval();
   }
 
-  /** A turn in the seeded "Free chat", not the open chat, stops for approval. */
-  function emitBackgroundApproval() {
+  /** A turn in a seeded background chat stops for approval. */
+  function emitBackgroundApproval(threadId = "fixture-free") {
     if (!chatHandler) return;
     const { turnId, assistantId } = fixtureIds();
     const id = {
-      session_id: "fixture-free-session",
-      thread_id: "fixture-free",
+      session_id: `${threadId}-session`,
+      thread_id: threadId,
       turn_id: turnId,
     };
     const toolId = `tool-${crypto.randomUUID()}`;
+    const approvalId = `approval-${crypto.randomUUID()}`;
+    splitStreams.set(threadId, () => {
+      backgroundApprovals.delete(approvalId);
+      interactionResults.delete(threadId);
+      splitStreams.delete(threadId);
+      chatHandler?.({ kind: "cancelled", ...id, message_id: assistantId });
+    });
+    backgroundApprovals.set(approvalId, (decision) => {
+      backgroundApprovals.delete(approvalId);
+      if (decision === "deny") {
+        finishInteraction(threadId, () => {
+          splitStreams.delete(threadId);
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "fixture_tool", id: toolId,
+            summary: "The fixture tool was denied.", isError: true,
+          });
+          chatHandler?.({ kind: "done", ...id, message_id: assistantId });
+        });
+      }
+      // An allowed command stays running until cancelTurn, with no result yet.
+    });
     chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
     chatHandler({ kind: "tool_call_start", ...id, message_id: assistantId, name: "fixture_tool", id: toolId });
     chatHandler({
       kind: "approval_needed",
       ...id,
       message_id: assistantId,
-      approval_id: `approval-${crypto.randomUUID()}`,
+      approval_id: approvalId,
       tool_name: "fixture_tool",
       tool_call_id: toolId,
       risk: "exec",
       path: "fixture_tool",
       summary: "Run the fixture tool in the background chat",
       diff: "{}",
+    });
+  }
+
+  if (scenario === "background-approval" && typeof window !== "undefined") {
+    window.addEventListener("zest:fixture-background-approval", (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail === "fixture-free" || event.detail === "fixture-local") {
+        emitBackgroundApproval(event.detail);
+      }
     });
   }
 
@@ -1168,7 +1254,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           defaultModel: DEFAULT_CODEX_MODEL,
           models: sessionModels,
         },
-        ...(scenario === "claude-cli-outdated" ? [
+        ...(scenario === "claude-cli-outdated" || scenario === "claude-alias-resolution" ? [
           {
             id: "claude-code",
             label: "Claude Code",
@@ -1180,8 +1266,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
             canConnect: false,
             configured: true,
             ownsAgentLoop: true,
-            defaultModel: "claude-sonnet-5-5",
-            models: CLAUDE_CODE_MODELS,
+            defaultModel: scenarioSession.defaultModel,
+            models: session.models,
           },
         ] : []),
         ...(scenario === "provider-picker" || scenario === "model-catalogue" ? [
@@ -2065,13 +2151,16 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (
         id !== session.threadId &&
         id !== "fixture-local" &&
+        id !== "fixture-free" &&
         id !== LONG_THREAD_ID &&
         !isStatusScenarioThread(id)
       ) {
         throw new Error(`fixture: unknown thread ${id}`);
       }
       fixtureThreadTitles.set(id, normalized);
-      const summary = (await this.listThreads()).find((thread) => thread.id === id);
+      const summary = (await this.listChatProjects())
+        .flatMap((project) => project.threads)
+        .find((thread) => thread.id === id);
       if (!summary) throw new Error(`fixture: unknown thread ${id}`);
       return summary;
     },
@@ -2255,6 +2344,15 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     },
     async resolveApproval(approvalId: string, decision) {
+      const background = backgroundApprovals.get(approvalId);
+      if (background) {
+        if (failBackgroundApprovalOnce && !backgroundApprovalFailed) {
+          backgroundApprovalFailed = true;
+          throw new Error("Fixture could not allow the tool. Try again.");
+        }
+        background(decision);
+        return;
+      }
       if (
         !pendingScenario ||
         pendingScenario.kind !== "approval" ||
@@ -2269,6 +2367,19 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     },
     async resolveQuestion(questionId: string) {
+      if (scenario === "sidebar-status" && questionId === "question-status-fixture" && statusQuestionPending) {
+        statusQuestionPending = false;
+        finishInteraction("fixture-question", () => {
+          splitStreams.delete("fixture-question");
+          chatHandler?.({
+            kind: "tool_call_result", ...statusScenarioTurn("fixture-question"),
+            message_id: "assistant-fixture-question", name: "ask_user", id: "tool-status-question",
+            summary: "The fixture answer was accepted.", isError: false,
+          });
+          chatHandler?.({ kind: "done", ...statusScenarioTurn("fixture-question"), message_id: "assistant-fixture-question" });
+        });
+        return;
+      }
       if (
         !pendingScenario ||
         pendingScenario.kind !== "question" ||

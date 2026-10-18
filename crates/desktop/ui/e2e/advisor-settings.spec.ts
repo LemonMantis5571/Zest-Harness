@@ -1,6 +1,38 @@
 import { expect, test } from "@playwright/test";
 
+import type { DesktopBackend } from "../src/lib/backend";
 import { waitForFixtureBoot } from "./fixtureBoot";
+
+test("Off clears a configured advisor whose provider is unavailable", async ({ page }) => {
+  await page.goto("/?fixture=1&scenario=advisor-unavailable");
+  const readAdvisor = () => page.evaluate(async () => {
+    const backend = (globalThis as { __zestFixtureBackend?: DesktopBackend }).__zestFixtureBackend;
+    if (!backend) throw new Error("The fixture backend is not available.");
+    return backend.advisorSettings();
+  });
+  expect((await readAdvisor()).provider).toBe("fixture-removed");
+
+  await page.getByRole("button", { name: /^Account menu for / }).click();
+  await page.getByRole("menuitem", { name: "Advisor" }).click();
+  const dialog = page.getByRole("dialog");
+  const issue = dialog.getByRole("alert").filter({ hasText: "provider `fixture-removed` is not configured" });
+  await expect(issue).toBeVisible();
+  const off = dialog.getByRole("radiogroup", { name: "Advisor", exact: true })
+    .getByRole("radio", { name: "Off", exact: true });
+  const initiallyChecked = await off.getAttribute("aria-checked");
+  await off.click();
+  await expect.poll(async () => (await readAdvisor()).provider).toBe("");
+  expect(initiallyChecked).toBe("false");
+  await expect(off).toHaveAttribute("aria-checked", "true");
+  await expect(issue).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: /^Account menu for / }).click();
+  await page.getByRole("menuitem", { name: "Advisor" }).click();
+  await expect(off).toHaveAttribute("aria-checked", "true");
+  expect((await readAdvisor()).provider).toBe("");
+  await expect(issue).toHaveCount(0);
+});
 
 test("the advisor is chosen in Settings, not in zest.toml", async ({ page }) => {
   const errors: string[] = [];

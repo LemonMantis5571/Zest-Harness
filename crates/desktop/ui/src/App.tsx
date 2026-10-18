@@ -505,6 +505,7 @@ export default function App() {
   const [splitSnapshot, setSplitSnapshot] = useState<SplitWorkspaceSnapshot | null>(null);
   const splitSnapshotRef = useRef<SplitWorkspaceSnapshot | null>(null);
   const splitVisibleRef = useRef(false);
+  const splitChoosingPaneRef = useRef<string | null>(null);
   splitSnapshotRef.current = splitSnapshot;
   splitVisibleRef.current = splitVisible;
   const [splitStartNewGroup, setSplitStartNewGroup] = useState(false);
@@ -649,9 +650,12 @@ export default function App() {
     navigateTo({ kind: "chat" });
   }, [applyNavigationDestination, navigateTo]);
 
-  const rememberSplitSnapshot = useCallback((next: SplitWorkspaceSnapshot) => {
+  const rememberSplitSnapshot = useCallback((next: SplitWorkspaceSnapshot, choosingPaneId: string | null = null) => {
+    const choosingChanged = splitChoosingPaneRef.current !== choosingPaneId;
+    splitChoosingPaneRef.current = choosingPaneId;
     splitSnapshotRef.current = next;
     setSplitSnapshot(next);
+    if (choosingChanged) publishSplit((revision) => revision + 1);
   }, []);
 
   const activateSplitLocation = useCallback(
@@ -800,20 +804,28 @@ export default function App() {
    * in single view with no panel covering it, or a pane of the split group on
    * screen.
    */
-  const isChatOnScreen = useCallback((threadId: string) => {
+  const visibleChatThreads = useCallback(() => {
     const snapshot = splitSnapshotRef.current;
-    if (splitVisibleRef.current && snapshot) {
+    if (splitVisibleRef.current) {
+      if (!snapshot) return [];
       const group = snapshot.groups.find(
         (candidate) => candidate.id === snapshot.activeGroupId
       );
-      if (group) {
-        return layoutPaneIds(group.root).some(
-          (paneId) => snapshot.panes[paneId]?.session?.threadId === threadId
-        );
-      }
+      if (!group) return [];
+      return layoutPaneIds(group.root).flatMap((paneId) => {
+        if (paneId === splitChoosingPaneRef.current) return [];
+        const threadId = snapshot.panes[paneId]?.session?.threadId;
+        return threadId ? [threadId] : [];
+      });
     }
-    return threadIdRef.current === threadId && shellPanelRef.current === null;
+    const threadId = threadIdRef.current;
+    return threadId && shellPanelRef.current === null ? [threadId] : [];
   }, []);
+  const isChatOnScreen = useCallback(
+    (threadId: string) => visibleChatThreads().includes(threadId),
+    [visibleChatThreads]
+  );
+  const visibleThreadsKey = JSON.stringify(visibleChatThreads());
 
   /**
    * Name a chat for an alert and find where it lives.
@@ -895,25 +907,35 @@ export default function App() {
       kind: AttentionKind,
       threadId: string,
       notice: AttentionNotice,
-      { byUser = false }: { byUser?: boolean } = {}
+      { byUser = false, isCurrent = () => true }: {
+        byUser?: boolean;
+        isCurrent?: () => boolean;
+      } = {}
     ) => {
-      const onScreen = isChatOnScreen(threadId);
+      if (byUser || !isCurrent()) return;
       const focused = await isWindowActuallyActive();
-      const route = attentionRoute(kind, { onScreen, focused, byUser });
+      if (!isCurrent()) return;
+      const route = attentionRoute(kind, { onScreen: isChatOnScreen(threadId), focused });
       if (route === "none") return;
 
       const chat = await describeChat(threadId);
+      if (!isCurrent()) return;
+      const onScreen = isChatOnScreen(threadId);
+      const currentRoute = attentionRoute(kind, { onScreen, focused });
+      if (currentRoute === "none") return;
       const title = attentionTitle(notice.title, chat.name);
       const open = chatOpener(threadId, chat.root);
-      if (route === "os") {
-        await notifyWhenAway(title, notice.description, open ?? undefined);
+      if (currentRoute === "os") {
+        await notifyWhenAway(title, notice.description, {
+          onClick: open ?? undefined,
+          isCurrent,
+        });
         return;
       }
-      // The user may have opened the chat while it was being named.
-      if (shownInTranscript(kind) && isChatOnScreen(threadId)) return;
       const id = toast.add({
         ...notice,
         title,
+        groupKey: JSON.stringify([threadId, kind]),
         timeout: attentionToastTimeout(kind),
         actionProps:
           !onScreen && open
@@ -962,6 +984,7 @@ export default function App() {
     shellPanel,
     splitSnapshot,
     splitVisible,
+    visibleThreadsKey,
   ]);
 
   const recordThreadActivity = useCallback((event: ChatEvent) => {
@@ -1223,14 +1246,14 @@ export default function App() {
           if (info && info.sessionId === sessionIdRef.current) {
             setSession((current) =>
               current
-                ? { ...current, checkpoints: info.checkpoints }
+                ? { ...current, checkpoints: info.checkpoints, models: info.models }
                 : current
             );
             return;
           }
           // `done` is emitted just before the Rust session slot is released.
-          // Retry briefly so the new checkpoint is visible without racing the
-          // turn finalizer.
+          // Retry briefly so checkpoints and resolved model aliases become
+          // visible without racing the turn finalizer.
           if (remaining > 0) {
             window.setTimeout(() => attempt(remaining - 1), 40);
           }
@@ -1486,6 +1509,15 @@ export default function App() {
           title: "Approval needed",
           description: approvalNotice(event.tool_name, event.summary),
           type: "warning",
+        }, {
+          isCurrent: () => {
+            const current = chatStatesRef.current.get(threadKey);
+            return current?.currentTurnId === event.turn_id && current.messages.some(
+              (message) => message.role === "assistant" && message.tools.some((tool) =>
+                tool.approvalId === event.approval_id && tool.status === "awaiting_approval"
+              )
+            );
+          },
         });
       }
     }
@@ -1495,6 +1527,13 @@ export default function App() {
         title: "Input needed",
         description: event.prompt,
         type: "warning",
+      }, {
+        isCurrent: () => {
+          const current = chatStatesRef.current.get(threadKey);
+          return current?.currentTurnId === event.turn_id && current.messages.some(
+            (message) => message.role === "assistant" && message.question?.questionId === event.question_id
+          );
+        },
       });
     }
 
@@ -1589,7 +1628,7 @@ export default function App() {
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
       recordThreadActivity(event);
-      recordUnreadEvent(event, threadIdRef.current);
+      recordUnreadEvent(event, isChatOnScreen(event.thread_id));
       if (event.kind === "text_delta" || event.kind === "thinking_delta") {
         deltaQueueRef.current.push(event);
         if (deltaRafRef.current == null) {
@@ -1608,7 +1647,7 @@ export default function App() {
       }
       applyChatEventNow(event);
     },
-    [applyChatEventNow, flushDeltaQueue, recordThreadActivity]
+    [applyChatEventNow, flushDeltaQueue, isChatOnScreen, recordThreadActivity]
   );
 
   /**
@@ -2056,11 +2095,10 @@ export default function App() {
     };
   }, [activeDelegationRoot]);
 
-  // Opening a chat is looking at it, so it stops reading as unread.
-  const openThreadId = session?.threadId;
+  // All visible panes count as read, not only the backend-active session.
   useEffect(() => {
-    if (openThreadId) markThreadSeen(openThreadId);
-  }, [openThreadId]);
+    for (const threadId of new Set(visibleChatThreads())) markThreadSeen(threadId);
+  }, [visibleThreadsKey, visibleChatThreads]);
 
   // Persist sticky draft for the active thread.
   useEffect(() => {
@@ -2868,46 +2906,56 @@ export default function App() {
     }
   }, []);
 
+  const updateInteractionMessages = useCallback((threadId: string, update: (state: ChatUiState) => ChatMessage[]) => {
+    const current = chatStatesRef.current.get(threadId);
+    if (!current) return;
+    const next = update(current);
+    if (next === current.messages) return;
+    chatStatesRef.current.set(threadId, { ...current, messages: next });
+    if (threadIdRef.current === threadId) {
+      messagesRef.current = next;
+      setMessages(next);
+    }
+    if (splitVisibleRef.current) publishSplit((revision) => revision + 1);
+  }, []);
+
   const onResolveApproval = useCallback(
-    async (approvalId: string, decision: ApprovalChoice) => {
+    async (approvalId: string, decision: ApprovalChoice, targetThreadId?: string) => {
       const resolving = resolvingApprovalIdsRef.current;
       if (resolving.has(approvalId)) return;
 
+      const threadId = targetThreadId ?? threadIdRef.current;
+      if (!threadId) return;
       const allow = decision !== "deny";
-      const snapshot = findApprovalTool(messagesRef.current, approvalId);
+      const state = chatStatesRef.current.get(threadId);
+      const snapshot = findApprovalTool(state?.messages ?? [], approvalId);
       if (!snapshot || snapshot.status !== "awaiting_approval") return;
       resolving.add(approvalId);
-      const threadId = threadIdRef.current;
-      if (allow) {
-        const next = markApprovalRunning(messagesRef.current, approvalId);
-        messagesRef.current = next;
-        setMessages(next);
-      }
+
+      // Every decision consumes the waiter before its tool result arrives.
+      updateInteractionMessages(threadId, (current) => markApprovalRunning(current.messages, approvalId));
       try {
         await backend.resolveApproval(
           approvalId,
           decision,
-          threadId ?? undefined
+          threadId
         );
       } catch (err) {
         // A dropped waiter is permanent: putting the card back would leave a
         // button that can only fail, and because the approval queue is ordered
         // by transcript position it would keep shadowing the live card behind
         // it. Retire it instead so the queue advances.
-        if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) {
-          const retired = retireApprovalCard(
-            messagesRef.current,
-            approvalId,
-            snapshot.id
-          );
-          messagesRef.current = retired;
-          setMessages(retired);
-          return;
-        } else if (allow && snapshot) {
-          const restored = restoreApprovalCard(messagesRef.current, snapshot);
-          messagesRef.current = restored;
-          setMessages(restored);
-        }
+        const dropped = isDroppedApprovalError(rawInvokeError(err).toLowerCase());
+        updateInteractionMessages(threadId, (current) => {
+          if (current.currentTurnId !== state?.currentTurnId) return current.messages;
+          const tool = current.messages.flatMap((message) => message.role === "assistant" ? message.tools : [])
+            .find((candidate) => candidate.id === snapshot.id);
+          if (tool?.status !== "running" || tool.approvalId) return current.messages;
+          return dropped
+            ? retireApprovalCard(current.messages, approvalId, snapshot.id)
+            : restoreApprovalCard(current.messages, snapshot);
+        });
+        if (dropped) return;
         toast.add({
           type: "error",
           title: allow ? "Could not allow tool" : "Could not deny tool",
@@ -2918,25 +2966,41 @@ export default function App() {
         resolving.delete(approvalId);
       }
     },
-    []
+    [updateInteractionMessages]
   );
 
   const onResolveQuestion = useCallback(
-    async (questionId: string, answer: string) => {
+    async (questionId: string, answer: string, targetThreadId?: string) => {
       const resolving = resolvingQuestionIdsRef.current;
       if (resolving.has(questionId)) return;
-      const isPending = messagesRef.current.some(
+      const threadId = targetThreadId ?? threadIdRef.current;
+      if (!threadId) return;
+      const state = chatStatesRef.current.get(threadId);
+      const snapshot = state?.messages.find(
         (message) =>
           message.role === "assistant" &&
           message.question?.questionId === questionId
       );
-      if (!isPending) return;
+      if (snapshot?.role !== "assistant" || !snapshot.question) return;
+      const question = snapshot.question;
       resolving.add(questionId);
-      const threadId = threadIdRef.current;
+      updateInteractionMessages(threadId, (current) => current.messages.map((message) =>
+        message.role === "assistant" && message.question?.questionId === questionId
+          ? { ...message, question: undefined }
+          : message
+      ));
       try {
-        await backend.resolveQuestion(questionId, answer, threadId ?? undefined);
+        await backend.resolveQuestion(questionId, answer, threadId);
       } catch (err) {
         if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) return;
+        updateInteractionMessages(threadId, (current) => {
+          if (current.currentTurnId !== state?.currentTurnId) return current.messages;
+          return current.messages.map((message) => {
+            if (message.id !== snapshot.id || message.role !== "assistant" || message.question || !message.streaming) return message;
+            const tool = message.tools.find((candidate) => candidate.id === question.toolCallId);
+            return tool && tool.status !== "running" ? message : { ...message, question };
+          });
+        });
         toast.add({
           type: "error",
           title: "Could not send answer",
@@ -2947,7 +3011,7 @@ export default function App() {
         resolving.delete(questionId);
       }
     },
-    []
+    [updateInteractionMessages]
   );
 
   const onApprovalModeChange = useCallback(async (next: ApprovalMode) => {
@@ -3238,6 +3302,8 @@ export default function App() {
             snapshot={splitSnapshot}
             startNewGroup={splitStartNewGroup}
             onStateChange={rememberSplitSnapshot}
+            onResolveApproval={onResolveApproval}
+            onResolveQuestion={onResolveQuestion}
             providers={providers}
             chatListRevision={chatListRevision}
             deletedThreadId={deletedThreadId}

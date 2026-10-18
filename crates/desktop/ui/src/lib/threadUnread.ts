@@ -31,10 +31,12 @@ const EMPTY: UnreadThreads = new Set();
 export function reduceUnreadThreads(
   unread: UnreadThreads,
   event: ChatEvent,
-  viewingThreadId: string | null
+  onScreen: boolean
 ): UnreadThreads {
   const id = event.thread_id;
-  if (!id || id === viewingThreadId || unread.has(id)) return unread;
+  if (!id) return unread;
+  if (onScreen) return withThreadSeen(unread, id);
+  if (unread.has(id)) return unread;
   if (event.kind !== "done" && event.kind !== "error") return unread;
   const next = new Set(unread);
   next.add(id);
@@ -104,8 +106,8 @@ function commit(next: UnreadThreads) {
   }
 }
 
-export function recordUnreadEvent(event: ChatEvent, viewingThreadId: string | null) {
-  commit(reduceUnreadThreads(getUnreadThreads(), event, viewingThreadId));
+export function recordUnreadEvent(event: ChatEvent, onScreen: boolean) {
+  commit(reduceUnreadThreads(getUnreadThreads(), event, onScreen));
 }
 
 export function markThreadSeen(threadId: string) {

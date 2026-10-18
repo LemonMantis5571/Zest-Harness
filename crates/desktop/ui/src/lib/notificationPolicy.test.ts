@@ -138,6 +138,17 @@ describe("attention copy", () => {
 });
 
 describe("notification policy", () => {
+  it("keeps identical attention content in different chats separate", () => {
+    assert.equal(
+      notificationFingerprint("warning", "Approval needed · Same title", "Run command", "chat-a"),
+      '{"group":"chat-a","notice":["warning","Approval needed · Same title","Run command"]}'
+    );
+    assert.equal(
+      notificationFingerprint("warning", "Approval needed · Same title", "Run command", "chat-b"),
+      '{"group":"chat-b","notice":["warning","Approval needed · Same title","Run command"]}'
+    );
+  });
+
   it("only marks turns at or above the long-turn threshold", () => {
     assert.equal(isLongTurn(LONG_TURN_NOTIFICATION_MS - 1), false);
     assert.equal(isLongTurn(LONG_TURN_NOTIFICATION_MS), true);

@@ -161,12 +161,13 @@ export function replyExcerpt(text: string) {
 export function notificationFingerprint(
   type: string | undefined,
   title: string,
-  description: string
+  description: string,
+  group?: string
 ) {
-  if (type === "success" || type === "info") {
-    return JSON.stringify([type, title]);
-  }
-  return JSON.stringify([type ?? "", title, description]);
+  const notice = type === "success" || type === "info"
+    ? [type, title]
+    : [type ?? "", title, description];
+  return JSON.stringify(group === undefined ? notice : { group, notice });
 }
 
 /** Prefer a non-empty hint when collapsing two success toasts into one card. */

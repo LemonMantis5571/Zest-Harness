@@ -1,5 +1,63 @@
 import { expect, test } from "@playwright/test";
 
+test("a chat finishing behind a split chooser stays unread until its transcript returns", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("zest.chatViewMode", "compact"));
+  await page.goto("/?fixture=1&scenario=sidebar-status");
+  await page.getByRole("button", { name: "Open split view", exact: true }).click();
+  const left = page.getByRole("region", { name: "Left chat", exact: true });
+  const right = page.getByRole("region", { name: "Right chat", exact: true });
+  await right.getByRole("button", { name: /Run the test suite/ }).click();
+  await expect(right.getByRole("button", { name: "Stop response", exact: true })).toBeVisible();
+  await left.getByRole("textbox", { name: "Message", exact: true }).fill("activate the left pane");
+  await left.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(left.getByText("Fixture echo: activate the left pane", { exact: true })).toBeVisible();
+  await right.getByRole("button", { name: /^Run the test suite/ }).click();
+  const chooser = right.getByRole("textbox", { name: "Find a chat", exact: true });
+  await expect(chooser).toBeVisible();
+  await chooser.fill("migration");
+  await page.evaluate(() => window.dispatchEvent(new Event("zest:fixture-finish-working")));
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("zest.unreadThreads")))
+    .toBe('["fixture-finished","fixture-working"]');
+  await expect(chooser).toHaveValue("migration");
+  await right.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(right.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("zest.unreadThreads"))).toBe('["fixture-finished"]');
+});
+
+test("a visible split pane finishing is read even when the other pane owns the backend session", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("zest.chatViewMode", "compact"));
+  await page.goto("/?fixture=1&scenario=sidebar-status");
+  await page.getByRole("button", { name: "Open split view", exact: true }).click();
+  const left = page.getByRole("region", { name: "Left chat", exact: true });
+  const right = page.getByRole("region", { name: "Right chat", exact: true });
+  await right.getByRole("button", { name: /Run the test suite/ }).click();
+  await expect(right.getByRole("button", { name: "Stop response", exact: true })).toBeVisible();
+  await left.getByRole("textbox", { name: "Message", exact: true }).fill("activate the left pane");
+  await left.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(left.getByText("Fixture echo: activate the left pane", { exact: true })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("zest:fixture-finish-working")));
+  await expect(right.getByRole("button", { name: "Stop response", exact: true })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("zest.unreadThreads"))).toBe('["fixture-finished"]');
+});
+
+test("returning to a split group clears unread marks on every visible pane", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("zest.chatViewMode", "compact"));
+  await page.goto("/?fixture=1&scenario=sidebar-status");
+  const sidebar = page.locator("aside").first();
+  await sidebar.getByRole("button", { name: /^Run the test suite\. Working/ }).click();
+  await page.getByRole("button", { name: "Open split view", exact: true }).click();
+  const right = page.getByRole("region", { name: "Right chat", exact: true });
+  await right.getByRole("button", { name: /^Fixture/ }).click();
+  await expect(right.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+  await right.getByRole("button", { name: "Continue in single view", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Split workspace", exact: true })).toHaveCount(0);
+  await page.evaluate(() => window.dispatchEvent(new Event("zest:fixture-finish-working")));
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("zest.unreadThreads"))).toBe('["fixture-finished","fixture-working"]');
+  await sidebar.getByRole("button", { name: "Split view with 2 chats", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Left chat", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("zest.unreadThreads"))).toBe('["fixture-finished"]');
+});
+
 test("both panes stream together and stopping one leaves the other running", async ({ page }) => {
   // This assertion checks live text delivery, so use the text-as-it-arrives
   // preference rather than the default complete-block display mode.
