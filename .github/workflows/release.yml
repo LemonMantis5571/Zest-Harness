@@ -284,7 +284,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Create or update prerelease
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -301,7 +301,11 @@ jobs:
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
           else
+            release_flags=()
+            if [[ "$tag" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-              --title "Zest $tag" --notes-file "$notes" --prerelease \
-              --verify-tag "${assets[@]}"
+              --title "Zest $tag" --notes-file "$notes" \
+              --verify-tag "${release_flags[@]}" "${assets[@]}"
           fi

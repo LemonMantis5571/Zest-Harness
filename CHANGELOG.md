@@ -5,6 +5,8 @@ a replacement for the commit history.
 
 ## Unreleased
 
+## 0.3.0 stable - 2026-10-18
+
 ### Added
 
 - `zest usage --tasks` lists the last 30 days of tasks: provider rounds,

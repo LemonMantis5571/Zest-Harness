@@ -219,10 +219,11 @@ verify`, `Linux full verify`, and `zest serve without WebKit` checks, and by
 disallowing direct pushes. CI can reject an artifact in a pushed commit, but
 only branch protection prevents bypassing the PR checks.
 
-The first beta is tag-driven. Maintainers should read
-[`docs/RELEASING.md`](docs/RELEASING.md) before pushing a `v*` tag; the release
-workflow verifies both platforms, builds their packages, and publishes the
-GitHub Release only after both package jobs pass.
+Releases are tag-driven. Maintainers should read
+[`docs/RELEASING.md`](docs/RELEASING.md) before pushing a `v*` tag. Plain
+SemVer tags create stable releases; tags with a prerelease suffix create
+prereleases. The workflow verifies both platforms, builds their packages, and
+publishes only after all checks pass.
 
 ## Security reports
 
