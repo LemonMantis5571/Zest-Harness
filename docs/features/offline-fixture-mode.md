@@ -25,6 +25,7 @@ verify:
   `zest:fixture-recover-context` is dispatched. Node tests can supply
   `contextFailureReady` and `contextRecoveryReady`, so failed and recovered
   popovers are deterministic and do not depend on request counts.
+- The `subagents` scenario restores a chat with a `delegate_external` worker, a `delegate_feature` card tied to the board's fixture job, and a Claude Code `Agent` whose activities name it as `parentId`. A send streams a live agent with nested steps (150 ms apart; "slow" in the message spaces them 1.5 s apart). Approving the fixture job now records worker and reviewer attempts.
 - The `html-artifacts` scenario exercises publication and restored interactive HTML. A dev-only token endpoint serves bounded source with the isolated response CSP; it is not a production artifact store or native IPC proof.
 - `npm run ui:dev`, then `http://127.0.0.1:1420/?fixture=1`: the full chat shell runs with no Tauri, provider, or credentials. `?fixture` is honoured only by the Vite dev server (`import.meta.env.DEV`); release builds drop the module.
 - On load the fixture starts session `session-fixture` / thread `fixture` and streams one canned turn: user "What's in README.md?", a thinking delta, four `read_file` tool calls (exercising run grouping), then a word-by-word reply. A second thread, `fixture-local` (provider `ollama`), shows as busy with a `git_status` tool for about 9 s to exercise the sidebar activity mark.

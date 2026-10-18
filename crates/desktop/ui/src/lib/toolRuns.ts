@@ -1,17 +1,6 @@
 import type { ToolPart } from "./types";
-import { htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
 
-/**
- * A stretch of tool calls shown as one line.
- *
- * New calls join the existing group so the list does not grow a fresh card
- * stack under a fold the user already closed. An approval still breaks out:
- * a collapsed prompt is a prompt the user cannot answer.
- */
-export type ToolRun =
-  | { kind: "single"; tool: ToolPart }
-  | { kind: "group"; tools: ToolPart[]; summary: ToolRunSummary };
-
+/** What a folded run of tool calls did, for its Chain of Thought line. */
 export type ToolRunSummary = {
   /** `bash` invocations. */
   commands: number;
@@ -29,15 +18,11 @@ export type ToolRunSummary = {
  * Fold once there is more than one row.
  *
  * One tool stays a row: "Ran 1 lookup" is longer than the path it would hide.
- * After that the group stays folded and later calls join it.
+ * After that a contiguous run becomes one Chain of Thought line.
  */
 export const COLLAPSE_THRESHOLD = 2;
 
 const WRITE_TOOLS = new Set(["write_file", "edit_file"]);
-
-function isSettled(tool: ToolPart): boolean {
-  return tool.status === "done" || tool.status === "error";
-}
 
 /**
  * Count `+`/`-` lines in a unified diff.
@@ -99,46 +84,4 @@ export function summarizeTools(tools: ToolPart[]): ToolRunSummary {
   const label = parts.length > 0 ? `Ran ${parts.join(", ")}` : "Ran tools";
 
   return { commands, filesEdited, inspections, added, removed, errors, label };
-}
-
-/**
- * Fold tool calls into summary rows.
- *
- * A group is a contiguous run. Later calls join the group only when it is
- * still the last thing on the list — an approval in between starts a new
- * run so order stays honest. The group itself stays folded; opening it is
- * a click.
- */
-export function groupToolRuns(
-  tools: ToolPart[],
-  threshold: number = COLLAPSE_THRESHOLD
-): ToolRun[] {
-  const runs: ToolRun[] = [];
-  let pending: ToolPart[] = [];
-
-  const flush = () => {
-    if (pending.length === 0) return;
-    if (pending.length >= threshold) {
-      runs.push({
-        kind: "group",
-        tools: pending,
-        summary: summarizeTools(pending.filter(isSettled)),
-      });
-    } else {
-      for (const tool of pending) runs.push({ kind: "single", tool });
-    }
-    pending = [];
-  };
-
-  for (const tool of tools) {
-    if (tool.status === "awaiting_approval" || htmlDocumentFromMetadata(tool.metadata)) {
-      flush();
-      runs.push({ kind: "single", tool });
-      continue;
-    }
-    pending.push(tool);
-  }
-  flush();
-
-  return runs;
 }

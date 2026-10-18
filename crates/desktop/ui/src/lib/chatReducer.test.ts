@@ -20,6 +20,9 @@ function seqId() {
   return (prefix: string) => `${prefix}-${++n}`;
 }
 
+/** Every step in these tests happens at the same instant. */
+const NOW = 1_000;
+
 const ID = {
   session_id: "session-1",
   thread_id: "thread-1",
@@ -35,7 +38,7 @@ function reduceAll(events: ChatEvent[], start?: ChatUiState): ChatUiState {
       threadId: ID.thread_id,
     });
   for (const event of events) {
-    state = reduceChatEvent(state, event, { newId }).state;
+    state = reduceChatEvent(state, event, { newId, now: () => NOW }).state;
   }
   return state;
 }
@@ -207,8 +210,73 @@ describe("reduceChatEvent characterization", () => {
     const a = assistant(state);
     assert.deepEqual(a.tools, []);
     assert.deepEqual(a.providerActivity, [
-      { id: "claude-tool-1", title: "Read", status: "done" },
+      {
+        id: "claude-tool-1",
+        title: "Read",
+        status: "done",
+        startedAt: NOW,
+        finishedAt: NOW,
+      },
     ]);
+  });
+
+  it("records thinking, tools and activity in the order they happened", () => {
+    const state = reduceAll([
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "Look at " },
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "the parser." },
+      { kind: "tool_call_start", ...ID, message_id: "a1", name: "read_file", id: "t1" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: "Reading." },
+      pendingApproval("ap-1", "t1"),
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "Now edit." },
+      pendingApproval("ap-2", "t2"),
+      {
+        kind: "provider_activity",
+        ...ID,
+        message_id: "a1",
+        id: "agent",
+        title: "Agent Map the code",
+        status: "running",
+      },
+    ]);
+    assert.deepEqual(assistant(state).steps, [
+      { kind: "thinking", text: "Look at the parser." },
+      { kind: "tool", id: "t1" },
+      { kind: "thinking", text: "Now edit." },
+      { kind: "tool", id: "t2" },
+      { kind: "activity", id: "agent" },
+    ]);
+  });
+
+  it("nests a subagent's activity under its parent and times both", () => {
+    const state = reduceAll([
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+      {
+        kind: "provider_activity",
+        ...ID,
+        message_id: "a1",
+        id: "agent",
+        title: "Agent Map the code",
+        status: "running",
+      },
+      {
+        kind: "provider_activity",
+        ...ID,
+        message_id: "a1",
+        id: "read",
+        title: "Read src/lib.rs",
+        status: "done",
+        parent_id: "agent",
+      },
+      { kind: "cancelled", ...ID, message_id: "a1" },
+    ]);
+    const [agent, read] = assistant(state).providerActivity ?? [];
+    assert.equal(read.parentId, "agent");
+    assert.equal(agent.parentId, undefined);
+    // The turn stopped while the subagent ran: it failed, and it has an end.
+    assert.equal(agent.status, "error");
+    assert.equal(agent.startedAt, NOW);
+    assert.equal(agent.finishedAt, NOW);
   });
 
   it("separates thinking sentence chunks that arrive without whitespace", () => {

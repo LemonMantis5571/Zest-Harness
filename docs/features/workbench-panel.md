@@ -31,8 +31,9 @@ verify:
 - Outline lists the conversation's messages; clicking one scrolls to it.
 - Delegation is the agent board for delegation jobs (create, approve, cancel,
   retry, apply); its behavior belongs to the delegation feature.
-- Clicking a delegation job nested under a chat in the sidebar opens the
-  Workbench on Delegation (switched to "All project"), scrolls that job's card
+- Clicking a delegation job nested under a chat in the sidebar, or a subagent
+  line's "Open in Delegation" in the transcript, opens the Workbench on
+  Delegation (switched to "All project"), expands that job's card, scrolls it
   into view, focuses it, and outlines it (`focusDelegationJob`).
 - Files is a read-only, shallow browser rooted at the project: directories first,
   then files, max 400 entries per folder; text preview up to 200000 bytes

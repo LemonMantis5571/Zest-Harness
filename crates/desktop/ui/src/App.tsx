@@ -267,8 +267,16 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
           path: t.path,
           diff: t.diff,
           metadata: t.metadata,
+          startedAt: t.startedAt,
+          finishedAt: t.finishedAt,
         };
       }),
+      // Nothing is still running on a reopened chat; a row left running was
+      // cut off, as tools above are.
+      providerActivity: msg.providerActivity?.map((activity) =>
+        activity.status === "running" ? { ...activity, status: "error" as const } : activity
+      ),
+      steps: msg.steps,
       error: msg.error,
       providerSelection: msg.providerSelection ?? msg.provider_selection,
       // Persisted, so a reopened plan still renders as a plan.

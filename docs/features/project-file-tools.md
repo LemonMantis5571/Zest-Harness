@@ -72,10 +72,13 @@ verify:
   stored under `.zest/spill/<thread-id>/` and replaced by a head/tail preview plus
   a locator the model can `read_file` or `grep`. Errors, `read_file` output, and
   Sensitive results are never spilled.
-- UI: each call is a compact row (Read, Edit, Find, Search, List, Run...). Two or
-  more rows fold into one "Ran 2 commands, edited 1 file, 3 lookups" line with
-  +/- counts; later calls join the same group; a call awaiting approval always
-  breaks out as its own row. Rows with a diff open the diff viewer.
+- UI: each call is a Tool line in the turn's Trace, worded by its state ("Reading
+  src/a.ts", "Read src/a.ts", "Failed to read src/a.ts"). Two or more calls in a
+  row fold into one Chain of Thought line such as "Ran 2 commands, edited 1
+  file, 3 lookups" with +/- counts; it opens while a call runs and folds when
+  the run settles. Thinking, an approval, an HTML card or a subagent ends a run,
+  so the order stays as it happened. Lines with a diff open the diff viewer;
+  lines with output expand to show it.
 
 ## How it works
 1. `RuntimeBuilder::build` (crates/core/src/runtime.rs) registers
@@ -93,14 +96,14 @@ verify:
 4. Both write tools commit through `commit_prepared_write` in write_file.rs;
    diffs come from `bounded_unified_diff` (48 lines / 6000 chars / 8 hunks).
 5. Tool events become `tool_call_*` chat events; the UI builds `ToolPart`s,
-   `groupToolRuns` / `summarizeTools` (toolRuns.ts) fold them, and
-   `ToolRunGroup` / `ToolCallRow` render them.
+   `buildTrace` (assistantTrace.ts) folds them with `summarizeTools`
+   (toolRuns.ts), and `ToolRunGroup` / `ToolLine` (ToolCallRow.tsx) render them.
 
 ## Verify
 Rust unit tests above; `a_real_grep_spill_can_be_read_back_through_its_locator`
 in `tools::characterization` proves the spill loop end to end. UI folding is
-covered by toolRuns.test.ts. In `?fixture=1` a sent message shows a tool row;
-`&scenario=tool-error` shows a failed row.
+covered by toolRuns.test.ts and assistantTrace.test.ts. In `?fixture=1` a sent message shows a tool line;
+`&scenario=tool-error` shows a failed line.
 
 ## Pitfalls
 - The spill locator sits under `.zest/`, which every walk skips; only a direct

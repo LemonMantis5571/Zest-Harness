@@ -282,6 +282,14 @@ describe("fixture delegation lifecycle", () => {
     );
     assert.deepEqual(ready.changedFiles, ["src/fixture.ts"]);
     assert.equal(ready.acceptanceChecks[0]?.status, "passed");
+    // The chat's subagent line lists who worked and reviewed, and for how long.
+    assert.deepEqual(
+      ready.attempts.map((attempt) => [attempt.role, attempt.finishedAt != null]),
+      [
+        ["worker", true],
+        ["reviewer", true],
+      ]
+    );
 
     const applied = await backend.applyDelegationJob(initial.jobId);
     assert.equal(applied.status, "accepted");
@@ -362,6 +370,46 @@ describe("fixture plugins and workspace files", () => {
     const preview = await backend.readWorkspaceFile("src/main.ts");
     assert.equal(preview.content, "[fixture preview]");
     assert.equal(preview.byteCount, preview.content.length);
+  });
+});
+
+describe("fixture subagents scenario", () => {
+  it("restores a chat with all three kinds of subagent, in step order", async () => {
+    const backend = createFixtureBackend({ scenario: "subagents" });
+    const session = await backend.startSession("fixture");
+    const [first, second] = session.messages.filter((message) => message.role === "assistant");
+    assert.ok(first?.role === "assistant" && second?.role === "assistant");
+    assert.deepEqual(
+      first.tools.map((tool) => tool.name),
+      ["read_file", "read_file", "delegate_external", "delegate_feature"]
+    );
+    const card = first.tools.find((tool) => tool.name === "delegate_feature");
+    const jobs = await backend.listDelegationJobs();
+    assert.equal(
+      card?.metadata?.kind === "delegation" ? card.metadata.job_id : undefined,
+      jobs[0]?.jobId
+    );
+    assert.deepEqual(
+      first.steps?.map((step) => step.kind),
+      ["thinking", "tool", "tool", "tool", "thinking", "tool"]
+    );
+    assert.deepEqual(
+      second.providerActivity?.filter((activity) => activity.parentId === "sub-agent").length,
+      3
+    );
+  });
+
+  it("streams a live agent whose steps name it as their parent", async () => {
+    const backend = createFixtureBackend({ scenario: "subagents" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("map the callers");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const children = events.filter(
+      (event) => event.kind === "provider_activity" && event.parent_id === "live-agent"
+    );
+    assert.ok(children.length >= 2);
+    assert.equal(events.at(-1)?.kind, "done");
   });
 });
 

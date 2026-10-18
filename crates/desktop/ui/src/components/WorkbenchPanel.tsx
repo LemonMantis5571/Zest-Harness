@@ -24,6 +24,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button";
 import { OrchestrationStatus } from "@/components/OrchestrationStatus";
+import { agentLabel } from "@/lib/subagents";
 import { getBackend } from "@/lib/backend";
 import {
   blobatarToneFor,
@@ -116,15 +117,6 @@ function statusDotClass(status: string) {
   if (status === "error") return "bg-destructive";
   if (status === "awaiting_approval") return "bg-amber-400";
   return "animate-pulse bg-primary";
-}
-
-function subagentLabel(id: string) {
-  if (id === "claude") return "Claude Code";
-  if (id === "gemini") return "Gemini CLI";
-  if (id === "cursor") return "Cursor CLI";
-  return id
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function subagentStatus(status: string) {
@@ -437,12 +429,14 @@ function WorkbenchBody({
   const titleId = useId();
   const workUnitsId = useId();
 
-  // A job picked in the sidebar may belong to another chat, so show the whole
-  // project's board, then bring that card into view and focus it.
+  // A job picked in the sidebar or a chat line may belong to another chat, so
+  // show the whole project's board, open the card, then bring it into view and
+  // focus it.
   useEffect(() => {
     if (!focusDelegationJob) return;
     setTab("delegation");
     setDelegationFilter("project");
+    setExpandedDelegation({ jobId: focusDelegationJob.jobId, section: "worker" });
     setHighlightedJob(focusDelegationJob);
   }, [focusDelegationJob]);
 
@@ -535,7 +529,7 @@ function WorkbenchBody({
       if (latest.has(id)) continue;
       latest.set(id, {
         id,
-        label: subagentLabel(id),
+        label: agentLabel(id),
         model: task.metadata.model,
         status: task.status,
         messageId: task.messageId,
@@ -1099,8 +1093,9 @@ function WorkbenchBody({
                       id={delegationCardId(job.jobId)}
                       tabIndex={-1}
                       aria-label={job.title}
+                      data-focused={highlightedJob?.jobId === job.jobId || undefined}
                       className={cn(
-                        "rounded-lg border border-border/70 bg-secondary/20 p-2.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                        "scroll-mt-2 rounded-lg border border-border/70 bg-secondary/20 p-2.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
                         highlightedJob?.jobId === job.jobId && "border-primary/60 ring-1 ring-primary/40"
                       )}
                     >

@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  COLLAPSE_THRESHOLD,
   countDiffLines,
-  groupToolRuns,
   summarizeTools,
 } from "./toolRuns.ts";
 import type { ToolPart } from "./types.ts";
@@ -101,114 +99,5 @@ describe("summarizeTools", () => {
       tool({ id: "2", name: "bash", status: "error" }),
     ]);
     assert.equal(summary.errors, 1);
-  });
-});
-
-describe("groupToolRuns", () => {
-  it("keeps HTML cards visible between folded lookup groups", () => {
-    const artifact = tool({ id: "html", name: "html_render", metadata: { kind: "html_document", title: "Counter", html: "<p>0</p>" } });
-    const tools = [...many(2), artifact, ...many(2).map((t) => ({ ...t, id: `after-${t.id}` }))];
-    const runs = groupToolRuns(tools);
-    assert.deepEqual(runs.map((run) => run.kind), ["group", "single", "group"]);
-    assert.equal(runs[1].kind === "single" && runs[1].tool.id, "html");
-    assert.deepEqual(runs.flatMap((run) => run.kind === "group" ? run.tools : [run.tool]), tools);
-  });
-
-  it("leaves a single call as a row", () => {
-    const runs = groupToolRuns(many(1));
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].kind, "single");
-  });
-
-  it("collapses once the run reaches the threshold", () => {
-    const runs = groupToolRuns(many(COLLAPSE_THRESHOLD));
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].kind, "group");
-    if (runs[0].kind === "group") {
-      assert.equal(runs[0].tools.length, COLLAPSE_THRESHOLD);
-    }
-  });
-
-  it("never folds an awaiting-approval row into the summary", () => {
-    const tools = [
-      ...many(6),
-      tool({ id: "live", name: "bash", status: "awaiting_approval" }),
-      tool({ id: "spin", name: "bash", status: "running" }),
-    ];
-    const runs = groupToolRuns(tools);
-    assert.equal(runs[0]?.kind, "group");
-    assert.equal(runs[1]?.kind, "single");
-    if (runs[1].kind === "single") assert.equal(runs[1].tool.id, "live");
-    assert.equal(runs[2]?.kind, "single");
-    if (runs[2].kind === "single") assert.equal(runs[2].tool.id, "spin");
-  });
-
-  it("keeps later calls inside the first group", () => {
-    const tools = [
-      ...many(6).map((t, i) => ({ ...t, id: `a${i}` })),
-      tool({ id: "live", status: "running" }),
-      ...many(6).map((t, i) => ({ ...t, id: `b${i}` })),
-    ];
-    const runs = groupToolRuns(tools);
-    assert.deepEqual(
-      runs.map((r) => r.kind),
-      ["group"]
-    );
-    if (runs[0].kind === "group") {
-      assert.equal(runs[0].tools.length, 13);
-      assert.equal(runs[0].summary.label, "Ran 12 lookups");
-    }
-  });
-
-  it("does not open a new card stack under a folded group", () => {
-    const tools = [
-      ...many(6),
-      tool({ id: "a", name: "mcp__Haiku__context_shell", status: "done" }),
-      tool({ id: "b", name: "mcp__Haiku__context_shell", status: "done" }),
-      tool({ id: "c", name: "mcp__Haiku__context_shell", status: "done" }),
-      tool({ id: "spin", name: "mcp__Haiku__context_shell", status: "running" }),
-    ];
-    const runs = groupToolRuns(tools);
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].kind, "group");
-    if (runs[0].kind === "group") {
-      assert.equal(runs[0].tools.length, 10);
-      assert.equal(runs[0].summary.inspections, 9);
-    }
-  });
-
-  it("starts a new run after an approval instead of jumping the queue", () => {
-    const tools = [
-      ...many(3),
-      tool({ id: "ask", name: "bash", status: "awaiting_approval" }),
-      tool({ id: "after-1", status: "done" }),
-      tool({ id: "after-2", status: "done" }),
-    ];
-    const runs = groupToolRuns(tools);
-    assert.deepEqual(
-      runs.map((r) => r.kind),
-      ["group", "single", "group"]
-    );
-    if (runs[2].kind === "group") {
-      assert.deepEqual(
-        runs[2].tools.map((item) => item.id),
-        ["after-1", "after-2"]
-      );
-    }
-  });
-
-  it("preserves order and loses nothing", () => {
-    const tools = [...many(7), tool({ id: "live", status: "running" }), ...many(2)];
-    const flat = groupToolRuns(tools).flatMap((r) =>
-      r.kind === "group" ? r.tools : [r.tool]
-    );
-    assert.deepEqual(
-      flat.map((t) => t.id),
-      tools.map((t) => t.id)
-    );
-  });
-
-  it("handles an empty list", () => {
-    assert.deepEqual(groupToolRuns([]), []);
   });
 });

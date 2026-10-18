@@ -137,14 +137,41 @@ pub enum ToolMetadata {
     },
 }
 
+/// Heading an external worker's body puts before the diff of its workspace.
+pub(crate) const WORKSPACE_CHANGES_HEADING: &str = "\n\nChanges from the external workspace:\n";
+
+/// Longest worker report the UI row carries. The model still gets the whole
+/// body; this only bounds what every saved thread repeats.
+const DELEGATION_REPORT_CHARS: usize = 600;
+
 impl ToolMetadata {
-    pub fn delegation_label(&self) -> Option<String> {
-        match self {
-            Self::Delegation {
-                provider_id, model, ..
-            } => Some(format!("Delegated to {provider_id} · {model}")),
-            Self::HtmlDocument { .. } => None,
+    /// The row summary for a delegated call: what the worker reported.
+    ///
+    /// An external worker's body opens with an `[agent · model]` line, which the
+    /// row already shows as a badge, and may end with its diff, which the row
+    /// opens in the diff viewer; neither is part of the report. An empty report
+    /// falls back to naming who the work went to.
+    pub fn delegation_summary(&self, body: &str) -> Option<String> {
+        let Self::Delegation {
+            provider_id, model, ..
+        } = self
+        else {
+            return None;
+        };
+        let report = body.split(WORKSPACE_CHANGES_HEADING).next().unwrap_or(body);
+        let report = match report.split_once('\n') {
+            Some((first, rest)) if first.starts_with('[') && first.ends_with(']') => rest,
+            _ => report,
         }
+        .trim();
+        if report.is_empty() {
+            return Some(format!("Delegated to {provider_id} · {model}"));
+        }
+        if report.chars().count() <= DELEGATION_REPORT_CHARS {
+            return Some(report.to_string());
+        }
+        let cut: String = report.chars().take(DELEGATION_REPORT_CHARS - 1).collect();
+        Some(format!("{}…", cut.trim_end()))
     }
 
     pub fn delegation_diff(&self) -> Option<&str> {
@@ -183,5 +210,47 @@ mod tests {
             ToolMetadata::Delegation { usage, .. } => assert!(usage.is_none()),
             _ => panic!("expected delegation metadata"),
         }
+    }
+
+    fn delegation() -> ToolMetadata {
+        ToolMetadata::Delegation {
+            provider_id: "codex".into(),
+            model: "gpt-5".into(),
+            diff: None,
+            usage: None,
+            job_id: None,
+            stage: None,
+            attempt: None,
+            review_status: None,
+        }
+    }
+
+    /// The subagent line used to say only "Delegated to codex · gpt-5", so the
+    /// user could not see what the worker found without asking the model.
+    #[test]
+    fn delegation_summary_is_the_worker_report_without_header_or_diff() {
+        let body = format!(
+            "[codex · gpt-5]\nThe cache key ignores the locale.\nKey it on both.{WORKSPACE_CHANGES_HEADING}--- a/x\n+++ b/x\n"
+        );
+        assert_eq!(
+            delegation().delegation_summary(&body).as_deref(),
+            Some("The cache key ignores the locale.\nKey it on both.")
+        );
+        assert_eq!(
+            delegation()
+                .delegation_summary("[codex · gpt-5]\n  ")
+                .as_deref(),
+            Some("Delegated to codex · gpt-5")
+        );
+        let long = "x".repeat(DELEGATION_REPORT_CHARS * 2);
+        let summary = delegation().delegation_summary(&long).unwrap();
+        assert_eq!(summary.chars().count(), DELEGATION_REPORT_CHARS);
+        assert!(summary.ends_with('…'));
+        assert!(ToolMetadata::HtmlDocument {
+            title: "t".into(),
+            html: "<p></p>".into()
+        }
+        .delegation_summary("body")
+        .is_none());
     }
 }

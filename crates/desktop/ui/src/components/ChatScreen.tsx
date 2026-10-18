@@ -10,16 +10,13 @@ import {
   useState,
 } from "react";
 import {
-  CheckCircle2Icon,
   Columns2Icon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
-  LoaderCircleIcon,
   PencilIcon,
   TriangleAlertIcon,
-  XCircleIcon,
   XIcon,
 } from "lucide-react";
 
@@ -44,9 +41,7 @@ import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
 import { Markdown } from "@/components/Markdown";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
-import { ToolCallRow } from "@/components/ToolCallRow";
-import { ToolRunGroup } from "@/components/ToolRunGroup";
-import { ThinkingReasoning } from "@/components/ThinkingReasoning";
+import { AssistantTrace } from "@/components/AssistantTrace";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
 import { visibleInterval } from "@/lib/visibleInterval";
 import {
@@ -87,7 +82,6 @@ import type { SendTurnRequest } from "@/lib/sendTurn";
 import { btwQuestion, isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import type { SplitSidebarGroup } from "@/lib/splitLayout";
-import { groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import { escapeAction } from "@/lib/escapeStack";
@@ -103,7 +97,6 @@ import type {
   GitContext,
   PreparedAttachment,
   ProjectChats,
-  ProviderActivityPart,
   ProviderRow,
   SessionInfo,
   ThreadSummary,
@@ -290,12 +283,11 @@ type ChatMessageRowProps = {
   approvalMode: ApprovalMode;
   /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
   providerLabel: string;
+  /** The board, so a feature card this turn created shows its live state. */
+  delegationJobs: ReadonlyArray<DelegationJob>;
+  onOpenDelegation: (jobId: string) => void;
   isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
-  onResolveApproval: (
-    approvalId: string,
-    decision: ApprovalChoice
-  ) => Promise<void>;
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
   onOpenProviderSwitch?: () => void;
@@ -381,43 +373,6 @@ function MessageEditForm({
   );
 }
 
-function ProviderActivityTrace({
-  activities,
-  providerLabel,
-}: {
-  activities: ProviderActivityPart[];
-  /** Whose loop ran these. Hard-coding one vendor mislabelled every other. */
-  providerLabel: string;
-}) {
-  if (activities.length === 0) return null;
-  return (
-    <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground" aria-label="Provider activity">
-      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
-        {providerLabel}
-      </div>
-      {activities.map((activity) => {
-        const icon =
-          activity.status === "done" ? (
-            <CheckCircle2Icon className="size-3.5 shrink-0 text-primary/90" aria-hidden />
-          ) : activity.status === "error" ? (
-            <XCircleIcon className="size-3.5 shrink-0 text-destructive/90" aria-hidden />
-          ) : (
-            <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden />
-          );
-        return (
-          <div key={activity.id} className="flex min-w-0 items-center gap-1.5">
-            {icon}
-            <span className="min-w-0 truncate text-foreground/75">{activity.title}</span>
-            <span className="shrink-0 text-[10px] text-muted-foreground/60">
-              {activity.status}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /**
  * Keep settled messages out of the streaming render path. Appending a delta
  * still updates the active row, but unchanged rows now retain their existing
@@ -429,9 +384,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
   sending,
   approvalMode,
   providerLabel,
+  delegationJobs,
+  onOpenDelegation,
   isPlanToBuild = false,
   onBuildPlan,
-  onResolveApproval,
   onOpenDiff,
   onReconnectProvider,
   onOpenProviderSwitch,
@@ -550,39 +506,13 @@ const ChatMessageRow = memo(function ChatMessageRow({
             Zest
           </div>
 
-          {msg.tools.length > 0 ? (
-            <div className="flex w-full max-w-full flex-col gap-0.5">
-              {groupToolRuns(msg.tools).map((run) =>
-                run.kind === "group" ? (
-                  <ToolRunGroup
-                    key={`group-${run.tools[0].id}`}
-                    tools={run.tools}
-                    summary={run.summary}
-                    onResolveApproval={onResolveApproval}
-                    onOpenDiff={onOpenDiff}
-                  />
-                ) : (
-                  <ToolCallRow
-                    key={run.tool.id}
-                    tool={run.tool}
-                    onResolveApproval={onResolveApproval}
-                    onOpenDiff={onOpenDiff}
-                  />
-                )
-              )}
-            </div>
-          ) : null}
-
-          {msg.providerActivity ? (
-            <ProviderActivityTrace
-              activities={msg.providerActivity}
-              providerLabel={providerLabel}
-            />
-          ) : null}
-
-          {msg.thinking ? (
-            <ThinkingReasoning thinking={msg.thinking} streaming={msg.streaming} />
-          ) : null}
+          <AssistantTrace
+            message={msg}
+            providerLabel={providerLabel}
+            delegationJobs={delegationJobs}
+            onOpenDiff={onOpenDiff}
+            onOpenDelegation={onOpenDelegation}
+          />
 
           {planningQuestion ? (
             <PlanningQuestionnaire
@@ -1031,6 +961,8 @@ export function ChatScreen({
     setWorkbenchOpen(false);
     setWorkbenchJobFocus(null);
   }, []);
+  // The sidebar's job rows and a subagent line's "Open in Delegation" both land
+  // on the job's card; a new request lets the same card be asked for twice.
   const openDelegationJob = useCallback(
     (jobId: string) => {
       if (session.isFreeChat) return;
@@ -1924,9 +1856,10 @@ export function ChatScreen({
                         sending={sending}
                         approvalMode={approvalMode}
                         providerLabel={providerLabel}
+                        delegationJobs={delegationJobs}
+                        onOpenDelegation={openDelegationJob}
                         isPlanToBuild={planToBuild === msg.id}
                         onBuildPlan={onBuildPlan}
-                        onResolveApproval={onResolveApproval}
                         onOpenDiff={openDiff}
                         onReconnectProvider={onReconnectProvider}
                         onOpenProviderSwitch={refreshAndOpenProviderSwitch}
