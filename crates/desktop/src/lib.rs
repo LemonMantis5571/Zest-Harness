@@ -472,6 +472,59 @@ struct ModelCapability {
     context_window: u64,
     supports_tools: bool,
     supports_vision: bool,
+    /// For a provider-decided alias, the model it last ran as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    resolves_to: Option<String>,
+    /// Set when the installed vendor CLI is known to be too old for this model.
+    /// The model is still selectable; the picker marks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    needs_cli: Option<CliRequirementView>,
+}
+
+impl From<zest_core::ModelSpec> for ModelCapability {
+    fn from(spec: zest_core::ModelSpec) -> Self {
+        Self {
+            id: spec.id,
+            efforts: spec.efforts,
+            context_window: spec.context_window,
+            supports_tools: spec.supports_tools,
+            supports_vision: spec.supports_vision,
+            resolves_to: spec.resolves_to,
+            needs_cli: spec.needs_cli.map(CliRequirementView::from),
+        }
+    }
+}
+
+/// Desktop wire view of core `CliRequirement`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "CliRequirement.ts", rename_all = "camelCase")
+)]
+struct CliRequirementView {
+    /// The CLI's display name, such as "Claude Code".
+    cli: String,
+    /// The oldest version that runs the model.
+    minimum: String,
+    /// The version installed now.
+    installed: String,
+    /// The command that updates the CLI, such as `claude update`.
+    update: String,
+}
+
+impl From<zest_core::CliRequirement> for CliRequirementView {
+    fn from(requirement: zest_core::CliRequirement) -> Self {
+        Self {
+            cli: requirement.cli,
+            minimum: requirement.minimum,
+            installed: requirement.installed,
+            update: requirement.update,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -746,6 +799,54 @@ struct ProviderView {
     models: Vec<ModelCapability>,
 }
 
+/// A provider Settings offers as the advisor: configured, and one whose agent
+/// loop Zest drives, so it can answer a plain request without running tools.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "AdvisorProviderOption.ts",
+        rename_all = "camelCase"
+    )
+)]
+struct AdvisorProviderOption {
+    id: String,
+    label: String,
+    status_label: String,
+    /// Keyed or signed in, so a consultation can actually be sent.
+    ready: bool,
+    default_model: String,
+    models: Vec<String>,
+}
+
+/// `[advisor]` as Settings shows it, with the providers it may choose from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "AdvisorSettingsView.ts", rename_all = "camelCase")
+)]
+struct AdvisorSettingsView {
+    /// Empty when no advisor is set.
+    provider: String,
+    /// Empty means the provider's default model.
+    model: String,
+    max_uses: u32,
+    /// Zest consults on its own before finishing and after repeated failures.
+    auto_review: bool,
+    /// Which `zest.toml` Settings writes to.
+    scope: String,
+    /// Why the saved advisor will not load, when it will not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    issue: Option<String>,
+    options: Vec<AdvisorProviderOption>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -877,13 +978,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         models: descriptor
             .models
             .into_iter()
-            .map(|m| ModelCapability {
-                id: m.id,
-                efforts: m.efforts,
-                context_window: m.context_window,
-                supports_tools: m.supports_tools,
-                supports_vision: m.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -954,13 +1049,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         models: descriptor
             .models
             .into_iter()
-            .map(|model| ModelCapability {
-                id: model.id,
-                efforts: model.efforts,
-                context_window: model.context_window,
-                supports_tools: model.supports_tools,
-                supports_vision: model.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -1301,9 +1390,9 @@ enum ChatEvent {
         message_id: String,
         text: String,
     },
-    /// Ephemeral activity from a provider-owned loop (for example Claude
-    /// Code reading a file). It is deliberately not persisted as a Zest tool
-    /// call and never enters the local tool executor.
+    /// Activity from a provider-owned loop (for example Claude Code reading a
+    /// file). Saved on the assistant message so a reopened chat still shows
+    /// it, but never a Zest tool call and never run by the local executor.
     ProviderActivity {
         session_id: String,
         thread_id: String,
@@ -1312,6 +1401,11 @@ enum ChatEvent {
         id: String,
         title: String,
         status: String,
+        /// The activity this one ran inside, such as a subagent's tool call
+        /// under its `Agent` row. No provider reports one yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        parent_id: Option<String>,
     },
     ToolCallStart {
         session_id: String,
@@ -1695,13 +1789,7 @@ fn chatgpt_codex_offer_view() -> ProviderView {
         models: descriptor
             .models
             .into_iter()
-            .map(|model| ModelCapability {
-                id: model.id,
-                efforts: model.efforts,
-                context_window: model.context_window,
-                supports_tools: model.supports_tools,
-                supports_vision: model.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -1980,6 +2068,79 @@ fn set_external_agent_model(
     zest_core::config_edit::upsert_external_agent(&path, &preset)?;
     clear_workspace_config_cache(&state);
     Ok(())
+}
+
+fn advisor_settings_view(state: &AppState) -> AdvisorSettingsView {
+    let config = load_workspace_config(state);
+    let options = config
+        .providers
+        .iter()
+        .filter(|(_, provider)| !provider.owns_agent_loop())
+        .map(|(id, _)| {
+            let view = configured_provider_view(id, &config);
+            AdvisorProviderOption {
+                id: id.clone(),
+                label: view.label,
+                status_label: view.status_label,
+                ready: view.status_kind == "ready",
+                default_model: view.default_model,
+                models: view.models.into_iter().map(|model| model.id).collect(),
+            }
+        })
+        .collect();
+    let advisor = config.advisor.as_ref();
+    // The same text `Config::lint` gives, so Settings and the session warning
+    // never disagree about why an advisor is off.
+    let issue = advisor.and_then(|_| {
+        config
+            .lint()
+            .into_iter()
+            .find(|issue| issue.starts_with("[advisor]"))
+    });
+    AdvisorSettingsView {
+        provider: advisor
+            .map(|advisor| advisor.provider.clone())
+            .unwrap_or_default(),
+        model: advisor
+            .and_then(|advisor| advisor.model.clone())
+            .unwrap_or_default(),
+        max_uses: advisor.map(|advisor| advisor.max_uses).unwrap_or(3),
+        auto_review: advisor.is_none_or(|advisor| advisor.auto_review),
+        scope: external_agent_scope(state),
+        issue,
+        options,
+    }
+}
+
+#[tauri::command]
+fn advisor_settings(state: State<'_, AppState>) -> AdvisorSettingsView {
+    let _read_guard = state.config_edit.lock().ok();
+    advisor_settings_view(&state)
+}
+
+/// Save the advisor, or turn it off with no `provider`. The running chat picks
+/// it up when the front-end rebuilds the session.
+#[tauri::command]
+fn set_advisor(
+    state: State<'_, AppState>,
+    provider: Option<String>,
+    model: Option<String>,
+    max_uses: Option<u32>,
+    auto_review: Option<bool>,
+) -> Result<AdvisorSettingsView, String> {
+    {
+        let _edit_guard = lock_config_edit(&state);
+        let path = editable_config_path(&state)?;
+        let input = provider.map(|provider| zest_core::config_edit::AdvisorInput {
+            provider,
+            model,
+            max_uses: max_uses.unwrap_or(3),
+            auto_review: auto_review.unwrap_or(true),
+        });
+        zest_core::config_edit::set_advisor(&path, input.as_ref())?;
+        clear_workspace_config_cache(&state);
+    }
+    Ok(advisor_settings_view(&state))
 }
 
 fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
@@ -2712,12 +2873,10 @@ fn configure_claude_code_provider(
             id,
             command: "claude".into(),
             model,
-            models: vec![
-                "sonnet".into(),
-                "opus".into(),
-                "haiku".into(),
-                "fable".into(),
-            ],
+            // No allow-list: the built-in catalogue applies and keeps up with
+            // new models. This used to write the CLI's bare aliases, which run
+            // the previous generation.
+            models: Vec::new(),
             allow_mcp: false,
             // Not `accept_edits`: that auto-approves inside the CLI before zest
             // is consulted, so edits would land with no approval card and no
@@ -3945,13 +4104,7 @@ fn session_capabilities(session: &Session) -> (String, Vec<ModelCapability>) {
         descriptor
             .models
             .into_iter()
-            .map(|m| ModelCapability {
-                id: m.id,
-                efforts: m.efforts,
-                context_window: m.context_window,
-                supports_tools: m.supports_tools,
-                supports_vision: m.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     )
 }
@@ -4105,7 +4258,14 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::ThinkingDelta {
             message_id, text, ..
         } => thread.apply_thinking_delta(message_id, text),
-        ChatEvent::ProviderActivity { .. } => {}
+        ChatEvent::ProviderActivity {
+            message_id,
+            id,
+            title,
+            status,
+            parent_id,
+            ..
+        } => thread.apply_provider_activity(message_id, id, title, status, parent_id.as_deref()),
         ChatEvent::ToolCallStart {
             message_id,
             name,
@@ -4198,7 +4358,11 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
 
 fn event_priority(event: &ChatEvent) -> PersistPriority {
     match event {
-        ChatEvent::TextDelta { .. } | ChatEvent::ThinkingDelta { .. } => PersistPriority::Delta,
+        // A subagent retitles its row on every step it takes; those coalesce
+        // like deltas rather than forcing a write each.
+        ChatEvent::TextDelta { .. }
+        | ChatEvent::ThinkingDelta { .. }
+        | ChatEvent::ProviderActivity { .. } => PersistPriority::Delta,
         _ => PersistPriority::Immediate,
     }
 }
@@ -4206,8 +4370,7 @@ fn event_priority(event: &ChatEvent) -> PersistPriority {
 fn event_mutates_thread(event: &ChatEvent) -> bool {
     !matches!(
         event,
-        ChatEvent::ProviderActivity { .. }
-            | ChatEvent::ToolCallUpdate { .. }
+        ChatEvent::ToolCallUpdate { .. }
             | ChatEvent::QuestionNeeded { .. }
             | ChatEvent::WorkspaceChanged { .. }
             | ChatEvent::InputQueued { .. }
@@ -8089,8 +8252,26 @@ fn prepare_pasted_image(
 
 #[tauri::command]
 fn git_branch(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let root = resolve_workspace_root(&state)?;
-    Ok(read_git_branch(&root))
+    let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
+    Ok(branch_for_session(
+        active_session_root.as_deref(),
+        active_session_root
+            .is_none()
+            .then(|| resolve_workspace_root(&state).ok())
+            .flatten(),
+    ))
+}
+
+/// The branch of the chat on screen, not of the selected project. A free chat
+/// keeps the last project selected for the next project chat, and reading that
+/// project's HEAD put its branch beside "No workspace".
+fn branch_for_session(
+    active_session_root: Option<&Path>,
+    fallback_root: Option<PathBuf>,
+) -> Option<String> {
+    project_root_for_session(active_session_root, fallback_root)
+        .as_deref()
+        .and_then(read_git_branch)
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {
@@ -8267,6 +8448,19 @@ struct GitContextInspection {
     view: GitContextView,
 }
 
+fn free_chat_git_context() -> GitContextView {
+    GitContextView {
+        branch: None,
+        base_branch: None,
+        branch_changed: false,
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        stats_source: "branch".to_string(),
+        pull_request: None,
+    }
+}
+
 async fn inspect_git_context(
     root: &Path,
     existing: Option<&ThreadGitContext>,
@@ -8340,6 +8534,12 @@ async fn git_context(state: State<'_, AppState>) -> Result<GitContextView, Strin
         .map_err(map_session_err)?
         .ok_or_else(|| "no active session".to_string())?;
     let (root, thread_id, existing) = snapshot;
+    // A free chat has no repository. `git rev-parse` would walk up from the
+    // free-chat store into whatever repo contains it, and a context copied in
+    // from a project chat would keep showing that project's branch.
+    if is_free_chat_root(&root) {
+        return Ok(free_chat_git_context());
+    }
     let inspection = inspect_git_context(&root, existing.as_ref()).await;
     let next_context = inspection.thread_context.clone();
     match state
@@ -9108,6 +9308,8 @@ pub fn run() {
                 set_external_agent,
                 set_external_agent_mcp,
                 set_external_agent_model,
+                advisor_settings,
+                set_advisor,
                 check_external_agent,
                 list_mcp_servers,
                 save_mcp_server,
@@ -9551,6 +9753,32 @@ mod workspace_root_tests {
         assert_eq!(project_root_for_session(Some(&free), Some(stale)), None);
     }
 
+    #[test]
+    fn free_chat_shows_no_branch_from_the_selected_project() {
+        let free = free_chats_root().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        std::fs::write(
+            project.path().join(".git").join("HEAD"),
+            "ref: refs/heads/feat/removed-project\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_for_session(Some(&free), Some(project.path().to_path_buf())),
+            None
+        );
+        assert_eq!(
+            branch_for_session(Some(project.path()), None).as_deref(),
+            Some("feat/removed-project")
+        );
+        assert_eq!(
+            branch_for_session(None, Some(project.path().to_path_buf())).as_deref(),
+            Some("feat/removed-project")
+        );
+        assert!(free_chat_git_context().branch.is_none());
+    }
+
     /// The UI keys the "choose another folder" guidance off this token, so the
     /// wording of the OS error must never be what decides whether it appears.
     #[test]
@@ -9589,6 +9817,7 @@ mod export_bindings {
         SessionMeta::export_all(&config).expect("export SessionMeta bindings");
         ProviderView::export_all(&config).expect("export ProviderView bindings");
         ExternalAgentView::export_all(&config).expect("export ExternalAgentView bindings");
+        AdvisorSettingsView::export_all(&config).expect("export AdvisorSettingsView bindings");
         ExternalAgentCheckView::export_all(&config)
             .expect("export ExternalAgentCheckView bindings");
         ModelCapability::export_all(&config).expect("export ModelCapability bindings");
@@ -9743,6 +9972,67 @@ mod characterization {
             },
         );
         assert_eq!(thread.messages.len(), 2);
+    }
+
+    /// A Claude Code subagent used to vanish on reopen: its `Agent` row was
+    /// only ever in the live UI.
+    #[test]
+    fn provider_activity_is_saved_in_order_and_settles_on_done() {
+        let activity = |id: &str, title: &str, status: &str, parent: Option<&str>| {
+            ChatEvent::ProviderActivity {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "a1".into(),
+                id: id.into(),
+                title: title.into(),
+                status: status.into(),
+                parent_id: parent.map(str::to_string),
+            }
+        };
+        let mut thread = Thread::new();
+        let first = activity("agent-1", "Agent Map the parser", "running", None);
+        assert!(event_mutates_thread(&first));
+        assert_eq!(event_priority(&first), PersistPriority::Delta);
+        apply_event_to_thread(&mut thread, &first);
+        apply_event_to_thread(
+            &mut thread,
+            &activity("read-1", "Read src/lib.rs", "done", Some("agent-1")),
+        );
+        apply_event_to_thread(
+            &mut thread,
+            &activity(
+                "agent-1",
+                "Agent Map the parser: Read src/lib.rs",
+                "running",
+                None,
+            ),
+        );
+        apply_event_to_thread(
+            &mut thread,
+            &ChatEvent::Done {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "a1".into(),
+            },
+        );
+
+        let saved = serde_json::to_value(&thread.messages[0]).unwrap();
+        assert_eq!(saved["providerActivity"][0]["id"], "agent-1");
+        assert_eq!(
+            saved["providerActivity"][0]["title"],
+            "Agent Map the parser: Read src/lib.rs"
+        );
+        assert_eq!(saved["providerActivity"][0]["status"], "done");
+        assert_eq!(saved["providerActivity"][1]["parentId"], "agent-1");
+        assert_eq!(
+            saved["steps"],
+            serde_json::json!([
+                { "kind": "activity", "id": "agent-1" },
+                { "kind": "activity", "id": "read-1" }
+            ])
+        );
     }
 
     #[test]

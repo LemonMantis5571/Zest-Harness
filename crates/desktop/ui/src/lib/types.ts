@@ -1,3 +1,5 @@
+import type { AdvisorProviderOption } from "./generated/AdvisorProviderOption.ts";
+import type { AdvisorSettingsView } from "./generated/AdvisorSettingsView.ts";
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
 import type { ModelCapability } from "./generated/ModelCapability.ts";
 import type { CommandView as GeneratedCommandView } from "./generated/CommandView.ts";
@@ -84,6 +86,17 @@ export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
 };
 
 export type ExternalAgentRow = ExternalAgentView;
+
+/** `[advisor]` as Settings shows it, with the providers it may choose from. */
+export type AdvisorSettings = AdvisorSettingsView;
+export type AdvisorOption = AdvisorProviderOption;
+/** What Settings saves. `null` turns the advisor off. */
+export type AdvisorChoice = {
+  provider: string;
+  model: string | null;
+  maxUses: number;
+  autoReview: boolean;
+};
 export type ExternalAgentCheck = ExternalAgentCheckView;
 
 /** Zest's own MCP servers — not the CLI-owned ones behind `mcpAllowed`. */
@@ -123,6 +136,9 @@ export type ToolPart = {
   path?: string;
   diff?: string;
   metadata?: ToolMetadata;
+  /** Unix ms. A subagent line shows the difference as its duration. */
+  startedAt?: number;
+  finishedAt?: number;
 };
 
 /** Filename chips shown on a sent user bubble (UI-only; may be absent on reload). */
@@ -131,11 +147,27 @@ export type UserAttachmentChip = {
   kind: string;
 };
 
+/** A step a provider-owned loop (Claude Code, Codex, Cursor) reported. */
 export type ProviderActivityPart = {
   id: string;
   title: string;
   status: "running" | "done" | "error";
+  /** The activity this one ran inside, such as a subagent's own tool call. */
+  parentId?: string;
+  startedAt?: number;
+  finishedAt?: number;
 };
+
+/**
+ * One entry in the order an assistant turn did things. Mirrors Rust
+ * `AssistantStep`. Tools and activities point into `tools` and
+ * `providerActivity`; each thinking block carries its own text so reasoning
+ * that came between tool calls stays between them.
+ */
+export type AssistantStep =
+  | { kind: "thinking"; text: string }
+  | { kind: "tool"; id: string }
+  | { kind: "activity"; id: string };
 
 export type ChatMessage =
   | {
@@ -161,8 +193,10 @@ export type ChatMessage =
       command?: string;
       /** Live question requested by the model; not persisted in thread history. */
       question?: PlanningQuestion;
-      /** Ephemeral activity from a provider-owned model/tool loop. */
+      /** Activity from a provider-owned model/tool loop. Saved since steps were. */
       providerActivity?: ProviderActivityPart[];
+      /** Arrival order of thinking, tools and activity. Absent on older threads. */
+      steps?: AssistantStep[];
       streaming: boolean;
     };
 

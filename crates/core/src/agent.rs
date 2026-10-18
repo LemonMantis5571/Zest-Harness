@@ -32,6 +32,7 @@ use crate::tools::approval::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
     ToolRisk,
 };
+use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::prepared::PreparedToolCall;
 use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
@@ -150,6 +151,9 @@ pub struct Agent {
     pub turn_usage: Option<TurnUsageSummary>,
     /// Tool-use ids whose results must be redacted when persisting wire history.
     sensitive_tool_ids: Vec<String>,
+    /// The same advisor registered as `consult_advisor`, kept here so Zest can
+    /// also consult it on its own (`docs/plans/advisor.md`, step 2).
+    advisor: Option<Arc<ConsultAdvisor>>,
 }
 
 impl Agent {
@@ -177,7 +181,15 @@ impl Agent {
             last_usage: None,
             turn_usage: None,
             sensitive_tool_ids: Vec::new(),
+            advisor: None,
         }
+    }
+
+    /// Let Zest consult this advisor on its own. Register the same instance as
+    /// a tool so both paths share one per-request budget.
+    pub fn with_advisor(mut self, advisor: Arc<ConsultAdvisor>) -> Self {
+        self.advisor = Some(advisor);
+        self
     }
 
     /// Accepts a bare string for the common case where the whole prompt is
@@ -783,6 +795,9 @@ impl Agent {
     ) -> Result<()> {
         let mut staged = self.messages.clone();
         self.turn_usage = None;
+        if let Some(advisor) = &self.advisor {
+            advisor.begin_request();
+        }
         staged.push(user_message);
         // Track which tool_use ids were sensitive so tool_result redaction can
         // strip them from durable history while live memory keeps the body.
@@ -790,6 +805,12 @@ impl Agent {
         // Overwritten each provider round; only the final end_turn value is kept.
         #[allow(unused_assignments)]
         let mut last_usage: Option<Usage> = None;
+        // Zest's own advisor consultations: at most one before a turn that
+        // changed files ends, and one after two failed tool calls in a row.
+        let mut wrote_files = false;
+        let mut failure_streak = 0u32;
+        let mut reviewed_before_finish = false;
+        let mut consulted_on_failures = false;
 
         publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
 
@@ -925,6 +946,35 @@ impl Agent {
 
             match completion.stop_reason.as_deref() {
                 Some("end_turn") | None => {
+                    if wrote_files && !reviewed_before_finish {
+                        reviewed_before_finish = true;
+                        let review = self
+                            .harness_consult(
+                                &staged,
+                                &turn_sensitive,
+                                crate::advisor::FINISH_REVIEW_QUESTION,
+                                on_event,
+                                cancel,
+                            )
+                            .await;
+                        Self::check_cancel(cancel)?;
+                        if let Some(advice) =
+                            review.filter(|advice| !crate::advisor::approves(advice))
+                        {
+                            // One more round to act on it; the review does not
+                            // run again this turn.
+                            staged.push(Message::user_text(crate::advisor::finish_review_note(
+                                &advice,
+                            )));
+                            publish_side_context(
+                                self,
+                                &staged,
+                                &turn_sensitive,
+                                &mut on_side_context,
+                            );
+                            continue;
+                        }
+                    }
                     self.sensitive_tool_ids.extend(turn_sensitive);
                     // Live memory keeps real tool bodies; persist path redacts.
                     self.messages = staged;
@@ -1003,6 +1053,19 @@ impl Agent {
                         if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
                         }
+                        if outcome.risk == ToolRisk::Write && !outcome.is_error {
+                            wrote_files = true;
+                        }
+                        // The advisor's own failures (a spent budget, a timeout)
+                        // say nothing about the work, so they neither count nor
+                        // break a streak.
+                        if call.name != crate::advisor::ADVISOR_TOOL {
+                            if outcome.is_error || outcome.failed {
+                                failure_streak += 1;
+                            } else {
+                                failure_streak = 0;
+                            }
+                        }
                         if let Some(crate::tools::ToolMetadata::Delegation {
                             provider_id,
                             usage,
@@ -1017,11 +1080,15 @@ impl Agent {
                         }
                         let summary = if outcome.risk == ToolRisk::Sensitive {
                             "sensitive content (hidden)".to_string()
-                        } else if let Some(label) =
-                            outcome.metadata.as_ref().and_then(|m| m.delegation_label())
+                        } else if let Some(report) = outcome
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.delegation_summary(&outcome.body))
                         {
-                            // Prefer the short provenance label; full body stays on wire.
-                            label
+                            // The worker's report, bounded; the full body stays on the wire.
+                            report
+                        } else if let Some(summary) = outcome.summary.clone() {
+                            summary
                         } else {
                             summarize_tool_body(&outcome.body)
                         };
@@ -1056,6 +1123,25 @@ impl Agent {
 
                     // One user message carrying every result.
                     staged.push(Message::user_blocks(results));
+                    if failure_streak >= 2 && !consulted_on_failures {
+                        consulted_on_failures = true;
+                        let advice = self
+                            .harness_consult(
+                                &staged,
+                                &turn_sensitive,
+                                crate::advisor::FAILURE_QUESTION,
+                                on_event,
+                                cancel,
+                            )
+                            .await;
+                        Self::check_cancel(cancel)?;
+                        // Its own message, after the results: OpenAI-format
+                        // endpoints need tool results to follow their calls
+                        // directly, so text cannot ride in the results message.
+                        if let Some(advice) = advice {
+                            staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
+                        }
+                    }
                     publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
                 }
 
@@ -1130,6 +1216,64 @@ impl Agent {
     /// UI, but providers without an effort control must receive `None` rather
     /// than a plausible-looking `high` field that a vendor may reject or
     /// interpret differently.
+    /// A consultation Zest starts itself, shown as an ordinary "Ask advisor"
+    /// row. Only when it needs no approval right now: the advisor shares the
+    /// chat's provider, the user allowed it for the session, or the mode allows
+    /// everything. Otherwise it is skipped, and the model can still ask through
+    /// the tool, which shows the card.
+    async fn harness_consult(
+        &self,
+        staged: &[Message],
+        turn_sensitive: &[String],
+        question: &str,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Option<String> {
+        let advisor = self
+            .advisor
+            .as_ref()
+            .filter(|advisor| advisor.auto_review())?;
+        let target = advisor.approval_target();
+        if advisor.needs_approval() {
+            let allowed = self.policy.lock().is_ok_and(|policy| {
+                matches!(
+                    policy.decide(crate::advisor::ADVISOR_TOOL, &target, ToolRisk::Exec, false),
+                    PolicyOutcome::Allow
+                )
+            });
+            if !allowed {
+                return None;
+            }
+        }
+        let mut sensitive_ids = self.sensitive_tool_ids.clone();
+        sensitive_ids.extend(turn_sensitive.iter().cloned());
+        let messages = redact_sensitive_staged(staged.to_vec(), &sensitive_ids);
+        let id = new_id("advisor");
+        on_event(StreamEvent::ToolCallStart {
+            name: crate::advisor::ADVISOR_TOOL,
+            id: &id,
+        });
+        let result = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err("turn cancelled before the advisor answered".to_string()),
+            result = advisor.review(&messages, question) => result,
+        };
+        let summary = match &result {
+            Ok(advice) => advice.trim().chars().take(4_000).collect(),
+            Err(error) => error.clone(),
+        };
+        on_event(StreamEvent::ToolCallResult {
+            name: crate::advisor::ADVISOR_TOOL,
+            id: &id,
+            summary: &summary,
+            is_error: result.is_err(),
+            path: Some(&target),
+            diff: None,
+            metadata: None,
+        });
+        result.ok()
+    }
+
     fn effort_for_model(&self) -> Option<String> {
         let supports_effort = self
             .provider
@@ -1263,6 +1407,8 @@ impl Agent {
                                 diff,
                                 metadata: outcome.metadata,
                                 images: outcome.images,
+                                summary: outcome.summary,
+                                failed: outcome.failed,
                             },
                             Err(message) => {
                                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1398,6 +1544,8 @@ impl Agent {
                 diff: None,
                 metadata: None,
                 images: Vec::new(),
+                summary: None,
+                failed: false,
             },
             Ok(_) => ToolCallOutcome::failed("the user submitted an empty answer", ToolRisk::Read),
             Err(message) => ToolCallOutcome::failed(message, ToolRisk::Read),
@@ -1527,6 +1675,8 @@ impl Agent {
                 diff,
                 metadata: outcome.metadata,
                 images: outcome.images,
+                summary: outcome.summary,
+                failed: outcome.failed,
             },
             Err(message) => {
                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1548,6 +1698,10 @@ struct ToolCallOutcome {
     diff: Option<String>,
     metadata: Option<crate::tools::ToolMetadata>,
     images: Vec<crate::tools::outcome::ToolImage>,
+    /// Replaces the one-line digest of `body` in the UI when the tool set one.
+    summary: Option<String>,
+    /// The tool ran, but what it ran failed (a non-zero exit).
+    failed: bool,
 }
 
 fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
@@ -1564,6 +1718,8 @@ impl ToolCallOutcome {
             diff: None,
             metadata: None,
             images: Vec::new(),
+            summary: None,
+            failed: false,
         }
     }
 }
@@ -1796,25 +1952,38 @@ fn publish_side_context(
 }
 
 fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> Vec<Message> {
+    let mut sensitive_ids: HashSet<String> = sensitive_ids.iter().cloned().collect();
+    // Older saved chats redacted results but retained the original arguments.
+    // Their result marker preserves the sensitivity even after live IDs are lost.
+    for block in messages.iter().flat_map(|message| &message.content) {
+        if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            && block.get("content").and_then(serde_json::Value::as_str)
+                == Some(REDACTED_SENSITIVE_RESULT)
+        {
+            if let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) {
+                sensitive_ids.insert(id.to_owned());
+            }
+        }
+    }
     if sensitive_ids.is_empty() {
         return messages;
     }
     let mut out = messages;
     for msg in &mut out {
-        if msg.role != "user" {
-            continue;
-        }
         for block in &mut msg.content {
-            let is_result = block.get("type").and_then(|t| t.as_str()) == Some("tool_result");
-            if !is_result {
-                continue;
-            }
-            let id = block
-                .get("tool_use_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if sensitive_ids.iter().any(|s| s == id) {
-                block["content"] = serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into());
+            let (id_field, content_field) =
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("tool_use") => ("id", "input"),
+                    Some("tool_result") => ("tool_use_id", "content"),
+                    _ => continue,
+                };
+            let id = block.get(id_field).and_then(|v| v.as_str()).unwrap_or("");
+            if sensitive_ids.contains(id) {
+                block[content_field] = if content_field == "input" {
+                    serde_json::json!({"redacted": "sensitive tool arguments omitted from shared history"})
+                } else {
+                    serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into())
+                };
             }
         }
     }
@@ -1922,6 +2091,8 @@ mod tests {
                 context_window: 200_000,
                 supports_tools: true,
                 supports_vision: true,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
         async fn stream_turn(
@@ -2224,6 +2395,8 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: false,
                 supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
 
@@ -2277,6 +2450,8 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: true,
                 supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
 
@@ -2325,6 +2500,8 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: true,
                 supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
 
@@ -3141,6 +3318,47 @@ mod tests {
         assert!(!json.contains("top-secret"));
     }
 
+    #[test]
+    fn regression_sensitive_arguments_are_redacted_from_shared_history() {
+        let messages = vec![
+            Message::assistant(vec![json!({
+                "type": "tool_use", "id": "secret-edit", "name": "edit_file",
+                "input": { "path": ".env", "old_string": "TOKEN=old-secret", "new_string": "TOKEN=new-secret" }
+            })]),
+            Message::user_blocks(vec![tool_result("secret-edit", "edited .env", false)]),
+            Message::assistant(vec![json!({"type":"text","text":"Checking the result."})]),
+        ];
+        let redacted = redact_sensitive_staged(messages.clone(), &["secret-edit".into()]);
+        let transcript = crate::advisor::render_transcript(&redacted, 100_000);
+        assert!(!transcript.contains("old-secret"), "{transcript}");
+        assert!(!transcript.contains("new-secret"), "{transcript}");
+        assert_eq!(redacted[0].content[0]["id"], "secret-edit");
+        assert_eq!(
+            messages[0].content[0]["input"]["new_string"],
+            "TOKEN=new-secret"
+        );
+    }
+
+    #[test]
+    fn regression_reopened_sensitive_history_redacts_arguments_without_live_ids() {
+        let messages = vec![
+            Message::assistant(vec![json!({
+                "type":"tool_use", "id":"old-edit", "name":"edit_file",
+                "input":{"path":".env","old_string":"TOKEN=old-secret","new_string":"TOKEN=new-secret"}
+            })]),
+            Message::user_blocks(vec![tool_result(
+                "old-edit",
+                REDACTED_SENSITIVE_RESULT,
+                false,
+            )]),
+        ];
+        let redacted = redact_sensitive_staged(messages, &[]);
+        let serialized = serde_json::to_string(&redacted).unwrap();
+        assert!(!serialized.contains("old-secret"));
+        assert!(!serialized.contains("new-secret"));
+        assert_eq!(redacted[0].content[0]["id"], "old-edit");
+    }
+
     /// The invariant that makes concurrency safe: tools may finish in any
     /// order, but `tool_result` blocks must come back in the order the model
     /// asked for them.
@@ -3485,5 +3703,441 @@ mod tests {
         assert_eq!(summary.usage.cache_creation_input_tokens, 42);
         assert_eq!(summary.usage.cache_read_input_tokens, 48);
         assert!(summary.usage_available);
+    }
+
+    mod advisor_reviews {
+        use super::*;
+        use crate::advisor::Advisor;
+        use crate::tools::approval::{AllowApprover, ApprovalMode};
+        use crate::tools::{Tool, ToolOutcome};
+        use std::collections::VecDeque;
+        use std::time::Duration;
+
+        /// Replays fixed completions in order, then answers "done".
+        struct Replay {
+            id: &'static str,
+            rounds: Mutex<VecDeque<Completion>>,
+            requests: Mutex<Vec<TurnRequest>>,
+        }
+
+        impl Replay {
+            fn new(id: &'static str, rounds: Vec<Completion>) -> Arc<Self> {
+                Arc::new(Self {
+                    id,
+                    rounds: Mutex::new(rounds.into()),
+                    requests: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn requests(&self) -> Vec<TurnRequest> {
+                self.requests.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl Provider for Replay {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn default_model(&self) -> &str {
+                "replay-model"
+            }
+            fn auth_status(&self) -> AuthStatus {
+                AuthStatus::Ready { account: None }
+            }
+            async fn stream_turn(
+                &self,
+                request: &TurnRequest,
+                _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+            ) -> Result<Completion> {
+                self.requests.lock().unwrap().push(request.clone());
+                Ok(self
+                    .rounds
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| text("done")))
+            }
+        }
+
+        fn text(body: &str) -> Completion {
+            Completion {
+                content: vec![json!({ "type": "text", "text": body })],
+                stop_reason: Some("end_turn".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            }
+        }
+
+        fn calls(names: &[&str]) -> Completion {
+            Completion {
+                content: names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        json!({"type":"tool_use","id":format!("c{index}"),"name":name,"input":{}})
+                    })
+                    .collect(),
+                stop_reason: Some("tool_use".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            }
+        }
+
+        /// A write that succeeds once approved.
+        struct WriteNote;
+
+        #[async_trait]
+        impl Tool for WriteNote {
+            fn name(&self) -> &str {
+                "write_note"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::Write
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("written"))
+            }
+        }
+
+        /// A command that runs and exits non-zero.
+        struct FailingCommand;
+
+        #[async_trait]
+        impl Tool for FailingCommand {
+            fn name(&self) -> &str {
+                "failing_command"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("$ make\nexit 2").with_failed(true))
+            }
+        }
+
+        fn advisor(
+            provider: Arc<Replay>,
+            chat_provider_id: &str,
+            auto_review: bool,
+        ) -> Arc<ConsultAdvisor> {
+            Arc::new(ConsultAdvisor::new(
+                Advisor {
+                    provider_id: provider.id.to_string(),
+                    model: "replay-model".into(),
+                    effort: None,
+                    provider,
+                    max_uses: 3,
+                    max_tokens: 4_096,
+                    timeout: Duration::from_secs(5),
+                    auto_review,
+                },
+                chat_provider_id,
+                None,
+            ))
+        }
+
+        fn agent(chat: Arc<Replay>, advisor: Arc<ConsultAdvisor>, mode: ApprovalMode) -> Agent {
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(WriteNote));
+            tools.register(Arc::new(FailingCommand));
+            tools.register(advisor.clone());
+            Agent::new(chat, tools)
+                .with_approver(Arc::new(AllowApprover))
+                .with_policy(Arc::new(Mutex::new(ApprovalPolicy::new(mode))))
+                .with_advisor(advisor)
+        }
+
+        fn last_text(request: &TurnRequest) -> String {
+            request.messages.last().unwrap().content[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        #[test]
+        fn regression_advisor_grants_are_bound_to_destination_and_workspace() {
+            let root_a = tempfile::tempdir().unwrap();
+            let root_b = tempfile::tempdir().unwrap();
+            let target = |root: &std::path::Path, endpoint: &str| {
+                let config = crate::Config::parse(&format!(
+                    "[providers.chat]\nkind = \"openai_compatible\"\nbase_url = \"http://localhost:9\"\nmodel = \"chat-model\"\n\n[providers.strong]\nkind = \"openai_compatible\"\nbase_url = \"{endpoint}\"\nmodel = \"strong-model\"\n\n[advisor]\nprovider = \"strong\"\n"
+                )).unwrap();
+                let runtime = crate::runtime::RuntimeBuilder::new(root)
+                    .with_config(config)
+                    .with_provider("chat")
+                    .enable_external_agents(false)
+                    .register_exec_tools(false)
+                    .build()
+                    .unwrap();
+                runtime.agent.advisor.unwrap().approval_target()
+            };
+            let first = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let same = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let moved = target(
+                root_b.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let changed = target(root_a.path(), "https://other.example/v1?key=private-token");
+            let changed_secret =
+                target(root_a.path(), "https://trusted.example/v1?key=other-token");
+            std::fs::write(root_a.path().join("zest.toml"), "# Project config scope").unwrap();
+            let changed_scope = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            assert_eq!(first, same);
+            let mut policy = ApprovalPolicy::new(ApprovalMode::Manual);
+            policy.trust(crate::advisor::ADVISOR_TOOL, &first);
+            for target in [moved, changed, changed_secret, changed_scope] {
+                assert_eq!(
+                    policy.decide(crate::advisor::ADVISOR_TOOL, &target, ToolRisk::Exec, false),
+                    PolicyOutcome::Ask
+                );
+                assert!(!target.contains("private-token") && !target.contains("other-token"));
+            }
+        }
+
+        #[tokio::test]
+        async fn regression_advisor_budget_resets_after_a_cancelled_request() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["consult_advisor", "consult_advisor", "consult_advisor"]),
+                    calls(&["consult_advisor"]),
+                    text("Done."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("Advice.")]);
+            let mut agent = agent(
+                chat,
+                advisor(strong.clone(), "chat", false),
+                ApprovalMode::Manual,
+            );
+            let cancel = CancelToken::new();
+            let mut sink = |event: StreamEvent<'_>| {
+                if matches!(
+                    event,
+                    StreamEvent::ToolCallResult {
+                        name: "consult_advisor",
+                        ..
+                    }
+                ) {
+                    cancel.cancel();
+                }
+            };
+            assert!(matches!(
+                agent
+                    .send_cancellable("First request", &mut sink, Some(&cancel))
+                    .await,
+                Err(HarnessError::Cancelled)
+            ));
+            assert!(agent.messages.is_empty());
+            agent
+                .send("A different request", &mut |_| {})
+                .await
+                .unwrap();
+            assert_eq!(
+                strong.requests().len(),
+                4,
+                "the new request has its own allowance"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_turn_that_changed_files_is_reviewed_once_before_it_ends() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["write_note"]),
+                    text("Done."),
+                    text("Ran the tests."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("Run the tests before finishing.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut rows = Vec::new();
+            let mut sink = |event: StreamEvent<'_>| {
+                if let StreamEvent::ToolCallResult { name, summary, .. } = event {
+                    rows.push((name.to_string(), summary.to_string()));
+                }
+            };
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+
+            let requests = chat.requests();
+            assert_eq!(requests.len(), 3, "one extra round to act on the advice");
+            let note = last_text(&requests[2]);
+            assert!(note.starts_with("[Zest: before you finish"), "{note}");
+            assert!(note.contains("Run the tests before finishing."), "{note}");
+            assert!(rows.contains(&(
+                "consult_advisor".to_string(),
+                "Run the tests before finishing.".to_string()
+            )));
+            let asked = strong.requests();
+            assert_eq!(
+                asked.len(),
+                1,
+                "reviewed once, not again after the extra round"
+            );
+            assert!(last_text(&asked[0]).contains("Zest, the harness running the agent"));
+        }
+
+        #[tokio::test]
+        async fn an_approving_review_lets_the_turn_end() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("chat", vec![text("APPROVE")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(chat.requests().len(), 2);
+            assert_eq!(strong.requests().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_second_provider_is_only_consulted_once_it_is_allowed() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("strong", vec![text("Run the tests.")]);
+            let mut asking = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            asking
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert!(
+                strong.requests().is_empty(),
+                "no card can be shown, so no consultation"
+            );
+            assert_eq!(chat.requests().len(), 2);
+
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let mut bypass = agent(
+                chat,
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Bypass,
+            );
+            bypass
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(strong.requests().len(), 1);
+
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let granted = agent(
+                chat,
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            granted.policy().lock().unwrap().trust(
+                crate::advisor::ADVISOR_TOOL,
+                &granted.advisor.as_ref().unwrap().approval_target(),
+            );
+            let mut granted = granted;
+            granted
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(strong.requests().len(), 2, "allowed for the session");
+        }
+
+        #[tokio::test]
+        async fn two_failures_in_a_row_bring_in_the_advisor_after_the_results() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["failing_command", "failing_command"]),
+                    text("Fixed the path."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("The build runs from the wrong folder.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Build it", &mut sink, None)
+                .await
+                .unwrap();
+
+            let requests = chat.requests();
+            assert_eq!(requests.len(), 2);
+            let messages = &requests[1].messages;
+            let results = &messages[messages.len() - 2];
+            assert!(
+                results
+                    .content
+                    .iter()
+                    .all(|block| block["type"] == "tool_result"),
+                "the results message stays pure: {results:?}"
+            );
+            let note = last_text(&requests[1]);
+            assert!(note.starts_with("[Zest: after repeated failures"), "{note}");
+            assert!(note.contains("wrong folder"), "{note}");
+            assert_eq!(strong.requests().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn automatic_reviews_can_be_turned_off() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("chat", vec![text("Run the tests.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", false),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert!(strong.requests().is_empty());
+            assert_eq!(chat.requests().len(), 2);
+        }
     }
 }

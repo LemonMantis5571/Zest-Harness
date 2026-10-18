@@ -53,6 +53,12 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
 - Catalogue (`catalogue`): configured `models`, else the kind's builtin ids, else
   just `default_model`; the default is always present and first. Unknown models
   or efforts outside a model's list are rejected before a turn spends quota.
+  A `ModelSpec` can also carry `resolves_to` (what a provider-decided alias ran
+  as) and `needs_cli` (the installed vendor CLI is too old for the model). Both
+  are labels: neither removes a model or fails validation. Claude Code uses
+  these fields. Installed-version discovery must not execute configured
+  commands; unavailable or untrusted metadata stays unknown. See
+  [CLI agent providers](cli-agent-providers.md).
 - Efforts: `low medium high xhigh max`, plus `none` only for `gpt-6-sol` /
   `gpt-6-luna`. GPT-6.1 Sol and GPT-6 Astra support the five standard levels,
   vision and a 1,050,000-token context window, but reject `none`.

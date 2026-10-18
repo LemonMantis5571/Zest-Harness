@@ -25,6 +25,9 @@ import {
 } from "./threadWindow.ts";
 import type { DesktopBackend } from "./backend";
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
+  ApprovalChoice,
   ApprovalMode,
   AttachmentInput,
   ChatEvent,
@@ -67,6 +70,23 @@ const CATALOGUE_MODELS = [
     supportsVision: index === 1,
   })),
 ];
+/**
+ * Claude Code's built-in catalogue as an old CLI (2.1.220) reports it: Opus 5.5
+ * and Fable 5.1 are marked because the API refuses them from that client.
+ */
+const OLD_CLAUDE_CODE = { cli: "Claude Code", installed: "2.1.220", update: "claude update" };
+const CLAUDE_CODE_MODELS = [
+  { id: "claude-opus-5-5", needsCli: { ...OLD_CLAUDE_CODE, minimum: "2.1.280" } },
+  { id: "claude-sonnet-5-5" },
+  { id: "claude-haiku-5-5" },
+  { id: "claude-fable-5-1", needsCli: { ...OLD_CLAUDE_CODE, minimum: "2.1.251" } },
+].map((model) => ({
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  contextWindow: 1_000_000,
+  supportsTools: true,
+  supportsVision: false,
+  ...model,
+}));
 const FIXTURE_ARTWORK_DATA_URL =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%235e6ad2'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='96' height='96' rx='16' fill='url(%23g)'/%3E%3Ccircle cx='48' cy='48' r='22' fill='%23010102' opacity='.8'/%3E%3Ccircle cx='48' cy='48' r='7' fill='%23f4f4f5'/%3E%3C/svg%3E";
 /** One stand-in per look, so the fixture UI shows a real difference. */
@@ -102,6 +122,15 @@ const FIXTURE_SESSION: SessionInfo = {
   hasOlderMessages: false,
   hasNewerMessages: false,
   hiddenUserTurns: 0,
+};
+const CLAUDE_CODE_SESSION: SessionInfo = {
+  ...FIXTURE_SESSION,
+  provider: "claude-code",
+  label: "Claude Code",
+  model: "claude-sonnet-5-5",
+  defaultModel: "claude-sonnet-5-5",
+  ownsAgentLoop: true,
+  models: CLAUDE_CODE_MODELS,
 };
 
 function notAvailable(op: string): never {
@@ -184,8 +213,90 @@ function htmlArtifactMessages(): ChatMessage[] {
   ];
 }
 
+/** The board job the restored `delegate_feature` call created. */
+const FIXTURE_DELEGATION_JOB_ID = "fixture-delegation-1";
+
+/**
+ * A chat that handed work to three kinds of subagent: a CLI worker
+ * (`delegate_external`), a board feature card (`delegate_feature`), and a
+ * Claude Code `Agent` whose own steps arrive nested under it.
+ */
+function subagentMessages(): ChatMessage[] {
+  const at = 1_700_000_000_000;
+  const tools: ToolPart[] = [
+    { id: "sub-read-1", name: "read_file", path: "src/cache.ts", status: "done", summary: "export function cacheKey(…)" },
+    { id: "sub-read-2", name: "read_file", path: "src/cache.test.ts", status: "done", summary: "describe(\"cache\", …)" },
+    {
+      id: "sub-worker", name: "delegate_external", status: "done", path: "codex",
+      summary: "[codex · gpt-5.1-codex] The cache key ignores the locale, so the two flaky tests share one entry. Keying on the locale fixes both.",
+      diff: "--- a/src/cache.ts\n+++ b/src/cache.ts\n@@ -1 +1 @@\n-export const cacheKey = (path) => path;\n+export const cacheKey = (path, locale) => `${locale}:${path}`;\n",
+      metadata: { kind: "delegation", provider_id: "codex", model: "gpt-5.1-codex", stage: "direct" },
+      startedAt: at, finishedAt: at + 48_000,
+    },
+    {
+      id: "sub-card", name: "delegate_feature", status: "done", path: "claude",
+      summary: `Feature card \`${FIXTURE_DELEGATION_JOB_ID}\` created in lane \`product\`.`,
+      metadata: {
+        kind: "delegation", provider_id: "claude", model: "sonnet",
+        job_id: FIXTURE_DELEGATION_JOB_ID, stage: "card_created", attempt: 0, review_status: "pending",
+      },
+      startedAt: at + 50_000, finishedAt: at + 51_000,
+    },
+  ];
+  const agentAt = at + 120_000;
+  return [
+    { id: "sub-user-1", role: "user", text: "Why are the cache tests flaky?" },
+    {
+      id: "sub-assistant-1", role: "assistant", streaming: false,
+      thinking: "**Reading the cache**\nThe flaky tests both touch cacheKey.**Handing off**\nCodex can confirm the cause; the fix belongs on the board.",
+      text: "Codex found the cause: the cache key ignores the locale. The fix is on the board as a feature card.",
+      tools,
+      steps: [
+        { kind: "thinking", text: "**Reading the cache**\nThe flaky tests both touch cacheKey." },
+        { kind: "tool", id: "sub-read-1" },
+        { kind: "tool", id: "sub-read-2" },
+        { kind: "tool", id: "sub-worker" },
+        { kind: "thinking", text: "**Handing off**\nCodex can confirm the cause; the fix belongs on the board." },
+        { kind: "tool", id: "sub-card" },
+      ],
+    },
+    { id: "sub-user-2", role: "user", text: "Map every caller of cacheKey." },
+    {
+      id: "sub-assistant-2", role: "assistant", streaming: false, thinking: "", tools: [],
+      text: "Three modules call cacheKey; only the image loader passes a locale.",
+      providerActivity: [
+        { id: "sub-agent", title: "Agent Map the cacheKey callers: Read src/images.ts", status: "done", startedAt: agentAt, finishedAt: agentAt + 34_000 },
+        { id: "sub-agent-grep", title: "Grep cacheKey in src", status: "done", parentId: "sub-agent", startedAt: agentAt + 2_000, finishedAt: agentAt + 3_000 },
+        { id: "sub-agent-read", title: "Read src/images.ts", status: "done", parentId: "sub-agent", startedAt: agentAt + 4_000, finishedAt: agentAt + 5_000 },
+        { id: "sub-agent-test", title: "Bash npm test -- cache", status: "error", parentId: "sub-agent", startedAt: agentAt + 6_000, finishedAt: agentAt + 30_000 },
+      ],
+      steps: [
+        { kind: "activity", id: "sub-agent" },
+        { kind: "activity", id: "sub-agent-grep" },
+        { kind: "activity", id: "sub-agent-read" },
+        { kind: "activity", id: "sub-agent-test" },
+      ],
+    },
+  ];
+}
+
 export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
-  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery";
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status" | "subagents" | "background-approval" | "claude-cli-outdated" | "advisor-unavailable" | "claude-alias-resolution";
+
+/**
+ * `?scenario=sidebar-status`: a chat in every state the status-grouped sidebar
+ * shows. boot() starts a background turn in each and leaves it there, except
+ * "Draft release notes", which ends at once and so reads as unread. Dispatch
+ * `zest:fixture-finish-working` to end "Run the test suite" and watch its row
+ * move from Working to Recent.
+ */
+const STATUS_SCENARIO_THREADS = [
+  { id: "fixture-approval", title: "Review the auth flow", ageSecs: 600, prompt: "Tighten the session checks." },
+  { id: "fixture-question", title: "Pick a migration path", ageSecs: 900, prompt: "Plan the database migration." },
+  { id: "fixture-working", title: "Run the test suite", ageSecs: 1200, prompt: "Run the whole test suite." },
+  { id: "fixture-finished", title: "Draft release notes", ageSecs: 60, prompt: "Draft the release notes." },
+] as const;
+export const FIXTURE_FINISH_WORKING_EVENT = "zest:fixture-finish-working";
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
@@ -202,7 +313,9 @@ function scenarioFromLocation(): FixtureScenario | undefined {
     value === "cancel" ||
     value === "tool-error" || value === "options-delayed" ||
     value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
-    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery"
+    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" ||
+    value === "sidebar-status" || value === "subagents" || value === "background-approval" ||
+    value === "claude-cli-outdated" || value === "advisor-unavailable" || value === "claude-alias-resolution"
     ? value
     : undefined;
 }
@@ -232,7 +345,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     if (options.contextRecoveryReady) void options.contextRecoveryReady.then(() => { contextRecovered = true; });
     else if (typeof window !== "undefined") window.addEventListener("zest:fixture-recover-context", () => { contextRecovered = true; }, { once: true });
   }
-  const sessionModels = scenario === "model-catalogue" ? CATALOGUE_MODELS : FIXTURE_MODELS;
+  const sessionModels: SessionInfo["models"] = scenario === "model-catalogue"
+    ? CATALOGUE_MODELS
+    : scenario === "claude-alias-resolution"
+      ? [{ ...CLAUDE_CODE_MODELS[1], id: "opus" }, ...CLAUDE_CODE_MODELS]
+      : scenario === "claude-cli-outdated" ? CLAUDE_CODE_MODELS : FIXTURE_MODELS;
+  const scenarioSession = scenario === "claude-alias-resolution"
+    ? { ...CLAUDE_CODE_SESSION, model: "opus", defaultModel: "opus" }
+    : scenario === "claude-cli-outdated" ? CLAUDE_CODE_SESSION : FIXTURE_SESSION;
   async function saveFixtureOptions() {
     if (scenario === "options-delayed" || scenario === "options-failing") {
       await new Promise((resolve) => setTimeout(resolve, 900));
@@ -241,10 +361,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     }
   }
-  let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
+  let session: SessionInfo = { ...scenarioSession, models: sessionModels, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
-  let workspace = scenario === "ui-stress" ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks" : ".";
+  let workspace = scenario === "ui-stress"
+    ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks"
+    : scenario === "sidebar-status"
+      ? "/fixture/zest-app"
+      : ".";
   let fixturePinned = false;
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
@@ -264,8 +388,44 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   ]);
   if (scenario === "html-artifacts") fixtureTranscripts.set("fixture", htmlArtifactMessages());
   if (scenario === "ui-stress") fixtureTranscripts.set("fixture", longThreadMessages().slice(0, 6));
+  if (scenario === "subagents") fixtureTranscripts.set("fixture", subagentMessages());
+  const statusScenarioPinned = new Set<string>();
+  if (scenario === "sidebar-status") {
+    for (const thread of STATUS_SCENARIO_THREADS) {
+      fixtureThreadTitles.set(thread.id, thread.title);
+      fixtureTranscripts.set(thread.id, [
+        { id: `user-${thread.id}`, role: "user", text: thread.prompt },
+      ]);
+    }
+  }
+  const isStatusScenarioThread = (id: string) =>
+    scenario === "sidebar-status" &&
+    (id === "fixture" || STATUS_SCENARIO_THREADS.some((thread) => thread.id === id));
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
+  const backgroundApprovals = new Map<string, (decision: ApprovalChoice) => void>();
+  const failBackgroundApprovalOnce = scenario === "background-approval" && typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("failBackgroundApprovalOnce");
+  let backgroundApprovalFailed = false;
+  const holdInteractionResults = (scenario === "background-approval" || scenario === "sidebar-status") &&
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).has("holdInteractionResults");
+  const interactionResults = new Map<string, () => void>();
+  let statusQuestionPending = scenario === "sidebar-status";
+
+  function finishInteraction(threadId: string, finish: () => void) {
+    if (holdInteractionResults) interactionResults.set(threadId, finish);
+    else finish();
+  }
+
+  if (holdInteractionResults) {
+    window.addEventListener("zest:fixture-release-interaction-result", (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail !== "fixture-free" && event.detail !== "fixture-local" && event.detail !== "fixture-question") return;
+      const finish = interactionResults.get(event.detail);
+      interactionResults.delete(event.detail);
+      finish?.();
+    });
+  }
 
   function windowSessionFor(
     threadId: string,
@@ -290,6 +450,45 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
+  let fixtureAdvisor: AdvisorChoice | null = scenario === "advisor-unavailable"
+    ? { provider: "fixture-removed", model: "removed-large", maxUses: 3, autoReview: true }
+    : null;
+  const fixtureAdvisorSettings = (): AdvisorSettings => ({
+    provider: fixtureAdvisor?.provider ?? "",
+    model: fixtureAdvisor?.model ?? "",
+    maxUses: fixtureAdvisor?.maxUses ?? 3,
+    autoReview: fixtureAdvisor?.autoReview ?? true,
+    scope: "User zest.toml",
+    issue: fixtureAdvisor?.provider === "fixture-removed"
+      ? "[advisor] provider `fixture-removed` is not configured."
+      : undefined,
+    options: [
+      {
+        id: "fixture",
+        label: "Fixture",
+        statusLabel: "Ready",
+        ready: true,
+        defaultModel: DEFAULT_CODEX_MODEL,
+        models: sessionModels.map((model) => model.id),
+      },
+      {
+        id: "fixture-strong",
+        label: "Strong fixture",
+        statusLabel: "Ready",
+        ready: true,
+        defaultModel: "strong-large",
+        models: ["strong-large", "strong-medium"],
+      },
+      {
+        id: "fixture-keyless",
+        label: "Keyless fixture",
+        statusLabel: "Add a key",
+        ready: false,
+        defaultModel: "keyless-model",
+        models: ["keyless-model"],
+      },
+    ],
+  });
   /** Zest-owned MCP servers. One row so the Customize screen has something to
    *  render offline, including the never-checked state. */
   const fixtureMcpServers = new Map<string, McpServerRow>([
@@ -346,7 +545,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   }
 
   const fixtureExternalModelOptions: Record<string, string[]> = {
-    claude: ["sonnet", "opus"],
+    claude: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
     gemini: [
       "auto",
       "gemini-3-pro-preview",
@@ -359,7 +558,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   let delegationHandler: ((event: DelegationEvent) => void) | null = null;
   let delegationHandlerGeneration = 0;
   let fixtureDelegationJob: DelegationJob = {
-    jobId: "fixture-delegation-1",
+    jobId: FIXTURE_DELEGATION_JOB_ID,
     parentThreadId: session.threadId,
     projectRoot: workspace,
     cardId: "fixture-card-1",
@@ -404,6 +603,37 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     };
   }
 
+  /**
+   * Extra jobs for `sidebar-status`, so one chat has more than the sidebar
+   * shows and another chat has a job of its own. They are read-only: the
+   * lifecycle actions still drive only `fixtureDelegationJob`.
+   */
+  function statusScenarioJobs(): DelegationJob[] {
+    const job = (
+      jobId: string,
+      parentThreadId: string,
+      title: string,
+      status: DelegationJob["status"],
+      minutesAgo: number
+    ): DelegationJob => ({
+      ...delegationSnapshot(),
+      jobId,
+      cardId: `card-${jobId}`,
+      parentThreadId,
+      title,
+      status,
+      approved: true,
+      origin: { coordinator: "fixture", chatId: null, threadId: parentThreadId },
+      updatedAt: fixtureEpochSeconds * 1000 - minutesAgo * 60_000,
+    });
+    return [
+      job("fixture-delegation-worker", "fixture", "Port the session cache", "worker_running", 2),
+      job("fixture-delegation-ready", "fixture", "Write migration tests", "ready_to_apply", 5),
+      job("fixture-delegation-applied", "fixture", "Bump the lockfile", "accepted", 30),
+      job("fixture-delegation-survey", "fixture-question", "Survey table sizes", "queued", 1),
+    ];
+  }
+
   function emitDelegation(kind: DelegationEvent["kind"]) {
     delegationHandler?.({ kind, job: delegationSnapshot() } as DelegationEvent);
   }
@@ -433,11 +663,33 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     ) {
       return delegationSnapshot();
     }
+    const attempt = fixtureDelegationJob.attempt + 1;
+    const started = BigInt(fixtureDelegationJob.updatedAt);
+    const worker = {
+      attemptId: `fixture-worker-${attempt}`,
+      role: "worker",
+      agent: fixtureDelegationJob.agent,
+      target: null,
+      usage: null,
+      resolvedTarget: null,
+      startedAt: started,
+      finishedAt: null,
+    };
+    const reviewer = {
+      ...worker,
+      attemptId: `fixture-reviewer-${attempt}`,
+      role: "reviewer",
+      agent: fixtureDelegationJob.reviewerAgent,
+      startedAt: started + 42_000n,
+    };
     updateDelegation("worker_running", "worker_started", {
-      attempt: fixtureDelegationJob.attempt + 1,
-      workerAttemptId: `fixture-worker-${fixtureDelegationJob.attempt + 1}`,
+      approved: true,
+      attempt,
+      workerAttemptId: worker.attemptId,
+      attempts: [...fixtureDelegationJob.attempts, worker],
       error: undefined,
     });
+    const workerDone = { ...worker, finishedAt: started + 42_000n };
     updateDelegation("worker_running", "worker_completed", {
       changedFiles: ["src/fixture.ts"],
       changedFileCount: 1,
@@ -445,13 +697,83 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       acceptanceChecks: [
         { command: "npm test", status: "passed", output: "fixture tests passed" },
       ],
+      attempts: fixtureDelegationJob.attempts.map((item) =>
+        item.attemptId === worker.attemptId ? workerDone : item
+      ),
     });
     updateDelegation("review_running", "reviewer_started", {
-      reviewerAttemptId: `fixture-reviewer-${fixtureDelegationJob.attempt}`,
+      reviewerAttemptId: reviewer.attemptId,
+      attempts: [...fixtureDelegationJob.attempts, reviewer],
     });
-    updateDelegation("review_running", "reviewer_completed");
+    updateDelegation("review_running", "reviewer_completed", {
+      attempts: fixtureDelegationJob.attempts.map((item) =>
+        item.attemptId === reviewer.attemptId
+          ? { ...reviewer, finishedAt: started + 60_000n }
+          : item
+      ),
+    });
     updateDelegation("ready_to_apply", "ready_to_apply");
     return delegationSnapshot();
+  }
+
+  function statusScenarioTurn(threadId: string) {
+    return { session_id: session.sessionId, thread_id: threadId, turn_id: `turn-${threadId}` };
+  }
+
+  function startStatusScenario(handler: (event: ChatEvent) => void) {
+    for (const thread of STATUS_SCENARIO_THREADS) {
+      handler({ kind: "user", ...statusScenarioTurn(thread.id), message_id: `user-${thread.id}`, text: thread.prompt });
+      handler({ kind: "assistant_start", ...statusScenarioTurn(thread.id), message_id: `assistant-${thread.id}` });
+    }
+    handler({
+      kind: "approval_needed",
+      ...statusScenarioTurn("fixture-approval"),
+      message_id: "assistant-fixture-approval",
+      approval_id: "approval-status-fixture",
+      tool_name: "write_file",
+      tool_call_id: "tool-status-approval",
+      risk: "write",
+      path: "src/auth.ts",
+      summary: "Write src/auth.ts",
+      diff: "",
+    });
+    handler({
+      kind: "tool_call_start",
+      ...statusScenarioTurn("fixture-question"),
+      message_id: "assistant-fixture-question",
+      name: "ask_user",
+      id: "tool-status-question",
+    });
+    splitStreams.set("fixture-question", () => {
+      statusQuestionPending = false;
+      interactionResults.delete("fixture-question");
+      splitStreams.delete("fixture-question");
+      chatHandler?.({ kind: "cancelled", ...statusScenarioTurn("fixture-question"), message_id: "assistant-fixture-question" });
+    });
+    handler({
+      kind: "question_needed",
+      ...statusScenarioTurn("fixture-question"),
+      message_id: "assistant-fixture-question",
+      question_id: "question-status-fixture",
+      tool_call_id: "tool-status-question",
+      prompt: "Migrate in place or copy to a new table?",
+      choices: ["In place", "New table"],
+      multiple: false,
+    });
+    handler({
+      kind: "tool_call_start",
+      ...statusScenarioTurn("fixture-working"),
+      message_id: "assistant-fixture-working",
+      name: "bash",
+      id: "tool-status-working",
+    });
+    handler({ kind: "done", ...statusScenarioTurn("fixture-finished"), message_id: "assistant-fixture-finished" });
+  }
+
+  if (scenario === "sidebar-status" && typeof window !== "undefined") {
+    window.addEventListener(FIXTURE_FINISH_WORKING_EVENT, () => {
+      chatHandler?.({ kind: "done", ...statusScenarioTurn("fixture-working"), message_id: "assistant-fixture-working" });
+    });
   }
 
   function fixtureIds() {
@@ -538,6 +860,126 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       text: text.trim() || "(attachment)",
     });
     chatHandler({ kind: "done", ...id, message_id: assistantId });
+    // Native alias resolutions reach session metadata after the turn finishes.
+    // Replace the catalogue so an earlier SessionInfo stays an unresolved snapshot.
+    if (scenario === "claude-alias-resolution") {
+      session = {
+        ...session,
+        models: session.models.map((model) => model.id === "opus"
+          ? { ...model, resolvesTo: "claude-opus-5" }
+          : model),
+      };
+    }
+    if (scenario === "background-approval") emitBackgroundApproval();
+  }
+
+  /** A turn in a seeded background chat stops for approval. */
+  function emitBackgroundApproval(threadId = "fixture-free") {
+    if (!chatHandler) return;
+    const { turnId, assistantId } = fixtureIds();
+    const id = {
+      session_id: `${threadId}-session`,
+      thread_id: threadId,
+      turn_id: turnId,
+    };
+    const toolId = `tool-${crypto.randomUUID()}`;
+    const approvalId = `approval-${crypto.randomUUID()}`;
+    splitStreams.set(threadId, () => {
+      backgroundApprovals.delete(approvalId);
+      interactionResults.delete(threadId);
+      splitStreams.delete(threadId);
+      chatHandler?.({ kind: "cancelled", ...id, message_id: assistantId });
+    });
+    backgroundApprovals.set(approvalId, (decision) => {
+      backgroundApprovals.delete(approvalId);
+      if (decision === "deny") {
+        finishInteraction(threadId, () => {
+          splitStreams.delete(threadId);
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "fixture_tool", id: toolId,
+            summary: "The fixture tool was denied.", isError: true,
+          });
+          chatHandler?.({ kind: "done", ...id, message_id: assistantId });
+        });
+      }
+      // An allowed command stays running until cancelTurn, with no result yet.
+    });
+    chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    chatHandler({ kind: "tool_call_start", ...id, message_id: assistantId, name: "fixture_tool", id: toolId });
+    chatHandler({
+      kind: "approval_needed",
+      ...id,
+      message_id: assistantId,
+      approval_id: approvalId,
+      tool_name: "fixture_tool",
+      tool_call_id: toolId,
+      risk: "exec",
+      path: "fixture_tool",
+      summary: "Run the fixture tool in the background chat",
+      diff: "{}",
+    });
+  }
+
+  if (scenario === "background-approval" && typeof window !== "undefined") {
+    window.addEventListener("zest:fixture-background-approval", (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail === "fixture-free" || event.detail === "fixture-local") {
+        emitBackgroundApproval(event.detail);
+      }
+    });
+  }
+
+  /**
+   * A live turn in which a Claude Code style `Agent` runs and reports its own
+   * steps under it. "slow" in the message spaces the steps out for watching.
+   */
+  function streamSubagentTurn(text: string) {
+    if (!chatHandler) return;
+    const { turnId, userId, assistantId } = fixtureIds();
+    const id = {
+      session_id: session.sessionId,
+      thread_id: session.threadId,
+      turn_id: turnId,
+      message_id: assistantId,
+    };
+    const gap = /slow/i.test(text) ? 1500 : 150;
+    const agent = (title: string, status: string) => ({
+      kind: "provider_activity" as const, ...id, id: "live-agent", title, status,
+    });
+    const child = (childId: string, title: string, status: string) => ({
+      kind: "provider_activity" as const, ...id, id: childId, title, status, parent_id: "live-agent",
+    });
+    const steps: ChatEvent[] = [
+      { kind: "thinking_delta", ...id, text: "**Splitting the work**\nOne agent maps the callers while I wait." },
+      agent("Agent Map the callers", "running"),
+      child("live-grep", "Grep cacheKey in src", "running"),
+      child("live-grep", "Grep cacheKey in src", "done"),
+      agent("Agent Map the callers: Grep cacheKey in src", "running"),
+      child("live-read", "Read src/images.ts", "running"),
+      child("live-read", "Read src/images.ts", "done"),
+      agent("Agent Map the callers: Read src/images.ts", "done"),
+      { kind: "text_delta", ...id, text: "The agent mapped three callers of cacheKey." },
+      { kind: "done", ...id },
+    ];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const finish = () => {
+      timers.forEach(clearTimeout);
+      splitStreams.delete(id.thread_id);
+    };
+    splitStreams.set(id.thread_id, () => {
+      finish();
+      chatHandler?.({ kind: "cancelled", ...id });
+    });
+    chatHandler({ kind: "user", ...id, message_id: userId, text });
+    chatHandler({ kind: "assistant_start", ...id });
+    steps.forEach((event, index) => {
+      timers.push(
+        setTimeout(() => {
+          chatHandler?.(event);
+          if (event.kind === "done") finish();
+        }, gap * (index + 1))
+      );
+    });
   }
 
   function finishScenario(kind: "allow" | "deny" | "answer" | "cancel") {
@@ -735,6 +1177,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (model?.trim()) fixtureExternalModels.set(id, model.trim());
       else fixtureExternalModels.delete(id);
     },
+    async advisorSettings() {
+      return fixtureAdvisorSettings();
+    },
+    async setAdvisor(choice) {
+      fixtureAdvisor = choice;
+      return fixtureAdvisorSettings();
+    },
     async checkExternalAgent() {
       return {
         available: false,
@@ -805,6 +1254,22 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           defaultModel: DEFAULT_CODEX_MODEL,
           models: sessionModels,
         },
+        ...(scenario === "claude-cli-outdated" || scenario === "claude-alias-resolution" ? [
+          {
+            id: "claude-code",
+            label: "Claude Code",
+            method: "Claude Code subscription",
+            statusKind: "ready" as const,
+            statusLabel: "Ready",
+            detail: "Claude Code CLI 2.1.220",
+            selectable: true,
+            canConnect: false,
+            configured: true,
+            ownsAgentLoop: true,
+            defaultModel: scenarioSession.defaultModel,
+            models: session.models,
+          },
+        ] : []),
         ...(scenario === "provider-picker" || scenario === "model-catalogue" ? [
           {
             id: "fixture-research",
@@ -1293,7 +1758,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       clearFixtureScenario();
       fixturePinned = false;
-      session = { ...FIXTURE_SESSION, root: workspace, models: sessionModels, messages: fixtureTranscripts.get("fixture") ?? [] };
+      session = { ...scenarioSession, root: workspace, models: sessionModels, messages: fixtureTranscripts.get("fixture") ?? [] };
       return { ...session };
     },
     async switchSessionProvider(providerId, model) {
@@ -1359,12 +1824,31 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           updatedAt: fixtureEpochSeconds,
           title: fixtureThreadTitles.get(session.threadId) || "Fixture",
           pinned: fixturePinned,
-          providerId: "codex",
+          // The open chat runs on the session's provider, as in the real store.
+          providerId: session.provider,
           messageCount:
             fixtureTranscripts.get(session.threadId)?.length ??
             session.messages.length,
           gitContext: FIXTURE_THREAD_GIT,
         });
+      }
+      if (scenario === "sidebar-status") {
+        const others = [
+          { id: "fixture", title: "Fixture", ageSecs: 0 },
+          ...STATUS_SCENARIO_THREADS,
+        ];
+        for (const thread of others) {
+          if (thread.id === session.threadId || deletedFixtureThreads.has(thread.id)) continue;
+          threads.push({
+            id: thread.id,
+            createdAt: fixtureEpochSeconds - thread.ageSecs,
+            updatedAt: fixtureEpochSeconds - thread.ageSecs,
+            title: fixtureThreadTitles.get(thread.id) || thread.title,
+            pinned: statusScenarioPinned.has(thread.id),
+            providerId: session.provider,
+            messageCount: fixtureTranscripts.get(thread.id)?.length ?? 1,
+          });
+        }
       }
       // A provider Zest has no mark for, so the generic fallback is visible
       // offline. This is the ordinary case for a local model, and it is the
@@ -1650,7 +2134,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       return { ...session };
     },
-    async setThreadPinned(_id, _projectPath, pinned) {
+    async setThreadPinned(id, _projectPath, pinned) {
+      if (isStatusScenarioThread(id) && id !== session.threadId) {
+        if (pinned) statusScenarioPinned.add(id);
+        else statusScenarioPinned.delete(id);
+        return;
+      }
       fixturePinned = pinned;
     },
     async renameThread(id, _projectPath, title) {
@@ -1662,12 +2151,16 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (
         id !== session.threadId &&
         id !== "fixture-local" &&
-        id !== LONG_THREAD_ID
+        id !== "fixture-free" &&
+        id !== LONG_THREAD_ID &&
+        !isStatusScenarioThread(id)
       ) {
         throw new Error(`fixture: unknown thread ${id}`);
       }
       fixtureThreadTitles.set(id, normalized);
-      const summary = (await this.listThreads()).find((thread) => thread.id === id);
+      const summary = (await this.listChatProjects())
+        .flatMap((project) => project.threads)
+        .find((thread) => thread.id === id);
       if (!summary) throw new Error(`fixture: unknown thread ${id}`);
       return summary;
     },
@@ -1734,6 +2227,10 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
       if (scenario === "html-artifacts" && text.trim() === "Publish an HTML artifact") {
         emitFixtureEcho(text, attachments, { ...FIXTURE_HTML_DOCUMENT, title: "Published counter" });
+        return;
+      }
+      if (scenario === "subagents") {
+        streamSubagentTurn(text);
         return;
       }
       emitFixtureEcho(text, attachments);
@@ -1847,6 +2344,15 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     },
     async resolveApproval(approvalId: string, decision) {
+      const background = backgroundApprovals.get(approvalId);
+      if (background) {
+        if (failBackgroundApprovalOnce && !backgroundApprovalFailed) {
+          backgroundApprovalFailed = true;
+          throw new Error("Fixture could not allow the tool. Try again.");
+        }
+        background(decision);
+        return;
+      }
       if (
         !pendingScenario ||
         pendingScenario.kind !== "approval" ||
@@ -1861,6 +2367,19 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     },
     async resolveQuestion(questionId: string) {
+      if (scenario === "sidebar-status" && questionId === "question-status-fixture" && statusQuestionPending) {
+        statusQuestionPending = false;
+        finishInteraction("fixture-question", () => {
+          splitStreams.delete("fixture-question");
+          chatHandler?.({
+            kind: "tool_call_result", ...statusScenarioTurn("fixture-question"),
+            message_id: "assistant-fixture-question", name: "ask_user", id: "tool-status-question",
+            summary: "The fixture answer was accepted.", isError: false,
+          });
+          chatHandler?.({ kind: "done", ...statusScenarioTurn("fixture-question"), message_id: "assistant-fixture-question" });
+        });
+        return;
+      }
       if (
         !pendingScenario ||
         pendingScenario.kind !== "question" ||
@@ -2208,7 +2727,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async listDelegationJobs(): Promise<DelegationJob[]> {
-      return [delegationSnapshot()];
+      return scenario === "sidebar-status"
+        ? [delegationSnapshot(), ...statusScenarioJobs()]
+        : [delegationSnapshot()];
     },
     async listDelegationTargets(): Promise<DelegationTargetOptionView[]> {
       return [
@@ -2330,10 +2851,15 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async boot(handler) {
       chatHandlerGeneration += 1;
       chatHandler = handler;
+      if (scenario === "sidebar-status") startStatusScenario(handler);
       if (!scenario || safetyScenario) await runFixtureStream(handler);
     },
   };
-  return recordFixtureCalls(backend);
+  const recorded = recordFixtureCalls(backend);
+  // Specs drive the page's own instance here. Importing /src/lib/backend.ts by
+  // path loads a second copy once the dev server has served an edit (?t= URLs).
+  (globalThis as { __zestFixtureBackend?: DesktopBackend }).__zestFixtureBackend = recorded;
+  return recorded;
 }
 
 /**

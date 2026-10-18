@@ -3,6 +3,7 @@ export type CustomizeTab =
   | "appearance"
   | "typography"
   | "chat"
+  | "models"
   | "mcp"
   | "skills"
   | "plugins"

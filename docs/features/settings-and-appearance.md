@@ -10,6 +10,7 @@ paths:
   - crates/desktop/src/lib.rs
   - crates/desktop/ui/index.html
   - crates/desktop/ui/src/components/SettingsPanel.tsx
+  - crates/desktop/ui/src/components/AccountMenu.tsx
   - crates/desktop/ui/src/components/CustomizePanel.tsx
   - crates/desktop/ui/src/components/ThemePicker.tsx
   - crates/desktop/ui/src/components/FontPicker.tsx
@@ -23,10 +24,14 @@ tests:
   - crates/desktop/ui/src/lib/themes.test.ts
   - crates/desktop/ui/src/lib/fonts.test.ts
   - crates/desktop/ui/src/lib/chatView.test.ts
+  - crates/desktop/ui/e2e/customize-chat-view.spec.ts
+  - crates/desktop/ui/e2e/account-menu.spec.ts
 verify:
   - cargo test -p zest-core --lib -- config
   - cargo test -p zest-core --lib -- profile::
   - npm run ui:test
+  - npm run ui:e2e -- customize-chat-view
+  - npm run ui:e2e -- account-menu
 ---
 
 # Settings, appearance, and profile
@@ -37,11 +42,11 @@ verify:
 - Unknown keys are a parse error (`deny_unknown_fields`). A legacy `kind = "gateway"` provider still loads: `codex` becomes a Codex CLI provider, `claude` a Claude Code provider, others are skipped with a reason. The file on disk is not rewritten.
 - `Config::lint` reports non-fatal problems: migration notices first, a default provider that does not exist, ignored legacy `[routing]`, `[tools] max_result_bytes` below 4096, invalid MCP entries, empty commands, and timeouts outside 1..3600 s.
 - Desktop edits (providers, MCP servers, external agents) keep comments and formatting, go to the project `zest.toml` when one exists and to `~/.zest/zest.toml` otherwise, and are refused if the result would not parse.
-- Customize tabs: Appearance, Typography, Chat view, MCPs, Skills, Extras, Rules, Shortcuts. Appearance, typography, and chat view apply immediately and persist per machine in `localStorage` (`zest.selected_theme`, `zest.selected_font`, `zest.chatViewMode`).
+- Customize tabs: Appearance, Typography, Chat view, Models, MCPs, Skills, Extras, Rules, Shortcuts. Appearance, typography, and chat view apply immediately and persist per machine in `localStorage` (`zest.selected_theme`, `zest.selected_font`, `zest.chatViewMode`). Chat view also holds Response display (stream complete blocks, `zest.responseBlockStreaming.v1`; see [message-rendering](message-rendering.md)).
 - Themes: `zest` (dark, default), `nights` (dark), `oceanic` (light). An unknown saved id falls back to the default. Fonts: Geist (default), ABC Arizona, Inter, Plus Jakarta Sans, JetBrains Mono, Fira Code, System UI; a font whose CSS fails to load reverts to Geist.
 - Oceanic uses a darker destructive color so small warning labels remain legible
   on its light popovers.
-- Settings (Mod+,) is a right-hand dialog with User (name and photo), Response display (stream complete blocks), Provider, CLI delegation, and Usage sections.
+- Settings (Mod+,) is a right-hand dialog with User (name and photo), Provider, Advisor (see [advisor](advisor.md)), CLI delegation, and Usage sections. There is no gear in the chat header: the sidebar's profile row opens an account menu (`AccountMenu`) with Your profile, one entry per Settings section (each opens the dialog with that section expanded), and Settings. Escape closes the menu without reaching ChatScreen's Escape stack. The split-view sidebar has no Settings entries because ChatScreen, which owns the dialog, is not mounted there.
 - CLI delegation model shortlists include explicit Claude Haiku 5.5 and Fable 5.1; Cursor presets use its confirmed current Opus/Sonnet/Haiku/Fable and Grok 4.7 wire ids. Existing worker configuration is not rewritten.
 - The avatar is stored as a JPEG of at most 48,000 bytes; the UI resizes a picked image to 128 px at quality 0.82 first. An empty photo deletes it. Without a photo the avatar shows the name's initial, then a generic icon.
 - Profile shows streaks, totals, and a heatmap. Chat counts are retroactive (from thread files in every known workspace); token figures exist only from `meteringSince`, and earlier cells say so rather than showing zero.
@@ -64,4 +69,4 @@ verify:
 - `~/.zest/zest.toml` (config) and `<OS config dir>/zest/` (profile, avatar, plugin toggles, last workspace) are different folders.
 - A project `zest.toml` is an explicit boundary: the desktop does not borrow the user file's providers for it, which is why a provider can be "not configured for this project".
 - The fixture's `setUserProfile` echoes its input, so avatar size limits are enforced only by the real backend.
-- The MCP, Skills, Extras, Rules, and Shortcuts tabs render inside `CustomizePanel` but belong to their own features ([plugins](plugins.md), [command-palette-and-shortcuts](command-palette-and-shortcuts.md)).
+- The Models, MCP, Skills, Extras, Rules, and Shortcuts tabs render inside `CustomizePanel` but belong to their own features ([model-and-effort-selection](model-and-effort-selection.md), [plugins](plugins.md), [command-palette-and-shortcuts](command-palette-and-shortcuts.md)).

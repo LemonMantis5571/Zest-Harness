@@ -3,6 +3,7 @@
 //! Deliberately headless — no UI, no terminal assumptions. The CLI crate is one
 //! front-end; a desktop app would be another.
 
+pub mod advisor;
 pub mod agent;
 #[cfg(test)]
 mod alpha_prove;
@@ -131,8 +132,8 @@ pub use provider::driver::{
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue, context_window_for_model, descriptor_for_picker_id, descriptor_from_config,
-    normalize_effort, probe, thread_provider_handoff, Completion, EffortPolicy, ModelSpec,
-    Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
+    normalize_effort, probe, thread_provider_handoff, CliRequirement, Completion, EffortPolicy,
+    ModelSpec, Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
     ProviderInteractionHost, ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot,
     ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt, ThreadProviderHandoff, TurnRequest,
     CODEX_KNOWN_MODELS, FALLBACK_CONTEXT_WINDOW, STANDARD_EFFORTS,

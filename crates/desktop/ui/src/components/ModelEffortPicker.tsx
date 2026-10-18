@@ -1,21 +1,26 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, RotateCcwIcon, TriangleAlertIcon } from "lucide-react";
 
 import { ModelIcon } from "@/components/ModelIcon";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { ProviderSourceTag } from "@/components/ProviderSourceTag";
 import {
   DEFAULT_EFFORT,
   capabilityForModel,
+  cliRequirementDetail,
+  cliRequirementLabel,
   effortsForModel,
   formatContextWindow,
   filterModelPickerGroups,
-  modelLabel,
+  catalogueModelLabel,
+  sharedProviderLabels,
   modelOptionsFromCapabilities,
   modelPickerGroups,
   type EffortId,
   type ModelCapability,
   type ModelPickerGroup,
 } from "@/lib/models";
+import { useHiddenPickerProviders } from "@/lib/pickerProviders";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useOptionNavigation } from "@/lib/useOptionNavigation";
@@ -78,6 +83,7 @@ export function ModelEffortPicker({
   const effortListRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const [openTarget, setOpenTarget] = useState<PickerTarget>("model");
+  const hiddenProviders = useHiddenPickerProviders();
   const groups: ModelPickerGroup[] = currentProviderId
     ? modelPickerGroups(
         {
@@ -85,7 +91,8 @@ export function ModelEffortPicker({
           label: currentProviderLabel ?? currentProviderId,
           models,
         },
-        providers ?? []
+        providers ?? [],
+        hiddenProviders
       )
     : [
         {
@@ -97,9 +104,15 @@ export function ModelEffortPicker({
       ];
   const grouped = groups.length > 1;
   const visibleGroups = filterModelPickerGroups(groups, query);
+  const sharedLabels = sharedProviderLabels(groups);
   const effortOptions = effortsForModel(models, model);
+  const currentLabel = catalogueModelLabel(models, model);
   const capability = capabilityForModel(models, model);
   const contextLabel = formatContextWindow(capability?.contextWindow);
+  // Warned, not disabled: the version check can be wrong, and if it is right
+  // the API's own refusal still reaches the chat.
+  const cliNeed = cliRequirementLabel(capability);
+  const cliNeedDetail = cliRequirementDetail(capability);
   const supportsEffort = effortOptions.length > 0;
   const pickerLabel = grouped
     ? "Model and provider"
@@ -239,7 +252,7 @@ export function ModelEffortPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={`Select model, currently ${modelLabel(model)}`}
+        aria-label={`Select model, currently ${currentLabel}${cliNeed ? `. ${cliNeed}` : ""}`}
         title="Select model"
         className={cn(
           "inline-flex min-h-7 min-w-0 max-w-[min(180px,34vw)] cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-foreground/85 outline-none transition-colors",
@@ -251,7 +264,8 @@ export function ModelEffortPicker({
         onClick={togglePicker}
       >
         <ModelIcon modelId={model} providerId={currentProviderId} className="size-4 rounded-sm" />
-        <span className="min-w-0 truncate">{modelLabel(model)}</span>
+        <span className="min-w-0 truncate">{currentLabel}</span>
+        {cliNeed ? <TriangleAlertIcon className="size-3 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden="true" /> : null}
         <ChevronDownIcon className="size-3 shrink-0 opacity-60" aria-hidden="true" />
       </button>
 
@@ -271,12 +285,12 @@ export function ModelEffortPicker({
             </div>
             <div
               className="mt-1 flex min-w-0 items-center gap-1.5 text-xs font-medium"
-              title={`${currentProviderLabel ?? ""} · ${modelLabel(model)}`}
+              title={`${currentProviderLabel ?? ""} · ${currentLabel}`}
             >
               <ModelIcon modelId={model} providerId={currentProviderId} />
               <span className="min-w-0 truncate">
                 {currentProviderLabel ? `${currentProviderLabel} · ` : ""}
-                {modelLabel(model)}
+                {currentLabel}
               </span>
             </div>
             {capability ? (
@@ -288,6 +302,12 @@ export function ModelEffortPicker({
                 </div>
                 {!supportsEffort ? (
                   <div className="mt-0.5 text-muted-foreground/75">No effort control</div>
+                ) : null}
+                {cliNeedDetail ? (
+                  <div role="note" className="mt-1 flex items-start gap-1.5 text-amber-700 dark:text-amber-400">
+                    <TriangleAlertIcon className="mt-px size-3 shrink-0" aria-hidden="true" />
+                    <span>{cliNeedDetail}</span>
+                  </div>
                 ) : null}
               </div>
             ) : null}
@@ -316,13 +336,24 @@ export function ModelEffortPicker({
               return (
                 <div key={group.providerId || group.label}>
                   {grouped ? (
-                    <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
+                    <div className="flex min-w-0 items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
                       <ProviderIcon providerId={group.providerId} className="size-3.5" />
-                      {group.label}
+                      <span className="truncate">{group.label}</span>
+                      {group.source ? <ProviderSourceTag source={group.source} /> : null}
+                      {/* Two providers can share a name (a gateway and a ChatGPT sign-in
+                          both called Codex); how each connects tells them apart. */}
+                      {sharedLabels.has(group.label) && group.method ? (
+                        <span className="truncate normal-case tracking-normal text-muted-foreground/80">
+                          {group.method}
+                        </span>
+                      ) : null}
                     </div>
                   ) : null}
                   {options.map((item) => {
                     const selected = group.current && item.id === model;
+                    const itemLabel = catalogueModelLabel(group.models, item.id);
+                    const itemNeed = cliRequirementLabel(item);
+                    const itemNeedDetail = cliRequirementDetail(item);
                     return (
                       <button
                         key={`${group.providerId}:${item.id}`}
@@ -331,7 +362,7 @@ export function ModelEffortPicker({
                         {...modelNavigation.optionProps(`${group.providerId}:${item.id}`)}
                         role="option"
                         aria-selected={selected}
-                        title={modelLabel(item.id)}
+                        title={itemNeedDetail ? `${itemLabel} — ${itemNeedDetail}` : itemLabel}
                         className={cn(
                           "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors",
                           "text-foreground/90 hover:bg-secondary/60 hover:text-foreground focus-visible:bg-secondary/60 focus-visible:text-foreground",
@@ -341,12 +372,13 @@ export function ModelEffortPicker({
                       >
                         <ModelIcon modelId={item.id} providerId={group.providerId} />
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate">{modelLabel(item.id)}</span>
+                          <span className="block truncate">{itemLabel}</span>
                           <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
                             {formatContextWindow(item.contextWindow) ? <span>{formatContextWindow(item.contextWindow)}</span> : null}
                             <span>{item.supportsTools ? "Tools" : "Text only"}</span>
                             {item.supportsVision ? <span>Vision</span> : null}
                             {item.efforts.length === 0 ? <span>No effort control</span> : null}
+                            {itemNeed ? <span className="text-amber-700 dark:text-amber-400">{itemNeed}</span> : null}
                           </span>
                         </span>
                         {selected ? <CheckIcon className="size-3.5 shrink-0" /> : null}

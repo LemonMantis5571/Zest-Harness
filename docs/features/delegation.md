@@ -14,10 +14,14 @@ paths:
   - crates/desktop/ui/src/components/WorkbenchPanel.tsx
   - crates/desktop/ui/src/components/OrchestrationStatus.tsx
   - crates/desktop/ui/src/components/WorkerModelPicker.tsx
+  - crates/desktop/ui/src/components/SubagentLine.tsx
+  - crates/desktop/ui/src/lib/subagents.ts
   - crates/desktop/ui/src/lib/generated/Delegation*.ts
 tests:
   - crates/core/tests/fixtures/external_agent_fixture.rs
   - crates/desktop/ui/src/lib/fixtureBackend.test.ts
+  - crates/desktop/ui/src/lib/subagents.test.ts
+  - crates/desktop/ui/e2e/subagents.spec.ts
 verify:
   - cargo test -p zest-core --lib delegation
   - cargo test -p zest-core --lib delegated_worker
@@ -28,6 +32,7 @@ verify:
   - cargo test -p zest-coordinator
   - npm run test -w ui
   - npm run test:e2e -w ui -- workbench
+  - npm run test:e2e -w ui -- subagents
 ---
 
 # Delegation (feature cards)
@@ -80,6 +85,18 @@ Queueing, locking and restart recovery are in
 - `accepted` and `cancelled` are final. Provider credentials are never written
   to a job. External worker processes run with secret-looking environment
   variables and the configured provider key names removed.
+- A delegated call's chat row carries the worker's report
+  (`ToolMetadata::delegation_summary`): its answer without the
+  `[agent · model]` line or the workspace diff, cut at 600 characters, or
+  "Delegated to <agent> · <model>" when the answer is empty. The model still
+  receives the whole body.
+- In the chat, a `delegate_feature` call is a Subagent line that follows its
+  job on the board (`SubagentLine.tsx`): "Waiting for approval", "Worker
+  running", "Ready to apply" and so on ahead of the card title, with the
+  approval, each worker and reviewer attempt (with its duration), the
+  acceptance checks and the review findings nested under it. "Open in
+  Delegation" opens the Workbench on the Delegation tab with that card
+  expanded and highlighted.
 
 ```text
 awaiting_approval -> queued -> worker_running -> review_running -> ready_to_apply -> accepted
@@ -92,7 +109,9 @@ blocked | failed | changes_requested | apply_conflict | queued -> awaiting_appro
 
 Entry points:
 
-1. **Desktop board.** The Workbench **Delegation** tab (`WorkbenchPanel.tsx`)
+1. **Desktop board.** The compact sidebar nests each job under the chat that
+   created it, with its status, and a click opens the board at that job
+   (see threads-and-history). The Workbench **Delegation** tab (`WorkbenchPanel.tsx`)
    calls `lib/api.ts`, which calls the Tauri commands in
    `crates/desktop/src/lib.rs`: `list_delegation_jobs` (runs `reconcile`
    first), `list_delegation_targets`, `create_delegation_job`,
@@ -101,9 +120,11 @@ Entry points:
    `prepare_delegation_handoff`. Each one calls `DelegationCoordinator`.
    Coordinator events reach the UI through `TauriDelegationNotifier` (in
    `crates/desktop/src/delegation.rs`) as `delegation-event`, which `App.tsx`
-   handles in `handleDelegationEvent`. That handler shows a toast for
+   handles in `handleDelegationEvent`. That handler announces
    `ready_to_apply`, `changes_requested`, `blocked`, `failed`, `applied` and
-   `cancelled`.
+   `cancelled` through the notification policy (see
+   [notifications](notifications.md)); a cancel or apply the user clicked in
+   this window is not announced again.
 2. **`delegate_feature` tool** (`FeatureDelegator`). It has Exec risk and the
    approval target `agent/<id>/feature/<model>`. After the user approves, it
    validates the card and calls `DelegationStore::create` with origin

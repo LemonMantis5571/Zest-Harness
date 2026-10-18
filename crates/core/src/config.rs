@@ -19,7 +19,8 @@ use serde::Deserialize;
 use crate::error::{HarnessError, Result};
 
 pub const CONFIG_FILE: &str = "zest.toml";
-pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "sonnet";
+/// Explicit, not the CLI's `sonnet` alias, which runs an older Sonnet.
+pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "claude-sonnet-5-5";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 
 /// Safe starter config embedded in every build. It contains provider metadata,
@@ -65,6 +66,11 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub usage: UsageConfig,
+    /// A stronger model the working model may consult mid-turn. Absent means
+    /// no advisor: nothing is registered and nothing leaves for a second
+    /// provider.
+    #[serde(default)]
+    pub advisor: Option<AdvisorConfig>,
     /// Set by [`Config::parse`] when it had to rewrite a legacy document.
     /// Never read from or written to TOML — the file on disk is left alone.
     #[serde(skip)]
@@ -219,7 +225,7 @@ pub enum ProviderConfig {
         /// Executable name or absolute path. No shell is involved.
         #[serde(default = "default_claude_code_command")]
         command: String,
-        /// Optional CLI-owned model alias or model id. Omitted uses 'sonnet'.
+        /// Optional CLI-owned model alias or model id. Omitted uses Sonnet 5.5.
         #[serde(default)]
         model: Option<String>,
         /// Optional allow-list for the Claude Code model picker.
@@ -704,6 +710,93 @@ impl ProviderConfig {
     }
 }
 
+/// `[advisor]`: the model `consult_advisor` asks. See `docs/plans/advisor.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisorConfig {
+    /// A provider id from `[providers]`. Must be one whose agent loop Zest
+    /// drives; a CLI provider runs its own tools and cannot simply answer.
+    pub provider: String,
+    /// The provider's default model when omitted.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Consultations allowed per user request.
+    #[serde(default = "default_advisor_max_uses")]
+    pub max_uses: u32,
+    /// Reply budget per consultation, reasoning included on providers that think.
+    #[serde(default = "default_advisor_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_advisor_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Let Zest consult on its own: before a turn that changed files finishes,
+    /// and after two failed tool calls in a row. Only when that needs no new
+    /// approval; it counts against `max_uses`.
+    #[serde(default = "default_true")]
+    pub auto_review: bool,
+}
+
+impl AdvisorConfig {
+    /// Validate the complete selection without loading credentials or calling
+    /// a provider. Settings and lint use the same catalogue as the runtime.
+    pub(crate) fn validate_selection(
+        &self,
+        provider: &ProviderConfig,
+    ) -> std::result::Result<(), String> {
+        if provider.owns_agent_loop() {
+            return Err(format!("[advisor] provider `{}` runs its own agent loop and cannot advise; choose an API provider", self.provider));
+        }
+        let descriptor = crate::provider::descriptor_from_config(&self.provider, provider);
+        let model = self.model.as_deref().unwrap_or(&descriptor.default_model);
+        let spec = descriptor
+            .models
+            .iter()
+            .find(|spec| spec.id == model)
+            .ok_or_else(|| {
+                format!(
+                    "[advisor] model `{model}` is not offered by provider `{}`",
+                    self.provider
+                )
+            })?;
+        let effort = crate::provider::normalize_effort(self.effort.as_deref().unwrap_or("high"));
+        if !spec.efforts.is_empty() && !spec.efforts.contains(&effort) {
+            return Err(format!(
+                "[advisor] effort `{effort}` is not offered for model `{model}` on provider `{}`",
+                self.provider
+            ));
+        }
+        Ok(())
+    }
+
+    /// Limits checked both by `Config::lint` and before the tool is registered,
+    /// so a bad value is reported once and never reaches a request.
+    pub fn validate_limits(&self) -> std::result::Result<(), String> {
+        if self.max_uses == 0 || self.max_uses > 20 {
+            return Err("[advisor] max_uses must be between 1 and 20".into());
+        }
+        if !(1_024..=64_000).contains(&self.max_tokens) {
+            return Err("[advisor] max_tokens must be between 1024 and 64000".into());
+        }
+        if self.timeout_secs == 0 || self.timeout_secs > 600 {
+            return Err("[advisor] timeout_secs must be between 1 and 600".into());
+        }
+        Ok(())
+    }
+}
+
+fn default_advisor_max_uses() -> u32 {
+    3
+}
+
+fn default_advisor_max_tokens() -> u32 {
+    4_096
+}
+
+fn default_advisor_timeout_secs() -> u64 {
+    120
+}
+
 fn default_anthropic_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
@@ -934,6 +1027,7 @@ impl Config {
             legacy_routing: None,
             tools: ToolsConfig::default(),
             usage: UsageConfig::default(),
+            advisor: None,
             migrations: Vec::new(),
             unsupported: Vec::new(),
         }
@@ -1003,6 +1097,22 @@ impl Config {
         }
         for (id, server) in &self.mcp {
             if let Err(error) = server.validate(id) {
+                issues.push(error);
+            }
+        }
+        if let Some(advisor) = &self.advisor {
+            match self.providers.get(&advisor.provider) {
+                None => issues.push(format!(
+                    "[advisor] provider points at unknown provider `{}`",
+                    advisor.provider
+                )),
+                Some(provider) => {
+                    if let Err(error) = advisor.validate_selection(provider) {
+                        issues.push(error);
+                    }
+                }
+            }
+            if let Err(error) = advisor.validate_limits() {
                 issues.push(error);
             }
         }
@@ -1382,6 +1492,82 @@ provider = "typo"
         let issues = config.lint();
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].contains("typo"));
+    }
+
+    #[test]
+    fn an_advisor_section_parses_with_defaults_and_lints_clean() {
+        let config = Config::parse(
+            r#"
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[advisor]
+provider = "anthropic"
+model = "claude-opus-5-5"
+"#,
+        )
+        .expect("parses");
+        let advisor = config.advisor.as_ref().expect("advisor");
+        assert_eq!(advisor.provider, "anthropic");
+        assert_eq!(advisor.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            (advisor.max_uses, advisor.max_tokens, advisor.timeout_secs),
+            (3, 4_096, 120)
+        );
+        assert!(config.lint().is_empty(), "{:?}", config.lint());
+        assert!(Config::default().advisor.is_none());
+    }
+
+    #[test]
+    fn lint_rejects_an_advisor_that_cannot_answer() {
+        let config = Config::parse(
+            r#"
+[providers.claude]
+kind = "claude_code"
+
+[advisor]
+provider = "claude"
+max_uses = 0
+"#,
+        )
+        .expect("parses");
+        let issues = config.lint();
+        assert!(
+            issues.iter().any(|i| i.contains("runs its own agent loop")),
+            "{issues:?}"
+        );
+        assert!(issues.iter().any(|i| i.contains("max_uses")), "{issues:?}");
+
+        let config = Config::parse("[advisor]\nprovider = \"typo\"\n").expect("parses");
+        assert!(
+            config
+                .lint()
+                .iter()
+                .any(|i| i.contains("unknown provider `typo`")),
+            "{:?}",
+            config.lint()
+        );
+        assert!(Config::parse("[advisor]\nprovider = \"a\"\nmodle = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn advisor_lint_reports_model_and_effort_issues_for_settings() {
+        let mut config = Config::parse(
+            "[providers.strong]\nkind = \"codex_oauth\"\nmodel = \"gpt-6-sol\"\n\n[advisor]\nprovider = \"strong\"\nmodel = \"gpt-6-astra\"\neffort = \"none\"\n",
+        ).unwrap();
+        let issues = config.lint();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].starts_with("[advisor] effort `none` is not offered"));
+        config.advisor.as_mut().unwrap().effort = Some("high".into());
+        assert!(config.lint().is_empty());
+        config.advisor.as_mut().unwrap().model = Some("not-offered".into());
+        assert!(config.lint()[0].starts_with("[advisor] model `not-offered` is not offered"));
     }
 
     #[test]

@@ -4,12 +4,12 @@ import * as React from "react"
 import { Toast as ToastPrimitive } from "@base-ui/react/toast"
 
 import { cn } from "@/lib/utils"
-import { notificationFingerprint, mergeToastDescription } from "@/lib/notificationPolicy"
+import { notificationFingerprint, mergeToastDescription, toastTimeout } from "@/lib/notificationPolicy"
 import { Button } from "@/components/ui/button"
 import { XIcon, CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 const baseToast = ToastPrimitive.createToastManager()
-type ToastAddOptions = Parameters<typeof baseToast.add>[0]
+type ToastAddOptions = Parameters<typeof baseToast.add>[0] & { groupKey?: string }
 
 type GroupedToast = {
   id: string
@@ -35,17 +35,21 @@ function toastData(data: unknown, count: number) {
   return { groupCount: count }
 }
 
-/** Keep repeated errors readable without hiding distinct failures. */
+/**
+ * Keep repeated errors readable without hiding distinct failures, and give
+ * each type its lifetime (`toastTimeout`) unless the caller sets one.
+ */
 const toast = {
   ...baseToast,
-  add(options: ToastAddOptions) {
+  add({ groupKey, ...requested }: ToastAddOptions) {
+    const options = { ...requested, timeout: requested.timeout ?? toastTimeout(requested.type) }
     const title = textValue(options.title)
     const description = textValue(options.description)
     if (title === null || description === null) {
       return baseToast.add(options)
     }
 
-    const fingerprint = notificationFingerprint(options.type, title, description)
+    const fingerprint = notificationFingerprint(options.type, title, description, groupKey)
     const existing = groupedToasts.get(fingerprint)
     if (existing) {
       existing.count += 1

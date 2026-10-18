@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::advisor::{Advisor, ADVISOR_PARENT_SYSTEM};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
@@ -21,6 +22,7 @@ use crate::provider::registry::{ProviderRegistry, Skipped};
 use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
 use crate::tools::approval::{AllowApprover, ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
+use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
@@ -323,10 +325,24 @@ impl RuntimeBuilder {
         // A remembered model that this provider cannot serve is discarded here,
         // before it can reach validation and make the provider unreachable.
         // Cross-provider bleed is the usual cause: a Codex model left in a
-        // Claude slot by an old single-provider preference file.
+        // Claude slot by an old single-provider preference file. One the
+        // provider stopped listing moves to its successor first, so a saved
+        // `opus` stays an Opus rather than falling back to the default.
+        let offers = |model: &str| {
+            provider.validate_selection(model, "high").is_ok()
+                || provider.models().iter().any(|spec| spec.id == model)
+        };
+        let remembered_model = remembered_model.map(|m| {
+            if offers(&m) {
+                return m;
+            }
+            provider
+                .successor_model(&m)
+                .filter(|next| offers(next))
+                .unwrap_or(m)
+        });
         let remembered_model = remembered_model.filter(|m| {
-            let ok = provider.validate_selection(m, "high").is_ok()
-                || provider.models().iter().any(|spec| spec.id == *m);
+            let ok = offers(m);
             if !ok {
                 warnings.push(format!(
                     "ignored remembered model `{m}`: provider `{provider_id}` does not offer it"
@@ -341,7 +357,16 @@ impl RuntimeBuilder {
             .or_else(|| {
                 config.default_target().and_then(|t| {
                     if t.provider == provider_id {
-                        t.model.clone()
+                        t.model.map(|model| {
+                            if offers(&model) {
+                                model
+                            } else {
+                                provider
+                                    .successor_model(&model)
+                                    .filter(|next| offers(next))
+                                    .unwrap_or(model)
+                            }
+                        })
                     } else {
                         None
                     }
@@ -405,6 +430,22 @@ impl RuntimeBuilder {
             && self.enable_external_agents
             && !provider_owns_agent_loop
             && !config.agents.is_empty();
+        // Resolved before the prompt is composed, for the same reason as the
+        // ACP tool above: the prompt mentions the advisor only when the tool is
+        // really there. An advisor that cannot load is a warning, never a
+        // reason the chat itself fails to start.
+        let advisor = match &config.advisor {
+            Some(settings) if is_parent && !provider_owns_agent_loop => {
+                match Advisor::resolve(settings, registry.get(&settings.provider)) {
+                    Ok(advisor) => Some(advisor),
+                    Err(reason) => {
+                        warnings.push(format!("The advisor is off for this chat: {reason}."));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let spill_thread_id = self
             .parent_thread_id
             .clone()
@@ -443,6 +484,10 @@ impl RuntimeBuilder {
             } else {
                 "For an interactive visualization in chat, build self-contained HTML with inline CSS/JavaScript and embedded data images. Use html_preview when available, inspect its real screenshot and diagnostics, correct errors, then publish with html_render. The user opens the isolated card. No external resources, network, or local-file access is available. If preview is unavailable or denied, state that explicitly; publication is still possible."
             });
+        }
+        if advisor.is_some() {
+            base_system.push_str("\n\n");
+            base_system.push_str(ADVISOR_PARENT_SYSTEM);
         }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
@@ -552,6 +597,18 @@ impl RuntimeBuilder {
         if is_parent && self.html_artifacts && !provider_owns_agent_loop {
             crate::tools::html::register_html_tools(&mut tools, self.register_exec);
         }
+        // One instance serves both the model's tool calls and the agent's own
+        // consultations, so they share one per-request budget.
+        let consult_advisor = advisor.map(|advisor| {
+            let entry = &config.providers[&advisor.provider_id];
+            Arc::new(
+                ConsultAdvisor::new(advisor, &provider_id, Some(ledger.clone()))
+                    .with_approval_scope(&root, entry),
+            )
+        });
+        if let Some(advisor) = &consult_advisor {
+            tools.register(advisor.clone());
+        }
 
         // Oversized results go to `.zest/spill/<chat-id>/` and the model gets a
         // locator instead of losing the bytes. A front-end that supplied no
@@ -596,6 +653,9 @@ impl RuntimeBuilder {
             RuntimeRole::DelegationReviewer => "reviewer",
         };
         agent = agent.with_usage_task_label(usage_task_kind, self.usage_correlation_id);
+        if let Some(advisor) = consult_advisor {
+            agent = agent.with_advisor(advisor);
+        }
         agent.model = model.clone();
         agent.effort = effort.clone();
 
@@ -877,6 +937,47 @@ mod tests {
             .agent
             .system_text()
             .contains("# Asking the user"));
+    }
+
+    #[test]
+    fn the_advisor_joins_parent_chats_only_and_a_broken_one_is_a_warning() {
+        let build = |advisor: &str, role: RuntimeRole| {
+            let root = two_provider_dir("advisor-runtime");
+            let raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            std::fs::write(root.join("zest.toml"), format!("{raw}\n{advisor}")).unwrap();
+            RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_role(role)
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap()
+        };
+        let configured = "[advisor]\nprovider = \"claude\"\nmodel = \"claude-opus-5\"\n";
+
+        let parent = build(configured, RuntimeRole::Parent);
+        assert!(parent.agent.tool_names().contains(&"consult_advisor"));
+        assert!(parent.agent.system_text().contains("consult_advisor"));
+        assert!(parent.warnings.is_empty(), "{:?}", parent.warnings);
+
+        let worker = build(configured, RuntimeRole::DelegationWorker);
+        assert!(!worker.agent.tool_names().contains(&"consult_advisor"));
+
+        let broken = build(
+            "[advisor]\nprovider = \"claude\"\nmodel = \"not-offered\"\n",
+            RuntimeRole::Parent,
+        );
+        assert!(!broken.agent.tool_names().contains(&"consult_advisor"));
+        assert!(!broken.agent.system_text().contains("consult_advisor"));
+        assert!(
+            broken.warnings.iter().any(|w| w.contains("advisor is off")),
+            "{:?}",
+            broken.warnings
+        );
+
+        let none = build("", RuntimeRole::Parent);
+        assert!(!none.agent.tool_names().contains(&"consult_advisor"));
     }
 
     #[test]
@@ -1241,6 +1342,85 @@ model = "gpt-a"
             .register_exec_tools(false)
             .build();
         assert!(explicit.is_err(), "explicit effort must not be swallowed");
+    }
+
+    fn claude_code_config(model_line: &str) -> Config {
+        Config::parse(&format!(
+            r#"
+[providers.claude]
+kind = "claude_code"
+{model_line}
+
+[default]
+provider = "claude"
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn regression_configured_default_alias_migrates_to_its_successor() {
+        let root = scratch("configured-default-alias");
+        let mut config = claude_code_config("");
+        config.default.as_mut().unwrap().model = Some("opus".into());
+        let runtime = RuntimeBuilder::new(&root)
+            .with_config(config)
+            .enable_external_agents(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert_eq!(runtime.model, "claude-opus-5-5");
+    }
+
+    /// Zest stopped listing Claude Code's bare aliases. A chat that remembered
+    /// `opus` must stay on an Opus, not drop to the Sonnet default.
+    #[test]
+    fn a_remembered_alias_moves_to_its_explicit_successor() {
+        let dir = scratch("remembered-alias");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(""))
+            .with_provider("claude")
+            .with_remembered_options(Some("opus".into()), None)
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "claude-opus-5-5");
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
+    }
+
+    /// An alias the user configured is still on offer, so it is kept as is.
+    #[test]
+    fn a_remembered_alias_the_config_names_is_kept() {
+        let dir = scratch("configured-alias");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(r#"model = "opus""#))
+            .with_provider("claude")
+            .with_remembered_options(Some("opus".into()), None)
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "opus");
+    }
+
+    #[test]
+    fn a_new_claude_code_chat_defaults_to_sonnet_5_5() {
+        let dir = scratch("claude-code-default");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(""))
+            .with_provider("claude")
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "claude-sonnet-5-5");
     }
 
     #[test]

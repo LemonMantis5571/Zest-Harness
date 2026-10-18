@@ -24,13 +24,14 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button";
 import { OrchestrationStatus } from "@/components/OrchestrationStatus";
+import { agentLabel } from "@/lib/subagents";
 import { getBackend } from "@/lib/backend";
 import {
   blobatarToneFor,
   getSavedTheme,
   subscribeThemeChange,
 } from "@/lib/themes";
-import { cn } from "@/lib/utils";
+import { cn, scrollBehavior } from "@/lib/utils";
 import type {
   ChatMessage,
   DelegationCreateInput,
@@ -62,9 +63,15 @@ type PanelProps = {
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
   onReconnectProvider?: (providerId: string) => void;
+  /** Show this job on the Delegation tab; a new `request` repeats the jump. */
+  focusDelegationJob?: { jobId: string; request: number } | null;
 };
 
 type Tab = "activity" | "outline" | "delegation" | "files";
+
+function delegationCardId(jobId: string) {
+  return `workbench-delegation-${jobId}`;
+}
 
 function formatAge(epochSecs: number) {
   const delta = Math.max(0, Math.floor(Date.now() / 1000) - epochSecs);
@@ -110,15 +117,6 @@ function statusDotClass(status: string) {
   if (status === "error") return "bg-destructive";
   if (status === "awaiting_approval") return "bg-amber-400";
   return "animate-pulse bg-primary";
-}
-
-function subagentLabel(id: string) {
-  if (id === "claude") return "Claude Code";
-  if (id === "gemini") return "Gemini CLI";
-  if (id === "cursor") return "Cursor CLI";
-  return id
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function subagentStatus(status: string) {
@@ -398,8 +396,9 @@ function WorkbenchBody({
   onRetryDelegation,
   onApplyDelegation,
   onReconnectProvider,
+  focusDelegationJob,
 }: PanelProps) {
-  const [tab, setTab] = useState<Tab>("activity");
+  const [tab, setTab] = useState<Tab>(focusDelegationJob ? "delegation" : "activity");
   const [blobatarTone, setBlobatarTone] = useState(
     () => blobatarToneFor(getSavedTheme().appearance)
   );
@@ -410,6 +409,8 @@ function WorkbenchBody({
     section: "worker" | "review";
   } | null>(null);
   const [delegationFilter, setDelegationFilter] = useState<"project" | "chat">("project");
+  const [highlightedJob, setHighlightedJob] = useState(focusDelegationJob ?? null);
+  const focusedJobRequest = useRef<number | null>(null);
   const [targetOptions, setTargetOptions] = useState<DelegationTargetOptionView[]>([]);
   const [targetError, setTargetError] = useState<string | null>(null);
   const [creatingJob, setCreatingJob] = useState(false);
@@ -427,6 +428,32 @@ function WorkbenchBody({
   const panelRef = useRef<HTMLElement>(null);
   const titleId = useId();
   const workUnitsId = useId();
+
+  // A job picked in the sidebar or a chat line may belong to another chat, so
+  // show the whole project's board, open the card, then bring it into view and
+  // focus it.
+  useEffect(() => {
+    if (!focusDelegationJob) return;
+    setTab("delegation");
+    setDelegationFilter("project");
+    setExpandedDelegation({ jobId: focusDelegationJob.jobId, section: "worker" });
+    setHighlightedJob(focusDelegationJob);
+  }, [focusDelegationJob]);
+
+  // Once per request: coming back to the tab later must leave focus on the tab,
+  // or the arrow keys between tabs would stop working.
+  useEffect(() => {
+    if (tab !== "delegation" || !highlightedJob) return;
+    if (focusedJobRequest.current === highlightedJob.request) return;
+    const frame = window.requestAnimationFrame(() => {
+      const card = document.getElementById(delegationCardId(highlightedJob.jobId));
+      if (!card) return;
+      focusedJobRequest.current = highlightedJob.request;
+      card.scrollIntoView({ block: "nearest", behavior: scrollBehavior() });
+      card.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [tab, delegationFilter, highlightedJob]);
 
   useEffect(
     () =>
@@ -502,7 +529,7 @@ function WorkbenchBody({
       if (latest.has(id)) continue;
       latest.set(id, {
         id,
-        label: subagentLabel(id),
+        label: agentLabel(id),
         model: task.metadata.model,
         status: task.status,
         messageId: task.messageId,
@@ -946,7 +973,7 @@ function WorkbenchBody({
                           type="button"
                           variant="ghost"
                           size="icon-xs"
-                          title={`Rewind to ${checkpoint.label}`}
+                          title={`Rewind to ${checkpoint.label}. Your files are not changed.`}
                           aria-label={`Rewind to ${checkpoint.label}`}
                           disabled={sending || busyAction !== null}
                           onClick={() => void runRewind(checkpoint.id)}
@@ -1063,7 +1090,14 @@ function WorkbenchBody({
                   return (
                     <article
                       key={job.jobId}
-                      className="rounded-lg border border-border/70 bg-secondary/20 p-2.5"
+                      id={delegationCardId(job.jobId)}
+                      tabIndex={-1}
+                      aria-label={job.title}
+                      data-focused={highlightedJob?.jobId === job.jobId || undefined}
+                      className={cn(
+                        "scroll-mt-2 rounded-lg border border-border/70 bg-secondary/20 p-2.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                        highlightedJob?.jobId === job.jobId && "border-primary/60 ring-1 ring-primary/40"
+                      )}
                     >
                       <div className="flex items-start gap-2">
                         <span className="mt-0.5 shrink-0" aria-hidden="true">

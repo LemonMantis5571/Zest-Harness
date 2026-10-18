@@ -104,6 +104,8 @@ pub(crate) fn model_catalogue(
                 efforts: Vec::new(),
                 supports_tools: true,
                 supports_vision: true,
+                resolves_to: None,
+                needs_cli: None,
             })
             .collect()
     };
@@ -118,6 +120,8 @@ pub(crate) fn model_catalogue(
                 efforts: Vec::new(),
                 supports_tools: true,
                 supports_vision: true,
+                resolves_to: None,
+                needs_cli: None,
             },
         );
     }

@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import {
+  CHAT_GROUPING_STORAGE_KEY,
   CHAT_VIEW_STORAGE_KEY,
+  DEFAULT_CHAT_GROUPING,
   DEFAULT_CHAT_VIEW_MODE,
   applyChatViewMode,
+  getSavedChatGrouping,
   getSavedChatViewMode,
+  saveChatGrouping,
 } from "./chatView.ts";
 
 function installStorage(initial: Record<string, string> = {}) {
@@ -52,5 +56,22 @@ describe("chat history view preference", () => {
   it("ignores an unknown stored mode", () => {
     installStorage({ [CHAT_VIEW_STORAGE_KEY]: "timeline" });
     assert.equal(getSavedChatViewMode(), DEFAULT_CHAT_VIEW_MODE);
+  });
+
+  it("groups the compact list by project until told otherwise", () => {
+    assert.equal(getSavedChatGrouping(), DEFAULT_CHAT_GROUPING);
+    assert.equal(DEFAULT_CHAT_GROUPING, "project");
+  });
+
+  it("remembers grouping by status", () => {
+    const storage = installStorage();
+    assert.equal(saveChatGrouping("status"), "status");
+    assert.equal(storage.get(CHAT_GROUPING_STORAGE_KEY), "status");
+    assert.equal(getSavedChatGrouping(), "status");
+  });
+
+  it("ignores an unknown stored grouping", () => {
+    installStorage({ [CHAT_GROUPING_STORAGE_KEY]: "provider" });
+    assert.equal(getSavedChatGrouping(), DEFAULT_CHAT_GROUPING);
   });
 });

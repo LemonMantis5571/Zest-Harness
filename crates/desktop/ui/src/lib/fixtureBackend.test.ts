@@ -6,6 +6,51 @@ import type { ChatEvent, DelegationEvent } from "./types.ts";
 import { FIXTURE_HTML_DOCUMENT } from "./fixtureBackend.ts";
 import { htmlDocumentFromFence, htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
 
+it("exposes the instance the page uses, so specs never import a second copy", () => {
+  const backend = createFixtureBackend();
+  assert.equal((globalThis as { __zestFixtureBackend?: unknown }).__zestFixtureBackend, backend);
+});
+
+it("clears a saved advisor whose provider is no longer available", async () => {
+  const backend = createFixtureBackend({ scenario: "advisor-unavailable" });
+  const configured = await backend.advisorSettings();
+  assert.equal(configured.provider, "fixture-removed");
+  assert.equal(configured.issue, "[advisor] provider `fixture-removed` is not configured.");
+  assert.ok(!configured.options.some((option) => option.id === configured.provider));
+
+  await backend.setAdvisor(null);
+  await backend.startSession();
+  const cleared = await backend.advisorSettings();
+  assert.equal(cleared.provider, "");
+  assert.equal(cleared.model, "");
+  assert.equal(cleared.issue, undefined);
+});
+
+it("exposes a newly resolved alias only in metadata read after a completed turn", async () => {
+  const backend = createFixtureBackend({ scenario: "claude-alias-resolution" });
+  const initial = await backend.startSession();
+  assert.equal(initial.model, "opus");
+  assert.equal(initial.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+
+  let duringTurn: ReturnType<typeof backend.sessionInfo> | undefined;
+  const events: ChatEvent[] = [];
+  await backend.onChatEvent((event) => {
+    events.push(event);
+    if (event.kind === "text_delta" && !duringTurn) duringTurn = backend.sessionInfo();
+  });
+  await backend.sendMessage("Resolve this alias");
+  const during = await duringTurn;
+  assert.ok(during);
+  assert.equal(during.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+  assert.equal(events.at(-1)?.kind, "done");
+
+  const completed = await backend.sessionInfo();
+  assert.ok(completed);
+  assert.equal(completed.models.find((model) => model.id === "opus")?.resolvesTo, "claude-opus-5");
+  assert.equal(completed.threadId, initial.threadId);
+  assert.equal(initial.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+});
+
 it("UI stress fixture exposes long labels and a consistent high-context reading", async () => {
   const backend = createFixtureBackend({ scenario: "ui-stress" });
   const session = await backend.startSession();
@@ -35,6 +80,50 @@ it("context recovery fixture fails measurements until explicitly recovered", asy
   recover();
   await contextRecoveryReady;
   assert.equal((await backend.contextUsage()).usedTokens, 12000);
+});
+
+describe("fixture status sidebar", () => {
+  const scenarioThreads = ["fixture-approval", "fixture-question", "fixture-working", "fixture-finished"];
+
+  it("leaves a background chat in every state the status view groups by", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    await backend.startSession();
+    const events: ChatEvent[] = [];
+    await backend.boot?.((event) => events.push(event));
+    const lastKind = (threadId: string) =>
+      events.filter((event) => event.thread_id === threadId).at(-1)?.kind;
+    assert.equal(lastKind("fixture-approval"), "approval_needed");
+    assert.equal(lastKind("fixture-question"), "question_needed");
+    assert.equal(lastKind("fixture-working"), "tool_call_start");
+    assert.equal(lastKind("fixture-finished"), "done");
+    assert.ok(!events.some((event) => event.thread_id === "fixture"), "the open chat stays idle");
+
+    const [project] = await backend.listChatProjects();
+    assert.equal(project.name, "zest-app");
+    const listed = project.threads.map((thread) => thread.id);
+    for (const id of ["fixture", ...scenarioThreads]) assert.ok(listed.includes(id), id);
+  });
+
+  it("gives the open chat more jobs than the sidebar shows, and another chat one", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    const session = await backend.startSession();
+    const jobs = await backend.listDelegationJobs();
+    const parents = jobs.map((job) => job.parentThreadId);
+    assert.equal(parents.filter((parent) => parent === "fixture").length, 4);
+    assert.deepEqual(parents.filter((parent) => parent === "fixture-question"), ["fixture-question"]);
+    assert.ok(jobs.every((job) => job.projectRoot === session.root));
+    assert.equal(new Set(jobs.map((job) => job.jobId)).size, jobs.length, "job ids are unique");
+  });
+
+  it("pins a background chat without pinning the open one", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    await backend.startSession();
+    await backend.openProjectChat({ root: "/fixture/zest-app", threadId: "fixture-finished" });
+    await backend.setThreadPinned("fixture", "/fixture/zest-app", true);
+    const [project] = await backend.listChatProjects();
+    const pinned = project.threads.filter((thread) => thread.pinned).map((thread) => thread.id);
+    assert.deepEqual(pinned, ["fixture"]);
+  });
 });
 
 describe("restored HTML artifact fixture", () => {
@@ -238,6 +327,14 @@ describe("fixture delegation lifecycle", () => {
     );
     assert.deepEqual(ready.changedFiles, ["src/fixture.ts"]);
     assert.equal(ready.acceptanceChecks[0]?.status, "passed");
+    // The chat's subagent line lists who worked and reviewed, and for how long.
+    assert.deepEqual(
+      ready.attempts.map((attempt) => [attempt.role, attempt.finishedAt != null]),
+      [
+        ["worker", true],
+        ["reviewer", true],
+      ]
+    );
 
     const applied = await backend.applyDelegationJob(initial.jobId);
     assert.equal(applied.status, "accepted");
@@ -321,6 +418,46 @@ describe("fixture plugins and workspace files", () => {
   });
 });
 
+describe("fixture subagents scenario", () => {
+  it("restores a chat with all three kinds of subagent, in step order", async () => {
+    const backend = createFixtureBackend({ scenario: "subagents" });
+    const session = await backend.startSession("fixture");
+    const [first, second] = session.messages.filter((message) => message.role === "assistant");
+    assert.ok(first?.role === "assistant" && second?.role === "assistant");
+    assert.deepEqual(
+      first.tools.map((tool) => tool.name),
+      ["read_file", "read_file", "delegate_external", "delegate_feature"]
+    );
+    const card = first.tools.find((tool) => tool.name === "delegate_feature");
+    const jobs = await backend.listDelegationJobs();
+    assert.equal(
+      card?.metadata?.kind === "delegation" ? card.metadata.job_id : undefined,
+      jobs[0]?.jobId
+    );
+    assert.deepEqual(
+      first.steps?.map((step) => step.kind),
+      ["thinking", "tool", "tool", "tool", "thinking", "tool"]
+    );
+    assert.deepEqual(
+      second.providerActivity?.filter((activity) => activity.parentId === "sub-agent").length,
+      3
+    );
+  });
+
+  it("streams a live agent whose steps name it as their parent", async () => {
+    const backend = createFixtureBackend({ scenario: "subagents" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("map the callers");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const children = events.filter(
+      (event) => event.kind === "provider_activity" && event.parent_id === "live-agent"
+    );
+    assert.ok(children.length >= 2);
+    assert.equal(events.at(-1)?.kind, "done");
+  });
+});
+
 describe("fixture safety scenarios", () => {
   async function scenarioEvents(scenario: FixtureScenario) {
     const backend = createFixtureBackend({ scenario });
@@ -391,6 +528,45 @@ describe("fixture safety scenarios", () => {
     assert.ok(result && result.kind === "tool_call_result");
     assert.equal(result.isError, true);
     assert.equal(events.at(-1)?.kind, "done");
+  });
+});
+
+describe("fixture background-approval scenario", () => {
+  it("can cancel the background approval without cancelling the open chat", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("show a background approval");
+    await backend.cancelTurn("fixture-free");
+    assert.deepEqual(
+      events.flatMap((event) => event.thread_id === "fixture-free" ? [event.kind] : []),
+      ["assistant_start", "tool_call_start", "approval_needed", "cancelled"]
+    );
+    assert.equal((await backend.sessionInfo())?.threadId, "fixture");
+  });
+
+  it("renames a free chat while a project chat is open", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const renamed = await backend.renameThread("fixture-free", null, "Same title", true);
+    assert.equal(renamed.id, "fixture-free");
+    assert.equal(renamed.title, "Same title");
+    const freeChats = (await backend.listChatProjects()).find((project) => project.path === null);
+    assert.equal(freeChats?.threads.find((thread) => thread.id === "fixture-free")?.title, "Same title");
+  });
+
+  it("echoes the open chat's turn, then stops the Free chat for approval", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const session = await backend.startSession();
+    await backend.sendMessage("hello");
+
+    const done = events.findIndex((event) => event.kind === "done");
+    const approval = events.findIndex((event) => event.kind === "approval_needed");
+    assert.ok(done >= 0 && approval > done);
+    assert.equal(events[done]?.thread_id, session.threadId);
+    assert.equal(events[approval]?.thread_id, "fixture-free");
+    assert.notEqual(session.threadId, "fixture-free");
   });
 });
 

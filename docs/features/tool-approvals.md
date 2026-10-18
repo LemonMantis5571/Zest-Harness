@@ -47,7 +47,8 @@ verify:
   dropped waiters, cancelled turns, poisoned locks.
 - Only one card is shown at a time, anchored above the composer
   (`NeedsInputCard`, "1 of N" when several are queued); the transcript shows each
-  pending call as a one-line "Awaiting approval" row.
+  pending call as a dimmed "Waiting for approval: <target>" line in the turn's
+  Trace.
 - In Plan mode every sent message is expanded with the `plan` skill (see
   questions-and-planning).
 

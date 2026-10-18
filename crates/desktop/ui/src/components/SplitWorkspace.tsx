@@ -12,6 +12,7 @@ import {
 import { Markdown } from "@/components/Markdown";
 import { ModelEffortPicker } from "@/components/ModelEffortPicker";
 import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
+import { AssistantTrace } from "@/components/AssistantTrace";
 import { ToolCallRow } from "@/components/ToolCallRow";
 import { readSidebarOpen, writeSidebarOpen } from "@/components/ChatHistorySidebar";
 import { Button } from "@/components/ui/button";
@@ -40,7 +41,7 @@ import {
   type SplitSidebarGroup,
   type SplitWorkspaceSnapshot,
 } from "@/lib/splitLayout";
-import type { ProjectChats, ProviderRow, SessionInfo } from "@/lib/types";
+import type { ApprovalChoice, ProjectChats, ProviderRow, SessionInfo } from "@/lib/types";
 
 export type { SplitChatTarget, SplitGroup, SplitPaneSnapshot, SplitWorkspaceSnapshot } from "@/lib/splitLayout";
 
@@ -85,7 +86,9 @@ type Props = {
     options: SplitPaneOptions
   ) => Promise<SessionInfo | void>;
   onClose: (session: SessionInfo, draft: string, target: SplitChatTarget) => Promise<void>;
-  onStateChange?: (snapshot: SplitWorkspaceSnapshot) => void;
+  onStateChange?: (snapshot: SplitWorkspaceSnapshot, choosingPaneId: string | null) => void;
+  onResolveApproval: (approvalId: string, decision: ApprovalChoice, threadId: string) => Promise<void>;
+  onResolveQuestion: (questionId: string, answer: string, threadId: string) => Promise<void>;
   renderSidebar?: (model: SplitSidebarRenderModel) => ReactNode;
 };
 
@@ -144,6 +147,8 @@ export function SplitWorkspace({
   onUpdateOptions,
   onClose,
   onStateChange,
+  onResolveApproval,
+  onResolveQuestion,
   renderSidebar,
 }: Props) {
   const initialWorkspaceRef = useRef<SplitWorkspaceSnapshot | null>(null);
@@ -151,6 +156,7 @@ export function SplitWorkspace({
     initialWorkspaceRef.current = initialWorkspace(snapshot, initial, initialDraft, startNewGroup);
   }
   const initialState = initialWorkspaceRef.current;
+  const receivedSnapshotRef = useRef(snapshot);
   const [workspace, setWorkspace] = useState(initialState);
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [choosing, setChoosing] = useState<string | null>(() => {
@@ -189,8 +195,17 @@ export function SplitWorkspace({
   }, [projects]);
 
   useEffect(() => {
-    onStateChange?.(workspace);
-  }, [onStateChange, workspace]);
+    if (snapshot !== receivedSnapshotRef.current) {
+      receivedSnapshotRef.current = snapshot;
+      if (snapshot && snapshot !== workspace) {
+        setWorkspace(snapshot);
+        setChoosing(null);
+        // Do not echo the old workspace while applying external navigation.
+        return;
+      }
+    }
+    onStateChange?.(workspace, choosing);
+  }, [choosing, onStateChange, snapshot, workspace]);
 
   useEffect(() => {
     if (!deletedThreadId) return;
@@ -655,6 +670,8 @@ export function SplitWorkspace({
             if (threadId) void run(() => getBackend().cancelTurn(threadId));
           }}
           onError={setError}
+          onResolveApproval={onResolveApproval}
+          onResolveQuestion={onResolveQuestion}
           providers={providers}
           onUpdateOptions={(options) => updatePaneOptions(node.paneId, options)}
           onResizeFocus={() => focusPane(activeGroup.id, node.paneId)}
@@ -801,6 +818,8 @@ function SplitPaneView({
   onSend,
   onStop,
   onError,
+  onResolveApproval,
+  onResolveQuestion,
   providers,
   onUpdateOptions,
   onResizeFocus,
@@ -839,6 +858,8 @@ function SplitPaneView({
   onSend: () => Promise<void>;
   onStop: () => void;
   onError: (message: string) => void;
+  onResolveApproval: Props["onResolveApproval"];
+  onResolveQuestion: Props["onResolveQuestion"];
   providers: ProviderRow[];
   onUpdateOptions: (options: SplitPaneOptions) => void;
   onResizeFocus: () => void;
@@ -935,6 +956,8 @@ function SplitPaneView({
           onSend={onSend}
           onStop={onStop}
           onError={onError}
+          onResolveApproval={onResolveApproval}
+          onResolveQuestion={onResolveQuestion}
           providers={providers}
           onUpdateOptions={onUpdateOptions}
         />
@@ -998,6 +1021,8 @@ function SplitConversation({
   onSend,
   onStop,
   onError,
+  onResolveApproval,
+  onResolveQuestion,
 }: {
   session: SessionInfo;
   state?: ChatUiState;
@@ -1009,6 +1034,8 @@ function SplitConversation({
   onSend: () => Promise<void>;
   onStop: () => void;
   onError: (value: string) => void;
+  onResolveApproval: Props["onResolveApproval"];
+  onResolveQuestion: Props["onResolveQuestion"];
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -1037,11 +1064,12 @@ function SplitConversation({
               </div>
             ) : (
               <>
-                {message.thinking ? <details className="mb-2 text-xs text-muted-foreground"><summary>Thinking</summary><p className="whitespace-pre-wrap py-2">{message.thinking}</p></details> : null}
+                <AssistantTrace message={message} providerLabel={session.label} className="mb-3" />
                 <Markdown streaming={message.streaming}>{message.text}</Markdown>
-                {message.tools.map((tool) => <ToolCallRow key={tool.id} tool={tool} asCard={tool.status === "awaiting_approval"} onResolveApproval={async (id, choice) => {
+                {/* A pane has no shared approval bar above its composer, so the card stays inline. */}
+                {message.tools.filter((tool) => tool.status === "awaiting_approval").map((tool) => <ToolCallRow key={tool.id} tool={tool} asCard onResolveApproval={async (id, choice) => {
                   try {
-                    await getBackend().resolveApproval(id, choice, session.threadId);
+                    await onResolveApproval(id, choice, session.threadId);
                   } catch (error) {
                     onError(String(error));
                     throw error;
@@ -1049,7 +1077,7 @@ function SplitConversation({
                 }} />)}
                 {message.question?.questionId ? <PlanningQuestionnaire question={message.question} onSubmit={async (answer) => {
                   try {
-                    await getBackend().resolveQuestion(message.question!.questionId!, answer, session.threadId);
+                    await onResolveQuestion(message.question!.questionId!, answer, session.threadId);
                   } catch (error) {
                     onError(String(error));
                     throw error;

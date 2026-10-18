@@ -5,6 +5,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { HTML_CSP, isolatedHtml, parseHtmlDocument } from "./src/lib/htmlArtifacts.ts";
+import { DEFAULT_UI_PORT, IDENTITY_PATH, uiPort, type DevServerIdentity } from "./devServer.ts";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -81,8 +82,24 @@ function htmlFixtureEndpoint(): Plugin {
   };
 }
 
+/** Says which checkout this server belongs to, so tools never reuse another's. */
+function devServerIdentity(): Plugin {
+  return {
+    name: "zest-dev-server-identity",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use(IDENTITY_PATH, (_request, response) => {
+        const identity: DevServerIdentity = { app: "zest-ui", root: server.config.root, pid: process.pid };
+        response.setHeader("Content-Type", "application/json");
+        response.setHeader("Cache-Control", "no-store");
+        response.end(JSON.stringify(identity));
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), htmlFixtureEndpoint()],
+  plugins: [react(), tailwindcss(), htmlFixtureEndpoint(), devServerIdentity()],
   // Workbench loads lazily; prepare its avatar entry before the first click.
   optimizeDeps: {
     include: ["blobatar/react"],
@@ -100,7 +117,8 @@ export default defineConfig({
   clearScreen: false,
   server: {
     host: "127.0.0.1",
-    port: 1420,
+    // The desktop shell pins 1420 (devUrl, CSP, html.rs); only the browser tooling moves.
+    port: process.env.TAURI_ENV_PLATFORM ? DEFAULT_UI_PORT : uiPort(),
     strictPort: true,
   },
 });

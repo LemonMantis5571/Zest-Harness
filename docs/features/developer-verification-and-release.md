@@ -43,6 +43,10 @@ verify:
 ## Behavior
 - npm is pinned to 11.21.0 in the root manifest. CI verification and desktop packaging install that declared version after Node setup so overrides propagate through workspace links. Older npm releases can retain an unpatched transitive version or mark a valid override as invalid. The Mermaid KaTeX override is exercised by the UI security regression and the unchanged dependency-audit gate.
 - The build tooling locks `source-map-js` to patched 1.2.2. Its regression test resolves the consumer through PostCSS, checks ordinary indexed mappings, rejects malformed or excessive section offsets, and bounds a large-offset conversion in a separate process so a regression cannot hang the test runner.
+- The Rust lockfile uses `quinn-proto` 0.11.18 and `rustls` 0.23.46 to cover
+  RUSTSEC-2026-0338 through 0342 and 0346 through 0349. The RustSec gate remains
+  enabled with no new exclusions. Maintenance and yanked-package warnings are
+  reported separately from blocking vulnerabilities.
 - `npm run verify` (`scripts/dev-verify.mjs`) runs these steps in order and stops at the first failure: output-policy tests, output policy, feature-map tests, feature-map check, control CLI tests, UI unit tests, UI lint, lint-plugin tests, UI build, Playwright e2e (`npm run ui:e2e`), the control CLI smoke test (`zest-control.mjs check`, see [ui-control-cli](ui-control-cli.md)), `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace --lib`, `git diff --check`.
 - `scripts/release-verify.ps1` and `release-verify.sh` are the CI and release gate. They run the same checks in the same order (toolchain version print or warning; output policy tests and check; feature map tests and check; control CLI tests; `npm ci`; ts-rs binding drift; UI test, lint, plugin-rule tests, build; Playwright e2e with `npx playwright install chromium`, plus `--with-deps` on Linux CI; the control CLI smoke test; fmt; clippy; `cargo test --workspace --all-targets`; `npm audit --omit=dev` with 3 tries; `cargo audit` or `cargo deny`; `git diff --check` for unstaged and staged changes).
 - CI (`windows-verify.yml`, `linux-verify.yml`) runs the release gate on push to main/master and on PRs, first checks every commit in a PR with `check-output-artifacts.mjs --range`, and uploads `crates/desktop/ui/test-results/` as `playwright-traces-windows` / `playwright-traces-linux` on failure. Linux also builds and tests `zest serve` and the JSONL run protocol without WebKit, using local provider and worker fixtures.
@@ -71,5 +75,5 @@ verify:
   A shared resource is linked into every artifact on both MSVC and GNU targets;
   Tauri's separate binary resource still supplies icons and version metadata.
 - In `release-verify.sh`, every step goes through `step`, which captures the exit code with `set +e`; an `if cmd; then` wrapper once let a failing `cargo test` pass.
-- Playwright reuses a dev server already on port 1420 outside CI.
+- Playwright reuses a dev server already on its port (`ZEST_UI_PORT`, default 1420) outside CI, but only one from the same checkout.
 - Stale comments: the `release-verify.ps1` header mentions sidecar fetching (there is no sidecar step), and `build-signed.ps1` mentions a `postbuild` hook that `crates/desktop/package.json` does not define.

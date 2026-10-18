@@ -1,4 +1,5 @@
 import {
+  Fragment,
   lazy,
   memo,
   Suspense,
@@ -10,17 +11,13 @@ import {
   useState,
 } from "react";
 import {
-  CheckCircle2Icon,
   Columns2Icon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
-  LoaderCircleIcon,
   PencilIcon,
-  SettingsIcon,
   TriangleAlertIcon,
-  XCircleIcon,
   XIcon,
 } from "lucide-react";
 
@@ -32,7 +29,7 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
-import { SettingsPanel } from "@/components/SettingsPanel";
+import { SettingsPanel, type SettingsSectionId } from "@/components/SettingsPanel";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
 import { Composer } from "@/components/Composer";
 import { BtwPanel } from "@/components/BtwPanel";
@@ -45,10 +42,9 @@ import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
 import { Markdown } from "@/components/Markdown";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
-import { ToolCallRow } from "@/components/ToolCallRow";
-import { ToolRunGroup } from "@/components/ToolRunGroup";
-import { ThinkingReasoning } from "@/components/ThinkingReasoning";
+import { AssistantTrace } from "@/components/AssistantTrace";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
+import { Marker, MarkerContent } from "@/components/ui/marker";
 import { visibleInterval } from "@/lib/visibleInterval";
 import {
   Attachment,
@@ -76,6 +72,7 @@ import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { openExternalUrl } from "@/lib/externalLinks";
 import { buildConversationTurns } from "@/lib/conversationTurns";
+import { noticesByMessage, type TranscriptNotice } from "@/lib/transcriptNotices";
 import { ensureFontLoaded } from "@/lib/fonts";
 import { LinkifyText } from "@/lib/linkify";
 import {
@@ -83,12 +80,12 @@ import {
   modelPickerHasChoices,
   type EffortId,
 } from "@/lib/models";
+import { useHiddenPickerProviders } from "@/lib/pickerProviders";
 import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import type { SendTurnRequest } from "@/lib/sendTurn";
 import { btwQuestion, isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
 import type { SplitSidebarGroup } from "@/lib/splitLayout";
-import { groupToolRuns } from "@/lib/toolRuns";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import { escapeAction } from "@/lib/escapeStack";
@@ -104,7 +101,6 @@ import type {
   GitContext,
   PreparedAttachment,
   ProjectChats,
-  ProviderActivityPart,
   ProviderRow,
   SessionInfo,
   ThreadSummary,
@@ -158,6 +154,8 @@ export type ChatScreenProps = {
   hasOlderMessages?: boolean;
   hasNewerMessages?: boolean;
   hiddenUserTurns?: number;
+  /** Housekeeping dividers for this chat, such as automatic compaction. */
+  transcriptNotices?: readonly TranscriptNotice[];
   loadingOlder?: boolean;
   loadingNewer?: boolean;
   onLoadOlder?: () => void;
@@ -291,12 +289,11 @@ type ChatMessageRowProps = {
   approvalMode: ApprovalMode;
   /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
   providerLabel: string;
+  /** The board, so a feature card this turn created shows its live state. */
+  delegationJobs: ReadonlyArray<DelegationJob>;
+  onOpenDelegation: (jobId: string) => void;
   isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
-  onResolveApproval: (
-    approvalId: string,
-    decision: ApprovalChoice
-  ) => Promise<void>;
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
   onOpenProviderSwitch?: () => void;
@@ -382,43 +379,6 @@ function MessageEditForm({
   );
 }
 
-function ProviderActivityTrace({
-  activities,
-  providerLabel,
-}: {
-  activities: ProviderActivityPart[];
-  /** Whose loop ran these. Hard-coding one vendor mislabelled every other. */
-  providerLabel: string;
-}) {
-  if (activities.length === 0) return null;
-  return (
-    <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground" aria-label="Provider activity">
-      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
-        {providerLabel}
-      </div>
-      {activities.map((activity) => {
-        const icon =
-          activity.status === "done" ? (
-            <CheckCircle2Icon className="size-3.5 shrink-0 text-primary/90" aria-hidden />
-          ) : activity.status === "error" ? (
-            <XCircleIcon className="size-3.5 shrink-0 text-destructive/90" aria-hidden />
-          ) : (
-            <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden />
-          );
-        return (
-          <div key={activity.id} className="flex min-w-0 items-center gap-1.5">
-            {icon}
-            <span className="min-w-0 truncate text-foreground/75">{activity.title}</span>
-            <span className="shrink-0 text-[10px] text-muted-foreground/60">
-              {activity.status}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /**
  * Keep settled messages out of the streaming render path. Appending a delta
  * still updates the active row, but unchanged rows now retain their existing
@@ -430,9 +390,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
   sending,
   approvalMode,
   providerLabel,
+  delegationJobs,
+  onOpenDelegation,
   isPlanToBuild = false,
   onBuildPlan,
-  onResolveApproval,
   onOpenDiff,
   onReconnectProvider,
   onOpenProviderSwitch,
@@ -551,39 +512,13 @@ const ChatMessageRow = memo(function ChatMessageRow({
             Zest
           </div>
 
-          {msg.tools.length > 0 ? (
-            <div className="flex w-full max-w-full flex-col gap-0.5">
-              {groupToolRuns(msg.tools).map((run) =>
-                run.kind === "group" ? (
-                  <ToolRunGroup
-                    key={`group-${run.tools[0].id}`}
-                    tools={run.tools}
-                    summary={run.summary}
-                    onResolveApproval={onResolveApproval}
-                    onOpenDiff={onOpenDiff}
-                  />
-                ) : (
-                  <ToolCallRow
-                    key={run.tool.id}
-                    tool={run.tool}
-                    onResolveApproval={onResolveApproval}
-                    onOpenDiff={onOpenDiff}
-                  />
-                )
-              )}
-            </div>
-          ) : null}
-
-          {msg.providerActivity ? (
-            <ProviderActivityTrace
-              activities={msg.providerActivity}
-              providerLabel={providerLabel}
-            />
-          ) : null}
-
-          {msg.thinking ? (
-            <ThinkingReasoning thinking={msg.thinking} streaming={msg.streaming} />
-          ) : null}
+          <AssistantTrace
+            message={msg}
+            providerLabel={providerLabel}
+            delegationJobs={delegationJobs}
+            onOpenDiff={onOpenDiff}
+            onOpenDelegation={onOpenDelegation}
+          />
 
           {planningQuestion ? (
             <PlanningQuestionnaire
@@ -732,6 +667,7 @@ export function ChatScreen({
   hasOlderMessages = false,
   hasNewerMessages = false,
   hiddenUserTurns = 0,
+  transcriptNotices,
   loadingOlder = false,
   loadingNewer = false,
   onLoadOlder,
@@ -818,7 +754,7 @@ export function ChatScreen({
   useEffect(() => {
     if (btw && btw.sessionId !== session.sessionId) setBtw(null);
   }, [btw, session.sessionId]);
-  const [focusUser, setFocusUser] = useState(false);
+  const [settingsFocus, setSettingsFocus] = useState<SettingsSectionId | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   /**
    * Too narrow to hold the sidebar, a checkpoint rail, and a readable
@@ -860,6 +796,7 @@ export function ChatScreen({
   );
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const hiddenPickerProviders = useHiddenPickerProviders();
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const refreshAndOpenProviderSwitch = useCallback(() => {
     void onRefreshProviders()
@@ -885,6 +822,11 @@ export function ChatScreen({
    * interrupts you.
    */
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  /** A job the sidebar asked the Workbench to show; `request` re-fires a repeat click. */
+  const [workbenchJobFocus, setWorkbenchJobFocus] = useState<{
+    jobId: string;
+    request: number;
+  } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteFilter, setPaletteFilter] = useState<PaletteFilter>("all");
   useEffect(() => {
@@ -910,6 +852,10 @@ export function ChatScreen({
         windowed: hasOlderMessages || hasNewerMessages,
       }),
     [hasNewerMessages, hasOlderMessages, hiddenUserTurns, messages, session.checkpoints]
+  );
+  const noticesAfterMessage = useMemo(
+    () => noticesByMessage(transcriptNotices),
+    [transcriptNotices]
   );
   const conversationMessageIds = useMemo(
     () => messages.map((message) => message.id),
@@ -1021,9 +967,25 @@ export function ChatScreen({
     scrollToTranscriptMessage(focusId);
   }, [messages, scrollToTranscriptMessage, session.focusMessageId]);
 
-  const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
+  // A jump request belongs to the click that made it; reopening the Workbench
+  // later starts on its usual tab.
+  const closeWorkbench = useCallback(() => {
+    setWorkbenchOpen(false);
+    setWorkbenchJobFocus(null);
+  }, []);
+  // The sidebar's job rows and a subagent line's "Open in Delegation" both land
+  // on the job's card; a new request lets the same card be asked for twice.
+  const openDelegationJob = useCallback(
+    (jobId: string) => {
+      if (session.isFreeChat) return;
+      setWorkbenchOpen(true);
+      setWorkbenchJobFocus((current) => ({ jobId, request: (current?.request ?? 0) + 1 }));
+    },
+    [session.isFreeChat]
+  );
   const toggleWorkbench = useCallback(() => {
     if (session.isFreeChat) return;
+    setWorkbenchJobFocus(null);
     setWorkbenchOpen((value) => !value);
   }, [session.isFreeChat]);
 
@@ -1297,7 +1259,8 @@ export function ChatScreen({
       label: providerLabel,
       models: session.models,
     },
-    providers
+    providers,
+    hiddenPickerProviders
   );
   const showPicker = modelPickerHasChoices(pickerGroups) || modelPickerOpen;
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
@@ -1402,8 +1365,8 @@ export function ChatScreen({
   }, []);
 
   const openSettings = useCallback(
-    (focusUser = false) => {
-      setFocusUser(focusUser);
+    (section: SettingsSectionId | null = null) => {
+      setSettingsFocus(section);
       setSettingsOpen(true);
       onOpenSettings?.();
     },
@@ -1519,7 +1482,7 @@ export function ChatScreen({
         description: "Configure Zest and keyboard shortcuts",
         shortcut: shortcutFor("view.settings"),
         group: "settings" as const,
-        run: openSettings,
+        run: () => openSettings(),
       },
       ...(onOpenProfile
         ? [
@@ -1566,19 +1529,19 @@ export function ChatScreen({
   // panel does not fly open on mount.
   useEffect(() => {
     if (settingsRequest <= 0) return;
-    setFocusUser(true);
+    setSettingsFocus("user");
     setSettingsOpen(true);
   }, [settingsRequest]);
 
   useEffect(() => {
     if (settingsOpenRequest <= 0) return;
-    setFocusUser(false);
+    setSettingsFocus(null);
     setSettingsOpen(true);
   }, [settingsOpenRequest]);
 
   const closeSettings = useCallback(() => {
     setSettingsOpen(false);
-    setFocusUser(false);
+    setSettingsFocus(null);
     onCloseSettings?.();
   }, [onCloseSettings]);
 
@@ -1688,6 +1651,7 @@ export function ChatScreen({
         profile={profile}
         providerLabel={providerLabel}
         onOpenProfile={openProfile}
+        onOpenSettings={openSettings}
         providers={providers}
         quotaRefreshKey={`${session.threadId}:${messages.length}`}
         onSearch={openPalette}
@@ -1708,6 +1672,8 @@ export function ChatScreen({
         activeSplitGroupId={activeSplitGroupId}
         onOpenSplitGroup={onOpenSplitGroup}
         onFocusSplitPane={onFocusSplitPane}
+        delegationJobs={delegationJobs}
+        onOpenDelegationJob={openDelegationJob}
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1757,17 +1723,9 @@ export function ChatScreen({
                 <FolderOpenIcon aria-hidden="true" />
               </Button>
             ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Settings (Ctrl+,)"
-              aria-label="Open settings"
-              aria-expanded={settingsOpen}
-              onClick={() => openSettings()}
-            >
-              <SettingsIcon />
-            </Button>
+            {/* Settings opens from the account menu at the bottom of the
+                sidebar, or Mod+, — not from a gear competing with the project
+                actions here. */}
           </div>
         </header>
 
@@ -1818,6 +1776,8 @@ export function ChatScreen({
               sending={sending}
               providerOwnsAgentLoop={session.ownsAgentLoop}
               providerLabel={providerLabel}
+              providers={providers}
+              currentProviderId={session.provider}
               onTabChange={(next) => onCustomizeTabChange?.(next)}
               onBack={() => onClosePanel?.()}
             />
@@ -1832,7 +1792,7 @@ export function ChatScreen({
                   onBack={() => onClosePanel?.()}
                   // Editing name and avatar stays in Settings; the profile
                   // page reports, it does not duplicate the form.
-                  onEditProfile={() => openSettings(true)}
+                  onEditProfile={() => openSettings("user")}
                   onOpenUsage={openUsage}
                 />
               ) : (
@@ -1904,40 +1864,54 @@ export function ChatScreen({
                     const isLast = index === messages.length - 1;
                     const isActiveWorking = showTurnWorking && isLast;
                     return (
-                      <ChatMessageRow
-                        key={msg.id}
-                        message={msg}
-                        isLast={isLast}
-                        sending={sending}
-                        approvalMode={approvalMode}
-                        providerLabel={providerLabel}
-                        isPlanToBuild={planToBuild === msg.id}
-                        onBuildPlan={onBuildPlan}
-                        onResolveApproval={onResolveApproval}
-                        onOpenDiff={openDiff}
-                        onReconnectProvider={onReconnectProvider}
-                        onOpenProviderSwitch={refreshAndOpenProviderSwitch}
-                        onSend={onSend}
-                        editing={editingMessageId === msg.id}
-                        editingText={
-                          editingMessageId === msg.id ? editingMessageText : ""
-                        }
-                        editingBusy={editingMessageBusy}
-                        onStartEdit={startEditingMessage}
-                        onChangeEdit={setEditingMessageText}
-                        onCancelEdit={cancelEditingMessage}
-                        onSubmitEdit={submitEditingMessage}
-                        onResolveQuestion={onResolveQuestion}
-                        pinQuestion={
-                          pendingApprovals.length === 0 &&
-                          pendingQuestion?.messageId === msg.id
-                        }
-                        showWorking={isActiveWorking && msg.role === "assistant"}
-                        workingStartedAt={
-                          isActiveWorking ? turnActivity?.startedAt : undefined
-                        }
-                        workingAction={isActiveWorking ? workingAction : undefined}
-                      />
+                      <Fragment key={msg.id}>
+                        <ChatMessageRow
+                          message={msg}
+                          isLast={isLast}
+                          sending={sending}
+                          approvalMode={approvalMode}
+                          providerLabel={providerLabel}
+                          delegationJobs={delegationJobs}
+                          onOpenDelegation={openDelegationJob}
+                          isPlanToBuild={planToBuild === msg.id}
+                          onBuildPlan={onBuildPlan}
+                          onOpenDiff={openDiff}
+                          onReconnectProvider={onReconnectProvider}
+                          onOpenProviderSwitch={refreshAndOpenProviderSwitch}
+                          onSend={onSend}
+                          editing={editingMessageId === msg.id}
+                          editingText={
+                            editingMessageId === msg.id ? editingMessageText : ""
+                          }
+                          editingBusy={editingMessageBusy}
+                          onStartEdit={startEditingMessage}
+                          onChangeEdit={setEditingMessageText}
+                          onCancelEdit={cancelEditingMessage}
+                          onSubmitEdit={submitEditingMessage}
+                          onResolveQuestion={onResolveQuestion}
+                          pinQuestion={
+                            pendingApprovals.length === 0 &&
+                            pendingQuestion?.messageId === msg.id
+                          }
+                          showWorking={isActiveWorking && msg.role === "assistant"}
+                          workingStartedAt={
+                            isActiveWorking ? turnActivity?.startedAt : undefined
+                          }
+                          workingAction={isActiveWorking ? workingAction : undefined}
+                        />
+                        {noticesAfterMessage.get(msg.id)?.map((notice) => (
+                          <MessageScrollerItem key={notice.id} messageId={notice.id}>
+                            <Marker
+                              variant="separator"
+                              role="note"
+                              data-transcript-notice=""
+                              className="text-xs"
+                            >
+                              <MarkerContent>{notice.text}</MarkerContent>
+                            </Marker>
+                          </MessageScrollerItem>
+                        ))}
+                      </Fragment>
                     );
                   })}
                   {hasNewerMessages || loadingNewer ? (
@@ -2120,7 +2094,7 @@ export function ChatScreen({
           effort={effort}
           sending={sending}
           profile={profile}
-          focusUser={focusUser}
+          focusSection={settingsFocus}
           onClose={closeSettings}
           onChangeProvider={() => {
             closeSettings();
@@ -2191,6 +2165,7 @@ export function ChatScreen({
             onRetryDelegation={onRetryDelegation}
             onApplyDelegation={onApplyDelegation}
             onReconnectProvider={onReconnectProvider}
+            focusDelegationJob={workbenchJobFocus}
           />
         </Suspense>
       ) : null}

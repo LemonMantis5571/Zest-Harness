@@ -1,16 +1,28 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ComponentType,
+} from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
+  CheckCircle2Icon,
+  CheckIcon,
   Columns2Icon,
   Clock3Icon,
   ChevronRightIcon,
   PanelLeftIcon,
   FolderIcon,
   FolderOpenIcon,
+  FolderPlusIcon,
   GitBranchIcon,
   GitForkIcon,
   GitPullRequestIcon,
+  LoaderCircleIcon,
   MoreHorizontalIcon,
   PinIcon,
   PlusIcon,
@@ -18,29 +30,57 @@ import {
   SlidersHorizontalIcon,
   SquarePenIcon,
   Trash2Icon,
+  TriangleAlertIcon,
+  XCircleIcon,
 } from "lucide-react";
 
+import { AccountMenu } from "@/components/AccountMenu";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import { UserAvatar, UserAvatarButton } from "@/components/UserAvatarButton";
+import type { SettingsSectionId } from "@/components/SettingsPanel";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import type { PaletteFilter } from "@/lib/commandPaletteSearch";
+import {
+  CHAT_STATUS_SECTIONS,
+  chatProjectLabel,
+  groupChatsByStatus,
+  type ChatStatusSection,
+} from "@/lib/chatStatusGroups";
+import { compactChatMark, foreignProvider, type CompactChatMark } from "@/lib/compactChatRow";
+import {
+  delegationChildStatus,
+  delegationChildrenByThread,
+  type DelegationChildTone,
+  type DelegationChildren,
+} from "@/lib/delegationChildren";
 import { isBooleanRecord, parseJson } from "@/lib/json";
 import { formatChord } from "@/lib/keybindings";
 import {
+  getSavedChatGrouping,
   getSavedChatViewMode,
+  saveChatGrouping,
   subscribeChatViewChange,
+  type ChatGrouping,
   type ChatViewMode,
 } from "@/lib/chatView";
 import {
+  activeThreadIds,
   elapsedLabel,
+  needsInput,
   type ThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
-import type { ProjectChats, ProviderRow, ThreadSummary, UserProfile } from "@/lib/types";
+import { getUnreadThreads, subscribeUnreadThreads } from "@/lib/threadUnread";
+import type {
+  DelegationJob,
+  ProjectChats,
+  ProviderRow,
+  ThreadSummary,
+  UserProfile,
+} from "@/lib/types";
 import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { cn } from "@/lib/utils";
 import {
@@ -83,6 +123,8 @@ type Props = {
   providerLabel?: string;
   /** Open the profile screen. */
   onOpenProfile?: () => void;
+  /** Open Settings, optionally at one section. */
+  onOpenSettings?: (section?: SettingsSectionId) => void;
   /** The profile screen is showing. */
   profileActive?: boolean;
   providers: ProviderRow[];
@@ -102,6 +144,10 @@ type Props = {
   activeSplitGroupId?: string | null;
   onOpenSplitGroup?: (groupId: string) => void;
   onFocusSplitPane?: (groupId: string, paneId: string) => void;
+  /** Feature-card jobs for the open project, nested under the chat that started each. */
+  delegationJobs?: ReadonlyArray<DelegationJob>;
+  /** Open the Workbench on its Delegation tab at this job. */
+  onOpenDelegationJob?: (jobId: string) => void;
 };
 
 function threadTitle(thread: ThreadSummary) {
@@ -179,7 +225,9 @@ function navItemClass(active = false) {
 }
 
 function activityStateLabel(activity: ThreadActivity) {
-  return activity.state === "awaiting_approval" ? "Needs approval" : "Working";
+  if (activity.state === "awaiting_approval") return "Needs approval";
+  if (activity.state === "awaiting_input") return "Needs your answer";
+  return "Working";
 }
 
 function activityDescription(activity: ThreadActivity, now: number) {
@@ -188,6 +236,67 @@ function activityDescription(activity: ThreadActivity, now: number) {
   const elapsed = elapsedLabel(activity.startedAt, now);
   if (elapsed) parts.push(`for ${elapsed}`);
   return parts.join(", ");
+}
+
+/** The leading mark of a compact row; `compactChatMark` decides which. */
+function CompactChatMarkIcon({ mark }: { mark: CompactChatMark }) {
+  return (
+    <span className="flex size-3.5 shrink-0 items-center justify-center" aria-hidden="true">
+      {mark === "needs_input" ? (
+        <span className="size-2 rounded-full bg-amber-400" />
+      ) : mark === "working" ? (
+        <LoaderCircleIcon className="size-3.5 animate-spin text-[var(--sidebar-primary)] motion-reduce:animate-none" />
+      ) : mark === "pull_request" ? (
+        <GitPullRequestIcon className="size-3.5 text-[var(--sidebar-primary)]" />
+      ) : mark === "branch" ? (
+        <GitBranchIcon className="size-3.5 text-muted-foreground" />
+      ) : (
+        <span className="size-2 rounded-full border border-muted-foreground/50" />
+      )}
+    </span>
+  );
+}
+
+/**
+ * A running chat's title shimmers, like the working indicator in the
+ * transcript. With reduced motion the app-wide rule stops the sweep, but a
+ * gradient frozen mid-sweep leaves the title half dimmed, so it falls back to
+ * plain text. The overrides need `!` because `.shimmer-text` is unlayered.
+ */
+const WORKING_TITLE_CLASS = "shimmer-text motion-reduce:bg-none! motion-reduce:text-inherit!";
+
+const STATUS_SECTION_META: Record<
+  ChatStatusSection,
+  { label: string; Icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>; iconClass: string }
+> = {
+  needs_input: { label: "Needs input", Icon: TriangleAlertIcon, iconClass: "text-amber-400" },
+  working: { label: "Working", Icon: LoaderCircleIcon, iconClass: "text-[var(--sidebar-primary)]" },
+  recent: { label: "Recent", Icon: Clock3Icon, iconClass: "text-muted-foreground" },
+};
+
+const NO_DELEGATION_JOBS: ReadonlyArray<DelegationJob> = [];
+
+function DelegationChildIcon({ tone }: { tone: DelegationChildTone }) {
+  const base = "size-3 shrink-0";
+  switch (tone) {
+    case "attention":
+      return <TriangleAlertIcon className={cn(base, "text-amber-400")} aria-hidden="true" />;
+    case "running":
+      return (
+        <LoaderCircleIcon
+          className={cn(base, "animate-spin text-[var(--sidebar-primary)] motion-reduce:animate-none")}
+          aria-hidden="true"
+        />
+      );
+    case "ready":
+      return <CheckCircle2Icon className={cn(base, "text-[var(--sidebar-primary)]")} aria-hidden="true" />;
+    case "waiting":
+      return <Clock3Icon className={cn(base, "text-muted-foreground")} aria-hidden="true" />;
+    case "done":
+      return <CheckIcon className={cn(base, "text-muted-foreground")} aria-hidden="true" />;
+    case "cancelled":
+      return <XCircleIcon className={cn(base, "text-muted-foreground")} aria-hidden="true" />;
+  }
 }
 
 type EditingThread = {
@@ -221,6 +330,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   profile,
   providerLabel,
   onOpenProfile,
+  onOpenSettings,
   profileActive = false,
   providers,
   quotaRefreshKey,
@@ -235,6 +345,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   activeSplitGroupId = null,
   onOpenSplitGroup,
   onFocusSplitPane,
+  delegationJobs = NO_DELEGATION_JOBS,
+  onOpenDelegationJob,
 }: Props) {
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [loading, setLoading] = useState(false);
@@ -260,6 +372,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [chatViewMode, setChatViewMode] = useState<ChatViewMode>(() => getSavedChatViewMode());
+  const unreadThreads = useSyncExternalStore(subscribeUnreadThreads, getUnreadThreads);
+  const [grouping, setGrouping] = useState<ChatGrouping>(() => getSavedChatGrouping());
 
   const hasActiveActivity = Object.values(threadActivity).some(
     (activity) => activity.state !== "idle"
@@ -329,6 +443,23 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     }
   }, [open, sending]);
 
+  // A chat that ends a turn in the background has a new `updatedAt` (and maybe
+  // a new title) the list has not seen, so reload when any busy chat settles.
+  const busyThreadKey = useMemo(
+    () => activeThreadIds(threadActivity).sort().join(" "),
+    [threadActivity]
+  );
+  const previousBusyThreadKey = useRef(busyThreadKey);
+  useEffect(() => {
+    const before = previousBusyThreadKey.current;
+    previousBusyThreadKey.current = busyThreadKey;
+    if (!open || !before) return;
+    const stillBusy = new Set(busyThreadKey.split(" "));
+    if (before.split(" ").some((id) => !stillBusy.has(id))) {
+      setTick((n) => n + 1);
+    }
+  }, [busyThreadKey, open]);
+
   const editingKey = editingThread?.key;
   useEffect(() => {
     if (!editingKey) return;
@@ -352,6 +483,20 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
         : [],
     [freeChatProject]
   );
+
+  const statusGroups = useMemo(
+    () => groupChatsByStatus(projects, threadActivity),
+    [projects, threadActivity]
+  );
+
+  const delegationChildren = useMemo(
+    () => delegationChildrenByThread(delegationJobs),
+    [delegationJobs]
+  );
+
+  function chooseGrouping(next: ChatGrouping) {
+    setGrouping(saveChatGrouping(next));
+  }
 
   const visibleProjects = useMemo(
     () =>
@@ -652,7 +797,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                 className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground"
                 aria-hidden="true"
               >
-                {activity.state === "awaiting_approval" ? (
+                {needsInput(activity) ? (
                   <span className="size-1.5 rounded-full bg-amber-400" />
                 ) : (
                   <span className="flex items-center gap-0.5">
@@ -740,52 +885,66 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   function renderCompactThreadItem(
     project: ProjectChats,
     thread: ThreadSummary,
-    key: string
+    key: string,
+    { projectLabel }: { projectLabel?: string } = {}
   ) {
     const active = thread.id === activeThreadId;
     const title = threadTitle(thread);
-    const age = formatAge(thread.updatedAt);
     const activity = threadActivity[thread.id];
-    const activityText =
-      activity && activity.state !== "idle"
-        ? activityDescription(activity, now)
-        : undefined;
+    const busy = activity && activity.state !== "idle" ? activity : undefined;
     const git = thread.gitContext;
-    const branch = git?.branch ?? git?.baseBranch;
     const pullRequest = git?.pullRequest;
-    const owner = thread.providerId;
+    const branchChanged = Boolean(
+      git?.branch && git.baseBranch && git.branch !== git.baseBranch
+    );
+    const mark = compactChatMark({
+      activity,
+      hasPullRequest: Boolean(pullRequest),
+      branchChanged,
+    });
+    const otherProvider = foreignProvider(thread.providerId, activeProviderId);
     const isEditing = editingThread?.key === key;
-    const groupLabel = project.path === null ? "Recent" : project.name;
-    const branchLabel = branch ?? (project.path === null ? "No workspace" : "No branch");
-    const ariaLabel = [groupLabel, title, branchLabel, activityText]
+    // Bold until opened, like unread mail. A running chat has nothing new yet.
+    const unread = unreadThreads.has(thread.id) && !active && !busy;
+    const working = busy?.state === "working";
+    const markText =
+      mark === "pull_request" && pullRequest
+        ? `Pull request #${pullRequest.number}`
+        : mark === "branch"
+          ? `On ${git?.branch}, started on ${git?.baseBranch}`
+          : busy
+            ? activityDescription(busy, now)
+            : undefined;
+    const ariaLabel = [
+      title,
+      markText,
+      unread ? "Finished since you last looked" : undefined,
+      projectLabel ? `in ${projectLabel}` : undefined,
+      otherProvider ? `on ${otherProvider}` : undefined,
+      thread.pinned ? "pinned" : undefined,
+    ]
       .filter(Boolean)
       .join(". ");
 
+    const children = delegationChildren.get(thread.id);
+
     return (
-      <li key={key} className="group/thread">
+      <li key={key}>
         <div
           className={cn(
-            "relative rounded-md",
-            isEditing
-              ? "bg-[var(--sidebar-accent)]"
-              : active
-                ? "bg-[color-mix(in_srgb,var(--sidebar-primary)_18%,transparent)] text-[var(--sidebar-accent-foreground)] before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-[var(--sidebar-primary)]"
-                : "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]"
+            "group/thread relative flex h-7 items-center rounded-md",
+            isEditing || active
+              ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]"
+              : "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]"
           )}
         >
           {isEditing ? (
             <div
               role="group"
               aria-label={`Renaming ${title}`}
-              className="flex min-w-0 items-center gap-1.5 px-1.5 py-1"
+              className="flex min-w-0 flex-1 items-center gap-2 pl-2 pr-1"
             >
-              {owner ? (
-                <ProviderIcon
-                  providerId={owner}
-                  label={owner}
-                  className="size-3.5 shrink-0 opacity-80"
-                />
-              ) : null}
+              <CompactChatMarkIcon mark={mark} />
               <input
                 ref={renameInputRef}
                 value={editingThread?.value ?? ""}
@@ -793,7 +952,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                 aria-label={`Rename chat ${title}`}
                 placeholder="Untitled chat"
                 disabled={renameBusy}
-                className="min-w-0 flex-1 rounded-sm border border-primary/60 bg-background/60 px-1.5 py-0.5 text-[12px] text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+                className="min-w-0 flex-1 rounded-sm border border-primary/60 bg-background/60 px-1.5 py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
                 onChange={(event) =>
                   setEditingThread((current) =>
                     current ? { ...current, value: event.target.value } : current
@@ -812,160 +971,207 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
               />
             </div>
           ) : (
-            <div className="flex min-w-0 items-stretch">
-              <button
-                type="button"
-                onClick={() => {
-                  if (active) {
-                    onRevealTranscript();
-                    return;
-                  }
-                  void openThread(project, thread).catch((error) =>
-                    ignoreExpectedFailure(error, "open compact chat history")
-                  );
-                }}
-                onDoubleClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  beginRename(project, thread, key);
-                }}
-                title={`Double-click to rename “${title}”`}
-                aria-current={active ? "page" : undefined}
-                aria-label={ariaLabel}
-                className="min-w-0 flex-1 cursor-pointer px-1.5 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            <button
+              type="button"
+              onClick={() => {
+                if (active) {
+                  onRevealTranscript();
+                  return;
+                }
+                void openThread(project, thread).catch((error) =>
+                  ignoreExpectedFailure(error, "open compact chat history")
+                );
+              }}
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                beginRename(project, thread, key);
+              }}
+              title={markText ? `${title}\n${markText}` : title}
+              aria-current={active ? "page" : undefined}
+              aria-label={ariaLabel}
+              className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 pr-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            >
+              <CompactChatMarkIcon mark={mark} />
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate text-[13px]",
+                  working && WORKING_TITLE_CLASS,
+                  unread && "font-semibold text-foreground"
+                )}
               >
-                <div className="flex min-w-0 items-center gap-1.5">
-                  {owner ? (
-                    <span
-                      title={`This chat belongs to ${owner}.`}
-                      className="flex shrink-0 items-center text-muted-foreground"
-                    >
-                      <ProviderIcon
-                        providerId={owner}
-                        label={owner}
-                        className="size-3.5 opacity-80"
-                      />
-                    </span>
-                  ) : null}
-                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
-                    {title}
-                  </span>
-                  {activity && activity.state !== "idle" ? (
-                    <span
-                      className="flex shrink-0 items-center gap-1 text-[9px] tabular-nums text-muted-foreground"
-                      aria-hidden="true"
-                    >
-                      {activity.state === "awaiting_approval" ? (
-                        <span className="size-1.5 rounded-full bg-amber-400" />
-                      ) : (
-                        <span className="flex items-center gap-0.5">
-                          <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.32s]" />
-                          <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.16s]" />
-                          <span className="size-1 rounded-full bg-primary animate-bounce" />
-                        </span>
-                      )}
-                      {elapsedLabel(activity.startedAt, now) ?? age}
-                    </span>
-                  ) : age ? (
-                    <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">
-                      {age}
-                    </span>
-                  ) : null}
-                </div>
-                <div
-                  className={cn(
-                    "mt-px flex min-w-0 items-center gap-1 text-[9.5px] text-muted-foreground",
-                    active ? "pr-20" : "pr-14"
-                  )}
+                {title}
+              </span>
+              {projectLabel ? (
+                <span className="max-w-[40%] shrink-0 truncate text-[11px] text-muted-foreground">
+                  {projectLabel}
+                </span>
+              ) : null}
+              {/* Exceptions only. The usual case (your provider, not pinned,
+                  not running) adds nothing to the row. */}
+              {otherProvider ? (
+                <span
+                  title={`On ${otherProvider}. Opening it keeps that provider or offers a copy.`}
+                  className="flex shrink-0 items-center text-muted-foreground"
                 >
-                  <GitBranchIcon className="size-2.5 shrink-0 opacity-75" aria-hidden="true" />
-                  <span className="min-w-0 truncate">{branchLabel}</span>
-                  {pullRequest ? (
-                    <a
-                      {...pullRequestAnchorProps(pullRequest.url)}
-                      title={`Pull request #${pullRequest.number}: ${pullRequest.title}`}
-                      aria-label={`Pull request #${pullRequest.number}`}
-                      className="shrink-0 rounded bg-primary/15 px-1 text-[9px] text-primary hover:bg-primary/25"
-                      onClick={(event) =>
-                        handlePullRequestClick(event, () =>
-                          onOpenPullRequest?.(project, thread)
-                        )
-                      }
-                    >
-                      #{pullRequest.number}
-                    </a>
-                  ) : null}
-                </div>
-              </button>
-            </div>
+                  <ProviderIcon
+                    providerId={otherProvider}
+                    label={otherProvider}
+                    className="size-3.5 opacity-70"
+                  />
+                </span>
+              ) : null}
+              {thread.pinned ? (
+                <PinIcon
+                  className="size-3 shrink-0 fill-current text-muted-foreground"
+                  aria-hidden="true"
+                />
+              ) : null}
+              {busy ? (
+                <span
+                  className="shrink-0 text-[10px] tabular-nums text-muted-foreground"
+                  aria-hidden="true"
+                >
+                  {elapsedLabel(busy.startedAt, now)}
+                </span>
+              ) : null}
+            </button>
           )}
-          <div
-            className={cn(
-              "pointer-events-none absolute bottom-0.5 right-0.5 z-10 flex items-center gap-0.5 rounded bg-[var(--sidebar)] pr-0.5 opacity-0 transition-opacity group-hover/thread:pointer-events-auto group-hover/thread:opacity-100 group-focus-within/thread:pointer-events-auto group-focus-within/thread:opacity-100"
-            )}
-          >
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              title={thread.pinned ? "Unpin chat" : "Pin chat"}
-              aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
-              aria-pressed={thread.pinned}
-              disabled={deleting || pinning === thread.id || (sending && active)}
-              className={cn(
-                "text-muted-foreground hover:bg-muted hover:text-foreground",
-                thread.pinned
-                  ? "fill-current text-primary opacity-100"
-                  : "opacity-0 group-hover/thread:opacity-100 group-focus-within/thread:opacity-100"
-              )}
-              onClick={(event) => {
-                event.stopPropagation();
-                void togglePinned(project.path, thread);
-              }}
-            >
-              <PinIcon aria-hidden="true" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              title={`Delete “${title}”`}
-              aria-label={`Delete “${title}”`}
-              disabled={deleting}
-              className={cn(
-                "text-muted-foreground hover:bg-destructive/15 hover:text-destructive",
-                "opacity-0 group-hover/thread:opacity-100 group-focus-within/thread:opacity-100"
-              )}
-              onClick={(event) => {
-                event.stopPropagation();
-                setPendingDelete({
-                  thread,
-                  projectPath: project.path,
-                });
-              }}
-            >
-              <Trash2Icon aria-hidden="true" />
-            </Button>
-            {active ? (
+          {isEditing ? null : (
+            <div className="pointer-events-none absolute inset-y-0 right-0.5 z-10 flex items-center gap-0.5 rounded-md bg-[var(--sidebar-accent)] pl-1 opacity-0 transition-opacity group-hover/thread:pointer-events-auto group-hover/thread:opacity-100 group-focus-within/thread:pointer-events-auto group-focus-within/thread:opacity-100">
+              {pullRequest ? (
+                <a
+                  {...pullRequestAnchorProps(pullRequest.url)}
+                  title={`Pull request #${pullRequest.number}: ${pullRequest.title} · +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`}
+                  aria-label={`Open pull request #${pullRequest.number}`}
+                  className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  onClick={(event) =>
+                    handlePullRequestClick(event, () => onOpenPullRequest?.(project, thread))
+                  }
+                >
+                  <GitPullRequestIcon className="size-3.5" aria-hidden="true" />
+                </a>
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                title="Fork conversation"
-                aria-label="Fork conversation"
-                disabled={sending || deleting}
-                className="text-muted-foreground hover:bg-muted hover:text-foreground"
+                title={thread.pinned ? "Unpin chat" : "Pin chat"}
+                aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
+                aria-pressed={thread.pinned}
+                disabled={deleting || pinning === thread.id || (sending && active)}
+                className={cn(
+                  "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  thread.pinned && "fill-current text-primary"
+                )}
                 onClick={(event) => {
                   event.stopPropagation();
-                  void onForkThread();
+                  void togglePinned(project.path, thread);
                 }}
               >
-                <GitForkIcon aria-hidden="true" />
+                <PinIcon aria-hidden="true" />
               </Button>
-            ) : null}
-          </div>
+              {active ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  title="Fork conversation"
+                  aria-label="Fork conversation"
+                  disabled={sending || deleting}
+                  className="text-muted-foreground hover:bg-muted hover:text-foreground"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void onForkThread();
+                  }}
+                >
+                  <GitForkIcon aria-hidden="true" />
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                title={`Delete “${title}”`}
+                aria-label={`Delete “${title}”`}
+                disabled={deleting}
+                className="text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setPendingDelete({
+                    thread,
+                    projectPath: project.path,
+                  });
+                }}
+              >
+                <Trash2Icon aria-hidden="true" />
+              </Button>
+            </div>
+          )}
         </div>
+        {children ? renderDelegationChildren(title, children) : null}
       </li>
+    );
+  }
+
+  /**
+   * Jobs a chat dispatched, hung off its row by a tree line that starts under
+   * the row's mark. Each opens the Workbench at that job.
+   */
+  function renderDelegationChildren(parentTitle: string, children: DelegationChildren) {
+    const more = children.hidden[0];
+    const rows = more ? [...children.shown, more] : children.shown;
+    return (
+      <ul aria-label={`Jobs started from ${parentTitle}`} className="m-0 flex list-none flex-col p-0">
+        {rows.map((job, index) => {
+          const last = index === rows.length - 1;
+          const isMore = more !== undefined && last;
+          const status = delegationChildStatus(job.status);
+          return (
+            <li key={isMore ? `delegation-more:${job.jobId}` : `delegation:${job.jobId}`} className="relative pl-[26px]">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-[15px] top-0 h-1/2 w-2 rounded-bl-[5px] border-b border-l border-border"
+              />
+              {last ? null : (
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute bottom-0 left-[15px] top-1/2 border-l border-border"
+                />
+              )}
+              {isMore ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenDelegationJob?.(job.jobId)}
+                  aria-label={`${children.hidden.length} more ${children.hidden.length === 1 ? "job" : "jobs"} from ${parentTitle}, in the Workbench`}
+                  className="flex h-6 w-full min-w-0 cursor-pointer items-center rounded-md pl-1 pr-2 text-left text-[11px] text-muted-foreground outline-none transition-colors hover:bg-[var(--sidebar-accent)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  {children.hidden.length} more
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onOpenDelegationJob?.(job.jobId)}
+                  title={`${job.title} · ${status.label}. Opens in the Workbench.`}
+                  aria-label={`${job.title}. Delegated job, ${status.label}`}
+                  className="flex h-6 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[12px] text-muted-foreground outline-none transition-colors hover:bg-[var(--sidebar-accent)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <DelegationChildIcon tone={status.tone} />
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate",
+                      status.tone === "running" && WORKING_TITLE_CLASS
+                    )}
+                  >
+                    {job.title}
+                  </span>
+                  <span className="shrink-0 text-[10px]">{status.label}</span>
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     );
   }
 
@@ -1179,196 +1385,228 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
           ) : error ? (
             <p className="px-2 py-1 text-xs text-destructive">{error}</p>
           ) : chatViewMode === "compact" ? (
-            <div className="flex flex-col gap-2">
-              <section aria-labelledby="compact-history-heading" className="flex flex-col gap-1">
-                <div className="flex items-center justify-between px-1">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <Clock3Icon className="size-3.5 text-muted-foreground" />
-                    <h2
-                      id="compact-history-heading"
-                      className="m-0 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"
-                    >
-                      Chats
-                    </h2>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-0.5">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      title={`Search chats (${formatChord("Mod+K")})`}
-                      aria-label="Search chats"
-                      onClick={() => onSearch("chats")}
-                    >
-                      <SearchIcon aria-hidden="true" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      title="Open project folder"
-                      aria-label="Open project folder"
-                      onClick={onOpenFolder}
-                    >
-                      <PlusIcon aria-hidden="true" />
-                    </Button>
-                  </div>
-                </div>
-                {projectError ? (
-                  <p className="px-2 pb-1 text-[11px] text-destructive">{projectError}</p>
-                ) : null}
-                {renameError ? (
-                  <p className="px-2 pb-1 text-[11px] text-destructive">{renameError}</p>
-                ) : null}
-              </section>
-
-              {recentThreads.length > 0 ? (
-                <section aria-labelledby="compact-recent-heading" className="flex flex-col gap-0.5">
-                  <div
-                    id="compact-recent-heading"
-                    className="px-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"
-                  >
-                    Recent
-                  </div>
-                  <ul className="m-0 flex list-none flex-col gap-px p-0">
-                    {recentThreads.map(({ project, thread }) =>
-                      renderCompactThreadItem(
-                        project,
-                        thread,
-                        `compact:recent:${project.path}:${thread.id}`
-                      )
+            // One heading tier: the project name is the heading, or the
+            // status when grouping by status. There is no "Chats" label above
+            // it, and a project with no chats is just its heading and its +
+            // button.
+            <div className="flex flex-col gap-3">
+              <div
+                role="group"
+                aria-label="Group chats"
+                className="mx-1 grid grid-cols-2 gap-0.5 rounded-md bg-[color-mix(in_srgb,var(--sidebar-accent)_70%,transparent)] p-0.5"
+              >
+                {(["project", "status"] as const).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={grouping === value}
+                    onClick={() => chooseGrouping(value)}
+                    className={cn(
+                      "h-6 cursor-pointer rounded px-2 text-[11px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50",
+                      grouping === value
+                        ? "bg-[var(--sidebar)] text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
                     )}
-                  </ul>
-                </section>
+                  >
+                    {value === "project" ? "By project" : "By status"}
+                  </button>
+                ))}
+              </div>
+              {projectError ? (
+                <p className="m-0 px-2 text-[11px] text-destructive">{projectError}</p>
+              ) : null}
+              {renameError ? (
+                <p className="m-0 px-2 text-[11px] text-destructive">{renameError}</p>
               ) : null}
 
-              {visibleProjects.map((project) => (
-                <section
-                  key={`compact-project:${project.path}`}
-                  aria-labelledby={`compact-project-heading:${project.path}`}
-                  className="flex flex-col gap-0.5"
-                >
-                  <div className="group/project relative flex items-center gap-0.5">
-                    <button
-                      type="button"
-                      title={project.path}
-                      onClick={() => {
-                        if (!project.active) {
-                          void onOpenProjectChat({ root: project.path });
-                        }
-                      }}
-                      className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left outline-none transition-colors hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50"
+              {grouping === "status" ? (
+                CHAT_STATUS_SECTIONS.map((section) => {
+                  const rows = statusGroups[section];
+                  if (rows.length === 0) return null;
+                  const { label, Icon, iconClass } = STATUS_SECTION_META[section];
+                  return (
+                    <section
+                      key={`compact-status:${section}`}
+                      aria-labelledby={`compact-status-heading:${section}`}
+                      className="flex flex-col"
                     >
-                      <FolderIcon
-                        className={cn(
-                          "size-3.5 shrink-0",
-                          project.active
-                            ? "text-[var(--sidebar-primary)]"
-                            : "text-muted-foreground"
+                      <div className="flex h-7 items-center gap-1.5 pl-2 pr-2">
+                        <Icon className={cn("size-3.5 shrink-0", iconClass)} aria-hidden />
+                        <h2
+                          id={`compact-status-heading:${section}`}
+                          className="m-0 min-w-0 flex-1 truncate text-[12px] font-medium text-muted-foreground"
+                        >
+                          {label}
+                        </h2>
+                        <span
+                          className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70"
+                          aria-hidden="true"
+                        >
+                          {rows.length}
+                        </span>
+                      </div>
+                      <ul className="m-0 flex list-none flex-col gap-px p-0">
+                        {rows.map(({ project, thread }) =>
+                          renderCompactThreadItem(project, thread, `compact:status:${thread.id}`, {
+                            projectLabel: chatProjectLabel(project),
+                          })
                         )}
-                      />
-                      <span
-                        id={`compact-project-heading:${project.path}`}
-                        className="truncate text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
-                      >
-                        {project.name}
-                      </span>
-                    </button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      title={`Project options for ${project.name}`}
-                      aria-label={`Project options for ${project.name}`}
-                      className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
-                      onClick={() => {
-                        setProjectError(null);
-                        setProjectMenuPath((path) =>
-                          path === project.path ? null : project.path
-                        );
-                      }}
-                    >
-                      <MoreHorizontalIcon />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      title={`New chat in ${project.name}`}
-                      aria-label={`New chat in ${project.name}`}
-                      className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
-                      onClick={() => {
-                        void onOpenProjectChat({ root: project.path, newThread: true });
-                      }}
-                    >
-                      <PlusIcon aria-hidden="true" />
-                    </Button>
-                    {projectMenuPath === project.path ? (
-                      <div
-                        ref={projectMenuRef}
-                        className="absolute right-0 top-8 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl"
-                      >
-                        <div className="flex items-center gap-2 px-2 pb-1.5">
-                          <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                          <div className="min-w-0">
-                            <div className="truncate text-xs font-medium text-foreground">
-                              {project.name}
-                            </div>
-                            <div className="truncate text-[10px] text-muted-foreground">
-                              Project actions
-                            </div>
-                          </div>
-                        </div>
-                        <button
+                      </ul>
+                    </section>
+                  );
+                })
+              ) : (
+                <>
+                  {recentThreads.length > 0 ? (
+                    <section aria-labelledby="compact-free-heading" className="flex flex-col">
+                      <div className="flex h-7 items-center gap-0.5 pl-2 pr-0.5">
+                        <h2
+                          id="compact-free-heading"
+                          className="m-0 min-w-0 flex-1 truncate text-[12px] font-medium text-muted-foreground"
+                        >
+                          No project
+                        </h2>
+                        <Button
                           type="button"
-                          disabled={projectBusy || project.active}
-                          title={
-                            project.active
-                              ? "Switch projects before removing the active workspace"
-                              : "Keep the folder and chats on disk"
-                          }
-                          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-45"
+                          variant="ghost"
+                          size="icon-xs"
+                          title="New chat without a project"
+                          aria-label="New chat without a project"
+                          className="shrink-0 text-muted-foreground"
+                          onClick={onNewChat}
+                        >
+                          <PlusIcon aria-hidden="true" />
+                        </Button>
+                      </div>
+                      <ul className="m-0 flex list-none flex-col gap-px p-0">
+                        {recentThreads.map(({ project, thread }) =>
+                          renderCompactThreadItem(project, thread, `compact:free:${thread.id}`)
+                        )}
+                      </ul>
+                    </section>
+                  ) : null}
+
+                  {visibleProjects.map((project) => (
+                    <section
+                      key={`compact-project:${project.path}`}
+                      aria-labelledby={`compact-project-heading:${project.path}`}
+                      className="flex flex-col"
+                    >
+                      <div className="group/project relative flex h-7 items-center gap-0.5 pl-2 pr-0.5">
+                        <h2 className="m-0 min-w-0 flex-1 text-[12px] font-medium">
+                          <button
+                            type="button"
+                            id={`compact-project-heading:${project.path}`}
+                            title={project.path}
+                            aria-current={project.active ? "true" : undefined}
+                            onClick={() => {
+                              if (!project.active) {
+                                void onOpenProjectChat({ root: project.path });
+                              }
+                            }}
+                            className={cn(
+                              "block max-w-full cursor-pointer truncate rounded-sm text-left outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
+                              project.active ? "text-foreground/85" : "text-muted-foreground"
+                            )}
+                          >
+                            {project.name}
+                          </button>
+                        </h2>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          title={`Project options for ${project.name}`}
+                          aria-label={`Project options for ${project.name}`}
+                          className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
                           onClick={() => {
-                            setProjectMenuPath(null);
-                            setWorkspaceAction({ project });
+                            setProjectError(null);
+                            setProjectMenuPath((path) =>
+                              path === project.path ? null : project.path
+                            );
                           }}
                         >
-                          <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                          <span className="min-w-0 flex-1 truncate">Remove from Zest</span>
-                        </button>
-                        {project.active ? (
-                          <p className="px-2 pt-1.5 text-[10px] leading-4 text-muted-foreground">
-                            Switch projects before managing this folder.
-                          </p>
+                          <MoreHorizontalIcon />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          title={`New chat in ${project.name}`}
+                          aria-label={`New chat in ${project.name}`}
+                          className="shrink-0 text-muted-foreground"
+                          onClick={() => {
+                            void onOpenProjectChat({ root: project.path, newThread: true });
+                          }}
+                        >
+                          <PlusIcon aria-hidden="true" />
+                        </Button>
+                        {projectMenuPath === project.path ? (
+                          <div
+                            ref={projectMenuRef}
+                            className="absolute right-0 top-8 z-30 w-[238px] rounded-lg border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-xl"
+                          >
+                            <div className="flex items-center gap-2 px-2 pb-1.5">
+                              <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                              <div className="min-w-0">
+                                <div className="truncate text-xs font-medium text-foreground">
+                                  {project.name}
+                                </div>
+                                <div className="truncate text-[10px] text-muted-foreground">
+                                  Project actions
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={projectBusy || project.active}
+                              title={
+                                project.active
+                                  ? "Switch projects before removing the active workspace"
+                                  : "Keep the folder and chats on disk"
+                              }
+                              className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-45"
+                              onClick={() => {
+                                setProjectMenuPath(null);
+                                setWorkspaceAction({ project });
+                              }}
+                            >
+                              <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span className="min-w-0 flex-1 truncate">Remove from Zest</span>
+                            </button>
+                            {project.active ? (
+                              <p className="px-2 pt-1.5 text-[10px] leading-4 text-muted-foreground">
+                                Switch projects before managing this folder.
+                              </p>
+                            ) : null}
+                          </div>
                         ) : null}
                       </div>
-                    ) : null}
-                  </div>
-                  <ul className="m-0 flex list-none flex-col gap-px p-0">
-                    {project.threads.length === 0 ? (
-                      <li className="px-2 py-1 text-[11px] text-muted-foreground/80">
-                        No chats yet
-                      </li>
-                    ) : (
-                      [...project.threads]
-                        .sort((a, b) => b.updatedAt - a.updatedAt)
-                        .map((thread) =>
-                          renderCompactThreadItem(
-                            project,
-                            thread,
-                            `compact:project:${project.path}:${thread.id}`
-                          )
-                        )
-                    )}
-                  </ul>
-                </section>
-              ))}
+                      {project.threads.length > 0 ? (
+                        // Backend order: pinned first, then most recently updated.
+                        <ul className="m-0 flex list-none flex-col gap-px p-0">
+                          {project.threads.map((thread) =>
+                            renderCompactThreadItem(
+                              project,
+                              thread,
+                              `compact:project:${project.path}:${thread.id}`
+                            )
+                          )}
+                        </ul>
+                      ) : null}
+                    </section>
+                  ))}
+                </>
+              )}
 
-              {recentThreads.length === 0 && visibleProjects.length === 0 ? (
-                <p className="px-2 py-1 text-xs text-muted-foreground">
-                  Open a project folder to get started.
-                </p>
-              ) : null}
+              <button
+                type="button"
+                onClick={onOpenFolder}
+                className="flex h-7 items-center gap-2 rounded-md px-2 text-left text-[12px] font-medium text-muted-foreground outline-none transition-colors hover:bg-[var(--sidebar-accent)] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+              >
+                <FolderPlusIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                Open a project folder
+              </button>
             </div>
           ) : (
             <>
@@ -1593,56 +1831,21 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
        * branch the header is actually for.
        */}
       <div className="relative z-20 mt-auto shrink-0 border-t border-border/60 p-1.5">
-        {open ? (
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={onOpenProfile}
-              aria-current={profileActive ? "page" : undefined}
-              title="Your profile"
-              className={cn(
-                "flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-left outline-none transition-colors",
-                "hover:bg-[var(--sidebar-accent)] focus-visible:ring-2 focus-visible:ring-ring/50",
-                profileActive && "bg-[var(--sidebar-accent)]"
-              )}
-            >
-              <UserAvatar
-                avatarDataUrl={profile.avatarDataUrl}
-                displayName={profile.displayName}
-                className="shrink-0"
-              />
-              <span className="min-w-0 flex-1 leading-tight">
-                <span className="block truncate text-[13px] font-medium text-foreground">
-                  {profile.displayName.trim() || "Zest"}
-                </span>
-                {providerLabel ? (
-                  <span className="block truncate text-[11px] text-muted-foreground">
-                    {providerLabel}
-                  </span>
-                ) : null}
-              </span>
-            </button>
-            <AgentQuotaButton
-              providers={providers}
-              refreshKey={quotaRefreshKey}
-              placement="above"
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-1">
-            <UserAvatarButton
-              avatarDataUrl={profile.avatarDataUrl}
-              displayName={profile.displayName}
-              title="Your profile"
-              onClick={() => onOpenProfile?.()}
-            />
-            <AgentQuotaButton
-              providers={providers}
-              refreshKey={quotaRefreshKey}
-              placement="above"
-            />
-          </div>
-        )}
+        <div className={open ? "flex items-center gap-0.5" : "flex flex-col items-center gap-1"}>
+          <AccountMenu
+            profile={profile}
+            providerLabel={providerLabel}
+            compact={!open}
+            profileActive={profileActive}
+            onOpenProfile={onOpenProfile}
+            onOpenSettings={onOpenSettings}
+          />
+          <AgentQuotaButton
+            providers={providers}
+            refreshKey={quotaRefreshKey}
+            placement="above"
+          />
+        </div>
       </div>
 
       <ConfirmDialog

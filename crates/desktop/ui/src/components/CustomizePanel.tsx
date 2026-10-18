@@ -1,9 +1,11 @@
 import {
   ArrowLeftIcon,
   BookOpenIcon,
+  BoxesIcon,
   CheckIcon,
   ChevronRightIcon,
   FolderOpenIcon,
+  GitPullRequestIcon,
   KeyboardIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -19,6 +21,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { FontPicker } from "@/components/FontPicker";
+import { ProviderIcon } from "@/components/ProviderIcon";
+import { ProviderSourceTag } from "@/components/ProviderSourceTag";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { ThemePicker } from "@/components/ThemePicker";
@@ -34,7 +38,10 @@ import {
   messageFromError,
   validateMcpServerDraft,
 } from "@/lib/mcpServerForm";
+import { providerSource, sharedProviderLabels } from "@/lib/models";
 import type { CustomizeTab } from "@/lib/navigationHistory";
+import { setPickerProviderShown, useHiddenPickerProviders } from "@/lib/pickerProviders";
+import { setResponseBlockStreaming, useResponseBlockStreaming } from "@/lib/responseStreaming";
 import {
   applyChatViewMode,
   getSavedChatViewMode,
@@ -46,6 +53,7 @@ import type {
   McpServerRow,
   NowPlayingView,
   PluginView,
+  ProviderRow,
   WallpaperFilterId,
   WallpaperView,
 } from "@/lib/types";
@@ -57,6 +65,9 @@ type Props = {
   /** Whether MCP tools can reach this chat's provider at all. */
   providerOwnsAgentLoop: boolean;
   providerLabel: string;
+  /** The providers the model picker can list, and the one this chat uses. */
+  providers: ReadonlyArray<ProviderRow>;
+  currentProviderId: string;
   tab: CustomizeTab;
   sending: boolean;
   onTabChange: (tab: CustomizeTab) => void;
@@ -67,6 +78,7 @@ const TABS: { id: CustomizeTab; label: string; icon: typeof PlugIcon }[] = [
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
   { id: "typography", label: "Typography", icon: TypeIcon },
   { id: "chat", label: "Chat view", icon: MessageSquareIcon },
+  { id: "models", label: "Models", icon: BoxesIcon },
   { id: "mcp", label: "MCPs", icon: PlugIcon },
   { id: "skills", label: "Skills", icon: BookOpenIcon },
   { id: "plugins", label: "Extras", icon: PuzzleIcon },
@@ -148,6 +160,8 @@ function draftFrom(server: McpServerRow): ServerDraft {
 export function CustomizePanel({
   providerOwnsAgentLoop,
   providerLabel,
+  providers,
+  currentProviderId,
   tab,
   sending,
   onTabChange,
@@ -250,8 +264,83 @@ export function CustomizePanel({
         {tab === "appearance" ? <AppearancePanel /> : null}
         {tab === "typography" ? <TypographyPanel /> : null}
         {tab === "chat" ? <ChatViewPanel /> : null}
+        {tab === "models" ? (
+          <ModelsPanel providers={providers} currentProviderId={currentProviderId} />
+        ) : null}
       </div>
     </div>
+  );
+}
+
+function ModelsPanel({
+  providers,
+  currentProviderId,
+}: {
+  providers: ReadonlyArray<ProviderRow>;
+  currentProviderId: string;
+}) {
+  const hidden = useHiddenPickerProviders();
+  // The picker only ever lists providers you can switch to, plus the current one.
+  const rows = providers.filter(
+    (row) => row.id === currentProviderId || (row.selectable && row.models.length > 0)
+  );
+  const sharedLabels = sharedProviderLabels(rows);
+
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionHeading
+        title="Model picker"
+        hint="Choose which providers' models the composer's model picker lists. Unchecked providers stay connected and can still be picked in the provider sheet."
+      />
+      {rows.length === 0 ? (
+        <p className="m-0 text-[11px] text-muted-foreground">No providers are connected yet.</p>
+      ) : (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0" aria-label="Providers in the model picker">
+          {rows.map((row) => {
+            const current = row.id === currentProviderId;
+            const shown = current || !hidden.has(row.id);
+            const count = row.models.length || (row.defaultModel ? 1 : 0);
+            const models = `${count} ${count === 1 ? "model" : "models"}`;
+            return (
+              <li key={row.id}>
+                <label
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5",
+                    current ? "cursor-default" : "cursor-pointer hover:bg-accent/40"
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    className="size-4 shrink-0 accent-[var(--primary)]"
+                    checked={shown}
+                    disabled={current}
+                    onChange={(event) => setPickerProviderShown(row.id, event.target.checked)}
+                  />
+                  <ProviderIcon providerId={row.id} className="size-4 shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate text-sm font-medium">{row.label}</span>
+                      <ProviderSourceTag source={providerSource(row.ownsAgentLoop)} />
+                      {/* The config id is the one name two "Codex" rows never share. */}
+                      {sharedLabels.has(row.label) ? (
+                        <span className="truncate font-mono text-[11px] text-muted-foreground">
+                          {row.id}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="block text-[11px] text-muted-foreground">
+                      {[row.method, current ? "in use in this chat, so always listed" : models]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -1139,6 +1228,7 @@ function TypographyPanel() {
 
 function ChatViewPanel() {
   const [mode, setMode] = useState<ChatViewMode>(() => getSavedChatViewMode());
+  const blockStreaming = useResponseBlockStreaming();
 
   useEffect(() => subscribeChatViewChange(() => setMode(getSavedChatViewMode())), []);
 
@@ -1148,37 +1238,74 @@ function ChatViewPanel() {
   }
 
   return (
-    <section className="flex flex-col gap-3">
-      <SectionHeading
-        title="Chat history"
-        hint="Choose how the chat list in the sidebar is organized. The change applies immediately."
-      />
-      <div
-        role="radiogroup"
-        aria-label="Chat history visualization"
-        className="grid gap-3 sm:grid-cols-2"
-      >
-        <ChatViewOption
-          mode="project"
-          selected={mode === "project"}
-          title="Project tree"
-          description="Keep the current expandable project folders and full chat rows."
-          onSelect={selectMode}
+    <div className="flex flex-col gap-6">
+      <section className="flex flex-col gap-3">
+        <SectionHeading
+          title="Chat history"
+          hint="Choose how the chat list in the sidebar is organized. The change applies immediately."
         />
-        <ChatViewOption
-          mode="compact"
-          selected={mode === "compact"}
-          title="Compact list"
-          description="Group chats by project and show the branch and recent time at a glance."
-          onSelect={selectMode}
+        <div
+          role="radiogroup"
+          aria-label="Chat history visualization"
+          className="grid gap-3 sm:grid-cols-2"
+        >
+          <ChatViewOption
+            mode="project"
+            selected={mode === "project"}
+            title="Project tree"
+            description="Keep the current expandable project folders and full chat rows."
+            onSelect={selectMode}
+          />
+          <ChatViewOption
+            mode="compact"
+            selected={mode === "compact"}
+            title="Compact list"
+            description="One line per chat under quiet project names. Marks appear only when a chat needs you."
+            onSelect={selectMode}
+          />
+        </div>
+        <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
+          Compact list shows each chat as its title and one mark: a spinner while it works, an amber
+          dot when it needs approval, or a branch or pull request icon. A provider logo appears only
+          for chats on a different provider. Projects and chats keep the same data and actions.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-3 border-t border-border/60 pt-5">
+        <SectionHeading
+          title="Response display"
+          hint="Choose how answers appear while they stream. The change applies immediately."
         />
-      </div>
-      <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
-        Compact list keeps more chats visible by showing the project, title, branch, and time in a
-        tight row. It changes the history presentation only; projects and chats keep the same data
-        and actions.
-      </p>
-    </section>
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">Stream complete blocks</div>
+            <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              Show each paragraph or code block once it is complete. Turn it off to show text as it
+              arrives.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={blockStreaming}
+            aria-label="Stream responses by complete blocks"
+            title="Stream responses by complete blocks"
+            onClick={() => setResponseBlockStreaming(!blockStreaming)}
+            className={cn(
+              "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+              blockStreaming ? "bg-primary" : "bg-muted"
+            )}
+          >
+            <span
+              className={cn(
+                "pointer-events-none size-4 rounded-full bg-background shadow-sm transition-transform",
+                blockStreaming ? "translate-x-4" : "translate-x-0"
+              )}
+            />
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1231,24 +1358,23 @@ function ChatViewPreview({ mode }: { mode: ChatViewMode }) {
     return (
       <div
         aria-hidden="true"
-        className="mt-3 overflow-hidden rounded-md border border-border/60 bg-[#101216] px-2 py-1.5 text-left text-[9px] text-white/75"
+        className="mt-3 overflow-hidden rounded-md border border-border/60 bg-background/70 px-2 py-1.5 text-left text-[9px]"
       >
-        <div className="flex items-center justify-between gap-2 text-[8px] text-white/45">
-          <span className="truncate">zest @ workspace</span>
-          <span className="shrink-0 tabular-nums">7m</span>
+        <div className="flex items-center justify-between px-1.5 py-0.5 text-muted-foreground">
+          <span className="truncate">zest-harness</span>
+          <PlusIcon className="size-2.5 shrink-0" />
         </div>
-        <div className="mt-0.5 flex min-w-0 items-center gap-1">
-          <MessageSquareIcon className="size-2.5 shrink-0 text-white/35" />
-          <span className="truncate font-medium text-white/85">Fix session shortcuts</span>
+        <div className="flex items-center gap-1.5 rounded bg-secondary/60 px-1.5 py-1 text-foreground/90">
+          <GitPullRequestIcon className="size-2.5 shrink-0 text-primary" />
+          <span className="truncate">Fix session shortcuts</span>
         </div>
-        <div className="mt-0.5 flex items-center gap-1 text-[8px] text-white/35">
-          <span>↳</span>
-          <span>fix/session-shortcuts</span>
-          <span className="ml-auto rounded bg-indigo-500/30 px-1 text-indigo-200">#12</span>
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-muted-foreground">
+          <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+          <span className="truncate text-foreground/80">Browser sidebar</span>
         </div>
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-white/10 pt-1 text-[8px] text-white/40">
-          <span className="truncate">Browser sidebar</span>
-          <span className="shrink-0 tabular-nums">2h</span>
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-muted-foreground">
+          <span className="size-1.5 shrink-0 rounded-full border border-muted-foreground/60" />
+          <span className="truncate text-foreground/80">Composer overflow</span>
         </div>
       </div>
     );

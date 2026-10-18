@@ -3,13 +3,14 @@ import {
   BotIcon,
   ChartColumnIcon,
   ChevronRightIcon,
+  LightbulbIcon,
   type LucideIcon,
-  SettingsIcon,
   ServerIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
 
+import { AdvisorSettings } from "@/components/AdvisorSettings";
 import { Button } from "@/components/ui/button";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import {
@@ -21,12 +22,10 @@ import { WorkerModelPicker } from "@/components/WorkerModelPicker";
 import { getBackend } from "@/lib/backend";
 import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
-import {
-  setResponseBlockStreaming,
-  useResponseBlockStreaming,
-} from "@/lib/responseStreaming";
 import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 import type {
+  AdvisorChoice,
+  AdvisorSettings as AdvisorSettingsData,
   ExternalAgentCheck,
   ExternalAgentRow,
   ProviderRow,
@@ -36,6 +35,9 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+/** Sections the account menu can open Settings at. */
+export type SettingsSectionId = "user" | "provider" | "advisor" | "delegation" | "usage";
+
 type Props = {
   open: boolean;
   session: SessionInfo;
@@ -43,8 +45,8 @@ type Props = {
   effort: EffortId;
   sending: boolean;
   profile: UserProfile;
-  /** Open the User section first (avatar click). */
-  focusUser?: boolean;
+  /** Open this section first, and scroll to it. */
+  focusSection?: SettingsSectionId | null;
   onClose: () => void;
   onChangeProvider: () => void;
   /** Rebuild the session after credentials or an external worker change. */
@@ -79,6 +81,12 @@ function externalContextSummary(row: UsageSnapshot["externalWorkers"][number]) {
   return value == null ? "Context not reported" : `Context ${value.toLocaleString()} reported`;
 }
 
+function advisorHint(advisor: AdvisorSettingsData | null): string {
+  const option = advisor?.options.find((candidate) => candidate.id === advisor.provider);
+  if (!advisor || !option) return "Off";
+  return `${option.label} · ${modelLabel(advisor.model || option.defaultModel)}`;
+}
+
 function SettingsSection({
   title,
   hint,
@@ -102,9 +110,12 @@ function SettingsSection({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (defaultOpen) setOpen(true);
+    if (!defaultOpen) return;
+    setOpen(true);
+    rootRef.current?.scrollIntoView({ block: "nearest" });
   }, [defaultOpen]);
 
   useEffect(() => {
@@ -112,7 +123,12 @@ function SettingsSection({
   }, [openSignal]);
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border/50">
+    <Collapsible
+      ref={rootRef}
+      open={open}
+      onOpenChange={setOpen}
+      className="border-b border-border/50"
+    >
       <CollapsibleTrigger
         className={cn(
           "flex w-full cursor-pointer items-center gap-2.5 px-4 py-3 text-left outline-none transition-colors",
@@ -152,7 +168,7 @@ export function SettingsPanel({
   effort,
   sending,
   profile,
-  focusUser = false,
+  focusSection = null,
   onClose,
   onChangeProvider,
   onReloadSession,
@@ -162,7 +178,6 @@ export function SettingsPanel({
   onProfileChange,
 }: Props) {
   const supportsEffort = effortsForModel(session.models, model).length > 0;
-  const responseBlockStreaming = useResponseBlockStreaming();
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   useDialogFocusTrap(open, panelRef);
@@ -181,6 +196,11 @@ export function SettingsPanel({
   } | null>(null);
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState<string | null>(null);
+
+  const [advisor, setAdvisor] = useState<AdvisorSettingsData | null>(null);
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorSaving, setAdvisorSaving] = useState(false);
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
 
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [displayName, setDisplayName] = useState(profile.displayName);
@@ -205,6 +225,8 @@ export function SettingsPanel({
     setExternalLoading(true);
     setExternalError(null);
     setExternalChecks({});
+    setAdvisorLoading(true);
+    setAdvisorError(null);
 
     const backend = getBackend();
     // Settled, not all: these are independent sections, and one of them
@@ -213,8 +235,9 @@ export function SettingsPanel({
       backend.listProviders(),
       backend.listExternalAgents(),
       backend.usageSnapshot(),
+      backend.advisorSettings(),
     ])
-      .then(([rowsR, externalR, snapR]) => {
+      .then(([rowsR, externalR, snapR, advisorR]) => {
         if (cancelled) return;
 
         if (rowsR.status === "fulfilled") {
@@ -235,11 +258,14 @@ export function SettingsPanel({
         }
 
         setUsage(snapR.status === "fulfilled" ? snapR.value : null);
+        if (advisorR.status === "fulfilled") setAdvisor(advisorR.value);
+        else setAdvisorError("Could not load advisor settings. Try again.");
       })
       .finally(() => {
         if (!cancelled) {
           setLoading(false);
           setExternalLoading(false);
+          setAdvisorLoading(false);
         }
       });
 
@@ -401,6 +427,29 @@ export function SettingsPanel({
     }
   }
 
+  async function saveAdvisor(choice: AdvisorChoice | null) {
+    if (sending) return;
+    setAdvisorSaving(true);
+    setAdvisorError(null);
+    try {
+      setAdvisor(await getBackend().setAdvisor(choice));
+      // The tool is registered when the session is built, so the open chat
+      // only gains or loses it after a rebuild.
+      if (onReloadSession) await onReloadSession();
+    } catch (error) {
+      // The backend explains a refused choice ("runs its own agent loop…").
+      setAdvisorError(
+        typeof error === "string"
+          ? error
+          : error instanceof Error
+            ? error.message
+            : "Could not save the advisor. Try again."
+      );
+    } finally {
+      setAdvisorSaving(false);
+    }
+  }
+
   async function onPickAvatar(file: File | null) {
     if (!file) return;
     setProfileError(null);
@@ -450,7 +499,7 @@ export function SettingsPanel({
             title="User"
             icon={UserIcon}
             hint={displayName.trim() || "Name & photo"}
-            defaultOpen={focusUser}
+            defaultOpen={focusSection === "user"}
           >
             <div className="flex items-center gap-3">
               <button
@@ -514,48 +563,10 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
-            title="Response display"
-            icon={SettingsIcon}
-            hint={responseBlockStreaming ? "Complete blocks" : "Text as it arrives"}
-          >
-            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/80 bg-card/70 px-3 py-2.5">
-              <div className="min-w-0">
-                <div className="text-sm font-medium">Stream complete blocks</div>
-                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                  Show each paragraph or code block once it is complete.
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={responseBlockStreaming}
-                aria-label="Stream responses by complete blocks"
-                title="Stream responses by complete blocks"
-                onClick={() =>
-                  setResponseBlockStreaming(!responseBlockStreaming)
-                }
-                className={cn(
-                  "relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                  responseBlockStreaming ? "bg-primary" : "bg-muted"
-                )}
-              >
-                <span
-                  className={cn(
-                    "pointer-events-none size-4 rounded-full bg-background shadow-sm transition-transform",
-                    responseBlockStreaming ? "translate-x-4" : "translate-x-0"
-                  )}
-                />
-              </button>
-            </div>
-            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-              Turn it off to show text as it arrives.
-            </p>
-          </SettingsSection>
-
-          <SettingsSection
             title="Provider"
             icon={ServerIcon}
             hint={`${session.label} · ${provider?.statusLabel ?? session.provider}`}
+            defaultOpen={focusSection === "provider"}
           >
             <div className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5">
               <div className="text-sm font-medium">{session.label}</div>
@@ -631,8 +642,28 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
+            title="Advisor"
+            icon={LightbulbIcon}
+            hint={advisorHint(advisor)}
+            defaultOpen={focusSection === "advisor"}
+          >
+            <AdvisorSettings
+              settings={advisor}
+              loading={advisorLoading}
+              saving={advisorSaving}
+              error={advisorError}
+              chatProviderId={session.provider}
+              chatProviderLabel={session.label}
+              chatOwnsAgentLoop={session.ownsAgentLoop}
+              sending={sending}
+              onSave={(choice) => void saveAdvisor(choice)}
+            />
+          </SettingsSection>
+
+          <SettingsSection
             title="CLI delegation"
             icon={BotIcon}
+            defaultOpen={focusSection === "delegation"}
             hint={
               externalLoading
                 ? "Loading..."
@@ -774,6 +805,7 @@ export function SettingsPanel({
           <SettingsSection
             title="Usage"
             icon={ChartColumnIcon}
+            defaultOpen={focusSection === "usage"}
             hint={
               usage && (usage.providers.length || usage.externalWorkers.length)
                 ? `${usage.providers.length + usage.externalWorkers.length} source${usage.providers.length + usage.externalWorkers.length === 1 ? "" : "s"}`

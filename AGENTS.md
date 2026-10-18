@@ -48,9 +48,14 @@ node scripts/zest-control.mjs stop
 If you find yourself scripting the same interaction twice, add a command or an
 `inspect` probe to `scripts/zest-control-daemon.mjs` instead.
 
+The UI dev server listens on `ZEST_UI_PORT` (default 1420) for `ui:dev`,
+`ui:e2e`, and zest-control alike. Give each worktree you test in at the same
+time its own port, e.g. `ZEST_UI_PORT=1421`. Both tools reuse a running server
+only when it serves their own checkout, and refuse with a hint otherwise.
+
 | Goal | Command |
 | --- | --- |
-| Look at the UI yourself | `npm run ui:dev`, then open `http://127.0.0.1:1420/?fixture=1` |
+| Look at the UI yourself | `npm run ui:dev`, then open `http://127.0.0.1:1420/?fixture=1` (or your `ZEST_UI_PORT`) |
 | Browser tests against that fixture UI | `npm run ui:e2e` (one spec: `npm run ui:e2e -- split-workspace`) |
 | UI unit tests | `npm run ui:test` |
 | One Rust module's tests | `cargo test -p zest-core --lib -- provider::` |

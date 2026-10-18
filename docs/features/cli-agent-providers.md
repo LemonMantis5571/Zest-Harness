@@ -2,6 +2,8 @@
 title: CLI agent providers
 summary: Use Claude Code, the Codex CLI, or Cursor as the main chat provider, with their own sign-in and agent loop and Zest's approval cards.
 paths:
+  - crates/core/src/provider/claude_aliases.rs
+  - crates/core/src/provider/claude_cli_version.rs
   - crates/core/src/provider/claude_code.rs
   - crates/core/src/provider/claude_control.rs
   - crates/core/src/provider/claude_stream.rs
@@ -14,6 +16,8 @@ paths:
   - scripts/acp-probe.mjs
   - scripts/acp-timing-report.mjs
 verify:
+  - cargo test -p zest-core --lib provider::claude_aliases
+  - cargo test -p zest-core --lib provider::claude_cli_version
   - cargo test -p zest-core --lib provider::claude_code
   - cargo test -p zest-core --lib provider::claude_control
   - cargo test -p zest-core --lib provider::claude_stream
@@ -43,6 +47,51 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   is sent for explicit Haiku 5.5 as well as the larger models, but not legacy
   Haiku ids or the deployment-dependent `haiku` alias. A stored session is resumed with `--resume` only if
   it was created for the same model; `/btw` side turns use `--fork-session`.
+- With `Task` in scope Claude Code also gets `--forward-subagent-text`, so
+  subagent records (tagged `parent_tool_use_id`) reach the stream. They never
+  join the answer or open rows of their own: the subagent's latest message or
+  tool (`Agent <description>: Grep cacheKey in scripts`) and any failed tool
+  show on the parent `Agent` row, which completes with its own title when its
+  own result arrives. A subagent's successful edit still reports its file. The
+  contract counts them as `assistant:subagent` and `user:subagent`.
+- Claude Code models: with no `models` in the config, Zest offers only explicit
+  ids (`BUILTIN_MODELS`: Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1) and the
+  default is `claude-sonnet-5-5`. The CLI's bare aliases (`opus`, `sonnet`,
+  `haiku`, `fable`) are no longer offered: the CLI resolves them to older
+  models (on 2.1.220, `opus` ran as `claude-opus-5` and `haiku` as Haiku 4.5).
+  An alias the config names is still offered and accepted. The model it ran
+  as is read from `system:init` (`ClaudeNormalizer::model`), saved by
+  `claude_aliases` to `<data dir>/zest/claude-code-aliases.json`, and sent as
+  `ModelSpec.resolves_to` so the picker reads "opus → Opus 5". A remembered
+  alias the catalogue no longer lists moves to its explicit successor
+  (`Provider::successor_model`) instead of to the default. The same migration
+  applies to an alias in `[default].model`; aliases explicitly offered by the
+  provider configuration are kept. "Enable Claude
+  Code" writes no `models` list, so the built-in catalogue applies.
+- Claude Code CLI version: an explicit model the installed CLI is too old for
+  is marked in the catalogue (`ModelSpec.needs_cli`: CLI name, minimum,
+  installed version, `claude update`) and stays selectable; if the turn is
+  refused anyway, the API's error reaches the chat as before. Minimums are
+  `MIN_CLI_VERSIONS` beside `BUILTIN_MODELS` (Opus 5.5 2.1.280, Fable 5.1
+  2.1.251); a model not listed there, an alias, or an unknown CLI version is
+  never marked. Passive discovery never executes the configured command,
+  including bare `claude`, and never reads CLI-version environment overrides.
+  Only the exact bare default command `claude` is discovered, using absolute
+  entries in the parent process's PATH (and its extension order on Windows).
+  An empty or relative entry before the selected absolute candidate makes the
+  version unknown without inspecting the current directory; later entries do not
+  affect an already selected candidate. The first matching
+  candidate decides the result: an opaque wrapper stays unknown even if a later
+  PATH entry has readable metadata. Canonical npm `cli.js` links and an exact
+  supported npm Windows `.cmd` launcher template (LF or CRLF) use a
+  bounded regular `package.json` whose name is `@anthropic-ai/claude-code` and
+  whose version is an exact release. Shell wrappers, altered launchers, and
+  comments merely mentioning that package stay unknown; arbitrary shell syntax
+  is not parsed. Evident native `claude/versions` layouts
+  can supply the version from their canonical path. Windows standalone executables
+  also use bounded version resources, requiring ProductName `Claude Code` and a
+  valid fixed file-version record. Custom commands and explicit paths remain
+  unknown. Unit fixtures can still `seed` a version to exercise the warning contract.
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
 - Codex CLI (`codex_app_server`): JSON-RPC over `codex app-server --listen
@@ -98,6 +147,14 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
 ## Verify
 
 - Unit tests above use recorded shapes and fake hosts; no CLI needed.
+- `provider::claude_cli_version` exercises the production metadata lookup with
+  disposable npm/native-layout files and rejects malformed or oversized metadata,
+  earlier empty/relative PATH entries, misleading wrapper comments, and altered
+  npm launchers. Its Windows-only ignored
+  `installed_windows_resource_metadata` test accepts an absolute executable path
+  in `ZEST_TEST_CLAUDE_EXE` and an expected exact release in
+  `ZEST_TEST_CLAUDE_VERSION`. It reads that file's actual resources without
+  executing it; this separate host check is not CI coverage of every installer.
 - Live (spends account usage): `live_claude_code_session_survives_a_second_turn`
   and `live_cursor_latency` are ignored tests, e.g.
   `cargo test -p zest-core live_cursor_latency --lib -- --ignored --nocapture`.
@@ -117,9 +174,24 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   camelCase.
 - Cursor's `toolCallId` contains a newline; approval ids are Zest-minted instead.
 - `CodexAppServerProvider::discover_models` has no caller today.
-- Explicit current Claude ids need a sufficiently new Claude Code client:
-  Opus 5.5 requires 2.1.280, Sonnet 5.5 requires 2.1.284 and Haiku 5.5
-  requires 2.1.293. See the official [model configuration](https://code.claude.com/docs/en/model-config).
+- Some explicit Claude ids need a newer Claude Code client, and the API says
+  so in the turn's error. Checked on 2026-10-17 with 2.1.220: Sonnet 5.5 and
+  Haiku 5.5 ran; Opus 5.5 was refused ("2.1.280 or newer is required") and
+  so was Fable 5.1 (2.1.251). The official [model configuration](https://code.claude.com/docs/en/model-config)
+  page names later releases (Sonnet 5.5 2.1.284, Haiku 5.5 2.1.293, Fable 5.1
+  2.1.257), which the API did not enforce on 2.1.220. `MIN_CLI_VERSIONS` follows
+  the API's refusals, so Sonnet and Haiku are not marked.
+- The former automatic `--version` probe was removed. Project commands are
+  untrusted during passive metadata discovery, and waiting for a wrapper's
+  exit did not bound stdout collection when a descendant retained the pipe.
+  There are now no probe children, reader threads, output joins, or inherited
+  credentials to clean up. Metadata discovery never follows arbitrary wrapper
+  instructions. Windows resources are read from an absolute canonical filename
+  with [GetFileVersionInfoW](https://learn.microsoft.com/en-us/windows/win32/api/winver/nf-winver-getfileversioninfow)
+  and [VerQueryValueW](https://learn.microsoft.com/en-us/windows/win32/api/winver/nf-winver-verqueryvaluew);
+  returned subblock ranges and lengths are checked before reading them. Metadata
+  is an advisory label, not executable authentication, and an unrecognized
+  installation stays unknown.
 - Cursor choices stay account-specific. Zest does not add API-only GPT ids to
   Cursor when `cursor-agent models` does not offer them. See Cursor's
   [model discovery command](https://cursor.com/docs/cli/reference/parameters).

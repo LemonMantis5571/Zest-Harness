@@ -1,9 +1,11 @@
 import type {
+  AssistantStep,
   ChatEvent,
   ChatMessage,
   ProviderActivityPart,
   ToolPart,
 } from "./types.ts";
+import type { TraceMessage } from "./assistantTrace.ts";
 
 /** Pure chat UI projection state reduced from desktop `chat-event` payloads. */
 export type ChatUiState = {
@@ -32,6 +34,8 @@ export type ChatReduceResult = {
 export type ChatReduceOptions = {
   /** Injected for deterministic tests; production uses crypto UUIDs. */
   newId?: (prefix: string) => string;
+  /** Unix ms for step timings; injected for deterministic tests. */
+  now?: () => number;
 };
 
 function defaultNewId(prefix: string): string {
@@ -73,6 +77,33 @@ export function joinThinkingStream(prev: string, delta: string): string {
   return prev + delta;
 }
 
+/** Record a tool or activity step the first time any event names it. */
+function withStep(
+  steps: AssistantStep[] | undefined,
+  step: Exclude<AssistantStep, { kind: "thinking" }>
+): AssistantStep[] {
+  const current = steps ?? [];
+  return current.some((item) => item.kind === step.kind && item.id === step.id)
+    ? current
+    : [...current, step];
+}
+
+/**
+ * Extend the thinking block in progress, or start a new one when a tool call
+ * or activity came in between, so each block stays where it happened.
+ */
+function withThinking(steps: AssistantStep[] | undefined, delta: string): AssistantStep[] {
+  const current = steps ?? [];
+  const last = current[current.length - 1];
+  if (last?.kind === "thinking") {
+    return [
+      ...current.slice(0, -1),
+      { kind: "thinking", text: joinThinkingStream(last.text, delta) },
+    ];
+  }
+  return [...current, { kind: "thinking", text: delta }];
+}
+
 /** Drop events that belong to a different session, thread, or turn. */
 export function isStaleChatEvent(state: ChatUiState, event: ChatEvent): boolean {
   const { session_id: sid, thread_id: tid, turn_id: turn } = event;
@@ -106,7 +137,7 @@ export function isStaleChatEvent(state: ChatUiState, event: ChatEvent): boolean 
  * could never advance. The restore-from-disk path in App.tsx has always done
  * this; the live path never did.
  */
-function terminalizeInterruptedTools(tools: ToolPart[]): ToolPart[] {
+function terminalizeInterruptedTools(tools: ToolPart[], now: number): ToolPart[] {
   if (
     !tools.some((t) => t.status === "awaiting_approval" || t.status === "running")
   ) {
@@ -122,16 +153,17 @@ function terminalizeInterruptedTools(tools: ToolPart[]): ToolPart[] {
       ...tool,
       status: "error" as const,
       summary: tool.summary ? `${tool.summary} (${note})` : note,
+      finishedAt: tool.finishedAt ?? now,
     };
   });
 }
 
 /** Apply {@link terminalizeInterruptedTools} across the whole transcript. */
-function sweepInterruptedTools(state: ChatUiState): ChatUiState {
+function sweepInterruptedTools(state: ChatUiState, now: number): ChatUiState {
   let changed = false;
   const messages = state.messages.map((message) => {
     if (message.role !== "assistant") return message;
-    const tools = terminalizeInterruptedTools(message.tools);
+    const tools = terminalizeInterruptedTools(message.tools, now);
     if (tools === message.tools) return message;
     changed = true;
     return { ...message, tools };
@@ -240,13 +272,34 @@ function providerActivityStatus(status: string): ProviderActivityPart["status"] 
   }
 }
 
+/** Apply a later event for an activity already on the row. */
+function updateActivity(
+  item: ProviderActivityPart,
+  update: ProviderActivityPart,
+  at: number
+): ProviderActivityPart {
+  const next: ProviderActivityPart = {
+    ...item,
+    // A bare "External tool" update carries no title of its own; keep the one
+    // the start event named.
+    title: update.title === "External tool" ? item.title : update.title,
+    status: update.status,
+  };
+  if (!next.parentId && update.parentId) next.parentId = update.parentId;
+  if (update.status !== "running" && next.finishedAt == null) next.finishedAt = at;
+  return next;
+}
+
 function finishProviderActivities(
   activities: ProviderActivityPart[] | undefined,
-  status: ProviderActivityPart["status"]
+  status: ProviderActivityPart["status"],
+  now: number
 ): ProviderActivityPart[] | undefined {
   if (!activities?.length) return activities;
   return activities.map((activity) =>
-    activity.status === "running" ? { ...activity, status } : activity
+    activity.status === "running"
+      ? { ...activity, status, finishedAt: activity.finishedAt ?? now }
+      : activity
   );
 }
 
@@ -260,6 +313,7 @@ export function reduceChatEvent(
   options?: ChatReduceOptions
 ): ChatReduceResult {
   const newId = options?.newId ?? defaultNewId;
+  const now = options?.now ?? Date.now;
   const effects: ChatReduceEffects = {};
 
   if (isStaleChatEvent(state, event)) {
@@ -328,37 +382,40 @@ export function reduceChatEvent(
         state: patchAssistant(ensured.state, ensured.id, (m) => ({
           ...m,
           thinking: joinThinkingStream(m.thinking, event.text),
+          steps: withThinking(m.steps, event.text),
+          thinkingTextLength: m.text.length,
           streaming: true,
-        })),
+        } satisfies TraceMessage)),
         effects,
       };
     }
     case "provider_activity": {
       const ensured = ensureAssistant(state, event.message_id, newId);
+      const at = now();
+      const status = providerActivityStatus(event.status);
       const activity: ProviderActivityPart = {
         id: event.id,
         title: event.title || "Provider activity",
-        status: providerActivityStatus(event.status),
+        status,
+        startedAt: at,
       };
+      if (event.parent_id) activity.parentId = event.parent_id;
+      if (status !== "running") activity.finishedAt = at;
       return {
         state: patchAssistant(ensured.state, ensured.id, (m) => {
           const current = m.providerActivity ?? [];
           const existing = current.find((item) => item.id === activity.id);
           const next = existing
             ? current.map((item) =>
-                item.id === activity.id
-                  ? {
-                      ...item,
-                      title:
-                        activity.title === "External tool"
-                          ? item.title
-                          : activity.title,
-                      status: activity.status,
-                    }
-                  : item
+                item.id === activity.id ? updateActivity(item, activity, at) : item
               )
             : [...current, activity];
-          return { ...m, providerActivity: next, streaming: true };
+          return {
+            ...m,
+            providerActivity: next,
+            steps: withStep(m.steps, { kind: "activity", id: activity.id }),
+            streaming: true,
+          };
         }),
         effects,
       };
@@ -366,11 +423,21 @@ export function reduceChatEvent(
     case "tool_call_start": {
       const ensured = ensureAssistant(state, event.message_id, newId);
       const toolId = event.id;
-      const tool: ToolPart = { id: toolId, name: event.name, status: "running" };
+      const tool: ToolPart = {
+        id: toolId,
+        name: event.name,
+        status: "running",
+        startedAt: now(),
+      };
       return {
         state: patchAssistant(ensured.state, ensured.id, (m) => {
           if (m.tools.some((t) => t.id === toolId)) return m;
-          return { ...m, tools: [...m.tools, tool], streaming: true };
+          return {
+            ...m,
+            tools: [...m.tools, tool],
+            steps: withStep(m.steps, { kind: "tool", id: toolId }),
+            streaming: true,
+          };
         }),
         effects,
       };
@@ -408,6 +475,7 @@ export function reduceChatEvent(
               path: event.path ?? t.path,
               diff: event.diff ?? t.diff,
               metadata: event.metadata ?? t.metadata,
+              finishedAt: now(),
             };
           }),
           question:
@@ -454,7 +522,8 @@ export function reduceChatEvent(
             streaming: true,
             tools: exists
               ? m.tools.map((t) => (t.id === toolId ? { ...t, ...nextTool } : t))
-              : [...m.tools, nextTool],
+              : [...m.tools, { ...nextTool, startedAt: now() }],
+            steps: withStep(m.steps, { kind: "tool", id: toolId }),
           };
         }),
         effects,
@@ -467,7 +536,7 @@ export function reduceChatEvent(
           ...m,
           streaming: false,
           question: undefined,
-          providerActivity: finishProviderActivities(m.providerActivity, "done"),
+          providerActivity: finishProviderActivities(m.providerActivity, "done", now()),
         }));
       } else if (next.activeAssistantId) {
         const id = next.activeAssistantId;
@@ -475,12 +544,12 @@ export function reduceChatEvent(
           ...m,
           streaming: false,
           question: undefined,
-          providerActivity: finishProviderActivities(m.providerActivity, "done"),
+          providerActivity: finishProviderActivities(m.providerActivity, "done", now()),
         }));
       }
       return {
         state: {
-          ...sweepInterruptedTools(next),
+          ...sweepInterruptedTools(next, now()),
           activeAssistantId: null,
           sending: false,
           currentTurnId: null,
@@ -497,9 +566,10 @@ export function reduceChatEvent(
               ...m,
               streaming: false,
               question: undefined,
-              providerActivity: finishProviderActivities(m.providerActivity, "error"),
+              providerActivity: finishProviderActivities(m.providerActivity, "error", now()),
               error: m.error ?? "turn cancelled",
-            }))
+            })),
+            now()
           ),
           activeAssistantId: null,
           sending: false,
@@ -518,12 +588,13 @@ export function reduceChatEvent(
               ...m,
               streaming: false,
               question: undefined,
-              providerActivity: finishProviderActivities(m.providerActivity, "error"),
+              providerActivity: finishProviderActivities(m.providerActivity, "error", now()),
               error: event.message,
               // Only set when signing in again is the actual fix.
               reconnectProvider: event.reconnect_provider ?? undefined,
               providerSelection: event.provider_selection ?? undefined,
-            }))
+            })),
+            now()
           ),
           activeAssistantId: null,
           sending: false,

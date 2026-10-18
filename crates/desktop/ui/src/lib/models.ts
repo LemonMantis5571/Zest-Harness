@@ -1,3 +1,5 @@
+import type { CliRequirementView } from "./generated/CliRequirement.ts";
+
 export type EffortId = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ModelOption = {
@@ -31,6 +33,18 @@ const MODEL_LABELS: Record<string, { label: string; shortLabel: string }> = {
   "claude-haiku-5-5": { label: "Haiku 5.5", shortLabel: "Haiku" },
   "claude-haiku-5-5-thinking": { label: "Haiku 5.5 Thinking", shortLabel: "Haiku" },
   "claude-fable-5-1": { label: "Fable 5.1", shortLabel: "Fable" },
+  // What Claude Code's bare aliases resolve to (CLI 2.1.220), so a configured
+  // alias reads as "opus → Opus 5" rather than as a raw id.
+  "claude-opus-5": { label: "Opus 5", shortLabel: "Opus" },
+  "claude-sonnet-5": { label: "Sonnet 5", shortLabel: "Sonnet" },
+  "claude-fable-5": { label: "Fable 5", shortLabel: "Fable" },
+  "claude-haiku-4-5": { label: "Haiku 4.5", shortLabel: "Haiku" },
+  "claude-haiku-4-5-20251001": { label: "Haiku 4.5", shortLabel: "Haiku" },
+  // An alias whose meaning is not known yet: no turn has run it.
+  opus: { label: "opus (alias)", shortLabel: "opus" },
+  sonnet: { label: "sonnet (alias)", shortLabel: "sonnet" },
+  haiku: { label: "haiku (alias)", shortLabel: "haiku" },
+  fable: { label: "fable (alias)", shortLabel: "fable" },
   "composer-2.5": { label: "Composer 2.5", shortLabel: "Composer" },
   "grok-4.7": { label: "Grok 4.7", shortLabel: "Grok" },
 };
@@ -55,7 +69,13 @@ export type ModelCapability = {
   contextWindow: number;
   supportsTools: boolean;
   supportsVision: boolean;
+  /** For an alias the provider resolves, such as Claude Code's `opus`: what it last ran as. */
+  resolvesTo?: string;
+  /** Set when the installed vendor CLI is known to be too old for this model. */
+  needsCli?: CliRequirement;
 };
+
+export type CliRequirement = CliRequirementView;
 
 export function capabilityForModel(
   models: ModelCapability[] | undefined,
@@ -76,6 +96,38 @@ export function modelLabel(modelId: string): string {
 
 export function modelShort(modelId: string): string {
   return MODEL_LABELS[modelId]?.shortLabel ?? modelId;
+}
+
+/**
+ * A model's label in a catalogue: an alias the provider has resolved names what
+ * it actually runs ("opus → Opus 5"); anything else is its plain label.
+ */
+export function catalogueModelLabel(
+  models: readonly ModelCapability[] | undefined,
+  modelId: string
+): string {
+  const resolvesTo = models?.find((item) => item.id === modelId)?.resolvesTo;
+  return resolvesTo ? `${modelId} → ${modelLabel(resolvesTo)}` : modelLabel(modelId);
+}
+
+/**
+ * The short mark on a model the installed CLI is too old for:
+ * "Needs Claude Code 2.1.280+ · run claude update". Null when nothing is known
+ * against it.
+ */
+export function cliRequirementLabel(model: Pick<ModelCapability, "needsCli"> | undefined): string | null {
+  const needs = model?.needsCli;
+  return needs ? `Needs ${needs.cli} ${needs.minimum}+ · run ${needs.update}` : null;
+}
+
+/**
+ * The longer explanation. The model stays selectable because the version check
+ * can be wrong; if it is right, the API's own refusal reaches the chat.
+ */
+export function cliRequirementDetail(model: Pick<ModelCapability, "needsCli"> | undefined): string | null {
+  const needs = model?.needsCli;
+  if (!needs) return null;
+  return `${needs.cli} ${needs.installed} is installed. This model needs ${needs.minimum} or newer, so its turns may be refused. Run ${needs.update}, then restart Zest.`;
 }
 
 export function effortLabel(effortId: string): string {
@@ -106,7 +158,43 @@ export type ModelPickerGroup = {
   label: string;
   current: boolean;
   models: ModelCapability[];
+  /** Whether the vendor CLI or Zest runs this provider, when known. */
+  source?: ProviderSource;
+  /** How the provider connects, such as "ChatGPT sign-in" or "API key". */
+  method?: string;
 };
+
+/**
+ * Who runs a provider's agent loop: its vendor CLI (Claude Code, Codex CLI,
+ * Cursor), or Zest itself against the model service.
+ */
+export type ProviderSource = "cli" | "api";
+
+export function providerSource(ownsAgentLoop: boolean | undefined): ProviderSource {
+  return ownsAgentLoop ? "cli" : "api";
+}
+
+export const PROVIDER_SOURCE_LABELS: Record<ProviderSource, { tag: string; title: string }> = {
+  cli: {
+    tag: "CLI",
+    title: "Runs through the vendor's command-line tool, which owns the agent loop and its tools",
+  },
+  api: {
+    tag: "API",
+    title: "Zest calls the model service directly and runs the agent loop itself",
+  },
+};
+
+/** Labels more than one provider uses, so the rows that share one can be told apart. */
+export function sharedProviderLabels(rows: ReadonlyArray<{ label: string }>): ReadonlySet<string> {
+  const seen = new Set<string>();
+  const shared = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.label)) shared.add(row.label);
+    seen.add(row.label);
+  }
+  return shared;
+}
 
 const fallbackCapability = (id: string): ModelCapability => ({
   id,
@@ -134,7 +222,11 @@ export function sameModelCatalogue(
   return right.every((model) => ids.has(model.id));
 }
 
-/** Current session models first, then every other selectable provider. */
+/**
+ * Current session models first, then every other selectable provider the user
+ * has not hidden. The current provider is shown even when hidden, so the model
+ * in use can always be changed.
+ */
 export function modelPickerGroups(
   current: {
     providerId: string;
@@ -147,19 +239,24 @@ export function modelPickerGroups(
     selectable: boolean;
     models: ModelCapability[];
     defaultModel: string;
-  }>
+    ownsAgentLoop?: boolean;
+    method?: string;
+  }>,
+  hidden: ReadonlySet<string> = new Set()
 ): ModelPickerGroup[] {
   const currentModels = current.models ?? [];
+  const currentRow = providers.find((row) => row.id === current.providerId);
   const groups: ModelPickerGroup[] = [
     {
       providerId: current.providerId,
       label: current.label,
       current: true,
       models: currentModels,
+      ...describedSource(currentRow),
     },
   ];
   for (const row of providers) {
-    if (!row.selectable || row.id === current.providerId) continue;
+    if (!row.selectable || row.id === current.providerId || hidden.has(row.id)) continue;
     const models = modelsForRow(row);
     if (models.length === 0) continue;
     // ChatGPT Codex and Codex CLI advertise the same list. Showing both
@@ -171,9 +268,21 @@ export function modelPickerGroups(
       label: row.label,
       current: false,
       models,
+      ...describedSource(row),
     });
   }
   return groups;
+}
+
+function describedSource(
+  row: { ownsAgentLoop?: boolean; method?: string } | undefined
+): Pick<ModelPickerGroup, "source" | "method"> {
+  if (!row) return {};
+  const described: Pick<ModelPickerGroup, "source" | "method"> = {
+    source: providerSource(row.ownsAgentLoop),
+  };
+  if (row.method) described.method = row.method;
+  return described;
 }
 
 export function modelPickerHasChoices(groups: ModelPickerGroup[]): boolean {
@@ -188,7 +297,7 @@ export function filterModelPickerGroups(groups: ModelPickerGroup[], query: strin
   return groups.flatMap((group) => {
     const models = group.label.toLocaleLowerCase().includes(needle)
       ? group.models
-      : group.models.filter((item) => item.id.toLocaleLowerCase().includes(needle) || modelLabel(item.id).toLocaleLowerCase().includes(needle));
+      : group.models.filter((item) => item.id.toLocaleLowerCase().includes(needle) || catalogueModelLabel(group.models, item.id).toLocaleLowerCase().includes(needle));
     return models.length ? [{ ...group, models }] : [];
   });
 }

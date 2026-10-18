@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::claude_aliases;
+use super::claude_cli_version::{self, CliVersion};
 use super::claude_control::{
     control_response, decide, grant_target, initialize_request_id, initialize_response,
     prepare_approval, preview_permission, remember_session_grant, render_diff, risk_for,
@@ -20,8 +22,8 @@ use super::claude_stream::ClaudeNormalizer;
 use super::stream_contract::{RunOutcome, StreamNormalizer};
 use super::turn_spec::{compose, AgentProfile, CompositionCapabilities, ToolScope, TurnSpec};
 use super::{
-    catalogue, Completion, EffortPolicy, ModelSpec, Provider, ProviderSessionRef, StreamEvent,
-    SystemPrompt, TurnRequest,
+    catalogue, CliRequirement, Completion, EffortPolicy, ModelSpec, Provider, ProviderSessionRef,
+    StreamEvent, SystemPrompt, TurnRequest,
 };
 use crate::anthropic::types::Usage;
 use crate::auth::{detect_claude_code, AuthStatus};
@@ -38,22 +40,79 @@ use crate::tools::external_agent::{
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-/// Aliases the Claude Code CLI accepts with no configuration.
+/// The models Zest offers for Claude Code when the config names none.
+///
+/// Explicit ids only. The CLI's bare aliases (`opus`, `sonnet`, ...) were here
+/// too, but the CLI resolves them to older models (`opus` ran as
+/// `claude-opus-5`, `haiku` as Haiku 4.5), so each family appeared twice with
+/// the short name quietly meaning the previous generation. A configured alias
+/// is still honoured and labelled; see [`super::claude_aliases`].
 ///
 /// `pub(crate)` so the driver builds the picker catalogue from the same list the
-/// provider accepts. It was private, and the driver passed an empty builtin list
-/// instead: an entry with no `models` offered `[sonnet]` in the picker while the
-/// provider accepted `[sonnet, opus, haiku]`.
+/// provider accepts.
 pub(crate) const BUILTIN_MODELS: &[&str] = &[
-    "sonnet",
-    "opus",
-    "haiku",
-    "fable",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
     "claude-fable-5-1",
 ];
+
+/// The oldest Claude Code CLI the API accepts each explicit model from.
+///
+/// From the API's own refusal, which names the version: on 2026-10-17 CLI
+/// 2.1.220 was refused Opus 5.5 ("2.1.280 or newer is required") and Fable 5.1
+/// ("2.1.251"), and ran Sonnet 5.5 and Haiku 5.5. A model missing here is
+/// treated as runnable.
+///
+/// The [model configuration](https://code.claude.com/docs/en/model-config)
+/// page names later releases (Sonnet 5.5 2.1.284, Haiku 5.5 2.1.293, Fable 5.1
+/// 2.1.257). 2.1.220 ran Sonnet 5.5 regardless, so those are not what the API
+/// enforces, and marking the default model on a CLI that runs it would teach
+/// users to ignore the mark.
+const MIN_CLI_VERSIONS: &[(&str, CliVersion)] = &[
+    ("claude-opus-5-5", CliVersion::new(2, 1, 280)),
+    ("claude-fable-5-1", CliVersion::new(2, 1, 251)),
+];
+
+fn min_cli_version(model: &str) -> Option<CliVersion> {
+    MIN_CLI_VERSIONS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, minimum)| *minimum)
+}
+
+/// Set [`ModelSpec::needs_cli`] on every model `installed` is known to be too
+/// old for. An unknown version marks nothing.
+pub(crate) fn mark_cli_requirements(
+    mut models: Vec<ModelSpec>,
+    installed: Option<CliVersion>,
+) -> Vec<ModelSpec> {
+    for model in &mut models {
+        model.needs_cli = installed
+            .zip(min_cli_version(&model.id))
+            .filter(|(installed, minimum)| installed < minimum)
+            .map(|(installed, minimum)| CliRequirement {
+                cli: "Claude Code".into(),
+                minimum: minimum.to_string(),
+                installed: installed.to_string(),
+                update: "claude update".into(),
+            });
+    }
+    models
+}
+
+/// The catalogue as the picker shows it: [`effort_catalogue`] plus what the CLI
+/// behind `command` is too old to run.
+pub(crate) fn picker_catalogue(
+    default_model: &str,
+    models: &[String],
+    command: &str,
+) -> Vec<ModelSpec> {
+    mark_cli_requirements(
+        effort_catalogue(default_model, models),
+        claude_cli_version::installed(command),
+    )
+}
 
 fn supports_effort(model: &str) -> bool {
     // The alias can still resolve to Haiku 4.5 on older clients or third-party
@@ -320,7 +379,7 @@ pub(crate) fn effort_catalogue(default_model: &str, models: &[String]) -> Vec<Mo
             model.efforts.clear();
         }
     }
-    catalogue
+    claude_aliases::label(catalogue)
 }
 
 #[async_trait]
@@ -334,7 +393,20 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn models(&self) -> Vec<ModelSpec> {
-        self.models.clone()
+        // Relabelled on every read: an alias resolves during the first turn
+        // that uses it, after this catalogue was built.
+        mark_cli_requirements(
+            claude_aliases::label(self.models.clone()),
+            claude_cli_version::installed(&self.command),
+        )
+    }
+
+    fn successor_model(&self, model: &str) -> Option<String> {
+        let successor = claude_aliases::successor(model)?;
+        self.models
+            .iter()
+            .any(|spec| spec.id == successor)
+            .then(|| successor.to_string())
     }
 
     fn auth_status(&self) -> AuthStatus {
@@ -457,6 +529,14 @@ impl Provider for ClaudeCodeProvider {
         // likely explanation for a failure than for a success.
         report_stream_health(&normalizer, &outcome);
         let run = outcome?;
+
+        // What an alias ran as is known from `system:init`, whatever became of
+        // the turn after it.
+        if claude_aliases::is_alias(&req.model) {
+            if let Some(model) = normalizer.model() {
+                claude_aliases::record(&req.model, model);
+            }
+        }
 
         if req
             .cancel
@@ -830,13 +910,57 @@ mod tests {
     }
 
     #[test]
-    fn default_model_and_aliases_are_available() {
+    fn the_builtin_catalogue_is_explicit_models_only() {
         let provider = provider(ClaudeCodePermissionMode::AcceptEdits);
+        let ids: Vec<String> = provider
+            .models()
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
 
-        assert_eq!(provider.default_model(), "sonnet");
-        assert!(provider.models().iter().any(|model| model.id == "opus"));
-        assert!(provider.models().iter().any(|model| model.id == "fable"));
+        assert_eq!(provider.default_model(), "claude-sonnet-5-5");
+        assert_eq!(
+            ids,
+            [
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+                "claude-fable-5-1",
+            ]
+        );
         assert!(provider.owns_agent_loop());
+    }
+
+    /// An alias is no longer offered, but one the config names still is, and
+    /// a remembered one finds the explicit model of its family.
+    #[test]
+    fn a_configured_alias_is_kept_and_a_dropped_one_has_a_successor() {
+        let configured = ClaudeCodeProvider::new(
+            "claude",
+            ".",
+            "claude",
+            Some("opus".into()),
+            Vec::new(),
+            false,
+            ClaudeCodePermissionMode::Auto,
+            Vec::new(),
+            900,
+        )
+        .unwrap();
+        assert!(configured.models().iter().any(|model| model.id == "opus"));
+        assert!(configured.validate_selection("opus", "high").is_ok());
+
+        let builtin = provider(ClaudeCodePermissionMode::Auto);
+        assert!(builtin.validate_selection("opus", "high").is_err());
+        assert_eq!(
+            builtin.successor_model("opus").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            builtin.successor_model("haiku").as_deref(),
+            Some("claude-haiku-5-5")
+        );
+        assert_eq!(builtin.successor_model("gpt-6-sol"), None);
     }
 
     #[test]
@@ -1024,13 +1148,18 @@ mod tests {
     /// The picker must not offer a control the model rejects.
     #[test]
     fn the_catalogue_offers_effort_only_where_the_cli_takes_it() {
-        let provider = provider(ClaudeCodePermissionMode::Auto);
+        // Aliases are no longer built in, but a config can still list them.
+        let configured: Vec<String> = ["sonnet", "opus", "haiku"]
+            .into_iter()
+            .chain(BUILTIN_MODELS.iter().copied())
+            .map(str::to_string)
+            .collect();
+        let catalogue = effort_catalogue(DEFAULT_CLAUDE_CODE_MODEL, &configured);
         let efforts = |id: &str| {
-            provider
-                .models()
-                .into_iter()
+            catalogue
+                .iter()
                 .find(|model| model.id == id)
-                .map(|model| model.efforts)
+                .map(|model| model.efforts.clone())
                 .expect(id)
         };
 
@@ -1045,6 +1174,124 @@ mod tests {
             efforts("claude-sonnet-5-5"),
             ["low", "medium", "high", "xhigh", "max"]
         );
+    }
+
+    fn needs(catalogue: &[ModelSpec], id: &str) -> Option<String> {
+        catalogue
+            .iter()
+            .find(|model| model.id == id)
+            .expect(id)
+            .needs_cli
+            .as_ref()
+            .map(|needs| needs.minimum.clone())
+    }
+
+    /// The picker says which models the installed CLI is too old for before a
+    /// turn is spent finding out.
+    #[test]
+    fn an_old_cli_marks_the_models_it_cannot_run() {
+        let configured: Vec<String> = ["opus", "fable"]
+            .into_iter()
+            .chain(BUILTIN_MODELS.iter().copied())
+            .map(str::to_string)
+            .collect();
+        let catalogue = mark_cli_requirements(
+            effort_catalogue(DEFAULT_CLAUDE_CODE_MODEL, &configured),
+            Some(CliVersion::new(2, 1, 220)),
+        );
+
+        assert_eq!(
+            needs(&catalogue, "claude-opus-5-5").as_deref(),
+            Some("2.1.280")
+        );
+        assert_eq!(
+            needs(&catalogue, "claude-fable-5-1").as_deref(),
+            Some("2.1.251")
+        );
+        assert_eq!(needs(&catalogue, "claude-sonnet-5-5"), None);
+        assert_eq!(needs(&catalogue, "claude-haiku-5-5"), None);
+        // An alias runs whatever this CLI resolves it to, so it has no minimum.
+        assert_eq!(needs(&catalogue, "opus"), None);
+        assert_eq!(needs(&catalogue, "fable"), None);
+
+        let opus = catalogue
+            .iter()
+            .find(|model| model.id == "claude-opus-5-5")
+            .and_then(|model| model.needs_cli.clone())
+            .unwrap();
+        assert_eq!(
+            opus,
+            CliRequirement {
+                cli: "Claude Code".into(),
+                minimum: "2.1.280".into(),
+                installed: "2.1.220".into(),
+                update: "claude update".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_enough_or_unknown_cli_marks_nothing() {
+        let builtin = || effort_catalogue(DEFAULT_CLAUDE_CODE_MODEL, &[]);
+
+        let between = mark_cli_requirements(builtin(), Some(CliVersion::new(2, 1, 251)));
+        assert_eq!(needs(&between, "claude-fable-5-1"), None);
+        assert_eq!(
+            needs(&between, "claude-opus-5-5").as_deref(),
+            Some("2.1.280")
+        );
+
+        for installed in [
+            Some(CliVersion::new(2, 1, 280)),
+            Some(CliVersion::new(3, 0, 0)),
+            None,
+        ] {
+            let catalogue = mark_cli_requirements(builtin(), installed);
+            assert!(
+                catalogue.iter().all(|model| model.needs_cli.is_none()),
+                "{installed:?}"
+            );
+        }
+
+        // A stale mark from an older reading is cleared, not kept.
+        let marked = mark_cli_requirements(builtin(), Some(CliVersion::new(2, 1, 220)));
+        let cleared = mark_cli_requirements(marked, Some(CliVersion::new(2, 1, 300)));
+        assert!(cleared.iter().all(|model| model.needs_cli.is_none()));
+    }
+
+    /// Both ways a catalogue leaves core, the live provider and the config-only
+    /// picker descriptor, carry the mark for the CLI the config names.
+    #[test]
+    fn the_provider_and_the_picker_share_passive_version_metadata() {
+        let command = "zest-test-claude-2-1-220";
+        claude_cli_version::seed(command, Some(CliVersion::new(2, 1, 220)));
+
+        let provider = ClaudeCodeProvider::new(
+            "claude",
+            ".",
+            command,
+            None,
+            Vec::new(),
+            false,
+            ClaudeCodePermissionMode::Auto,
+            Vec::new(),
+            900,
+        )
+        .unwrap();
+        let live = provider.models();
+        assert_eq!(needs(&live, "claude-opus-5-5").as_deref(), Some("2.1.280"));
+        assert_eq!(needs(&live, "claude-sonnet-5-5"), None);
+        // Marked, not removed: the check could be wrong, so it stays selectable.
+        assert!(provider
+            .validate_selection("claude-opus-5-5", "high")
+            .is_ok());
+
+        let config = crate::config::Config::parse(&format!(
+            "[providers.house]\nkind = \"claude_code\"\ncommand = \"{command}\"\n"
+        ))
+        .unwrap();
+        let picker = super::super::descriptor_from_config("house", &config.providers["house"]);
+        assert_eq!(picker.models, live);
     }
 
     #[test]
