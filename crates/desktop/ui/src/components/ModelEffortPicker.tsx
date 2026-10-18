@@ -3,6 +3,7 @@ import { CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
 
 import { ModelIcon } from "@/components/ModelIcon";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { ProviderSourceTag } from "@/components/ProviderSourceTag";
 import {
   DEFAULT_EFFORT,
   capabilityForModel,
@@ -10,6 +11,7 @@ import {
   formatContextWindow,
   filterModelPickerGroups,
   catalogueModelLabel,
+  sharedProviderLabels,
   modelOptionsFromCapabilities,
   modelPickerGroups,
   type EffortId,
@@ -100,6 +102,7 @@ export function ModelEffortPicker({
       ];
   const grouped = groups.length > 1;
   const visibleGroups = filterModelPickerGroups(groups, query);
+  const sharedLabels = sharedProviderLabels(groups);
   const effortOptions = effortsForModel(models, model);
   const currentLabel = catalogueModelLabel(models, model);
   const capability = capabilityForModel(models, model);
@@ -320,9 +323,17 @@ export function ModelEffortPicker({
               return (
                 <div key={group.providerId || group.label}>
                   {grouped ? (
-                    <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
+                    <div className="flex min-w-0 items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
                       <ProviderIcon providerId={group.providerId} className="size-3.5" />
-                      {group.label}
+                      <span className="truncate">{group.label}</span>
+                      {group.source ? <ProviderSourceTag source={group.source} /> : null}
+                      {/* Two providers can share a name (a gateway and a ChatGPT sign-in
+                          both called Codex); how each connects tells them apart. */}
+                      {sharedLabels.has(group.label) && group.method ? (
+                        <span className="truncate normal-case tracking-normal text-muted-foreground/80">
+                          {group.method}
+                        </span>
+                      ) : null}
                     </div>
                   ) : null}
                   {options.map((item) => {

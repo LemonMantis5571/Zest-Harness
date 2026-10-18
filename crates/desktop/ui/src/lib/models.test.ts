@@ -10,8 +10,10 @@ import {
   modelOptionsFromCapabilities,
   modelPickerGroups,
   modelPickerHasChoices,
+  providerSource,
   sameModelCatalogue,
   sessionSupportsModelPicker,
+  sharedProviderLabels,
   type ModelCapability,
 } from "./models.ts";
 
@@ -207,5 +209,42 @@ describe("catalogueModelLabel", () => {
     const found = filterModelPickerGroups(groups, "opus 5");
     assert.deepEqual(found[0].models.map((model) => model.id), ["opus", "claude-opus-5-5"]);
     assert.deepEqual(filterModelPickerGroups(groups, "opus 5.5")[0].models.map((model) => model.id), ["claude-opus-5-5"]);
+  });
+});
+
+describe("provider source", () => {
+  it("calls a provider that owns its agent loop a CLI and anything else an API", () => {
+    assert.equal(providerSource(true), "cli");
+    assert.equal(providerSource(false), "api");
+    assert.equal(providerSource(undefined), "api");
+  });
+
+  it("finds the labels two providers share", () => {
+    const shared = sharedProviderLabels([
+      { label: "Codex" },
+      { label: "Claude" },
+      { label: "Codex" },
+      { label: "Cursor" },
+    ]);
+    assert.deepEqual([...shared], ["Codex"]);
+  });
+
+  it("carries each group's source and connection method", () => {
+    const groups = modelPickerGroups(
+      { providerId: "codex", label: "Codex", models: [noEffortModel] },
+      [
+        { id: "codex", label: "Codex", selectable: true, models: [noEffortModel], defaultModel: "local-model", ownsAgentLoop: false, method: "API key" },
+        { id: "codex-chatgpt", label: "Codex", selectable: true, models: [], defaultModel: "gpt-6-sol", ownsAgentLoop: false, method: "ChatGPT sign-in" },
+        { id: "claude-code", label: "Claude", selectable: true, models: [], defaultModel: "claude-sonnet-5-5", ownsAgentLoop: true, method: "Claude Code subscription" },
+      ]
+    );
+    assert.deepEqual(
+      groups.map((group) => [group.providerId, group.source, group.method]),
+      [
+        ["codex", "api", "API key"],
+        ["codex-chatgpt", "api", "ChatGPT sign-in"],
+        ["claude-code", "cli", "Claude Code subscription"],
+      ]
+    );
   });
 });

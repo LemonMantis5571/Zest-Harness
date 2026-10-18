@@ -20,6 +20,8 @@ test("Customize > Models keeps an unchecked provider out of the model picker", a
   const providers = page.getByRole("list", { name: "Providers in the model picker" });
   // Only providers the picker could list: the unconfigured one is not offered.
   await expect(providers.getByRole("checkbox")).toHaveCount(2);
+  // Neither fixture provider runs through a vendor CLI, so both are tagged API.
+  await expect(providers.getByText("API", { exact: true })).toHaveCount(2);
   const current = providers.getByRole("checkbox", { name: /always listed/ });
   await expect(current).toBeChecked();
   await expect(current).toBeDisabled();

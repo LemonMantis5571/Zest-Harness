@@ -132,7 +132,43 @@ export type ModelPickerGroup = {
   label: string;
   current: boolean;
   models: ModelCapability[];
+  /** Whether the vendor CLI or Zest runs this provider, when known. */
+  source?: ProviderSource;
+  /** How the provider connects, such as "ChatGPT sign-in" or "API key". */
+  method?: string;
 };
+
+/**
+ * Who runs a provider's agent loop: its vendor CLI (Claude Code, Codex CLI,
+ * Cursor), or Zest itself against the model service.
+ */
+export type ProviderSource = "cli" | "api";
+
+export function providerSource(ownsAgentLoop: boolean | undefined): ProviderSource {
+  return ownsAgentLoop ? "cli" : "api";
+}
+
+export const PROVIDER_SOURCE_LABELS: Record<ProviderSource, { tag: string; title: string }> = {
+  cli: {
+    tag: "CLI",
+    title: "Runs through the vendor's command-line tool, which owns the agent loop and its tools",
+  },
+  api: {
+    tag: "API",
+    title: "Zest calls the model service directly and runs the agent loop itself",
+  },
+};
+
+/** Labels more than one provider uses, so the rows that share one can be told apart. */
+export function sharedProviderLabels(rows: ReadonlyArray<{ label: string }>): ReadonlySet<string> {
+  const seen = new Set<string>();
+  const shared = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.label)) shared.add(row.label);
+    seen.add(row.label);
+  }
+  return shared;
+}
 
 const fallbackCapability = (id: string): ModelCapability => ({
   id,
@@ -177,16 +213,20 @@ export function modelPickerGroups(
     selectable: boolean;
     models: ModelCapability[];
     defaultModel: string;
+    ownsAgentLoop?: boolean;
+    method?: string;
   }>,
   hidden: ReadonlySet<string> = new Set()
 ): ModelPickerGroup[] {
   const currentModels = current.models ?? [];
+  const currentRow = providers.find((row) => row.id === current.providerId);
   const groups: ModelPickerGroup[] = [
     {
       providerId: current.providerId,
       label: current.label,
       current: true,
       models: currentModels,
+      ...describedSource(currentRow),
     },
   ];
   for (const row of providers) {
@@ -202,9 +242,21 @@ export function modelPickerGroups(
       label: row.label,
       current: false,
       models,
+      ...describedSource(row),
     });
   }
   return groups;
+}
+
+function describedSource(
+  row: { ownsAgentLoop?: boolean; method?: string } | undefined
+): Pick<ModelPickerGroup, "source" | "method"> {
+  if (!row) return {};
+  const described: Pick<ModelPickerGroup, "source" | "method"> = {
+    source: providerSource(row.ownsAgentLoop),
+  };
+  if (row.method) described.method = row.method;
+  return described;
 }
 
 export function modelPickerHasChoices(groups: ModelPickerGroup[]): boolean {
