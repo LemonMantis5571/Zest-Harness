@@ -1623,16 +1623,21 @@ fn map_session_err(e: SessionError) -> String {
 fn load_workspace_config(state: &AppState) -> Config {
     let root = resolve_workspace_root(state).ok();
     let mut config = match root.as_ref() {
-        Some(root) => Config::find(root).unwrap_or_else(|_| Config::env_fallback()),
+        Some(root) => worktree_config_root(root)
+            .ok()
+            .and_then(|config_root| Config::find(config_root).ok())
+            .unwrap_or_else(Config::env_fallback),
         None => zest_core::user_config_path()
             .filter(|path| path.is_file())
             .and_then(|path| Config::load_from(path).ok())
             .unwrap_or_else(Config::env_fallback),
     };
     if root.as_ref().is_none()
-        || root
-            .as_ref()
-            .is_some_and(|root| can_inherit_workspace_config(root))
+        || root.as_ref().is_some_and(|root| {
+            worktree_config_root(root)
+                .ok()
+                .is_some_and(|config_root| can_inherit_workspace_config(&config_root))
+        })
     {
         merge_cached_providers(state, &mut config, None);
     }
@@ -1655,8 +1660,9 @@ fn lock_config_edit(state: &AppState) -> std::sync::MutexGuard<'_, ()> {
 
 fn editable_config_path(state: &AppState) -> Result<PathBuf, String> {
     if let Ok(root) = resolve_workspace_root(state) {
-        if root.join(zest_core::config::CONFIG_FILE).is_file() {
-            return Ok(root.join(zest_core::config::CONFIG_FILE));
+        let config_root = worktree_config_root(&root)?;
+        if config_root.join(zest_core::config::CONFIG_FILE).is_file() {
+            return Ok(config_root.join(zest_core::config::CONFIG_FILE));
         }
     }
     zest_core::ensure_user_config()
@@ -1720,8 +1726,9 @@ fn merge_provider_tables(config: &mut Config, cached: &Config, only_provider: Op
 }
 
 fn config_for_session(state: &AppState, root: &Path) -> Result<Config, String> {
-    let mut config = Config::find(root).map_err(|e| e.to_string())?;
-    if can_inherit_workspace_config(root) {
+    let config_root = worktree_config_root(root)?;
+    let mut config = Config::find(&config_root).map_err(|e| e.to_string())?;
+    if can_inherit_workspace_config(&config_root) {
         merge_cached_providers(state, &mut config, None);
     }
     Ok(config)
@@ -2981,7 +2988,7 @@ fn codex_cli_available() -> bool {
 #[tauri::command]
 fn open_project_config(root: String) -> Result<(), String> {
     let root = canonicalize_dir(PathBuf::from(root.trim()))?;
-    let path = root.join(zest_core::config::CONFIG_FILE);
+    let path = worktree_config_root(&root)?.join(zest_core::config::CONFIG_FILE);
     if !path.is_file() {
         return Err(
             "This project has no zest.toml yet. Add the provider to its project configuration first."
@@ -3636,6 +3643,134 @@ fn persist_workspace(root: &Path) -> Result<(), String> {
 
 const KNOWN_WORKSPACES_FILE: &str = "known-workspaces.json";
 const MAX_KNOWN_WORKSPACES: usize = 40;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeChatRecord {
+    path: PathBuf,
+    source_root: PathBuf,
+    branch: String,
+}
+
+fn worktree_chat_registry_path() -> Result<PathBuf, String> {
+    Ok(zest_config_dir()?.join("worktree-chats.json"))
+}
+
+fn load_worktree_chat_records() -> Result<Vec<WorktreeChatRecord>, String> {
+    let path = worktree_chat_registry_path()?;
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot read worktree chat registry: {error}")),
+    };
+    serde_json::from_str(&body)
+        .map_err(|error| format!("cannot read worktree chat registry: {error}"))
+}
+
+fn worktree_config_root(root: &Path) -> Result<PathBuf, String> {
+    let records = load_worktree_chat_records()?;
+    worktree_config_root_from_records(root, &records)
+}
+
+fn worktree_config_root_from_records(
+    root: &Path,
+    records: &[WorktreeChatRecord],
+) -> Result<PathBuf, String> {
+    let Some(record) = records.iter().find(|record| record.path == root) else {
+        return Ok(root.to_path_buf());
+    };
+    if !record.source_root.is_dir() {
+        return Err(format!(
+            "The original project for this worktree is missing: {}",
+            display_path(&record.source_root)
+        ));
+    }
+    Ok(record.source_root.clone())
+}
+
+#[cfg(test)]
+mod worktree_chat_tests {
+    use super::*;
+
+    #[test]
+    fn worktree_inherits_its_source_project_config_and_fails_if_source_is_missing() {
+        let scratch = ScratchDir::new("zest-worktree-config-");
+        let source = scratch.join("source");
+        let worktree = scratch.join("worktree");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            source.join("zest.toml"),
+            "[providers.claude]\nkind = \"claude_code\"\n\
+             [providers.codex]\nkind = \"codex_cli\"\n\
+             [providers.deepseek]\nkind = \"openai_compatible\"\n\
+             base_url = \"https://api.deepseek.com\"\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .unwrap();
+        let records = vec![WorktreeChatRecord {
+            path: worktree.clone(),
+            source_root: source.clone(),
+            branch: "zest/chat-test".into(),
+        }];
+        assert_eq!(
+            worktree_config_root_from_records(&worktree, &records).unwrap(),
+            source
+        );
+        let config =
+            Config::find(worktree_config_root_from_records(&worktree, &records).unwrap()).unwrap();
+        for provider in ["claude", "codex", "deepseek"] {
+            assert!(config.providers.contains_key(provider));
+        }
+        assert_eq!(
+            worktree_config_root_from_records(scratch.as_ref(), &records).unwrap(),
+            scratch.to_path_buf()
+        );
+        std::fs::remove_dir_all(&source).unwrap();
+        assert!(worktree_config_root_from_records(&worktree, &records).is_err());
+    }
+}
+
+/// Make a persistent checkout for a new chat. It becomes an ordinary Zest
+/// workspace, so all providers and the file review use the same isolated root.
+#[tauri::command]
+async fn create_worktree_chat(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<String, String> {
+    let source = require_known_workspace(Path::new(project_path.trim()))?;
+    let config_root = worktree_config_root(&source)?;
+    let storage = zest_config_dir()?.join("worktrees");
+    let created = tokio::task::spawn_blocking(move || {
+        zest_core::worktree_chat::create_chat_worktree(&source, &storage)
+    })
+    .await
+    .map_err(|error| format!("Worktree creation stopped: {error}"))??;
+    let path = canonicalize_dir(created.path)?;
+    let _edit_guard = lock_config_edit(&state);
+    let mut records = load_worktree_chat_records()?;
+    records.push(WorktreeChatRecord {
+        path: path.clone(),
+        source_root: config_root,
+        branch: created.branch,
+    });
+    zest_core::fsutil::atomic_write_json(&worktree_chat_registry_path()?, &records).map_err(
+        |error| {
+            format!(
+                "Worktree created at {} but could not be registered: {error}",
+                display_path(&path)
+            )
+        },
+    )?;
+    let mut known = load_known_workspaces();
+    append_known_workspace(&mut known, path.clone());
+    write_known_workspaces(&known).map_err(|error| {
+        format!(
+            "Worktree created at {} but could not be added to the sidebar: {error}",
+            display_path(&path)
+        )
+    })?;
+    Ok(display_path(&path))
+}
 
 fn known_workspaces_path() -> Result<PathBuf, String> {
     Ok(zest_config_dir()?.join(KNOWN_WORKSPACES_FILE))
@@ -4981,6 +5116,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         .chat_summary_cache
         .lock()
         .map_err(|_| "chat summary cache lock poisoned".to_string())?;
+    let worktree_records = load_worktree_chat_records()?;
     let mut out = Vec::new();
     for root in roots {
         if !root.is_dir() {
@@ -4996,7 +5132,17 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         };
         let active = active_root.as_ref().is_some_and(|active| root == *active);
         out.push(ProjectChats {
-            name: project_display_name(&root),
+            name: worktree_records
+                .iter()
+                .find(|record| record.path == root)
+                .map(|record| {
+                    format!(
+                        "{} · {}",
+                        project_display_name(&record.source_root),
+                        read_git_branch(&root).unwrap_or_else(|| record.branch.clone())
+                    )
+                })
+                .unwrap_or_else(|| project_display_name(&root)),
             path: Some(display_path(&root)),
             active,
             threads,
@@ -8275,8 +8421,7 @@ fn branch_for_session(
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {
-    let head = root.join(".git").join("HEAD");
-    let contents = std::fs::read_to_string(head).ok()?;
+    let contents = zest_core::prompt::git_head_contents(root)?;
     let line = contents.lines().next()?.trim();
     if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
         return Some(branch.to_string());
@@ -9358,6 +9503,7 @@ pub fn run() {
                 list_threads,
                 forget_workspace,
                 list_chat_projects,
+                create_worktree_chat,
                 search_chats,
                 open_project_chat,
                 load_older_thread_messages,

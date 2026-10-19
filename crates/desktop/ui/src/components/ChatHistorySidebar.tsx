@@ -545,6 +545,22 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
     }
   }
 
+  async function createWorktreeChat(project: ProjectChats) {
+    if (!project.path || projectBusy) return;
+    setProjectBusy(true);
+    setProjectError(null);
+    setProjectMenuPath(null);
+    try {
+      const root = await getBackend().createWorktreeChat(project.path);
+      await onOpenProjectChat({ root, newThread: true });
+      setTick((n) => n + 1);
+    } catch (error) {
+      setProjectError(String(error));
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
   async function confirmDelete() {
     if (!pendingDelete) return;
     setDeleting(true);
@@ -1559,6 +1575,16 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                             </div>
                             <button
                               type="button"
+                              disabled={projectBusy}
+                              title="Start an isolated chat from this project's committed HEAD"
+                              className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-45"
+                              onClick={() => void createWorktreeChat(project)}
+                            >
+                              <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span>New chat in worktree</span>
+                            </button>
+                            <button
+                              type="button"
                               disabled={projectBusy || project.active}
                               title={
                                 project.active
@@ -1749,6 +1775,16 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                               </div>
                             </div>
                             <div className="flex flex-col gap-0.5">
+                              <button
+                                type="button"
+                                disabled={projectBusy}
+                                title="Start an isolated chat from this project's committed HEAD"
+                                className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-45"
+                                onClick={() => void createWorktreeChat(project)}
+                              >
+                                <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                                <span>New chat in worktree</span>
+                              </button>
                               <button
                                 type="button"
                                 disabled={projectBusy || project.active}

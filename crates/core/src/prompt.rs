@@ -288,10 +288,28 @@ pub fn env_context(root: &Path) -> String {
     out
 }
 
-/// Read the branch from `.git/HEAD` rather than shelling out to git — this runs
-/// on every session start and must not depend on git being installed.
+/// Read Git's HEAD without launching Git. Linked worktrees use a `.git` file
+/// pointing to their own metadata directory instead of a `.git` directory.
+pub fn git_head_contents(root: &Path) -> Option<String> {
+    let dot_git = root.join(".git");
+    let head = if dot_git.is_dir() {
+        dot_git.join("HEAD")
+    } else {
+        let pointer = fs::read_to_string(&dot_git).ok()?;
+        let gitdir = pointer.trim().strip_prefix("gitdir: ")?;
+        let gitdir = Path::new(gitdir);
+        if gitdir.is_absolute() {
+            gitdir.join("HEAD")
+        } else {
+            root.join(gitdir).join("HEAD")
+        }
+    };
+    fs::read_to_string(head).ok()
+}
+
+/// Read the branch from HEAD rather than shelling out to Git on session start.
 fn git_branch(root: &Path) -> Option<String> {
-    let head = fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
+    let head = git_head_contents(root)?;
     let head = head.trim();
     // Detached HEAD stores a bare sha, which is not a branch name.
     head.strip_prefix("ref: refs/heads/").map(str::to_string)
@@ -552,6 +570,16 @@ mod tests {
         let env = env_context(&dir);
         assert!(env.contains("branch unknown"), "{env}");
         assert!(!env.contains("abc123def"), "{env}");
+    }
+
+    #[test]
+    fn env_context_reads_linked_worktree_branch() {
+        let dir = scratch("linked-branch");
+        let metadata = dir.join("git-metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(dir.join(".git"), "gitdir: git-metadata\n").unwrap();
+        fs::write(metadata.join("HEAD"), "ref: refs/heads/zest/chat-a\n").unwrap();
+        assert!(env_context(&dir).contains("branch zest/chat-a"));
     }
 
     /// The environment block must not be inside the region a cache breakpoint

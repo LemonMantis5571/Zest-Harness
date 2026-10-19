@@ -158,6 +158,7 @@ export type DesktopBackend = {
   listThreads(): Promise<ThreadSummary[]>;
   forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
+  createWorktreeChat(projectPath: string): Promise<string>;
   searchChats(query: string): Promise<ChatSearchHit[]>;
   openProjectChat(options: {
     /** `null` opens a chat without a workspace. */
@@ -337,6 +338,7 @@ export function createTauriBackend(): DesktopBackend {
     listThreads: () => tauriApi.listThreads(),
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
+    createWorktreeChat: (projectPath) => tauriApi.createWorktreeChat(projectPath),
     searchChats: (query) => tauriApi.searchChats(query),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadOlderThreadMessages: (options) => tauriApi.loadOlderThreadMessages(options),

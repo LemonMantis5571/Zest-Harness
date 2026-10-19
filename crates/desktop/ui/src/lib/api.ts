@@ -333,6 +333,10 @@ export function listChatProjects() {
   return invoke<ProjectChats[]>("list_chat_projects");
 }
 
+export function createWorktreeChat(projectPath: string) {
+  return invoke<string>("create_worktree_chat", { projectPath });
+}
+
 export function searchChats(query: string) {
   return invoke<ChatSearchHit[]>("search_chats", { query });
 }

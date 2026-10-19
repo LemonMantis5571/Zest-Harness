@@ -51,6 +51,7 @@ pub mod tools;
 pub mod transcripts;
 pub mod usage;
 pub mod workspace_changes;
+pub mod worktree_chat;
 
 pub use agent::{Agent, CompactionOutcome, TurnUsageSummary};
 pub use anthropic::client::AnthropicClient;
