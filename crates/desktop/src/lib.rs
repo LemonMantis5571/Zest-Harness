@@ -3705,8 +3705,13 @@ fn load_worktree_chat_records_from(config_dir: &Path) -> Vec<WorktreeChatRecord>
                 if let Some(canonical_path) =
                     canonical_managed_worktree_path(config_dir, &record.path)
                 {
-                    record.path = canonical_path.clone();
-                    by_path.insert(canonical_path, record);
+                    let sidecar = worktree_record_path(config_dir, &canonical_path);
+                    let sidecar_is_missing = std::fs::symlink_metadata(sidecar)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                    if sidecar_is_missing {
+                        record.path = canonical_path.clone();
+                        by_path.insert(canonical_path, record);
+                    }
                 }
             }
         }
@@ -3925,6 +3930,40 @@ mod worktree_chat_tests {
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].visible);
         assert!(sidebar_workspaces_from(vec![loaded[0].path.clone()], &loaded).is_empty());
+    }
+
+    #[test]
+    fn damaged_sidecar_does_not_revive_a_legacy_worktree_record() {
+        let scratch = ScratchDir::new("zest-worktree-damaged-sidecar-");
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(config_dir.join("worktrees")).unwrap();
+        let storage = worktree_storage_root(&config_dir);
+        let worktree = storage.join("chat-hidden");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let record = WorktreeChatRecord {
+            path: worktree.clone(),
+            source_root: scratch.join("source"),
+            branch: "zest/chat-hidden".into(),
+            visible: false,
+        };
+        let legacy = serde_json::json!([{
+            "path": worktree,
+            "sourceRoot": record.source_root,
+            "branch": record.branch
+        }]);
+        std::fs::write(
+            config_dir.join("worktree-chats.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        save_worktree_chat_record_at(&config_dir, &record).unwrap();
+        let sidecar = worktree_record_path(&config_dir, &record.path);
+        std::fs::write(sidecar, "damaged JSON").unwrap();
+
+        let loaded = load_worktree_chat_records_from(&config_dir);
+        assert!(loaded.is_empty());
+        assert!(sidebar_workspaces_from(Vec::new(), &loaded).is_empty());
+        assert!(worktree_config_root_from_records(&worktree, &loaded, &storage).is_err());
     }
 
     #[test]
