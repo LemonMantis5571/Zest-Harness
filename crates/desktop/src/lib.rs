@@ -3211,7 +3211,7 @@ fn set_local_offset(minutes: i32) {
 /// reaches are kept distinct in the payload rather than blended.
 #[tauri::command]
 fn profile_stats(state: State<'_, AppState>) -> Result<ProfileStats, String> {
-    let mut roots = load_known_workspaces();
+    let mut roots = sidebar_workspaces();
     if let Ok(active) = resolve_workspace_root(&state) {
         if !roots.iter().any(|p| p == &active) {
             roots.insert(0, active);
@@ -3593,7 +3593,7 @@ fn initial_workspace_root() -> Option<PathBuf> {
 fn remembered_workspace() -> Option<PathBuf> {
     let path = zest_config_dir().ok()?.join("last-workspace");
     let raw = std::fs::read_to_string(path).ok()?;
-    choose_remembered_workspace(raw.trim(), &load_known_workspaces())
+    choose_remembered_workspace(raw.trim(), &sidebar_workspaces())
 }
 
 fn choose_remembered_workspace(raw: &str, known: &[PathBuf]) -> Option<PathBuf> {
@@ -3650,34 +3650,163 @@ struct WorktreeChatRecord {
     path: PathBuf,
     source_root: PathBuf,
     branch: String,
+    #[serde(default = "worktree_visible_default")]
+    visible: bool,
 }
 
-fn worktree_chat_registry_path() -> Result<PathBuf, String> {
-    Ok(zest_config_dir()?.join("worktree-chats.json"))
+fn worktree_visible_default() -> bool {
+    true
 }
 
-fn load_worktree_chat_records() -> Result<Vec<WorktreeChatRecord>, String> {
-    let path = worktree_chat_registry_path()?;
-    let body = match std::fs::read_to_string(&path) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("cannot read worktree chat registry: {error}")),
+fn worktree_storage_root(config_dir: &Path) -> PathBuf {
+    let storage = config_dir.join("worktrees");
+    storage.canonicalize().unwrap_or(storage)
+}
+
+fn canonical_managed_worktree_path(config_dir: &Path, path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let storage = worktree_storage_root(config_dir);
+    let canonical = path.canonicalize().ok()?;
+    (canonical != storage && canonical.starts_with(&storage)).then_some(canonical)
+}
+
+fn worktree_record_path(config_dir: &Path, root: &Path) -> PathBuf {
+    let key = display_path(root);
+    let key = if cfg!(windows) {
+        key.to_ascii_lowercase()
+    } else {
+        key
     };
-    serde_json::from_str(&body)
-        .map_err(|error| format!("cannot read worktree chat registry: {error}"))
+    config_dir
+        .join("worktree-chat-records")
+        .join(format!("{}.json", blake3::hash(key.as_bytes()).to_hex()))
+}
+
+fn save_worktree_chat_record_at(
+    config_dir: &Path,
+    record: &WorktreeChatRecord,
+) -> Result<(), String> {
+    let path = worktree_record_path(config_dir, &record.path);
+    std::fs::create_dir_all(path.parent().expect("record path has a parent"))
+        .map_err(|error| format!("cannot prepare worktree chat registry: {error}"))?;
+    zest_core::fsutil::atomic_write_json(&path, record)
+        .map_err(|error| format!("cannot save worktree chat registry: {error}"))
+}
+
+fn load_worktree_chat_records_from(config_dir: &Path) -> Vec<WorktreeChatRecord> {
+    let mut by_path = BTreeMap::<PathBuf, WorktreeChatRecord>::new();
+    // Older builds wrote one shared array. Keep reading it, but a bad array
+    // cannot prevent ordinary projects or independently saved records opening.
+    if let Ok(body) = std::fs::read_to_string(config_dir.join("worktree-chats.json")) {
+        if let Ok(records) = serde_json::from_str::<Vec<WorktreeChatRecord>>(&body) {
+            for mut record in records {
+                if let Some(canonical_path) =
+                    canonical_managed_worktree_path(config_dir, &record.path)
+                {
+                    record.path = canonical_path.clone();
+                    by_path.insert(canonical_path, record);
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(config_dir.join("worktree-chat-records")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<WorktreeChatRecord>(&body) else {
+                continue;
+            };
+            let Some(canonical_path) = canonical_managed_worktree_path(config_dir, &record.path)
+            else {
+                continue;
+            };
+            if canonical_path == record.path
+                && path == worktree_record_path(config_dir, &canonical_path)
+            {
+                by_path.insert(canonical_path, record);
+            }
+        }
+    }
+    by_path.into_values().collect()
+}
+
+fn load_worktree_chat_records() -> Vec<WorktreeChatRecord> {
+    zest_config_dir()
+        .map(|config_dir| load_worktree_chat_records_from(&config_dir))
+        .unwrap_or_default()
+}
+
+fn save_worktree_chat_record(record: &WorktreeChatRecord) -> Result<(), String> {
+    save_worktree_chat_record_at(&zest_config_dir()?, record)
+}
+
+fn sidebar_workspaces_from(known: Vec<PathBuf>, records: &[WorktreeChatRecord]) -> Vec<PathBuf> {
+    let mut roots = known
+        .into_iter()
+        .filter(|root| {
+            !records
+                .iter()
+                .any(|record| record.path == *root && !record.visible)
+        })
+        .collect::<Vec<_>>();
+    for record in records.iter().filter(|record| record.visible) {
+        if !roots.contains(&record.path) {
+            roots.push(record.path.clone());
+        }
+    }
+    roots
+}
+
+fn sidebar_workspaces() -> Vec<PathBuf> {
+    sidebar_workspaces_from(load_known_workspaces(), &load_worktree_chat_records())
 }
 
 fn worktree_config_root(root: &Path) -> Result<PathBuf, String> {
-    let records = load_worktree_chat_records()?;
-    worktree_config_root_from_records(root, &records)
+    let storage = worktree_storage_root(&zest_config_dir()?);
+    worktree_config_root_from_records(root, &load_worktree_chat_records(), &storage)
+}
+
+fn set_worktree_chat_visible(root: &Path, visible: bool) -> Result<(), String> {
+    let config_dir = zest_config_dir()?;
+    if !root.starts_with(worktree_storage_root(&config_dir)) {
+        return Ok(());
+    }
+    let mut record = load_worktree_chat_records_from(&config_dir)
+        .into_iter()
+        .find(|record| record.path == root)
+        .ok_or_else(|| {
+            format!(
+                "This Zest worktree has no provider mapping: {}",
+                display_path(root)
+            )
+        })?;
+    if record.visible != visible {
+        record.visible = visible;
+        save_worktree_chat_record_at(&config_dir, &record)?;
+    }
+    Ok(())
 }
 
 fn worktree_config_root_from_records(
     root: &Path,
     records: &[WorktreeChatRecord],
+    storage: &Path,
 ) -> Result<PathBuf, String> {
-    let Some(record) = records.iter().find(|record| record.path == root) else {
+    if !root.starts_with(storage) {
         return Ok(root.to_path_buf());
+    }
+    let Some(record) = records.iter().find(|record| record.path == root) else {
+        return Err(format!(
+            "This Zest worktree has no provider mapping: {}. Restore its worktree chat record before opening it.",
+            display_path(root)
+        ));
     };
     if !record.source_root.is_dir() {
         return Err(format!(
@@ -3711,32 +3840,148 @@ mod worktree_chat_tests {
             path: worktree.clone(),
             source_root: source.clone(),
             branch: "zest/chat-test".into(),
+            visible: true,
         }];
         assert_eq!(
-            worktree_config_root_from_records(&worktree, &records).unwrap(),
+            worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).unwrap(),
             source
         );
-        let config =
-            Config::find(worktree_config_root_from_records(&worktree, &records).unwrap()).unwrap();
+        let config = Config::find(
+            worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).unwrap(),
+        )
+        .unwrap();
         for provider in ["claude", "codex", "deepseek"] {
             assert!(config.providers.contains_key(provider));
         }
         assert_eq!(
-            worktree_config_root_from_records(scratch.as_ref(), &records).unwrap(),
+            worktree_config_root_from_records(scratch.as_ref(), &records, &worktree).unwrap(),
             scratch.to_path_buf()
         );
         std::fs::remove_dir_all(&source).unwrap();
-        assert!(worktree_config_root_from_records(&worktree, &records).is_err());
+        assert!(worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).is_err());
+    }
+
+    #[test]
+    fn independent_records_survive_concurrent_writes_and_a_corrupt_legacy_registry() {
+        let scratch = ScratchDir::new("zest-worktree-records-");
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(config_dir.join("worktrees")).unwrap();
+        std::fs::write(config_dir.join("worktree-chats.json"), "broken JSON").unwrap();
+        let storage = worktree_storage_root(&config_dir);
+        for name in ["one", "two"] {
+            std::fs::create_dir_all(storage.join(name)).unwrap();
+        }
+        let records = ["one", "two"].map(|name| WorktreeChatRecord {
+            path: storage.join(name),
+            source_root: scratch.join("source"),
+            branch: format!("zest/chat-{name}"),
+            visible: true,
+        });
+        std::thread::scope(|scope| {
+            for record in &records {
+                let config_dir = &config_dir;
+                scope.spawn(move || save_worktree_chat_record_at(config_dir, record).unwrap());
+            }
+        });
+        let loaded = load_worktree_chat_records_from(&config_dir);
+        assert_eq!(loaded.len(), 2);
+        for record in &records {
+            assert!(loaded.iter().any(|loaded| loaded.path == record.path));
+        }
+        let ordinary = scratch.join("ordinary");
+        assert_eq!(
+            worktree_config_root_from_records(&ordinary, &loaded, &storage).unwrap(),
+            ordinary
+        );
+        assert!(
+            worktree_config_root_from_records(&storage.join("missing"), &loaded, &storage).is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_registry_is_read_and_a_hidden_sidecar_overrides_it() {
+        let scratch = ScratchDir::new("zest-worktree-legacy-");
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(config_dir.join("worktrees")).unwrap();
+        let worktree = worktree_storage_root(&config_dir).join("chat-old");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let source = scratch.join("source");
+        let legacy = serde_json::json!([{
+            "path": worktree,
+            "sourceRoot": source,
+            "branch": "zest/chat-old"
+        }]);
+        std::fs::write(
+            config_dir.join("worktree-chats.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let mut loaded = load_worktree_chat_records_from(&config_dir);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].visible);
+        loaded[0].visible = false;
+        save_worktree_chat_record_at(&config_dir, &loaded[0]).unwrap();
+        let loaded = load_worktree_chat_records_from(&config_dir);
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].visible);
+        assert!(sidebar_workspaces_from(vec![loaded[0].path.clone()], &loaded).is_empty());
+    }
+
+    #[test]
+    fn legacy_and_sidecar_records_cannot_escape_worktree_storage() {
+        let scratch = ScratchDir::new("zest-worktree-path-validation-");
+        let config_dir = scratch.join("config");
+        let storage = config_dir.join("worktrees");
+        std::fs::create_dir_all(&storage).unwrap();
+        let outside = scratch.join("another-project");
+        std::fs::create_dir_all(&outside).unwrap();
+        let escaped_path = storage.join("..").join("..").join("another-project");
+        let record = WorktreeChatRecord {
+            path: escaped_path,
+            source_root: outside.clone(),
+            branch: "zest/chat-escaped".into(),
+            visible: true,
+        };
+
+        std::fs::write(
+            config_dir.join("worktree-chats.json"),
+            serde_json::to_vec(&[&record]).unwrap(),
+        )
+        .unwrap();
+        assert!(load_worktree_chat_records_from(&config_dir).is_empty());
+
+        save_worktree_chat_record_at(&config_dir, &record).unwrap();
+        assert!(load_worktree_chat_records_from(&config_dir).is_empty());
+        assert_eq!(canonical_managed_worktree_path(&config_dir, &outside), None);
+    }
+
+    #[test]
+    fn visible_worktrees_survive_the_ordinary_project_limit_and_hidden_records_stay_hidden() {
+        let scratch = ScratchDir::new("zest-worktree-sidebar-");
+        let source = scratch.join("source");
+        let storage = scratch.join("worktrees");
+        let mut records = (0..45)
+            .map(|index| WorktreeChatRecord {
+                path: storage.join(format!("chat-{index}")),
+                source_root: source.clone(),
+                branch: format!("zest/chat-{index}"),
+                visible: true,
+            })
+            .collect::<Vec<_>>();
+        let roots = sidebar_workspaces_from(vec![source.clone()], &records);
+        assert_eq!(roots.len(), 46);
+        assert!(roots.contains(&source));
+        records[0].visible = false;
+        let roots = sidebar_workspaces_from(vec![source, records[0].path.clone()], &records);
+        assert_eq!(roots.len(), 45);
+        assert!(!roots.contains(&records[0].path));
     }
 }
 
 /// Make a persistent checkout for a new chat. It becomes an ordinary Zest
 /// workspace, so all providers and the file review use the same isolated root.
 #[tauri::command]
-async fn create_worktree_chat(
-    state: State<'_, AppState>,
-    project_path: String,
-) -> Result<String, String> {
+async fn create_worktree_chat(project_path: String) -> Result<String, String> {
     let source = require_known_workspace(Path::new(project_path.trim()))?;
     let config_root = worktree_config_root(&source)?;
     let storage = zest_config_dir()?.join("worktrees");
@@ -3746,26 +3991,15 @@ async fn create_worktree_chat(
     .await
     .map_err(|error| format!("Worktree creation stopped: {error}"))??;
     let path = canonicalize_dir(created.path)?;
-    let _edit_guard = lock_config_edit(&state);
-    let mut records = load_worktree_chat_records()?;
-    records.push(WorktreeChatRecord {
+    let record = WorktreeChatRecord {
         path: path.clone(),
         source_root: config_root,
         branch: created.branch,
-    });
-    zest_core::fsutil::atomic_write_json(&worktree_chat_registry_path()?, &records).map_err(
-        |error| {
-            format!(
-                "Worktree created at {} but could not be registered: {error}",
-                display_path(&path)
-            )
-        },
-    )?;
-    let mut known = load_known_workspaces();
-    append_known_workspace(&mut known, path.clone());
-    write_known_workspaces(&known).map_err(|error| {
+        visible: true,
+    };
+    save_worktree_chat_record(&record).map_err(|error| {
         format!(
-            "Worktree created at {} but could not be added to the sidebar: {error}",
+            "Worktree created at {} but could not be registered: {error}",
             display_path(&path)
         )
     })?;
@@ -3821,7 +4055,7 @@ fn append_known_workspace(list: &mut Vec<PathBuf>, root: PathBuf) {
 fn require_known_workspace(path: &Path) -> Result<PathBuf, String> {
     let root = canonicalize_dir(path.to_path_buf())?;
     let root_key = display_path(&root);
-    if load_known_workspaces()
+    if sidebar_workspaces()
         .iter()
         .any(|known| display_path(known) == root_key)
     {
@@ -3837,6 +4071,14 @@ fn remember_workspace(root: &Path) {
     let Ok(root) = canonicalize_dir(root.to_path_buf()) else {
         return;
     };
+    // Worktree records are their own durable sidebar entries and do not use
+    // up one of the 40 ordinary-project slots.
+    if load_worktree_chat_records()
+        .iter()
+        .any(|record| record.path == root)
+    {
+        return;
+    }
     let mut list = load_known_workspaces();
     append_known_workspace(&mut list, root);
     let _ = write_known_workspaces(&list);
@@ -3877,15 +4119,6 @@ fn remove_known_workspace_metadata(
     root_key: &str,
     known_roots: &[PathBuf],
 ) -> Result<(), String> {
-    if !known_roots
-        .iter()
-        .any(|root| display_path(root) == root_key)
-    {
-        return Err(format!(
-            "That folder is not a known Zest workspace: {root_key}"
-        ));
-    }
-
     let mut remaining = known_roots.to_vec();
     remaining.retain(|root| display_path(root) != root_key);
     let previous_persisted_workspace = clear_persisted_workspace(root_key)?;
@@ -3916,7 +4149,7 @@ fn workspace_removal_target(
         return Err("Switch to another project before removing the active workspace.".to_string());
     }
     let known_roots = load_known_workspaces();
-    if !known_roots
+    if !sidebar_workspaces()
         .iter()
         .any(|known| display_path(known) == root_key)
     {
@@ -3991,6 +4224,7 @@ fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String
             display_path(&root)
         ));
     }
+    set_worktree_chat_visible(&root, true)?;
     persist_workspace(&root)?;
     if let Ok(mut guard) = state.workspace_root.lock() {
         *guard = Some(root.clone());
@@ -4985,8 +5219,9 @@ fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadSummary>, String
 /// folder or the chats stored inside it.
 #[tauri::command]
 fn forget_workspace(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
-    let (_root, root_key, known_roots) = workspace_removal_target(&state, &project_path)?;
-    remove_known_workspace_metadata(&state, &root_key, &known_roots)
+    let (root, root_key, known_roots) = workspace_removal_target(&state, &project_path)?;
+    remove_known_workspace_metadata(&state, &root_key, &known_roots)?;
+    set_worktree_chat_visible(&root, false)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5100,13 +5335,15 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             .then(|| resolve_workspace_root(&state).ok())
             .flatten(),
     );
-    let mut roots = load_known_workspaces();
+    let mut roots = sidebar_workspaces();
     if let Some(active_root) = active_root.as_ref() {
         // Keep the listing call read-only for existing projects. A selected
         // project is normally persisted by `set_workspace_root`; this only
         // keeps an active legacy/root override visible if its registry write
         // was unavailable.
-        append_known_workspace(&mut roots, active_root.clone());
+        if !roots.contains(active_root) {
+            roots.push(active_root.clone());
+        }
     }
 
     let free_root = free_chats_root()?;
@@ -5116,7 +5353,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         .chat_summary_cache
         .lock()
         .map_err(|_| "chat summary cache lock poisoned".to_string())?;
-    let worktree_records = load_worktree_chat_records()?;
+    let worktree_records = load_worktree_chat_records();
     let mut out = Vec::new();
     for root in roots {
         if !root.is_dir() {
@@ -5207,9 +5444,11 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
             .then(|| resolve_workspace_root(&state).ok())
             .flatten(),
     );
-    let mut roots = load_known_workspaces();
+    let mut roots = sidebar_workspaces();
     if let Some(active_root) = active_root.as_ref() {
-        append_known_workspace(&mut roots, active_root.clone());
+        if !roots.contains(active_root) {
+            roots.push(active_root.clone());
+        }
     }
     let free_root = free_chats_root()?;
 
