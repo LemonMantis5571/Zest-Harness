@@ -369,6 +369,8 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     : scenario === "sidebar-status"
       ? "/fixture/zest-app"
       : ".";
+  const initialWorkspace = workspace;
+  const fixtureWorktrees = new Map<string, string>();
   let fixturePinned = false;
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
@@ -1886,11 +1888,17 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       const threads = await this.listThreads();
       return [
         {
-          name: workspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
-          path: workspace,
-          active: !session.isFreeChat,
-          threads: session.isFreeChat ? [] : threads,
+          name: initialWorkspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
+          path: initialWorkspace,
+          active: !session.isFreeChat && workspace === initialWorkspace,
+          threads: session.isFreeChat || workspace !== initialWorkspace ? [] : threads,
         },
+        ...Array.from(fixtureWorktrees, ([path, branch]) => ({
+          name: `${initialWorkspace.split(/[/\\]/).filter(Boolean).pop() || "fixture"} · ${branch}`,
+          path,
+          active: !session.isFreeChat && workspace === path,
+          threads: session.isFreeChat || workspace !== path ? [] : threads,
+        })),
         {
           name: "Free chats",
           path: null,
@@ -1910,6 +1918,15 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
               ].filter((thread) => !deletedFixtureThreads.has(thread.id)),
         },
       ];
+    },
+    async createWorktreeChat(projectPath) {
+      if (projectPath !== initialWorkspace && !fixtureWorktrees.has(projectPath)) {
+        throw new Error("fixture: unknown Git project");
+      }
+      const id = crypto.randomUUID().slice(0, 8);
+      const root = `${initialWorkspace}/worktrees/${id}`;
+      fixtureWorktrees.set(root, `zest/chat-${id}`);
+      return root;
     },
     async searchChats(query) {
       const needle = query.trim();
@@ -2582,7 +2599,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async gitBranch() {
-      return "master";
+      return fixtureWorktrees.get(workspace) ?? "master";
     },
     async gitContext(): Promise<GitContext> {
       return {

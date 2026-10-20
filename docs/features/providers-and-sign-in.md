@@ -73,6 +73,9 @@ connected provider actually serves turns is in
 - API keys are never written to `zest.toml`. Adding a provider writes the entry
   to the project `zest.toml` if one exists, else the user config, and stores the
   key under its `credential` account in the OS credential manager.
+- A worktree chat runs in its isolated checkout but reads and edits provider
+  configuration from the original project. This applies to Claude Code, Codex
+  CLI, and API providers alike; a missing original project is an error.
 - Enable Claude Code / Codex CLI / Cursor CLI writes a parent-provider entry with
   preset models (`sonnet`, `gpt-5.6-sol`, `composer-2.5`) and no API key.
 - In-chat switching keeps the thread when both sides run Zest's loop (API key,
