@@ -38,10 +38,11 @@ import { AccountMenu } from "@/components/AccountMenu";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { WorktreeStatusBadge } from "@/components/WorktreeStatusBadge";
 import type { SettingsSectionId } from "@/components/SettingsPanel";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
-import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
+import { fallbackOnFailure, ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import type { PaletteFilter } from "@/lib/commandPaletteSearch";
 import {
   CHAT_STATUS_SECTIONS,
@@ -80,6 +81,7 @@ import type {
   ProviderRow,
   ThreadSummary,
   UserProfile,
+  WorktreeChatStatus,
 } from "@/lib/types";
 import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { cn } from "@/lib/utils";
@@ -349,6 +351,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
   onOpenDelegationJob,
 }: Props) {
   const [projects, setProjects] = useState<ProjectChats[]>([]);
+  const [worktreeStatus, setWorktreeStatus] = useState<Record<string, WorktreeChatStatus>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -408,6 +411,48 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
       cancelled = true;
     };
   }, [open, activeThreadId, activeProjectPath, activeProviderId, tick]);
+
+  // Git counts for worktree chat rows. Every list load runs this, and the list
+  // reloads when the sidebar opens and when a turn ends, so it needs no timer.
+  // One path at a time keeps many worktrees from spawning a burst of Git
+  // processes. A failure drops that row's counts and nothing else.
+  useEffect(() => {
+    const paths = projects.flatMap((project) =>
+      project.worktree && project.path ? [project.path] : []
+    );
+    setWorktreeStatus((current) => {
+      const kept = Object.keys(current).filter((path) => paths.includes(path));
+      return kept.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(kept.map((path) => [path, current[path]]));
+    });
+    let cancelled = false;
+    void (async () => {
+      for (const path of paths) {
+        const status = await getBackend()
+          .worktreeChatStatus(path)
+          .catch((error) => fallbackOnFailure(error, null, "read worktree chat status"));
+        if (cancelled) return;
+        setWorktreeStatus((current) => {
+          const before = current[path];
+          if (!status) {
+            if (!before) return current;
+            const { [path]: _removed, ...rest } = current;
+            return rest;
+          }
+          return before &&
+            before.ahead === status.ahead &&
+            before.behind === status.behind &&
+            before.dirty === status.dirty
+            ? current
+            : { ...current, [path]: status };
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projects]);
 
   useEffect(() => {
     if (!open) return;
@@ -1528,6 +1573,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                             {project.name}
                           </button>
                         </h2>
+                        <WorktreeStatusBadge status={worktreeStatus[project.path]} />
                         <Button
                           type="button"
                           variant="ghost"
@@ -1725,6 +1771,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar({
                               {project.name}
                             </span>
                           </button>
+                          <WorktreeStatusBadge status={worktreeStatus[project.path]} />
                           <Button
                             type="button"
                             variant="ghost"
