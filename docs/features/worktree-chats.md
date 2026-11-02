@@ -6,6 +6,7 @@ paths:
   - crates/core/src/prompt.rs
   - crates/desktop/src/lib.rs
   - crates/desktop/ui/src/components/ChatHistorySidebar.tsx
+  - crates/desktop/ui/src/components/WorktreeStatusBadge.tsx
   - crates/desktop/ui/src/lib/api.ts
   - crates/desktop/ui/src/lib/backend.ts
   - crates/desktop/ui/src/lib/fixtureBackend.ts
@@ -25,19 +26,26 @@ verify:
 - Each new chat gets a unique `zest/chat-*` branch and persistent checkout. Its files, chat history, approvals, and running turns belong to that checkout. Claude Code, Codex/GPT, and Zest-driven API providers such as DeepSeek use the same isolated working directory.
 - The checkout starts at committed HEAD. Uncommitted and untracked files in the original project are not copied. Other worktree chats and the original project keep their own edits.
 - Worktree chats appear as separate, named workspaces in the sidebar. They survive app restarts and do not consume the 40 ordinary-project slots. The source project's provider configuration is used for each worktree; editing that configuration changes the source project.
+- A worktree chat's sidebar row shows its Git state as compact counts: commits ahead of and behind the source project's current branch (up and down arrows), and a dot with the number of uncommitted entries. The entries are what `git status --porcelain` lists, so tracked changes and untracked files count, and a new untracked folder counts once. The counts have an accessible label and tooltip such as "2 commits ahead, 1 commit behind, 3 uncommitted changes". A level, clean checkout shows nothing, and ordinary project rows never show any. The "By status" grouping has no project rows, so it shows none either.
+- The counts refresh whenever the sidebar's chat list loads: when it opens, when the window regains focus, and when a turn ends. There is no timer. If the source project is on a detached HEAD, ahead and behind compare with the commit the worktree started from; if that is unknown (a worktree registered before it was recorded) they are left out. If Git cannot read the checkout, for example because the source project was deleted, the row shows no counts. None of this raises an error or a toast.
 - Deleting a chat or removing a worktree from Zest's sidebar does not delete its files or Git branch. Use Git to inspect and remove a worktree deliberately after its work is integrated.
 
 ## How it works
 
 `ChatHistorySidebar` calls `create_worktree_chat` through the backend. The desktop checks that the source is a known workspace, asks `zest_core::worktree_chat` to create a branch and linked checkout under the user-local Zest config directory, and writes one record per checkout under `worktree-chat-records/`. The previous shared `worktree-chats.json` array remains readable for migration; a present per-checkout sidecar takes precedence, and even a damaged sidecar suppresses its legacy entry so removed worktrees cannot reappear. Independent records prevent concurrent app windows from overwriting each other's mappings. Records are canonicalized and checked against the managed storage root, rejecting traversal and symlink escapes; other invalid records are skipped. An unregistered managed worktree fails closed rather than silently using another provider config. Visible records are combined with ordinary known projects at listing, search, and restore time. It then opens a normal new project chat with the worktree as its root. Provider sessions, file tools, history, and review already use the active project's root, so they all operate in the checkout. `prompt::git_head_contents` reads both normal `.git/HEAD` and the linked-worktree pointer.
 
+Each record also keeps the `base_commit` the checkout started from (optional, so older records still load), and `list_chat_projects` marks worktree rows with `worktree: true`. After every list load the sidebar asks the `worktree_chat_status` command about each such row, one at a time. The command accepts only a path with a visible worktree record, runs `zest_core::worktree_chat::chat_worktree_status` on a blocking thread under a 10 s timeout, and returns `{ ahead, behind, dirty }` or `null`. Only counts cross the boundary, never file paths. The core function compares `git rev-list --left-right --count <source branch tip>...HEAD` run in the checkout, using the tip of the branch the source project is on, or the recorded base commit when it has none. Its `git status --porcelain --untracked-files=normal` gives the dirty count. Both run with `GIT_OPTIONAL_LOCKS=0`, so a refresh cannot take the index lock from the agent's own Git commands. The ts-rs binding for the reply is `generated/WorktreeChatStatus.ts`.
+
 ## Verify
 
 Run the focused Rust and fixture-browser tests above. In a disposable Git repository, start two worktree chats and edit the same tracked file differently. Confirm the source file stays unchanged and reopening either chat returns to its own branch.
+
+To check the status counts, commit once in one chat's checkout, add an untracked file there, and commit once in the source project. Within one refresh (reopen the sidebar, refocus the window, or finish a turn) that chat's row reads one commit ahead, one behind and one uncommitted change, while a clean sibling chat shows only the one behind. The fixture browser tests cover the same counts, the refresh after a turn, and a Git failure.
 
 ## Pitfalls
 
 - Worktrees are persistent user data. Never use delegation's temporary worktree cleanup or force-remove a chat checkout.
 - Provider configuration belongs to the original project even though execution occurs in the worktree. A missing original project is an error rather than silently choosing another provider table.
 - A damaged legacy registry or one damaged per-checkout record must not block ordinary project chats. A checkout whose own mapping cannot be recovered cannot start a provider session.
+- The status command must stay read-only and path-free: no `git status` that writes the index, and no file names in its reply. Run it only for registered worktree records, never for an arbitrary path.
 - A plain new project chat still uses the selected project folder. Isolation is opt-in.
