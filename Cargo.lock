@@ -6991,7 +6991,7 @@ dependencies = [
  "base64 0.23.1",
  "serde",
  "serde_json",
- "windows 0.61.3",
+ "windows 0.62.2",
  "zest-plugin-api",
 ]
 
