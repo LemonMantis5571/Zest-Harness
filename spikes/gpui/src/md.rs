@@ -39,8 +39,9 @@ pub enum Block {
     Heading { level: u8, unit: usize },
     Para { unit: usize, quote: usize },
     Item { unit: usize, depth: usize, marker: String, quote: usize },
-    Code { lang: String, unit: usize },
-    Table { rows: Vec<Vec<usize>> },
+    /// `indent` is the list nesting the block sits in (0 = top level), so code under a list item stays under it.
+    Code { lang: String, unit: usize, indent: usize },
+    Table { rows: Vec<Vec<usize>>, indent: usize },
     Rule,
 }
 
@@ -170,7 +171,7 @@ pub fn parse(src: &str) -> Doc {
                         }
                         let spans = highlight(&lang, &text);
                         doc.units.push(Unit { text: text.into(), spans, sep: "\n\n", mono: true });
-                        doc.blocks.push(Block::Code { lang, unit: doc.units.len() - 1 });
+                        doc.blocks.push(Block::Code { lang, unit: doc.units.len() - 1, indent: lists.len() });
                     }
                 }
                 TagEnd::List(_) => {
@@ -196,7 +197,7 @@ pub fn parse(src: &str) -> Doc {
                         if let Some(last) = rows.last().and_then(|r| r.last()) {
                             doc.units[*last].sep = "\n\n";
                         }
-                        doc.blocks.push(Block::Table { rows });
+                        doc.blocks.push(Block::Table { rows, indent: lists.len() });
                     }
                 }
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link | TagEnd::Image => {
@@ -258,6 +259,10 @@ static HL: OnceLock<Hl> = OnceLock::new();
 pub fn init_highlighter() -> std::time::Duration {
     let t = Instant::now();
     HL.get_or_init(|| {
+        // `--features grammars` swaps in the bat/two-face pack (TypeScript, TSX, TOML, Dockerfile, Kotlin, ...).
+        #[cfg(feature = "grammars")]
+        let ss = two_face::syntax::extra_newlines();
+        #[cfg(not(feature = "grammars"))]
         let ss = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
         Hl { ss, theme: ts.themes["base16-ocean.dark"].clone() }
@@ -278,14 +283,7 @@ pub fn highlight(lang: &str, code: &str) -> Vec<(Range<usize>, SpanKind)> {
         return hit;
     }
     let Some(hl) = HL.get() else { return vec![] };
-    let lang = match lang {
-        "ts" | "tsx" | "typescript" | "jsx" => "js",
-        "sh" | "shell" | "zsh" | "powershell" | "ps1" => "bash",
-        "rs" => "rust",
-        "py" => "python",
-        l => l,
-    };
-    let syntax = hl.ss.find_syntax_by_token(lang);
+    let syntax = find_syntax(&hl.ss, lang).map(|(s, _)| s);
     let mut out = vec![];
     if let Some(syntax) = syntax {
         let mut hlines = HighlightLines::new(syntax, &hl.theme);
@@ -320,8 +318,50 @@ pub fn unit_slice(u: &Unit, range: Range<usize>) -> &str {
     u.text.get(s..e).unwrap_or("")
 }
 
-/// Which of Zest's shiki grammars the bundled syntect pack can colour.
-pub fn language_coverage(tokens: &[&str]) -> Vec<(String, bool)> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Coverage {
+    /// The pack has a grammar for the language itself.
+    Native,
+    /// Coloured with a neighbouring grammar (TypeScript as JavaScript, PowerShell as Bash).
+    Approx,
+    None,
+}
+
+/// Resolves a fence label to a syntect grammar. The first lookup uses the label as the pack knows it
+/// (Zest's shiki names such as `csharp` and `docker` map to the tokens `cs` and `dockerfile`).
+fn find_syntax<'a>(ss: &'a SyntaxSet, lang: &str) -> Option<(&'a syntect::parsing::SyntaxReference, Coverage)> {
+    let token = match lang {
+        "csharp" => "cs",
+        "docker" => "dockerfile",
+        "kotlin" => "kt",
+        "typescript" => "ts",
+        "sh" | "shell" | "zsh" => "bash",
+        "ps1" => "powershell",
+        "rs" => "rust",
+        "py" => "python",
+        l => l,
+    };
+    if let Some(s) = ss.find_syntax_by_token(token) {
+        return Some((s, Coverage::Native));
+    }
+    let near = match lang {
+        "ts" | "tsx" | "typescript" | "jsx" => "js",
+        "powershell" | "ps1" => "bash",
+        _ => return None,
+    };
+    ss.find_syntax_by_token(near).map(|s| (s, Coverage::Approx))
+}
+
+/// Which of Zest's shiki grammars the loaded syntect pack can colour, natively or approximately.
+pub fn language_coverage(tokens: &[&str]) -> Vec<(String, Coverage)> {
     let Some(hl) = HL.get() else { return vec![] };
-    tokens.iter().map(|t| (t.to_string(), hl.ss.find_syntax_by_token(t).is_some())).collect()
+    tokens
+        .iter()
+        .map(|t| (t.to_string(), find_syntax(&hl.ss, t).map(|(_, c)| c).unwrap_or(Coverage::None)))
+        .collect()
+}
+
+/// Number of grammars in the loaded pack.
+pub fn grammar_count() -> usize {
+    HL.get().map(|h| h.ss.syntaxes().len()).unwrap_or(0)
 }

@@ -40,6 +40,10 @@ pub struct Shared {
     /// Units painted this frame. Off-screen units are absent (the list is virtualized), so
     /// hit-testing uses this and copy uses the document model.
     pub hits: HashMap<(usize, usize), Hit>,
+    /// Painted bounds of trace rows, by message index. `ListState::bounds_for_item` returns `None`
+    /// for every item while the list follows the tail, so anything that must know where a row is
+    /// at the tail has to record it at paint time.
+    pub rows: HashMap<usize, Bounds<Pixels>>,
 }
 
 pub type SharedRef = Rc<RefCell<Shared>>;
@@ -242,6 +246,11 @@ fn quoted(el: Div, quote: usize) -> Div {
     }
 }
 
+/// Left edge of a list item's text: its nesting indent, the 20 px marker column and the 8 px gap.
+fn list_text_offset(indent: usize) -> f32 {
+    18. * indent.saturating_sub(1) as f32 + 28.
+}
+
 pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyElement> {
     let mut out = vec![];
     for block in &doc.blocks {
@@ -271,9 +280,10 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                 .child(div().w(px(20.)).flex_shrink_0().text_color(rgb(MUTED)).child(marker.clone()))
                 .child(div().flex_1().min_w_0().child(unit_el(doc, *unit, msg, shared)))
                 .into_any_element(),
-            Block::Code { lang, unit } => {
+            Block::Code { lang, unit, indent } => {
                 let text = doc.units[*unit].text.to_string();
                 div()
+                    .when(*indent > 0, |d| d.ml(px(list_text_offset(*indent))))
                     .rounded_md()
                     .bg(rgb(PANEL))
                     .border_1()
@@ -313,7 +323,8 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                     )
                     .into_any_element()
             }
-            Block::Table { rows } => div()
+            Block::Table { rows, indent } => div()
+                .when(*indent > 0, |d| d.ml(px(list_text_offset(*indent))))
                 .flex()
                 .flex_col()
                 .rounded_md()
@@ -375,6 +386,113 @@ pub fn render_assistant(doc: &Rc<Doc>, msg: usize, shared: &SharedRef, live: boo
                 .line_height(px(22.))
                 .children(render_blocks(doc, msg, shared))
                 .when(live, |d| d.child(div().text_color(rgb(MUTED)).child("\u{258D}"))),
+        )
+        .into_any_element()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolStatus {
+    Running,
+    Ok,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub enum TraceKind {
+    Thinking { live: bool, secs: f32 },
+    Tool { name: String, id: String, status: ToolStatus, secs: f32 },
+}
+
+/// One collapsible row of an agent turn (reasoning or a tool call). Its body is an ordinary `Doc`, so
+/// selection, copy and highlighting work in it with no extra code.
+#[derive(Clone, Debug)]
+pub struct Trace {
+    pub kind: TraceKind,
+    /// One-line description shown in the header (first line of the tool result).
+    pub title: String,
+    pub open: bool,
+}
+
+pub fn render_trace(
+    msg: usize,
+    tr: &Trace,
+    doc: &Rc<Doc>,
+    shared: &SharedRef,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (label, badge, badge_color) = match &tr.kind {
+        TraceKind::Thinking { live: true, .. } => ("Thinking".to_string(), "\u{2026}".to_string(), MUTED),
+        TraceKind::Thinking { secs, .. } => ("Thought".to_string(), format!("{secs:.0}s"), MUTED),
+        TraceKind::Tool { name, status, secs, .. } => (
+            name.clone(),
+            match status {
+                ToolStatus::Running => "running\u{2026}".to_string(),
+                ToolStatus::Ok => format!("\u{2713} {secs:.1}s"),
+                ToolStatus::Error => format!("\u{2717} {secs:.1}s"),
+            },
+            match status {
+                ToolStatus::Running => MUTED,
+                ToolStatus::Ok => 0x7ec699,
+                ToolStatus::Error => 0xe06c75,
+            },
+        ),
+    };
+    let has_body = !doc.units.is_empty();
+    let sh = shared.clone();
+    div()
+        .w_full()
+        .px_4()
+        .relative()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, _, _| {
+                    sh.borrow_mut().rows.insert(msg, bounds);
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .child(
+            div()
+                .max_w(px(780.))
+                .child(
+                    div()
+                        .id(("trace", msg))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0x1d1f26)))
+                        .text_size(px(13.))
+                        .text_color(rgb(MUTED))
+                        .child(div().w(px(10.)).child(if tr.open { "\u{25BE}" } else { "\u{25B8}" }))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(FG)).child(label))
+                        .child(div().flex_1().min_w_0().truncate().child(tr.title.clone()))
+                        .child(div().text_color(rgb(badge_color)).child(badge))
+                        .on_click(on_toggle),
+                )
+                .when(tr.open && has_body, |d| {
+                    d.child(
+                        div()
+                            .ml(px(18.))
+                            .mt_1()
+                            .mb_1()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .text_size(px(13.))
+                            .text_color(rgb(MUTED))
+                            .line_height(px(20.))
+                            .children(render_blocks(doc, msg, shared)),
+                    )
+                }),
         )
         .into_any_element()
 }

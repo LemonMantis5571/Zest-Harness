@@ -1,6 +1,6 @@
 # GPUI spike: could it host Zest's chat UI on Windows 11?
 
-Throwaway code in this folder (about 2,600 lines of Rust). Run on 2026-11-02, Windows 11 Pro 26200, Ryzen 7 8700G
+Throwaway code in this folder (about 3,400 lines of Rust). Run on 2026-11-02 in two rounds (the spike, then a follow-up on the parts where GPUI looked like a win; see "Round 2"), Windows 11 Pro 26200, Ryzen 7 8700G
 (16 logical CPUs), RTX 3060 Ti + Radeon 780M, one 60 Hz display, MSVC (VS 2022 17.14), Windows SDK 10.0.26100, rustc 1.97.1.
 **Caveat for every number below: a game (Fortnite) and a Discord clip-recording process were running on the machine the whole time.**
 Words like "ran", "measured", "passed" mean I executed it. "Docs/code say" means I read it and did not run it.
@@ -13,6 +13,9 @@ It is not a drop-in swap. Everything the webview gives for free had to be hand-b
 the browser and HTML artifacts still need a webview, and two things are **unverified and carry the real risk**: a real CJK IME and a screen reader (see "Not verified").
 The webview baseline says the existing UI already holds 60 fps at its real default window, so performance alone does not justify this; the measurable difference is footprint (about 138 MB private in one process against about 725 MB across about 12, not like-for-like) and headroom for long histories.
 My recommendation: technically unblocked, not yet justified. Do the IME and screen-reader checks and decide what problem a native UI must solve before spending the porting effort below.
+
+Round 2 asked whether the wins survive a realistic agent transcript (reasoning and tool rows between the messages, expandable). They did: draw time, CPU and memory were unchanged within run-to-run noise at 500 and 5,000 rows, and expanding rows behaves correctly at the tail and when scrolled up (see "Round 2").
+It does not change the verdict: the wins are footprint and headroom for long histories, not frame rate. A piecemeal port is not what I tested: the working hybrid is a GPUI window that hosts child webviews, and those paint above GPUI content. I did not try the reverse, GPUI inside Tauri's window (GPUI creates its own windows).
 
 ## Setup (setup friction is a result)
 
@@ -102,15 +105,61 @@ The two draw/main-thread figures measure different things and must not be subtra
 with the animation paused by injected CSS, idle dropped to 0-0.07 cores and the streaming frame rate rose from 33 to about 48 fps. At 20 messages idle is about 0.1 cores against 0.01 for the empty app; I did not isolate how much of that is the same cause. This is worth a separate fix whatever happens with GPUI.
 
 
-**Gaps / not built:** word and line selection (double/triple click), auto-scroll while dragging is only a nudge on mouse-move, nested blocks
-inside list items (code in a list item loses structure), images and the lightbox, Mermaid (I did not look for a Rust renderer; Zed's `mermaid_render` is GPL-3.0), link-preview cards, "Copy Markdown"/"Save as", block-streaming reveal, resumable highlighting (I re-highlight the whole fence;
-a cache hides it for settled blocks), Trace/Reasoning/Tool rows. **Grammar coverage: syntect's bundled pack natively covers 17 of Zest's 30 shiki grammars**
-(bash, c, cpp, css, diff, go, html, java, javascript, json, markdown, php, python, ruby, rust, sql, yaml). Missing: csharp, docker,
-graphql, kotlin, scss, swift, toml, vue, and TypeScript/TSX/JSX, which I aliased to the JavaScript grammar (approximate), shell/powershell to bash.
-A larger grammar pack (for example the `two-face` crate) probably closes this; I did not test it.
+**Gaps / not built:** word and line selection (double/triple click), auto-scroll while dragging is only a nudge on mouse-move, images and the lightbox,
+Mermaid (I did not look for a Rust renderer; Zed's `mermaid_render` is GPL-3.0), link-preview cards, "Copy Markdown"/"Save as", block-streaming reveal, resumable highlighting (I re-highlight the whole fence;
+a cache hides it for settled blocks), approval and question cards, subagent and shimmer rows. (Round 2 added reasoning and tool rows and fixed code and tables under list items.)
+**Grammar coverage:** see "Grammar packs" under Round 2. (Round 1 said syntect covers 17 of Zest's 30 shiki grammars; that count was wrong, see the correction there.)
 
 **Stability finding:** a panic inside a GPUI window event handler **aborts the process** (non-unwinding callback). My first drag-select
 panicked on a `RefCell` double borrow and killed the app. Rust UI code on this path cannot rely on unwinding to survive a bug.
+
+## Round 2: do the wins survive a realistic agent transcript? (ran)
+
+Round 1's transcript was plain Markdown messages. A coding agent's transcript is mostly small rows between the messages, so round 2 added them and re-measured. I did not check what else was running on the machine this time.
+**Built (about 750 lines of Rust, 220 of them the self-test):** collapsible reasoning and tool rows in the same virtualized list, fed by `StreamEvent::Thinking`, `ToolCallStart` and `ToolCallResult` through the same `Provider::stream_turn` mock (`bridge.rs`, `main.rs`, `view.rs::render_trace`);
+a tool row's body is a diff or text block through the existing renderer, so selection, highlighting and "Copy code" work in it with no extra code; code and tables under list items now keep their indent (`md.rs`); `--agent` seeds history as user, reasoning, three tool rows, answer; `--open` starts with every row expanded.
+Status is static text (running, tick, cross), not a spinner: a native spinner needs a redraw every frame while it is on screen, which is the webview's hidden-spinner mistake again if it stays on a settled row.
+
+**Checks (`--selftest --agent`, all PASS; the 15 round-1 checks still PASS):**
+
+| Check | Result |
+| --- | --- |
+| Nested blocks under list items | code and table carry indent 1, two items |
+| History shape | 500 rows: 84 reasoning, 249 tool |
+| Live turn through the bridge | rows arrive as reasoning, three tool rows, answer; each tool row gets its result title |
+| Click a tool header while following the tail | opens (29 px to 197 px), the tail is still followed, the last item's bottom edge is at the viewport bottom (814 px) |
+| Click a header while scrolled up | the row's top edge stays at 135 px, height 29 px to 217 px, the tail stays released |
+| Copy across a collapsed reasoning row | 1,058 chars without its text; 1,827 chars once expanded |
+
+While following the tail, expanding a row above the bottom keeps the bottom pinned, so the expanded row's top edge must move up by the growth (inferred from the pinned bottom; the test did not log the top). I did not compare that with the webview.
+**API note:** `ListState::bounds_for_item` returns `None` for every item while the list follows the tail (there is no scroll anchor, so the logical scroll top is the end; read from `list.rs`). Anything that must locate a row at the tail (click targets, anchored popovers) has to record painted bounds itself; the spike does it with a `canvas` per row.
+
+**Measured (release, 60 Hz, live message streaming at 75 tok/s for 30 s, all draw times in ms):**
+
+| Transcript, build | Draw mean / p95 / p99 / max | Late frames | CPU cores avg | Private MB |
+| --- | --- | --- | --- | --- |
+| 500 plain, round-1 code (rebuilt from the commit), 2 runs | 2.71 / 4.87 / 6.27 / 8.83 and 2.90 / 5.64 / 7.14 / 10.29 | 0, 0 | 0.21, 0.24 | 139.4, 139.1 |
+| 500 plain, round-2 code, 2 runs | 2.55 / 4.48 / 5.52 / 8.00 and 3.00 / 5.80 / 7.14 / 10.44 | 0, 0 | 0.24, 0.25 | 139.6, 140.2 |
+| 500 agent-shaped rows, round-2 code, 4 runs | means 2.79 to 3.09, p99 6.23 to 7.49, max 8.4 to 23.6 | 0, 0, 1, 1 | 0.22 to 0.27 | 138.2 to 138.7 |
+| 5,000 agent-shaped rows | 2.97 / 5.12 / 6.23 / 9.10 | 0 | 0.24 | 150.9 |
+| 5,000 plain | 2.82 / 5.21 / 6.53 / 9.52 | 0 | 0.26 | 153.7 |
+
+Programmatic scroll through 500 rows for 20 s, one run each, no streaming: plain mean 1.27 / p99 3.32 / max 11.35; agent rows 1.45 / 3.19 / 12.30; agent rows all expanded 1.30 / 3.12 / 17.47 (about 700 frames each).
+Reading: the rows did not move any number beyond the spread between two runs of the same build. The late frames (1 each in two agent runs, 18 and 24 ms worst) are in the range the plain runs' max already reach; I did not isolate them.
+**The machine drifted:** the round-1 code measured 1.6 ms mean draw and 0.13 cores in round 1 and 2.7 to 2.9 ms and 0.21 to 0.24 cores today, from the same source. Only compare numbers inside one table. The round-1 table above and this one are not comparable, and the webview baseline was measured in round 1.
+Not measured: a long-lived session (growth over hours), many expanded diffs at once beyond the scroll case above, images. Seeding 500 rows took 115 to 220 ms (more rows add little because the highlight cache dedups the repeated content); parsing tool bodies lazily on first expand would avoid it and was not built.
+
+### Grammar packs (ran)
+
+**Correction to round 1:** it said syntect's default pack natively covers 17 of Zest's 30 grammars. That count looked Zest's names up as syntect tokens (`csharp`, `shell`), which missed C# and Shell. With the right tokens (`cs`, `bash`) the default pack covers 19 natively (`--langs`).
+
+| Pack | Grammars | Zest's 30: native / approximate / missing | Init | Private MB (500 agent rows) | Seed 500 rows | Exe |
+| --- | --- | --- | --- | --- | --- | --- |
+| syntect default | 75 | 19 / 4 (jsx, powershell, tsx, typescript, shown as JavaScript or Bash) / 7 (docker, graphql, kotlin, scss, swift, toml, vue) | 2.5 ms | 138.6 | about 150 ms | 16.5 MB |
+| plus `two-face` 0.5.2 (bat 0.26.1), `--features grammars` | 213 | 28 / 2 (jsx, powershell) / 0 | 4.1 ms | 181.4 to 182.8 | about 303 ms | 17.1 MB |
+
+Draw time and CPU were unchanged with the larger pack (mean 2.88 and 2.85 against 2.79 and 3.09 for the default, alternating runs), so it closes the coverage gap at a cost of about 43 MB private memory and double the seed time, which eats a visible share of the footprint win.
+A 256 ms frame appeared once in an earlier run with the larger pack and did not come back in the next two; I did not isolate it. Bundling means shipping bat's syntax licenses: `two-face` is MIT or Apache-2.0, its embedded syntaxes carry their own licenses and it exposes them through `acknowledgement::listing()`. I did not review them.
 
 ## Experiment 2: composer
 
@@ -184,7 +233,7 @@ semantics. Narrator/NVDA behaviour, focus order and live-region announcements fo
 
 About 39,000 lines of TypeScript across 81 components, 28 Playwright specs, `zest-control` and the fixture backend do not carry over. Rough buckets:
 
-1. **Rendering:** GFM with nested blocks, images (http, data, local assets), link-preview cards, lightbox, Mermaid, the 30-grammar highlighter, Trace rows (reasoning, tool, chain-of-thought, subagents, shimmer), approval/question cards, working indicator, context meter, document-card framing, copy/save actions.
+1. **Rendering:** GFM with nested blocks, images (http, data, local assets), link-preview cards, lightbox, Mermaid, the 30-grammar highlighter, Trace rows (reasoning and tool rows are prototyped; chain-of-thought, subagents and shimmer are not), approval/question cards, working indicator, context meter, document-card framing, copy/save actions.
 2. **Input:** attachments (chips, lightbox, limits), slash commands and palette popups, drafts, the queue panel, undo, word/line selection, drag-and-drop, a verified IME story.
 3. **Shell:** sidebar with status groups, resizable nested split panes, workbench tabs, pickers (model/provider/effort), settings and themes, notifications, command palette, keyboard map.
 4. **Webview-hosted:** agent browser, HTML artifacts (stay webview windows), anything that embeds third-party content.
@@ -203,5 +252,9 @@ target/release/zest-gpui-spike.exe --bench --rate=75 --secs=30   # prints BENCH 
 target/release/zest-gpui-spike.exe --scroll --secs=20    # scroll bench
 target/release/zest-gpui-spike.exe --langs               # grammar coverage
 target/release/zest-gpui-spike.exe --idle --webview --topmost    # child webview
+target/release/zest-gpui-spike.exe --selftest --agent    # round 2: nested Markdown, reasoning/tool rows, expand/collapse, tail
+target/release/zest-gpui-spike.exe --bench --agent       # agent-shaped history (add --history=5000)
+target/release/zest-gpui-spike.exe --scroll --agent --open       # every row expanded
+cargo build --release --features core,webview,grammars   # bat grammar pack; then --langs
 ```
 Automated modes do not take focus. `--focus` forces activation. `ZEST_IME_TRACE=1` prints every text-input callback.

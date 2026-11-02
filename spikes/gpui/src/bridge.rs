@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub enum Cmd {
-    /// A user turn: stream a canned reply for `secs` at `rate` tokens/s.
-    Reply { prompt: String, images: usize },
+    /// A user turn: stream a canned reply for `secs` at `rate` tokens/s (with tool rows when `agent`).
+    Reply { prompt: String, images: usize, agent: bool },
     Stream { rate: u32, secs: u32, chars: usize },
+    /// An agent-shaped turn: reasoning, `tools` tool calls, then the streamed answer.
+    Agent { rate: u32, secs: u32, chars: usize, tools: usize },
     Cancel,
 }
 
@@ -27,6 +29,8 @@ pub enum EvKind {
     Start,
     Thinking(String),
     Text(String),
+    ToolStart { id: String, name: String },
+    ToolResult { id: String, summary: String, diff: Option<String>, is_error: bool },
     End { tokens: usize, cancelled: bool },
 }
 
@@ -38,19 +42,62 @@ pub struct Bridge {
 pub enum Piece<'a> {
     Think(&'a str),
     Text(&'a str),
+    ToolStart { name: &'a str, id: &'a str },
+    ToolResult { name: &'a str, id: &'a str, summary: &'a str, diff: Option<&'a str>, is_error: bool },
 }
 
-/// Emits `tokens` at roughly `rate` per second, catching up after slow timer ticks.
+/// What one mock turn does: reasoning tokens, tool calls, then the answer tokens.
+pub struct Script {
+    pub think: Vec<String>,
+    pub tools: Vec<crate::seed::ToolSeed>,
+    pub tokens: Vec<String>,
+}
+
+impl Script {
+    pub fn plain(tokens: Vec<String>) -> Self {
+        let think = ["Looking ", "at ", "the ", "request, ", "then ", "drafting ", "an ", "answer."];
+        Script { think: think.iter().map(|s| s.to_string()).collect(), tools: vec![], tokens }
+    }
+
+    pub fn agent(text: &str, tools: usize, salt: usize) -> Self {
+        Script {
+            think: crate::seed::tokenize(&crate::seed::think_text(salt)),
+            tools: (0..tools).map(|k| crate::seed::tool_seed(salt + k)).collect(),
+            tokens: crate::seed::tokenize(text),
+        }
+    }
+}
+
+/// Emits the script at roughly `rate` answer tokens per second, catching up after slow timer ticks.
 pub async fn pace(
-    tokens: &[String],
+    script: &Script,
     rate: u32,
     max_secs: u32,
     cancel: &AtomicBool,
     emit: &mut (dyn FnMut(Piece) + Send),
 ) -> (usize, bool) {
-    for t in ["Looking ", "at ", "the ", "request, ", "then ", "drafting ", "an ", "answer."] {
+    let tokens = &script.tokens;
+    let slow = script.think.len() <= 16;
+    for (n, t) in script.think.iter().enumerate() {
         emit(Piece::Think(t));
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        if slow || n % 8 == 7 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    for (k, t) in script.tools.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return (0, true);
+        }
+        let id = format!("call_{k}");
+        emit(Piece::ToolStart { name: t.name, id: &id });
+        tokio::time::sleep(Duration::from_millis(t.delay_ms)).await;
+        emit(Piece::ToolResult {
+            name: t.name,
+            id: &id,
+            summary: &t.summary,
+            diff: t.diff.as_deref(),
+            is_error: t.is_error,
+        });
     }
     let start = Instant::now();
     let mut sent = 0;
@@ -79,7 +126,7 @@ mod mock {
     use zest_core::provider::{Completion, Provider, StreamEvent, TurnRequest};
 
     pub struct MockProvider {
-        pub tokens: Arc<Vec<String>>,
+        pub script: Arc<Script>,
         pub rate: u32,
         pub secs: u32,
         pub cancel: Arc<AtomicBool>,
@@ -101,9 +148,21 @@ mod mock {
             _req: &TurnRequest,
             on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         ) -> zest_core::error::Result<Completion> {
-            let (sent, _) = pace(&self.tokens, self.rate, self.secs, &self.cancel, &mut |p| match p {
+            let (sent, _) = pace(&self.script, self.rate, self.secs, &self.cancel, &mut |p| match p {
                 Piece::Think(t) => on_event(StreamEvent::Thinking(t)),
                 Piece::Text(t) => on_event(StreamEvent::Text(t)),
+                Piece::ToolStart { name, id } => on_event(StreamEvent::ToolCallStart { name, id }),
+                Piece::ToolResult { name, id, summary, diff, is_error } => {
+                    on_event(StreamEvent::ToolCallResult {
+                        name,
+                        id,
+                        summary,
+                        is_error,
+                        path: None,
+                        diff,
+                        metadata: None,
+                    })
+                }
             })
             .await;
             Ok(Completion {
@@ -120,12 +179,12 @@ mod mock {
 
     pub async fn turn(
         tx: fmpsc::UnboundedSender<Ev>,
-        tokens: Arc<Vec<String>>,
+        script: Arc<Script>,
         rate: u32,
         secs: u32,
         cancel: Arc<AtomicBool>,
     ) {
-        let provider = MockProvider { tokens, rate, secs, cancel: cancel.clone() };
+        let provider = MockProvider { script, rate, secs, cancel: cancel.clone() };
         let req = TurnRequest {
             model: "mock-1".into(),
             system: None,
@@ -150,6 +209,15 @@ mod mock {
                         EvKind::Text(t.to_string())
                     }
                     StreamEvent::Thinking(t) => EvKind::Thinking(t.to_string()),
+                    StreamEvent::ToolCallStart { name, id } => {
+                        EvKind::ToolStart { id: id.to_string(), name: name.to_string() }
+                    }
+                    StreamEvent::ToolCallResult { id, summary, is_error, diff, .. } => EvKind::ToolResult {
+                        id: id.to_string(),
+                        summary: summary.to_string(),
+                        diff: diff.map(str::to_string),
+                        is_error,
+                    },
                     _ => return,
                 };
                 let _ = tx2.unbounded_send(Ev { at: Instant::now(), kind });
@@ -168,7 +236,7 @@ mod mock {
     use super::*;
     pub async fn turn(
         tx: fmpsc::UnboundedSender<Ev>,
-        tokens: Arc<Vec<String>>,
+        script: Arc<Script>,
         rate: u32,
         secs: u32,
         cancel: Arc<AtomicBool>,
@@ -176,13 +244,20 @@ mod mock {
         let _ = tx.unbounded_send(Ev { at: Instant::now(), kind: EvKind::Start });
         let tx2 = tx.clone();
         let mut count = 0usize;
-        let (_, cancelled) = pace(&tokens, rate, secs, &cancel, &mut |p| {
+        let (_, cancelled) = pace(&script, rate, secs, &cancel, &mut |p| {
             let kind = match p {
                 Piece::Text(t) => {
                     count += 1;
                     EvKind::Text(t.to_string())
                 }
                 Piece::Think(t) => EvKind::Thinking(t.to_string()),
+                Piece::ToolStart { name, id } => EvKind::ToolStart { id: id.to_string(), name: name.to_string() },
+                Piece::ToolResult { id, summary, diff, is_error, .. } => EvKind::ToolResult {
+                    id: id.to_string(),
+                    summary: summary.to_string(),
+                    diff: diff.map(str::to_string),
+                    is_error,
+                },
             };
             let _ = tx2.unbounded_send(Ev { at: Instant::now(), kind });
         })
@@ -207,7 +282,7 @@ pub fn start() -> Bridge {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         Cmd::Cancel => cancel.store(true, Ordering::Relaxed),
-                        Cmd::Reply { prompt, images } => {
+                        Cmd::Reply { prompt, images, agent } => {
                             cancel = Arc::new(AtomicBool::new(false));
                             let text = format!(
                                 "## Re: {}\n\nYou sent {} chars and {} image(s). This is a **mock** reply streamed from Tokio.\n\n{}\n",
@@ -216,13 +291,23 @@ pub fn start() -> Bridge {
                                 images,
                                 crate::seed::assistant_text(prompt.len())
                             );
-                            let tokens = Arc::new(crate::seed::tokenize(&text));
-                            tokio::spawn(mock::turn(ev_tx.clone(), tokens, 80, 30, cancel.clone()));
+                            let script = Arc::new(if agent {
+                                Script::agent(&text, 2, prompt.len())
+                            } else {
+                                Script::plain(crate::seed::tokenize(&text))
+                            });
+                            tokio::spawn(mock::turn(ev_tx.clone(), script, 80, 30, cancel.clone()));
                         }
                         Cmd::Stream { rate, secs, chars } => {
                             cancel = Arc::new(AtomicBool::new(false));
-                            let tokens = Arc::new(crate::seed::tokenize(&crate::seed::stream_script(chars)));
-                            tokio::spawn(mock::turn(ev_tx.clone(), tokens, rate, secs, cancel.clone()));
+                            let script =
+                                Arc::new(Script::plain(crate::seed::tokenize(&crate::seed::stream_script(chars))));
+                            tokio::spawn(mock::turn(ev_tx.clone(), script, rate, secs, cancel.clone()));
+                        }
+                        Cmd::Agent { rate, secs, chars, tools } => {
+                            cancel = Arc::new(AtomicBool::new(false));
+                            let script = Arc::new(Script::agent(&crate::seed::stream_script(chars), tools, chars));
+                            tokio::spawn(mock::turn(ev_tx.clone(), script, rate, secs, cancel.clone()));
                         }
                     }
                 }

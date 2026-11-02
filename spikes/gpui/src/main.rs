@@ -27,6 +27,10 @@ struct Args {
     a11y: bool,
     focus: bool,
     langs: bool,
+    /// Agent-shaped history and turns: reasoning rows and tool rows between the messages.
+    agent: bool,
+    /// Start with every reasoning and tool row expanded (worst-case density for the scroll bench).
+    open: bool,
     show: String,
     rate: u32,
     secs: u32,
@@ -46,6 +50,8 @@ fn parse_args() -> Args {
             "--a11y" => a.a11y = true,
             "--focus" => a.focus = true,
             "--langs" => a.langs = true,
+            "--agent" => a.agent = true,
+            "--open" => a.open = true,
             _ => {
                 if let Some(v) = s.strip_prefix("--show=") {
                     a.show = v.to_string();
@@ -67,6 +73,33 @@ struct Msg {
     user: bool,
     doc: Rc<Doc>,
     attachments: usize,
+    /// Set for reasoning and tool rows; `doc` is then the row's body.
+    trace: Option<Trace>,
+}
+
+impl Msg {
+    fn user(text: &str, attachments: usize) -> Self {
+        Msg { user: true, doc: Rc::new(Doc::plain(text)), attachments, trace: None }
+    }
+    fn assistant(doc: Doc) -> Self {
+        Msg { user: false, doc: Rc::new(doc), attachments: 0, trace: None }
+    }
+    fn trace(trace: Trace, doc: Doc) -> Self {
+        Msg { user: false, doc: Rc::new(doc), attachments: 0, trace: Some(trace) }
+    }
+}
+
+/// Body of a tool row: the diff when there is one, else the result text, as a fenced block.
+fn tool_body(summary: &str, diff: Option<&str>) -> Doc {
+    let (lang, body) = match diff {
+        Some(d) => ("diff", d),
+        None => ("text", summary),
+    };
+    md::parse(&format!("```{lang}\n{body}\n```"))
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").chars().take(120).collect()
 }
 
 #[derive(Default)]
@@ -86,6 +119,13 @@ struct Root {
     focus: FocusHandle,
     live: Option<usize>,
     live_text: String,
+    /// True from a turn's Start to its End, including before the first answer token.
+    turn_active: bool,
+    turns_done: usize,
+    /// The reasoning row of the running turn: (row index, text so far, started).
+    think: Option<(usize, String, Instant)>,
+    /// Running tool rows of the turn: (call id, row index, started).
+    tools: Vec<(String, usize, Instant)>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
     stats: Stats,
     args: Args,
@@ -106,10 +146,37 @@ impl Root {
         let t = Instant::now();
         let mut msgs = Vec::with_capacity(args.history);
         for i in 0..args.history {
-            if i % 2 == 0 {
-                msgs.push(Msg { user: true, doc: Rc::new(Doc::plain(&seed::user_text(i))), attachments: 0 });
+            if args.agent {
+                // One agent turn is six rows: user, reasoning, three tool calls, answer.
+                msgs.push(match i % 6 {
+                    0 => Msg::user(&seed::user_text(i), 0),
+                    1 => Msg::trace(
+                        Trace { kind: TraceKind::Thinking { live: false, secs: 2. + (i % 7) as f32 }, title: String::new(), open: false },
+                        Doc::plain(&seed::think_text(i)),
+                    ),
+                    2..=4 => {
+                        let t = seed::tool_seed(i);
+                        let status = if t.is_error { ToolStatus::Error } else { ToolStatus::Ok };
+                        Msg::trace(
+                            Trace {
+                                kind: TraceKind::Tool { name: t.name.to_string(), id: format!("h{i}"), status, secs: t.delay_ms as f32 / 40. },
+                                title: first_line(&t.summary),
+                                open: false,
+                            },
+                            tool_body(&t.summary, t.diff.as_deref()),
+                        )
+                    }
+                    _ => Msg::assistant(md::parse(&seed::assistant_text(i))),
+                });
+            } else if i % 2 == 0 {
+                msgs.push(Msg::user(&seed::user_text(i), 0));
             } else {
-                msgs.push(Msg { user: false, doc: Rc::new(md::parse(&seed::assistant_text(i))), attachments: 0 });
+                msgs.push(Msg::assistant(md::parse(&seed::assistant_text(i))));
+            }
+        }
+        if args.open {
+            for t in msgs.iter_mut().filter_map(|m| m.trace.as_mut()) {
+                t.open = true;
             }
         }
         println!("seed: {} messages parsed+highlighted in {:?}", msgs.len(), t.elapsed());
@@ -148,6 +215,10 @@ impl Root {
             focus: cx.focus_handle(),
             live: None,
             live_text: String::new(),
+            turn_active: false,
+            turns_done: 0,
+            think: None,
+            tools: vec![],
             cmd_tx: bridge.tx,
             stats: Stats::default(),
             args,
@@ -164,8 +235,8 @@ impl Root {
     }
 
     fn send(&mut self, text: String, images: usize, cx: &mut Context<Self>) {
-        self.push(Msg { user: true, doc: Rc::new(Doc::plain(&text)), attachments: images });
-        let _ = self.cmd_tx.send(Cmd::Reply { prompt: text, images });
+        self.push(Msg::user(&text, images));
+        let _ = self.cmd_tx.send(Cmd::Reply { prompt: text, images, agent: self.args.agent });
         self.list.set_follow_mode(FollowMode::Tail);
         cx.notify();
     }
@@ -177,8 +248,11 @@ impl Root {
             self.stats.latency_us.push(now.duration_since(ev.at).as_micros() as u64);
             match ev.kind {
                 EvKind::Start => {
-                    let ix = self.push(Msg { user: false, doc: Rc::new(Doc::default()), attachments: 0 });
-                    self.live = Some(ix);
+                    // The answer row is pushed on the first text token, after any reasoning and tool rows.
+                    self.turn_active = true;
+                    self.live = None;
+                    self.think = None;
+                    self.tools.clear();
                     self.live_text.clear();
                     self.stats.stream_started = Some(Instant::now());
                     self.stats.tokens = 0;
@@ -187,14 +261,62 @@ impl Root {
                         .update(cx, |_, w, _| w.frame_duration_snapshot())
                         .ok();
                 }
-                EvKind::Thinking(_) => {}
+                EvKind::Thinking(t) => {
+                    if self.think.is_none() {
+                        let row = Trace { kind: TraceKind::Thinking { live: true, secs: 0. }, title: String::new(), open: false };
+                        let ix = self.push(Msg::trace(row, Doc::default()));
+                        self.think = Some((ix, String::new(), Instant::now()));
+                    }
+                    if let Some((ix, buf, _)) = self.think.as_mut() {
+                        buf.push_str(&t);
+                        // A collapsed row shows no body, so only an open one needs rebuilding per token.
+                        if self.msgs[*ix].trace.as_ref().is_some_and(|tr| tr.open) {
+                            self.msgs[*ix].doc = Rc::new(Doc::plain(buf));
+                            self.list.remeasure_items(*ix..*ix + 1);
+                        }
+                    }
+                    dirty = true;
+                }
+                EvKind::ToolStart { id, name } => {
+                    self.finish_think();
+                    let row = Trace {
+                        kind: TraceKind::Tool { name, id: id.clone(), status: ToolStatus::Running, secs: 0. },
+                        title: String::new(),
+                        open: false,
+                    };
+                    let ix = self.push(Msg::trace(row, Doc::default()));
+                    self.tools.push((id, ix, Instant::now()));
+                    dirty = true;
+                }
+                EvKind::ToolResult { id, summary, diff, is_error } => {
+                    if let Some(pos) = self.tools.iter().position(|t| t.0 == id) {
+                        let (_, ix, started) = self.tools.remove(pos);
+                        let m = &mut self.msgs[ix];
+                        m.doc = Rc::new(tool_body(&summary, diff.as_deref()));
+                        if let Some(Trace { kind: TraceKind::Tool { status, secs, .. }, title, .. }) = m.trace.as_mut() {
+                            *status = if is_error { ToolStatus::Error } else { ToolStatus::Ok };
+                            *secs = started.elapsed().as_secs_f32();
+                            *title = first_line(&summary);
+                        }
+                        self.list.remeasure_items(ix..ix + 1);
+                    }
+                    dirty = true;
+                }
                 EvKind::Text(t) => {
+                    self.finish_think();
+                    if self.live.is_none() {
+                        let ix = self.push(Msg::assistant(Doc::default()));
+                        self.live = Some(ix);
+                    }
                     self.live_text.push_str(&t);
                     self.stats.tokens += 1;
                     dirty = true;
                 }
                 EvKind::End { tokens, cancelled } => {
                     dirty = true;
+                    self.finish_think();
+                    self.turn_active = false;
+                    self.turns_done += 1;
                     if let Some(ix) = self.live.take() {
                         self.reparse(ix);
                     }
@@ -209,6 +331,27 @@ impl Root {
             if let Some(ix) = self.live {
                 self.reparse(ix);
             }
+            cx.notify();
+        }
+    }
+
+    /// Closes the running reasoning row: final text and duration, header relabelled "Thought".
+    fn finish_think(&mut self) {
+        if let Some((ix, buf, started)) = self.think.take() {
+            let secs = started.elapsed().as_secs_f32();
+            let m = &mut self.msgs[ix];
+            m.doc = Rc::new(Doc::plain(&buf));
+            if let Some(tr) = m.trace.as_mut() {
+                tr.kind = TraceKind::Thinking { live: false, secs };
+            }
+            self.list.remeasure_items(ix..ix + 1);
+        }
+    }
+
+    fn toggle_trace(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(tr) = self.msgs.get_mut(ix).and_then(|m| m.trace.as_mut()) {
+            tr.open = !tr.open;
+            self.list.remeasure_items(ix..ix + 1);
             cx.notify();
         }
     }
@@ -288,7 +431,8 @@ impl Root {
         let mut out = String::new();
         for m in a.msg..=b.msg.min(self.msgs.len().saturating_sub(1)) {
             let doc = &self.msgs[m].doc;
-            if doc.units.is_empty() {
+            // A collapsed row is hidden, so it is not part of what a selection copies.
+            if doc.units.is_empty() || self.msgs[m].trace.as_ref().is_some_and(|t| !t.open) {
                 continue;
             }
             let u0 = if m == a.msg { a.unit } else { 0 };
@@ -405,9 +549,12 @@ impl Root {
         .size_full()
     }
 
-    fn render_item(&mut self, ix: usize) -> AnyElement {
+    fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(m) = self.msgs.get(ix) else { return div().into_any_element() };
-        let el = if m.user {
+        let el = if let Some(tr) = &m.trace {
+            let on_toggle = cx.listener(move |this, _: &ClickEvent, _w, cx| this.toggle_trace(ix, cx));
+            render_trace(ix, tr, &m.doc, &self.shared, on_toggle)
+        } else if m.user {
             render_user(&m.doc, ix, &self.shared, m.attachments)
         } else {
             render_assistant(&m.doc, ix, &self.shared, self.live == Some(ix))
@@ -417,7 +564,7 @@ impl Root {
             div()
                 .id(("row", ix))
                 .role(Role::ListItem)
-                .aria_label(format!("{}: {text}", if m.user { "You" } else { "Zest" }))
+                .aria_label(format!("{}: {text}", if m.trace.is_some() { "Trace" } else if m.user { "You" } else { "Zest" }))
                 .child(el)
                 .into_any_element()
         } else {
@@ -428,9 +575,13 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.shared.borrow_mut().hits.clear();
+        {
+            let mut s = self.shared.borrow_mut();
+            s.hits.clear();
+            s.rows.clear();
+        }
         let following = self.list.is_following_tail();
-        let busy = self.live.is_some();
+        let busy = self.turn_active;
         let n = self.msgs.len();
         let list = self.list.clone();
         div()
@@ -448,7 +599,7 @@ impl Render for Root {
             .text_size(px(14.))
             .child(
                 div().id("transcript").when(self.args.a11y, |d| d.role(Role::List).aria_label("Conversation")).flex_1().min_h_0().relative().child(
-                    gpui::list(self.list.clone(), cx.processor(|this, ix, _w, _cx| this.render_item(ix)))
+                    gpui::list(self.list.clone(), cx.processor(|this, ix, _w, cx| this.render_item(ix, cx)))
                         .size_full(),
                 )
                 .child(self.mouse_layer(cx)),
@@ -492,10 +643,12 @@ fn main() {
             "sql", "swift", "toml", "tsx", "typescript", "vue", "yaml",
         ];
         let cov = md::language_coverage(&zest);
-        let ok: Vec<_> = cov.iter().filter(|c| c.1).map(|c| c.0.as_str()).collect();
-        let missing: Vec<_> = cov.iter().filter(|c| !c.1).map(|c| c.0.as_str()).collect();
-        println!("LANGS covered {}/{}: {ok:?}", ok.len(), cov.len());
-        println!("LANGS missing: {missing:?}");
+        let of = |c: md::Coverage| cov.iter().filter(|x| x.1 == c).map(|x| x.0.as_str()).collect::<Vec<_>>();
+        let (native, approx, missing) = (of(md::Coverage::Native), of(md::Coverage::Approx), of(md::Coverage::None));
+        println!("LANGS pack has {} grammars; {} Zest languages", md::grammar_count(), cov.len());
+        println!("LANGS native {}: {native:?}", native.len());
+        println!("LANGS approximate {}: {approx:?}", approx.len());
+        println!("LANGS missing {}: {missing:?}", missing.len());
         return;
     }
     let bridge = bridge::start();
@@ -538,9 +691,14 @@ fn main() {
         if args.bench {
             let (rate, secs) = (args.rate, args.secs);
             let root = handle.update(cx, |r, _, _| r.cmd_tx.clone()).unwrap();
+            let agent = args.agent;
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
-                let _ = root.send(Cmd::Stream { rate, secs, chars: 80_000 });
+                let _ = root.send(if agent {
+                    Cmd::Agent { rate, secs, chars: 80_000, tools: 6 }
+                } else {
+                    Cmd::Stream { rate, secs, chars: 80_000 }
+                });
             })
             .detach();
         }
@@ -607,7 +765,11 @@ fn main() {
         if args.selftest {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
-                selftest(handle, cx).await;
+                if args.agent {
+                    selftest_trace(handle, cx).await;
+                } else {
+                    selftest(handle, cx).await;
+                }
             })
             .detach();
         }
@@ -615,3 +777,4 @@ fn main() {
 }
 
 include!("selftest.rs");
+include!("selftest_trace.rs");

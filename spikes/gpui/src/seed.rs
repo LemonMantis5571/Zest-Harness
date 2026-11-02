@@ -124,3 +124,77 @@ pub fn tokenize(s: &str) -> Vec<String> {
     }
     out
 }
+
+// ---- agent-shaped turns: reasoning and tool rows ----
+
+pub struct ToolSeed {
+    pub name: &'static str,
+    pub summary: String,
+    pub diff: Option<String>,
+    pub is_error: bool,
+    pub delay_ms: u64,
+}
+
+const FILES: &[&str] = &[
+    "crates/core/src/agent.rs", "crates/core/src/provider/mod.rs", "crates/coordinator/src/queue.rs",
+    "crates/desktop/ui/src/lib/chatReducer.ts", "crates/cli/src/serve.rs", "docs/features/delegation.md",
+];
+
+pub fn tool_seed(i: usize) -> ToolSeed {
+    let mut r = rng(i + 500_003);
+    let file = FILES[r() % FILES.len()];
+    match r() % 4 {
+        0 => ToolSeed {
+            name: "read_file",
+            summary: format!("{file}\n{}", (1..=14).map(|n| format!("{n:>4}  {}", RUST.lines().nth(n % 9).unwrap_or(""))).collect::<Vec<_>>().join("\n")),
+            diff: None,
+            is_error: false,
+            delay_ms: 60,
+        },
+        1 => {
+            let failed = r() % 5 == 0;
+            ToolSeed {
+                name: "bash",
+                summary: if failed {
+                    "cargo test -p zest-core\ntest agent::tests::retries_once ... FAILED\n\nfailures:\n    agent::tests::retries_once\n\ntest result: FAILED. 127 passed; 1 failed".to_string()
+                } else {
+                    format!("cargo test -p zest-core\nrunning {} tests\ntest result: ok. {} passed; 0 failed; 0 ignored", 100 + r() % 40, 100 + r() % 40)
+                },
+                diff: None,
+                is_error: failed,
+                delay_ms: 120,
+            }
+        }
+        2 => {
+            let diff = format!(
+                "--- a/{file}\n+++ b/{file}\n@@ -{a},7 +{a},9 @@\n     let mut state = State::default();\n-    for ev in events {{\n-        state.apply(ev);\n-    }}\n+    for ev in events {{\n+        if ev.is_noise() {{\n+            continue;\n+        }}\n+        state.apply(ev);\n+    }}\n     state.finish()",
+                a = 10 + r() % 200
+            );
+            ToolSeed { name: "apply_patch", summary: format!("patched {file}"), diff: Some(diff), is_error: false, delay_ms: 80 }
+        }
+        _ => ToolSeed {
+            name: "grep",
+            summary: format!(
+                "reconcile\n{}",
+                (0..(3 + r() % 6)).map(|_| format!("{}:{}: fn reconcile_{}(", FILES[r() % FILES.len()], 10 + r() % 400, r() % 9)).collect::<Vec<_>>().join("\n")
+            ),
+            diff: None,
+            is_error: false,
+            delay_ms: 40,
+        },
+    }
+}
+
+pub fn think_text(i: usize) -> String {
+    let mut r = rng(i + 700_007);
+    let topic = TOPICS[r() % TOPICS.len()];
+    let mut s = format!("The user is asking about {topic}. ");
+    for _ in 0..(4 + r() % 6) {
+        s.push_str(&format!(
+            "I should check how {} interacts with {} before changing anything, because the last time this broke it was a stale cache rather than the logic itself. ",
+            TOPICS[r() % TOPICS.len()],
+            TOPICS[r() % TOPICS.len()]
+        ));
+    }
+    s
+}
