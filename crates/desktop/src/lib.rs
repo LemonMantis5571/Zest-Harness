@@ -3652,6 +3652,10 @@ struct WorktreeChatRecord {
     branch: String,
     #[serde(default = "worktree_visible_default")]
     visible: bool,
+    /// The commit the checkout started from. Absent in records written before
+    /// worktree status existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_commit: Option<String>,
 }
 
 fn worktree_visible_default() -> bool {
@@ -3846,6 +3850,7 @@ mod worktree_chat_tests {
             source_root: source.clone(),
             branch: "zest/chat-test".into(),
             visible: true,
+            base_commit: None,
         }];
         assert_eq!(
             worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).unwrap(),
@@ -3881,6 +3886,7 @@ mod worktree_chat_tests {
             source_root: scratch.join("source"),
             branch: format!("zest/chat-{name}"),
             visible: true,
+            base_commit: None,
         });
         std::thread::scope(|scope| {
             for record in &records {
@@ -3924,6 +3930,7 @@ mod worktree_chat_tests {
         let mut loaded = load_worktree_chat_records_from(&config_dir);
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].visible);
+        assert_eq!(loaded[0].base_commit, None);
         loaded[0].visible = false;
         save_worktree_chat_record_at(&config_dir, &loaded[0]).unwrap();
         let loaded = load_worktree_chat_records_from(&config_dir);
@@ -3945,6 +3952,7 @@ mod worktree_chat_tests {
             source_root: scratch.join("source"),
             branch: "zest/chat-hidden".into(),
             visible: false,
+            base_commit: None,
         };
         let legacy = serde_json::json!([{
             "path": worktree,
@@ -3980,6 +3988,7 @@ mod worktree_chat_tests {
             source_root: outside.clone(),
             branch: "zest/chat-escaped".into(),
             visible: true,
+            base_commit: None,
         };
 
         std::fs::write(
@@ -3995,6 +4004,64 @@ mod worktree_chat_tests {
     }
 
     #[test]
+    fn status_is_only_read_for_visible_registered_worktrees() {
+        let scratch = ScratchDir::new("zest-worktree-status-");
+        let repository = scratch.join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(
+            repository.join("file.txt"),
+            "base
+",
+        )
+        .unwrap();
+        git(&["add", "file.txt"]);
+        git(&[
+            "-c",
+            "user.name=Zest Test",
+            "-c",
+            "user.email=zest@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        std::fs::write(
+            repository.join("loose.txt"),
+            "untracked
+",
+        )
+        .unwrap();
+        let path = canonicalize_dir(repository.clone()).unwrap();
+        let record = |visible| WorktreeChatRecord {
+            path: path.clone(),
+            source_root: path.clone(),
+            branch: "zest/chat-status".into(),
+            visible,
+            base_commit: None,
+        };
+        let shown = display_path(&path);
+
+        // A repository nobody registered is never read, whatever its state.
+        assert_eq!(worktree_status_from_records(&shown, &[]), None);
+        assert_eq!(worktree_status_from_records(&shown, &[record(false)]), None);
+        let status = worktree_status_from_records(&shown, &[record(true)]).unwrap();
+        assert_eq!((status.ahead, status.behind, status.dirty), (0, 0, 1));
+        assert_eq!(
+            worktree_status_from_records("   ", &[record(true)]),
+            None,
+            "an empty path matches nothing"
+        );
+    }
+
+    #[test]
     fn visible_worktrees_survive_the_ordinary_project_limit_and_hidden_records_stay_hidden() {
         let scratch = ScratchDir::new("zest-worktree-sidebar-");
         let source = scratch.join("source");
@@ -4005,6 +4072,7 @@ mod worktree_chat_tests {
                 source_root: source.clone(),
                 branch: format!("zest/chat-{index}"),
                 visible: true,
+                base_commit: None,
             })
             .collect::<Vec<_>>();
         let roots = sidebar_workspaces_from(vec![source.clone()], &records);
@@ -4035,6 +4103,7 @@ async fn create_worktree_chat(project_path: String) -> Result<String, String> {
         source_root: config_root,
         branch: created.branch,
         visible: true,
+        base_commit: Some(created.base_commit),
     };
     save_worktree_chat_record(&record).map_err(|error| {
         format!(
@@ -4043,6 +4112,59 @@ async fn create_worktree_chat(project_path: String) -> Result<String, String> {
         )
     })?;
     Ok(display_path(&path))
+}
+
+/// Counts only, so the sidebar can show a worktree chat's Git state without
+/// ever receiving a file path.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "WorktreeChatStatus.ts", rename_all = "camelCase")
+)]
+struct WorktreeChatStatusView {
+    ahead: u32,
+    behind: u32,
+    dirty: u32,
+}
+
+const WORKTREE_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Only a path with a visible worktree record is ever handed to Git, so this
+/// command cannot be used to probe an arbitrary repository.
+fn worktree_status_from_records(
+    project_path: &str,
+    records: &[WorktreeChatRecord],
+) -> Option<zest_core::worktree_chat::ChatWorktreeStatus> {
+    let root = canonicalize_dir(PathBuf::from(project_path.trim())).ok()?;
+    let record = records
+        .iter()
+        .find(|record| record.path == root && record.visible)?;
+    zest_core::worktree_chat::chat_worktree_status(
+        &record.path,
+        &record.source_root,
+        record.base_commit.as_deref(),
+    )
+}
+
+/// Git counts for one worktree chat's sidebar row. It answers `None` for any
+/// path that is not a registered worktree chat and whenever Git cannot read
+/// the checkout, so a broken or missing worktree never becomes an error.
+#[tauri::command]
+async fn worktree_chat_status(project_path: String) -> Option<WorktreeChatStatusView> {
+    let lookup = tokio::task::spawn_blocking(move || {
+        worktree_status_from_records(&project_path, &load_worktree_chat_records())
+    });
+    let status = tokio::time::timeout(WORKTREE_STATUS_TIMEOUT, lookup)
+        .await
+        .ok()?
+        .ok()??;
+    Some(WorktreeChatStatusView {
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty,
+    })
 }
 
 fn known_workspaces_path() -> Result<PathBuf, String> {
@@ -5270,6 +5392,8 @@ struct ProjectChats {
     /// `None` is the user-local free-chat bucket rendered under RECENT.
     path: Option<String>,
     active: bool,
+    /// A `zest/chat-*` checkout, whose row shows its Git status.
+    worktree: bool,
     threads: Vec<ThreadSummary>,
 }
 
@@ -5407,10 +5531,9 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             Err(_) => Vec::new(),
         };
         let active = active_root.as_ref().is_some_and(|active| root == *active);
+        let worktree = worktree_records.iter().find(|record| record.path == root);
         out.push(ProjectChats {
-            name: worktree_records
-                .iter()
-                .find(|record| record.path == root)
+            name: worktree
                 .map(|record| {
                     format!(
                         "{} · {}",
@@ -5421,6 +5544,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
                 .unwrap_or_else(|| project_display_name(&root)),
             path: Some(display_path(&root)),
             active,
+            worktree: worktree.is_some(),
             threads,
         });
     }
@@ -5440,6 +5564,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             active: active_session_root
                 .as_ref()
                 .is_some_and(|root| is_free_chat_root(root)),
+            worktree: false,
             threads: free_threads,
         });
     }
@@ -9782,6 +9907,7 @@ pub fn run() {
                 forget_workspace,
                 list_chat_projects,
                 create_worktree_chat,
+                worktree_chat_status,
                 search_chats,
                 open_project_chat,
                 load_older_thread_messages,
@@ -10250,6 +10376,7 @@ mod export_bindings {
         WorkspaceChangeView::export_all(&config).expect("export WorkspaceChange bindings");
         PullRequestView::export_all(&config).expect("export PullRequestView bindings");
         GitContextView::export_all(&config).expect("export GitContext bindings");
+        WorktreeChatStatusView::export_all(&config).expect("export WorktreeChatStatus bindings");
         ThreadCheckpointView::export_all(&config).expect("export ThreadCheckpoint bindings");
         PendingInputAttachmentView::export_all(&config)
             .expect("export PendingInputAttachment bindings");

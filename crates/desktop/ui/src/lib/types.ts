@@ -18,6 +18,7 @@ import type { PendingInputAttachmentView } from "./generated/PendingInputAttachm
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 import type { GitContextView as GeneratedGitContext } from "./generated/GitContext.ts";
 import type { PullRequestView } from "./generated/PullRequestView.ts";
+import type { WorktreeChatStatusView } from "./generated/WorktreeChatStatus.ts";
 import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
 import type { WorkspaceChange as GeneratedWorkspaceChange } from "./generated/WorkspaceChange.ts";
 import type { DelegationEvent as GeneratedDelegationEvent } from "./generated/DelegationEvent.ts";
@@ -115,6 +116,8 @@ export type LoginStatus = {
 
 export type { ModelCapability };
 export type WorkspaceReview = GeneratedWorkspaceReview;
+/** Commits ahead/behind the source branch and uncommitted entries of one worktree chat. */
+export type WorktreeChatStatus = WorktreeChatStatusView;
 export type WorkspaceChange = GeneratedWorkspaceChange;
 export type DelegationEvent = GeneratedDelegationEvent;
 export type DelegationJob = DelegationJobView;
@@ -285,6 +288,8 @@ export type ProjectChats = {
   /** `null` marks the user-local free-chat bucket shown under RECENT. */
   path: string | null;
   active: boolean;
+  /** A `zest/chat-*` checkout; its row shows `WorktreeChatStatus`. */
+  worktree?: boolean;
   threads: ThreadSummary[];
 };
 

@@ -72,6 +72,7 @@ import type {
   WorkspacePickResult,
   WorkspaceChange,
   WorkspaceReview,
+  WorktreeChatStatus,
 } from "./types";
 
 export function listProviders() {
@@ -335,6 +336,11 @@ export function listChatProjects() {
 
 export function createWorktreeChat(projectPath: string) {
   return invoke<string>("create_worktree_chat", { projectPath });
+}
+
+/** `null` when the path is not a worktree chat or Git cannot read it. */
+export function worktreeChatStatus(projectPath: string) {
+  return invoke<WorktreeChatStatus | null>("worktree_chat_status", { projectPath });
 }
 
 export function searchChats(query: string) {
