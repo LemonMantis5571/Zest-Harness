@@ -26,7 +26,7 @@ verify:
 # Command palette and keyboard shortcuts
 
 ## Behavior
-- Default chords (`Mod` = Ctrl, or Cmd on macOS): Mod+K palette, Mod+B chat history, Mod+N new chat, Mod+. stop turn, `/` focus composer, Mod+, settings, Mod+Shift+, Customize, Mod+Shift+K shortcuts editor, Mod+Shift+P profile, Mod+Shift+U usage, Mod+Shift+M switch provider.
+- Default chords (`Mod` = Ctrl, or Cmd on macOS): Mod+K palette, Mod+B chat history, Mod+N new chat, Mod+. stop turn, `/` focus composer, Mod+, settings, Mod+Shift+, Customize, Mod+Shift+K shortcuts editor, Mod+Shift+P profile, Mod+Shift+U usage, Mod+Shift+M switch provider. Split view adds Mod+Shift+Enter (zoom the focused pane) and Mod+Shift+H (minimize it), plus "Restore all split panes" with no default chord; they sit under "Split view" in the shortcuts editor and are only handled while split view is open.
 - The palette is a dialog named "Search" with filter tabs All / Chats / Actions / Settings. On open the input is focused and empty; the sidebar's "Search chats" button opens it on the Chats tab.
 - With an empty query, All shows up to 8 recent chats plus actions; typing searches titles, projects, and (after 180 ms) chat bodies through `searchChats`, showing an excerpt and jumping to the matching message. Chats cap at 12 when searching, 24 on the Chats tab; slash commands (up to 16) appear only when searching or on Actions; Settings items appear on All only while searching.
 - Palette keys: Up/Down move (wrapping), Enter runs, Escape closes, Left or Shift+Right changes the filter tab.
@@ -34,6 +34,7 @@ verify:
 - Shortcuts are rebindable in Customize > Shortcuts. Enter, Tab, Space, Backspace, and Escape cannot be bound on their own, and Escape cannot be bound at all. Clashes are shown, not blocked. Only overrides are stored (`localStorage` `zest.keybindings`), so a changed default reaches users who never touched that binding. An empty string means deliberately unbound.
 - Unmodified chords (like `/`) never fire while typing in an input, textarea, or contenteditable.
 - Escape closes the topmost surface in this order: diff, provider switch, model picker, settings, palette, message edit, shell panel (Customize/Profile/Usage/PRs); only when none is open does it stop a running turn.
+- Split view does not mount `ChatScreen`, so it registers its own handlers: `SplitWorkspace.tsx` calls `useKeybindings` for Mod+K and the three split commands and shows `CommandPalette` with `scope="actions"`, which lists only "Zoom pane", "Minimize pane" and "Restore all panes" (no chats, slash commands, or filter tabs). The sidebar's "Search chats" button there still opens the focused pane's chat chooser instead. The commands act on the pane holding keyboard focus when the chord is pressed or the palette opens, else the group's focused pane. Other chords (Mod+B, Mod+N, and so on) are not handled in split view.
 - The native right-click menu appears only in inputs, selects, textareas, and contenteditable regions (a `contenteditable="false"` ancestor turns it off).
 
 ## How it works

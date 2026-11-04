@@ -351,12 +351,62 @@ html {
   border-radius: 12px;
 }
 
+/*
+ * A minimized or zoomed-away split pane is drawn as a strip (SplitPaneStrip):
+ * a thin column beside an expanded pane, a short row above or below one. The
+ * pane's own content stays mounted behind it.
+ */
+.zest-split-pane[data-collapsed] { flex: 1 1 auto; }
+.zest-split-strip {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.5rem;
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+.zest-split-strip[data-orientation="vertical"] {
+  flex-direction: column;
+  width: 2.25rem;
+  padding: 0.625rem 0;
+}
+.zest-split-strip[data-orientation="horizontal"] {
+  flex-direction: row;
+  height: 2rem;
+  padding: 0 0.75rem;
+}
+.zest-split-strip-title {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zest-split-strip-status { flex: none; white-space: nowrap; }
+.zest-split-strip[data-orientation="vertical"] .zest-split-strip-title,
+.zest-split-strip[data-orientation="vertical"] .zest-split-strip-status { writing-mode: vertical-rl; }
+
 @media (max-width: 700px) {
   .zest-split-panes,
   .zest-split-node { flex-direction: column !important; }
   .zest-split-panes .zest-split-node > div,
   .zest-split-panes > .zest-split-pane { flex: 1 1 0% !important; }
+  .zest-split-panes .zest-split-node > div.zest-split-collapsed { flex: 0 0 auto !important; }
   .zest-split-divider { display: none; }
+  /* Panes already stack, so every strip is a row. */
+  .zest-split-strip[data-orientation] {
+    flex-direction: row;
+    width: auto;
+    height: 2rem;
+    padding: 0 0.75rem;
+  }
+  .zest-split-strip[data-orientation] .zest-split-strip-title,
+  .zest-split-strip[data-orientation] .zest-split-strip-status { writing-mode: horizontal-tb; }
 }
 
 /* Keep the photo full-bleed while preserving the rounded canvas edge. */

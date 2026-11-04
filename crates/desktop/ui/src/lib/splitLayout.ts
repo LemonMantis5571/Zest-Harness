@@ -39,6 +39,14 @@ export type SplitGroup = {
   label: string;
   root: LayoutNode;
   focusedPaneId: string;
+  /**
+   * The pane shown alone while every other pane is drawn as a strip. A
+   * render-time override: `root` and its ratios are never touched, so clearing
+   * it brings the previous layout back exactly.
+   */
+  zoomedPaneId?: string;
+  /** Panes put away as strips while their turns keep running. */
+  minimizedPaneIds?: string[];
 };
 
 export type SplitWorkspaceSnapshot = {
@@ -268,6 +276,179 @@ export function updateSplitRatio(
     first: updateSplitRatio(node.first, splitId, ratio),
     second: updateSplitRatio(node.second, splitId, ratio),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Zoom and minimize                                                           */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Both controls are overrides on a group, not edits to its tree. A collapsed
+ * pane keeps its place in `root` (and so its React identity, draft and running
+ * turn) and is only drawn as a strip. That is what lets "restore" bring the
+ * old layout back exactly: nothing about the ratios was ever changed.
+ */
+
+type PaneLookup = SplitWorkspaceSnapshot["panes"];
+
+export type PaneOverrides = {
+  zoomed: string | null;
+  minimized: string[];
+};
+
+function paneHasChat(panes: PaneLookup, paneId: string): boolean {
+  return Boolean(panes[paneId]?.session);
+}
+
+/**
+ * The group's overrides made consistent with its tree: ids of closed panes are
+ * dropped, an empty chooser pane cannot be minimized, zoom needs a second pane
+ * to zoom over, and the last visible pane is never folded away.
+ */
+export function resolvePaneOverrides(group: SplitGroup, panes: PaneLookup): PaneOverrides {
+  const leaves = layoutPaneIds(group.root);
+  const zoomed =
+    group.zoomedPaneId && leaves.length > 1 && leaves.includes(group.zoomedPaneId)
+      ? group.zoomedPaneId
+      : null;
+  const stored = group.minimizedPaneIds ?? [];
+  let minimized = leaves.filter(
+    (paneId) => stored.includes(paneId) && paneId !== zoomed && paneHasChat(panes, paneId)
+  );
+  if (minimized.length >= leaves.length) minimized = [];
+  return { zoomed, minimized };
+}
+
+/** Panes drawn as strips: everything but the zoomed pane, else the minimized ones. */
+export function collapsedPaneIds(group: SplitGroup, panes: PaneLookup): ReadonlySet<string> {
+  const { zoomed, minimized } = resolvePaneOverrides(group, panes);
+  if (zoomed) return new Set(layoutPaneIds(group.root).filter((paneId) => paneId !== zoomed));
+  return new Set(minimized);
+}
+
+/**
+ * Panes whose transcripts are on screen, in layout order. A chat in a strip is
+ * not: its completion reads as unread and its requests may notify.
+ */
+export function visiblePaneIds(group: SplitGroup, panes: PaneLookup): string[] {
+  const collapsed = collapsedPaneIds(group, panes);
+  return layoutPaneIds(group.root).filter((paneId) => !collapsed.has(paneId));
+}
+
+/** Whether a subtree has no expanded pane left, so it draws only strips. */
+export function isNodeCollapsed(node: LayoutNode, collapsed: ReadonlySet<string>): boolean {
+  return layoutPaneIds(node).every((paneId) => collapsed.has(paneId));
+}
+
+/**
+ * Which way a strip runs. Beside an expanded pane it is a thin column; above or
+ * below one it is a short row, so it spends its thin side where there is room.
+ */
+export function stripOrientation(parentAxis: SplitAxis): "vertical" | "horizontal" {
+  return parentAxis === "row" ? "vertical" : "horizontal";
+}
+
+export function canZoomPane(group: SplitGroup, panes: PaneLookup, paneId: string): boolean {
+  const leaves = layoutPaneIds(group.root);
+  return leaves.length > 1 && leaves.includes(paneId) && paneHasChat(panes, paneId);
+}
+
+/** A pane can be put away while another one stays on screen. */
+export function canMinimizePane(group: SplitGroup, panes: PaneLookup, paneId: string): boolean {
+  if (!paneHasChat(panes, paneId)) return false;
+  const visible = visiblePaneIds(group, panes);
+  return visible.includes(paneId) && visible.length > 1;
+}
+
+/**
+ * `focusedPaneId` must not rest on a strip: "Search chats" and the pane
+ * shortcuts would act on a pane you cannot see. Same object when it already
+ * rests on a visible pane.
+ */
+export function ensureVisibleFocus(group: SplitGroup, panes: PaneLookup): SplitGroup {
+  const visible = visiblePaneIds(group, panes);
+  if (visible.length === 0 || visible.includes(group.focusedPaneId)) return group;
+  return { ...group, focusedPaneId: visible[0] };
+}
+
+function withoutValue(list: string[] | undefined, value: string): string[] {
+  return (list ?? []).filter((item) => item !== value);
+}
+
+/** Zoom a pane, or give the layout back when it is already zoomed. */
+export function toggleZoomPane(group: SplitGroup, panes: PaneLookup, paneId: string): SplitGroup {
+  if (resolvePaneOverrides(group, panes).zoomed === paneId) {
+    return { ...group, zoomedPaneId: undefined };
+  }
+  if (!canZoomPane(group, panes, paneId)) return group;
+  return {
+    ...group,
+    zoomedPaneId: paneId,
+    // Zooming a pane you had put away is asking to see it; it stays up once zoom ends.
+    minimizedPaneIds: withoutValue(group.minimizedPaneIds, paneId),
+    focusedPaneId: paneId,
+  };
+}
+
+/** Put a pane away as a strip, or bring a stripped pane back. */
+export function toggleMinimizePane(group: SplitGroup, panes: PaneLookup, paneId: string): SplitGroup {
+  if (collapsedPaneIds(group, panes).has(paneId)) return revealPane(group, panes, paneId);
+  if (!canMinimizePane(group, panes, paneId)) return group;
+  const minimizedPaneIds = [...resolvePaneOverrides(group, panes).minimized, paneId];
+  return ensureVisibleFocus({ ...group, minimizedPaneIds }, panes);
+}
+
+/**
+ * Make a pane visible again: a strip was clicked, or something (the sidebar, an
+ * alert's Open) is taking the user to it. Zoom ends because it hid the pane,
+ * and the pane leaves the minimized set. Other minimized panes stay put.
+ */
+export function revealPane(group: SplitGroup, panes: PaneLookup, paneId: string): SplitGroup {
+  if (!layoutContainsPane(group.root, paneId)) return group;
+  const keepZoom = resolvePaneOverrides(group, panes).zoomed === paneId;
+  return {
+    ...group,
+    zoomedPaneId: keepZoom ? paneId : undefined,
+    minimizedPaneIds: withoutValue(group.minimizedPaneIds, paneId),
+    focusedPaneId: paneId,
+  };
+}
+
+/** Clear zoom and every minimized pane. */
+export function restoreAllPanes(group: SplitGroup): SplitGroup {
+  if (group.zoomedPaneId === undefined && !group.minimizedPaneIds?.length) return group;
+  return { ...group, zoomedPaneId: undefined, minimizedPaneIds: [] };
+}
+
+/**
+ * Bring minimized panes back without moving focus, for a chat that now waits on
+ * an approval or an answer. Zoom is left alone: its strips show the same
+ * attention state, and the user chose to look at one pane.
+ */
+export function wakeMinimizedPanes(
+  group: SplitGroup,
+  panes: PaneLookup,
+  shouldWake: (paneId: string) => boolean
+): SplitGroup {
+  const { zoomed, minimized } = resolvePaneOverrides(group, panes);
+  if (zoomed) return group;
+  const keep = minimized.filter((paneId) => !shouldWake(paneId));
+  if (keep.length === minimized.length) return group;
+  return { ...group, minimizedPaneIds: keep };
+}
+
+/** Store only what still applies after a pane closed or lost its chat. Same object when nothing changed. */
+export function pruneGroupOverrides(group: SplitGroup, panes: PaneLookup): SplitGroup {
+  const { zoomed, minimized } = resolvePaneOverrides(group, panes);
+  const stored = group.minimizedPaneIds ?? [];
+  const unchanged =
+    (group.zoomedPaneId ?? null) === zoomed &&
+    stored.length === minimized.length &&
+    stored.every((paneId, index) => paneId === minimized[index]);
+  const pruned = unchanged
+    ? group
+    : { ...group, zoomedPaneId: zoomed ?? undefined, minimizedPaneIds: minimized };
+  return ensureVisibleFocus(pruned, panes);
 }
 
 export function splitSidebarGroups(
