@@ -50,9 +50,11 @@ tests:
   - crates/desktop/ui/e2e/streaming-performance.spec.ts
   - crates/desktop/ui/e2e/code-highlighting.spec.ts
   - crates/desktop/ui/e2e/markdown-diagrams.spec.ts
+  - crates/desktop/ui/e2e/idle-animations.spec.ts
   - crates/desktop/ui/e2e/fixtures/streaming.html
 verify:
   - npm run ui:test
+  - npm run ui:e2e -- idle-animations
   - npm run ui:e2e -- streaming-performance
   - npm run ui:e2e -- code-highlighting
   - npm run ui:e2e -- markdown-diagrams
@@ -74,7 +76,7 @@ verify:
 - Fenced code shows a language chip and a "Copy code" button. Text is readable immediately while streaming and gains colour shortly after. Every language with a grammar in `codeBlockLanguages` is coloured, including aliases such as `rb`, `kt`, `ps1` and `dockerfile`; a tag with no grammar keeps its label and renders uncoloured.
 - ` ```mermaid ` fences render as a diagram once the fence has settled; while streaming or when invalid they stay a copyable code block. Diagrams and images expand to a zoomable overlay (+/-/0, Esc closes).
 - Images: `http(s)` URLs, raster `data:` URLs, and absolute local image paths (served through Tauri's asset protocol). Local paths written in prose (bare path, code span, `file://`) get an image hoisted above the line. Backtick and tilde fenced contents are never rewritten, including image-like path strings and Markdown image syntax inside HTML scripts. Broken images are hidden.
-- Settled answers show "Copy Markdown" (raw source) and "Save as <name>.md" (native save dialog). Neither shows while the message streams.
+- Settled answers show "Copy Markdown" (raw source) and "Save as <name>.md" (native save dialog). Neither shows while the message streams. Save's icon becomes a spinner only while the save is pending; a settled answer runs no animation at all, so an idle chat costs no style recalculation however many answers are loaded.
 - Block streaming (Customize > Chat view toggle, default on, key `zest.responseBlockStreaming.v1`) reveals an answer block by block instead of re-rendering a growing tail.
 - For turns produced by a command (for example Plan mode), an answer is framed as a document card once it is 400+ chars or contains a heading or ordered list (`looksLikeDocument`).
 
@@ -85,10 +87,12 @@ verify:
 - `MermaidBlock.tsx`: dynamic `import("mermaid")`, `securityLevel: "strict"`, theme follows the app appearance, SVG inserted via `markTrustedHtml` (`safeHtml.ts`, a provenance brand, not a sanitizer). The browser regression covers math labels and the expanded diagram. The root dependency override selects KaTeX 0.18.2 for Mermaid without downgrading Mermaid. The security regression resolves Mermaid's actual math renderer and proves inherited `trust` cannot enable HTML links, while explicit trusted links and ordinary math still render.
 - `ZoomableImage.tsx` -> `resolveChatImageSrc` (`chatImageSrc.ts`) -> `safeImageSrc` (`imageSrc.ts`) or `parseLocalImagePath` + `convertFileSrc`. `ImageLightbox` is shared with composer attachment chips.
 - Links: `safeHttpUrl` and `installExternalLinkHandling` (capture-phase click/auxclick) in `externalLinks.ts` -> `openExternalUrl`.
+- `MarkdownActions.tsx` shows its icons through `IconSwap` (`components/ui/icon-swap.tsx`, owned by [App shell](app-shell.md)), which keeps both icons mounted and cross-fades them; its hidden layer pauses every descendant animation, so the Save spinner turns only while `saving`.
 - `MarkdownActions.tsx` -> `suggestedMarkdownFilename` (`markdownExport.ts`, first heading, Windows-reserved names prefixed, 120 chars) -> Tauri `save_markdown` (`crates/desktop/src/lib.rs`), which enforces `.md` and remembers the directory.
 
 ## Verify
 - `npm run ui:e2e -- streaming-performance` drives the real `CodeBlock` through `e2e/fixtures/streaming.html`: final text, growing last line, language swap, copy, unmount mid-highlight, typing responsiveness. `ZEST_PERF=1 ... --workers=1` adds the opt-in benchmark (plans/005-streaming-highlight-results.md).
+- `npm run ui:e2e -- idle-animations` opens the fixture's long thread and asserts `document.getAnimations()` has nothing running once it settles, then holds `saveMarkdown` to prove the Save spinner runs only while pending.
 - `npm run ui:e2e -- code-highlighting` sends one fence per language through the fixture chat and asserts each block is labelled and coloured.
 - In `?fixture=1`, send a message containing a fence, a Mermaid block, a table and a link to check rendering end to end.
 
@@ -101,4 +105,5 @@ verify:
 - Two code blocks on purpose: Markdown fences use the ReUI block (highlighting that resumes while it streams); tool output in Trace lines uses the plain shadcn `ui/code-block`.
 - Trace rows clip (`overflow: hidden`) for their open/close animation, so hover text is `TraceHoverTitle`: in the tree (no portal, which the WebView drops) but `position: fixed` at the title's rectangle.
 - A Claude Code subagent's own tool calls only nest once core sends them as activities with a `parent_id` (the `parent_tool_use_id` in `claude_stream.rs`). Until then the wire carries none and the line shows the progress core appends to the `Agent` title.
+- Per-message chrome multiplies by the loaded message count. An `animate-spin` or `animate-pulse` that stays mounted while hidden keeps running; 250 of them held a renderer at about one core at idle with 500 messages loaded. Mount an animated element only while its state holds (or inside an `IconSwap` layer), and extend `idle-animations.spec.ts` when settled content gains a new moving part.
 - The shadcn CLI writes new components with `import { cn } from "cn"` and adds the `cn` npm package; point them at `@/lib/utils` instead, as the existing components do.
