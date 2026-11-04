@@ -89,6 +89,7 @@ verify:
 - Never hand-edit `lib/generated/`; it is exempt from feature-map coverage because the owning feature is the Rust type.
 - `HarnessError::provider_user_message` only trusts `Stream` errors whose kind starts with `provider:`. `Other` and plain `Stream` text are internal and must not reach a chat bubble.
 - `TopbarPanel` deliberately does not portal; portalled menus were fragile in the Tauri webview.
+- `IconSwap` (`components/ui/icon-swap.tsx`) keeps both icons mounted and cross-fades them, so its hidden layer pauses descendant animations; without that a hidden `animate-spin` keeps running at opacity 0. [Message rendering](message-rendering.md) has the measurement.
 - The comment in `selectBackend` has lost its inline code spans; the gate is `import.meta.env.DEV`, which makes the fixture import dead code in release builds.
 - `scratch_dir.rs` is a `#[cfg(test)]` helper (`ScratchDir`, a self-deleting temp dir), not runtime code.
 - `reveal.ts` (`revealCount`, streamed-text pacing) currently has no caller outside its own test; check before assuming it drives the transcript.
