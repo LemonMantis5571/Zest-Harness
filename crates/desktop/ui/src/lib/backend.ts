@@ -53,6 +53,7 @@ import type {
   WorkspacePickResult,
   WorkspaceChange,
   WorkspaceReview,
+  WorktreeChatStatus,
 } from "./types";
 
 export type { SkillSummary, SystemPromptInfo };
@@ -159,6 +160,7 @@ export type DesktopBackend = {
   forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
   createWorktreeChat(projectPath: string): Promise<string>;
+  worktreeChatStatus(projectPath: string): Promise<WorktreeChatStatus | null>;
   searchChats(query: string): Promise<ChatSearchHit[]>;
   openProjectChat(options: {
     /** `null` opens a chat without a workspace. */
@@ -339,6 +341,7 @@ export function createTauriBackend(): DesktopBackend {
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
     createWorktreeChat: (projectPath) => tauriApi.createWorktreeChat(projectPath),
+    worktreeChatStatus: (projectPath) => tauriApi.worktreeChatStatus(projectPath),
     searchChats: (query) => tauriApi.searchChats(query),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadOlderThreadMessages: (options) => tauriApi.loadOlderThreadMessages(options),

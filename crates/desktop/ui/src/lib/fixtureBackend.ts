@@ -51,6 +51,7 @@ import type {
   ChatSearchHit,
   WallpaperFilterId,
   WorkspaceChange,
+  WorktreeChatStatus,
 } from "./types";
 
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
@@ -371,6 +372,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       : ".";
   const initialWorkspace = workspace;
   const fixtureWorktrees = new Map<string, string>();
+  // The first worktree chat starts diverged and dirty so tests can read counts
+  // off its row; later ones start clean. A turn in a worktree chat edits a
+  // file, which `?worktreeStatus=fail` turns into a Git failure instead.
+  const fixtureWorktreeStatus = new Map<string, WorktreeChatStatus>();
+  const worktreeStatusFails =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("worktreeStatus") === "fail";
   let fixturePinned = false;
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
@@ -1897,6 +1905,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           name: `${initialWorkspace.split(/[/\\]/).filter(Boolean).pop() || "fixture"} · ${branch}`,
           path,
           active: !session.isFreeChat && workspace === path,
+          worktree: true,
           threads: session.isFreeChat || workspace !== path ? [] : threads,
         })),
         {
@@ -1926,7 +1935,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       const id = crypto.randomUUID().slice(0, 8);
       const root = `${initialWorkspace}/worktrees/${id}`;
       fixtureWorktrees.set(root, `zest/chat-${id}`);
+      fixtureWorktreeStatus.set(
+        root,
+        fixtureWorktrees.size === 1
+          ? { ahead: 2, behind: 1, dirty: 3 }
+          : { ahead: 0, behind: 0, dirty: 0 },
+      );
       return root;
+    },
+    async worktreeChatStatus(projectPath) {
+      if (worktreeStatusFails) throw new Error("fixture: Git is unavailable");
+      const status = fixtureWorktreeStatus.get(projectPath);
+      return status ? { ...status } : null;
     },
     async searchChats(query) {
       const needle = query.trim();
@@ -2249,6 +2269,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (scenario === "subagents") {
         streamSubagentTurn(text);
         return;
+      }
+      const worktreeStatus = fixtureWorktreeStatus.get(workspace);
+      if (worktreeStatus) {
+        fixtureWorktreeStatus.set(workspace, { ...worktreeStatus, dirty: worktreeStatus.dirty + 1 });
+        // The echo starts and ends in one synchronous burst, which React
+        // batches into a turn the sidebar never sees begin. Hold it briefly so
+        // it ends the way a real turn does.
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
       emitFixtureEcho(text, attachments);
     },
