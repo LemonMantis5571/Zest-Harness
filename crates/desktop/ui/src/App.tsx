@@ -122,7 +122,9 @@ import type {
 } from "@/lib/types";
 import {
   layoutPaneIds,
+  revealPane,
   splitSidebarGroups,
+  visiblePaneIds,
   type SplitWorkspaceSnapshot,
 } from "@/lib/splitLayout";
 import { applyFont, getSavedFontId } from "@/lib/fonts";
@@ -663,13 +665,13 @@ export default function App() {
       const current = splitSnapshotRef.current;
       const group = current?.groups.find((candidate) => candidate.id === groupId);
       if (!current || !group) return;
-      const focus = paneId ?? group.focusedPaneId;
       const next: SplitWorkspaceSnapshot = {
         ...current,
         activeGroupId: groupId,
+        // Going to a pane means seeing it: it leaves a minimized strip or zoom.
         groups: current.groups.map((candidate) =>
-          candidate.id === groupId
-            ? { ...candidate, focusedPaneId: focus }
+          candidate.id === groupId && paneId
+            ? revealPane(candidate, current.panes, paneId)
             : candidate
         ),
       };
@@ -812,7 +814,9 @@ export default function App() {
         (candidate) => candidate.id === snapshot.activeGroupId
       );
       if (!group) return [];
-      return layoutPaneIds(group.root).flatMap((paneId) => {
+      // Panes put away as strips (minimized, or hidden behind a zoomed pane)
+      // are off screen, like a pane covered by its chooser.
+      return visiblePaneIds(group, snapshot.panes).flatMap((paneId) => {
         if (paneId === splitChoosingPaneRef.current) return [];
         const threadId = snapshot.panes[paneId]?.session?.threadId;
         return threadId ? [threadId] : [];
@@ -3304,6 +3308,7 @@ export default function App() {
             onStateChange={rememberSplitSnapshot}
             onResolveApproval={onResolveApproval}
             onResolveQuestion={onResolveQuestion}
+            threadActivity={threadActivity}
             providers={providers}
             chatListRevision={chatListRevision}
             deletedThreadId={deletedThreadId}

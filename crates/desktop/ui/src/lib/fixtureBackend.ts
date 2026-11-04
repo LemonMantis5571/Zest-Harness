@@ -299,6 +299,20 @@ const STATUS_SCENARIO_THREADS = [
 ] as const;
 export const FIXTURE_FINISH_WORKING_EVENT = "zest:fixture-finish-working";
 
+/**
+ * `?scenario=split-streaming` keeps every sent turn live until it is stopped.
+ * Dispatch this event with `detail: { prompt, action }`, where `prompt` is the
+ * text that started the turn, to move that turn along without a timer:
+ * `delta` streams more `text`, `done` ends it, `approval` stops it on a tool
+ * approval, and `question` stops it on a question.
+ */
+export const FIXTURE_SPLIT_TURN_EVENT = "zest:fixture-split-turn";
+export type FixtureSplitTurnDetail = {
+  prompt: string;
+  action: "delta" | "done" | "approval" | "question";
+  text?: string;
+};
+
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
   pullRequestDiffReady?: Promise<void>;
@@ -413,6 +427,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     (id === "fixture" || STATUS_SCENARIO_THREADS.some((thread) => thread.id === id));
   const deletedFixtureThreads = new Set<string>();
   const splitStreams = new Map<string, () => void>();
+  /** Live `split-streaming` turns by their prompt, for `FIXTURE_SPLIT_TURN_EVENT`. */
+  const splitTurns = new Map<string, {
+    id: { session_id: string; thread_id: string; turn_id: string };
+    assistantId: string;
+    finish: () => void;
+  }>();
+  const splitQuestions = new Map<string, () => void>();
   const backgroundApprovals = new Map<string, (decision: ApprovalChoice) => void>();
   const failBackgroundApprovalOnce = scenario === "background-approval" && typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).has("failBackgroundApprovalOnce");
@@ -778,6 +799,64 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       id: "tool-status-working",
     });
     handler({ kind: "done", ...statusScenarioTurn("fixture-finished"), message_id: "assistant-fixture-finished" });
+  }
+
+  if (scenario === "split-streaming" && typeof window !== "undefined") {
+    window.addEventListener(FIXTURE_SPLIT_TURN_EVENT, (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail as FixtureSplitTurnDetail;
+      const turn = splitTurns.get(detail.prompt);
+      if (!turn) return;
+      const { id, assistantId } = turn;
+      const toolId = `tool-${crypto.randomUUID()}`;
+      if (detail.action === "delta") {
+        chatHandler?.({ kind: "text_delta", ...id, message_id: assistantId, text: detail.text ?? "" });
+      } else if (detail.action === "done") {
+        turn.finish();
+      } else if (detail.action === "approval") {
+        const approvalId = `approval-${crypto.randomUUID()}`;
+        backgroundApprovals.set(approvalId, (decision) => {
+          backgroundApprovals.delete(approvalId);
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "fixture_tool", id: toolId,
+            summary: decision === "deny" ? "The fixture tool was denied." : "The fixture tool ran.",
+            isError: decision === "deny",
+          });
+        });
+        chatHandler?.({ kind: "tool_call_start", ...id, message_id: assistantId, name: "fixture_tool", id: toolId });
+        chatHandler?.({
+          kind: "approval_needed",
+          ...id,
+          message_id: assistantId,
+          approval_id: approvalId,
+          tool_name: "fixture_tool",
+          tool_call_id: toolId,
+          risk: "exec",
+          path: "fixture_tool",
+          summary: "Run the fixture tool in this split pane",
+          diff: "{}",
+        });
+      } else if (detail.action === "question") {
+        const questionId = `question-${crypto.randomUUID()}`;
+        splitQuestions.set(questionId, () => {
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "ask_user", id: toolId,
+            summary: "The fixture answer was accepted.", isError: false,
+          });
+        });
+        chatHandler?.({ kind: "tool_call_start", ...id, message_id: assistantId, name: "ask_user", id: toolId });
+        chatHandler?.({
+          kind: "question_needed",
+          ...id,
+          message_id: assistantId,
+          question_id: questionId,
+          tool_call_id: toolId,
+          prompt: "Which branch should this split pane use?",
+          choices: ["main", "a new branch"],
+          multiple: false,
+        });
+      }
+    });
   }
 
   if (scenario === "sidebar-status" && typeof window !== "undefined") {
@@ -2221,7 +2300,19 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
             clearTimeout(timer);
             chatHandler?.({ kind: "cancelled", ...id, message_id: assistantId });
             splitStreams.delete(id.thread_id);
+            splitTurns.delete(text);
             resolve();
+          });
+          splitTurns.set(text, {
+            id,
+            assistantId,
+            finish: () => {
+              clearTimeout(timer);
+              chatHandler?.({ kind: "done", ...id, message_id: assistantId });
+              splitStreams.delete(id.thread_id);
+              splitTurns.delete(text);
+              resolve();
+            },
           });
           chatHandler?.({ kind: "user", ...id, message_id: userId, text });
           chatHandler?.({ kind: "assistant_start", ...id, message_id: assistantId });
@@ -2412,6 +2503,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     },
     async resolveQuestion(questionId: string) {
+      const splitAnswer = splitQuestions.get(questionId);
+      if (splitAnswer) {
+        splitQuestions.delete(questionId);
+        splitAnswer();
+        return;
+      }
       if (scenario === "sidebar-status" && questionId === "question-status-fixture" && statusQuestionPending) {
         statusQuestionPending = false;
         finishInteraction("fixture-question", () => {

@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   ArrowUpIcon,
+  ExpandIcon,
   GripVerticalIcon,
   GitForkIcon,
   Maximize2Icon,
+  MinusIcon,
   PlusIcon,
+  ShrinkIcon,
   SquareIcon,
   XIcon,
 } from "lucide-react";
@@ -14,25 +17,44 @@ import { ModelEffortPicker } from "@/components/ModelEffortPicker";
 import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
 import { AssistantTrace } from "@/components/AssistantTrace";
 import { ToolCallRow } from "@/components/ToolCallRow";
+import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { readSidebarOpen, writeSidebarOpen } from "@/components/ChatHistorySidebar";
+import { SplitPaneStrip } from "@/components/SplitPaneStrip";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { loadDraft } from "@/lib/drafts";
+import { formatChord } from "@/lib/keybindings";
 import { DEFAULT_EFFORT, type EffortId } from "@/lib/models";
 import { effortFromSession } from "@/lib/sessionOptions";
+import { splitPaneStatus, type PaneStatus } from "@/lib/splitPaneStatus";
+import { needsInput, type ThreadActivityMap } from "@/lib/threadActivity";
+import { getUnreadThreads, subscribeUnreadThreads } from "@/lib/threadUnread";
+import { useBindings, useKeybindings } from "@/lib/useKeybindings";
 import type { ChatUiState } from "@/lib/chatReducer";
 import {
   addPaneToLayout,
   appendSplitGroup,
+  canMinimizePane,
+  canZoomPane,
   clampSplitRatio,
+  collapsedPaneIds,
   createSplitId,
   createSplitWorkspaceSnapshot,
+  isNodeCollapsed,
   layoutPaneIds,
   movePaneInLayout,
+  pruneGroupOverrides,
   removePaneFromLayout,
+  resolvePaneOverrides,
+  restoreAllPanes,
+  revealPane,
   splitSidebarGroups,
+  stripOrientation,
   targetForSession,
+  toggleMinimizePane,
+  toggleZoomPane,
   updateSplitRatio,
+  wakeMinimizedPanes,
   type LayoutNode,
   type SplitAxis,
   type SplitChatTarget,
@@ -89,6 +111,8 @@ type Props = {
   onStateChange?: (snapshot: SplitWorkspaceSnapshot, choosingPaneId: string | null) => void;
   onResolveApproval: (approvalId: string, decision: ApprovalChoice, threadId: string) => Promise<void>;
   onResolveQuestion: (questionId: string, answer: string, threadId: string) => Promise<void>;
+  /** What every chat is doing, so a strip can say "working" or "awaiting approval". */
+  threadActivity?: ThreadActivityMap;
   renderSidebar?: (model: SplitSidebarRenderModel) => ReactNode;
 };
 
@@ -149,6 +173,7 @@ export function SplitWorkspace({
   onStateChange,
   onResolveApproval,
   onResolveQuestion,
+  threadActivity,
   renderSidebar,
 }: Props) {
   const initialWorkspaceRef = useRef<SplitWorkspaceSnapshot | null>(null);
@@ -184,6 +209,18 @@ export function SplitWorkspace({
     workspace.groups.find((group) => group.id === workspace.activeGroupId) ??
     workspace.groups[0];
   const activePane = activeGroup ? workspace.panes[activeGroup.focusedPaneId] : undefined;
+  const [bindings] = useBindings();
+  const unreadThreads = useSyncExternalStore(subscribeUnreadThreads, getUnreadThreads);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  /** The pane a palette command acts on, taken before the palette's input takes focus. */
+  const paletteTargetRef = useRef<string | null>(null);
+  /** Where focus goes once a pane has been put away or brought back. */
+  const pendingFocusRef = useRef<{ paneId: string; target: "strip" | "composer" } | null>(null);
+  const collapsedIds = useMemo(
+    () => (activeGroup ? collapsedPaneIds(activeGroup, workspace.panes) : new Set<string>()),
+    [activeGroup, workspace.panes]
+  );
+  const zoomedPaneId = activeGroup ? resolvePaneOverrides(activeGroup, workspace.panes).zoomed : null;
   const threadTitles = useMemo(() => {
     const map = new Map<string, string>();
     for (const project of projects) {
@@ -207,6 +244,40 @@ export function SplitWorkspace({
     onStateChange?.(workspace, choosing);
   }, [choosing, onStateChange, snapshot, workspace]);
 
+  // A minimized pane whose chat now waits on an approval or an answer comes
+  // back by itself, without taking focus. Zoom is left alone: its strips show
+  // the same state and the user chose to look at one pane.
+  useEffect(() => {
+    setWorkspace((current) => {
+      const group =
+        current.groups.find((candidate) => candidate.id === current.activeGroupId) ?? current.groups[0];
+      if (!group) return current;
+      const next = wakeMinimizedPanes(group, current.panes, (paneId) => {
+        const threadId = current.panes[paneId]?.session?.threadId;
+        return needsInput(threadId ? threadActivity?.[threadId] : undefined);
+      });
+      if (next === group) return current;
+      return {
+        ...current,
+        groups: current.groups.map((candidate) => (candidate.id === group.id ? next : candidate)),
+      };
+    });
+  }, [threadActivity, workspace]);
+
+  useEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending) return;
+    pendingFocusRef.current = null;
+    const section = document.querySelector<HTMLElement>(
+      `[data-split-pane-id="${CSS.escape(pending.paneId)}"]`
+    );
+    const target =
+      pending.target === "strip"
+        ? section?.querySelector<HTMLElement>("[data-split-strip]")
+        : section?.querySelector<HTMLElement>("textarea");
+    target?.focus();
+  }, [workspace]);
+
   useEffect(() => {
     if (!deletedThreadId) return;
     try {
@@ -228,7 +299,13 @@ export function SplitWorkspace({
           title: undefined,
         };
       }
-      return changed ? { ...current, panes } : current;
+      if (!changed) return current;
+      // An emptied pane cannot stay minimized: it has no chat for a strip to describe.
+      return {
+        ...current,
+        panes,
+        groups: current.groups.map((group) => pruneGroupOverrides(group, panes)),
+      };
     });
   }, [deletedThreadId]);
 
@@ -269,6 +346,125 @@ export function SplitWorkspace({
     }));
   }
 
+  function updateActiveGroup(
+    update: (group: SplitGroup, panes: SplitWorkspaceSnapshot["panes"]) => SplitGroup
+  ) {
+    setWorkspace((current) => {
+      const group =
+        current.groups.find((candidate) => candidate.id === current.activeGroupId) ?? current.groups[0];
+      if (!group) return current;
+      const next = update(group, current.panes);
+      if (next === group) return current;
+      return {
+        ...current,
+        groups: current.groups.map((candidate) => (candidate.id === group.id ? next : candidate)),
+      };
+    });
+  }
+
+  function paneNeedsInput(pane: SplitPaneSnapshot | undefined) {
+    const threadId = pane?.session?.threadId;
+    return needsInput(threadId ? threadActivity?.[threadId] : undefined);
+  }
+
+  function paneStatusFor(pane: SplitPaneSnapshot): PaneStatus {
+    const threadId = pane.session?.threadId;
+    return splitPaneStatus({
+      hasChat: Boolean(pane.session),
+      activity: threadId ? threadActivity?.[threadId] : undefined,
+      sending: threadId ? states.get(threadId)?.sending : false,
+      unread: threadId ? unreadThreads.has(threadId) : false,
+    });
+  }
+
+  /** The pane a pane shortcut acts on: the one holding keyboard focus, else the group's focused pane. */
+  function paneForShortcut(): string | null {
+    if (!activeGroup) return null;
+    const active = document.activeElement;
+    const fromDom =
+      active instanceof HTMLElement
+        ? active.closest<HTMLElement>("[data-split-pane-id]")?.dataset.splitPaneId
+        : undefined;
+    const leaves = layoutPaneIds(activeGroup.root);
+    if (fromDom && leaves.includes(fromDom)) return fromDom;
+    return leaves.includes(activeGroup.focusedPaneId) ? activeGroup.focusedPaneId : null;
+  }
+
+  function zoomPane(paneId: string) {
+    updateActiveGroup((group, panes) => toggleZoomPane(group, panes, paneId));
+  }
+
+  /** Put a pane away, or bring a stripped pane back. A pane waiting on you is not put away. */
+  function minimizePane(paneId: string) {
+    const stripped = collapsedIds.has(paneId);
+    if (!stripped && paneNeedsInput(workspace.panes[paneId])) return;
+    pendingFocusRef.current = { paneId, target: stripped ? "composer" : "strip" };
+    updateActiveGroup((group, panes) => toggleMinimizePane(group, panes, paneId));
+  }
+
+  /** A strip was clicked: the pane comes back and takes focus. */
+  function restoreStrip(paneId: string) {
+    pendingFocusRef.current = { paneId, target: "composer" };
+    updateActiveGroup((group, panes) => revealPane(group, panes, paneId));
+  }
+
+  function restoreAllPaneStrips() {
+    updateActiveGroup((group) => restoreAllPanes(group));
+  }
+
+  function openPalette() {
+    paletteTargetRef.current = paneForShortcut();
+    setPaletteOpen(true);
+  }
+
+  useKeybindings({
+    "view.palette": openPalette,
+    "split.zoom": () => {
+      const paneId = paneForShortcut();
+      if (paneId) zoomPane(paneId);
+    },
+    "split.minimize": () => {
+      const paneId = paneForShortcut();
+      if (paneId) minimizePane(paneId);
+    },
+    "split.restore": restoreAllPaneStrips,
+  });
+
+  const shortcutFor = (id: "split.zoom" | "split.minimize" | "split.restore") => {
+    const chord = bindings[id];
+    return chord ? formatChord(chord) : undefined;
+  };
+
+  const paletteActions: PaletteAction[] = [
+    {
+      id: "zoom-pane",
+      label: "Zoom pane",
+      description: "Show the focused split pane full size, or bring the others back",
+      shortcut: shortcutFor("split.zoom"),
+      run: () => {
+        const paneId = paletteTargetRef.current ?? paneForShortcut();
+        if (paneId) zoomPane(paneId);
+      },
+    },
+    {
+      id: "minimize-pane",
+      label: "Minimize pane",
+      description: "Put the focused split pane away as a strip while its turn keeps running",
+      shortcut: shortcutFor("split.minimize"),
+      run: () => {
+        const paneId = paletteTargetRef.current ?? paneForShortcut();
+        if (paneId) minimizePane(paneId);
+      },
+    },
+    {
+      id: "restore-panes",
+      label: "Restore all panes",
+      description: "End zoom and bring back every minimized pane",
+      shortcut: shortcutFor("split.restore"),
+      run: restoreAllPaneStrips,
+    },
+  ];
+
   function updatePaneOptions(paneId: string, options: SplitPaneOptions) {
     const pane = workspace.panes[paneId];
     if (!pane?.session || !pane.target) return;
@@ -298,8 +494,9 @@ export function SplitWorkspace({
     setWorkspace((current) => ({
       ...current,
       activeGroupId: groupId,
+      // Going to a pane means seeing it, so it leaves a strip.
       groups: current.groups.map((group) =>
-        group.id === groupId ? { ...group, focusedPaneId: paneId } : group
+        group.id === groupId ? revealPane(group, current.panes, paneId) : group
       ),
     }));
     setChoosing(workspace.panes[paneId]?.session ? null : paneId);
@@ -356,7 +553,9 @@ export function SplitWorkspace({
         },
         groups: current.groups.map((candidate) =>
           candidate.id === groupId
-            ? { ...candidate, root: currentRoot, focusedPaneId: paneId }
+            // A new pane would be born hidden behind zoom or a minimized
+            // sibling, so adding one brings every pane back.
+            ? restoreAllPanes({ ...candidate, root: currentRoot, focusedPaneId: paneId })
             : candidate
         ),
       };
@@ -374,6 +573,8 @@ export function SplitWorkspace({
     if (!group) return null;
     const empty = emptyPaneInGroup(group);
     if (empty) {
+      // The empty pane may be a strip; its chooser has to be on screen.
+      updateGroup(groupId, restoreAllPanes);
       setChoosing(empty);
       return empty;
     }
@@ -454,7 +655,9 @@ export function SplitWorkspace({
         panes,
         groups: current.groups.map((candidate) =>
           candidate.id === groupId
-            ? { ...candidate, root, focusedPaneId: nextFocus }
+            // A closed pane leaves zoom and the minimized set; if it was the
+            // last one on screen, the strips come back with it.
+            ? pruneGroupOverrides({ ...candidate, root, focusedPaneId: nextFocus }, panes)
             : candidate
         ),
       };
@@ -599,19 +802,50 @@ export function SplitWorkspace({
 
   if (!activeGroup) return null;
 
-  const renderNode = (node: LayoutNode, path: string[]): ReactNode => {
+  /**
+   * Draw the tree. Zoom and minimize only change how a pane or subtree is
+   * drawn (`collapsedIds`): every pane keeps its place in the tree, so it stays
+   * mounted and its draft and running turn carry on behind its strip.
+   * `strip` is the direction a strip runs if this node turns out to be collapsed.
+   */
+  const renderNode = (
+    node: LayoutNode,
+    path: string[],
+    strip: "vertical" | "horizontal"
+  ): ReactNode => {
     if (node.kind === "pane") {
       const pane = workspace.panes[node.paneId];
       if (!pane) return null;
+      const collapsed = collapsedIds.has(node.paneId);
+      const title = titleForPane(pane, threadTitles);
+      const needsAnswer = paneNeedsInput(pane);
+      const zoomed = zoomedPaneId === node.paneId;
       return (
         <SplitPaneView
           key={node.paneId}
           pane={pane}
           label={paneLabel(path)}
-          title={titleForPane(pane, threadTitles)}
+          title={title}
           projectLabel={projectForPane(pane)}
           busy={busy}
           states={states}
+          collapsed={collapsed}
+          strip={strip}
+          status={paneStatusFor(pane)}
+          zoomed={zoomed}
+          canZoom={canZoomPane(activeGroup, workspace.panes, node.paneId)}
+          minimizeBlockedReason={
+            canMinimizePane(activeGroup, workspace.panes, node.paneId)
+              ? needsAnswer
+                ? "Answer the pending request before minimizing this pane"
+                : undefined
+              : "Keep at least one pane visible"
+          }
+          zoomShortcut={shortcutFor("split.zoom")}
+          minimizeShortcut={shortcutFor("split.minimize")}
+          onZoom={() => zoomPane(node.paneId)}
+          onMinimize={() => minimizePane(node.paneId)}
+          onRestore={() => restoreStrip(node.paneId)}
           onChoose={() => {
             setChoosing(node.paneId);
             setQuery("");
@@ -623,6 +857,7 @@ export function SplitWorkspace({
             if (!pane.session) return;
             const empty = emptyPaneInGroup(activeGroup);
             if (empty && empty !== node.paneId) {
+              updateGroup(activeGroup.id, restoreAllPanes);
               void choose(empty, sessionTarget(pane.session), true);
             } else {
               const created = addEmptyPane(activeGroup.id, node.paneId, "column");
@@ -676,7 +911,7 @@ export function SplitWorkspace({
           onUpdateOptions={(options) => updatePaneOptions(node.paneId, options)}
           onResizeFocus={() => focusPane(activeGroup.id, node.paneId)}
           dragging={draggedPaneId === node.paneId}
-          canDrop={draggedPaneId !== null && draggedPaneId !== node.paneId}
+          canDrop={draggedPaneId !== null && draggedPaneId !== node.paneId && !collapsed}
           onDragStart={() => setDraggedPaneId(node.paneId)}
           onDragEnd={() => setDraggedPaneId(null)}
           onDrop={(event) => dropPane(node.paneId, event)}
@@ -690,41 +925,60 @@ export function SplitWorkspace({
     }
 
     const ratio = clampSplitRatio(node.ratio);
-    const axisClass = node.axis === "row" ? "flex-row" : "flex-col";
+    const firstCollapsed = isNodeCollapsed(node.first, collapsedIds);
+    const secondCollapsed = isNodeCollapsed(node.second, collapsedIds);
+    const sharesSpace = !firstCollapsed && !secondCollapsed;
+    // A collapsed subtree is a run of strips, whatever its own axis was. The
+    // ratio is only used while both sides are expanded, so it is never edited.
+    const childStrip = firstCollapsed && secondCollapsed ? strip : stripOrientation(node.axis);
+    const direction = firstCollapsed && secondCollapsed
+      ? strip === "vertical" ? "flex-row" : "flex-col"
+      : node.axis === "row" ? "flex-row" : "flex-col";
     const separatorClass = node.axis === "row"
       ? "h-full w-2 cursor-col-resize"
       : "h-2 w-full cursor-row-resize";
-    const firstStyle: CSSProperties = { flex: `0 0 calc(${ratio}% - 4px)` };
+    const firstStyle: CSSProperties = {
+      flex: sharesSpace ? `0 0 calc(${ratio}% - 4px)` : firstCollapsed ? "0 0 auto" : "1 1 0%",
+    };
+    const secondStyle: CSSProperties = { flex: secondCollapsed ? "0 0 auto" : "1 1 0%" };
 
     return (
-      <div key={node.id} className={`zest-split-node flex min-h-0 min-w-0 flex-1 ${axisClass}`}>
-        <div className="flex min-h-0 min-w-0 flex-col" style={firstStyle}>
-          {renderNode(node.first, [...path, "first"])}
+      <div key={node.id} className={`zest-split-node flex min-h-0 min-w-0 flex-1 ${direction}`}>
+        <div
+          className={`flex min-h-0 min-w-0 flex-col ${firstCollapsed ? "zest-split-collapsed" : ""}`}
+          style={firstStyle}
+        >
+          {renderNode(node.first, [...path, "first"], childStrip)}
         </div>
-        <SplitDivider
-          axis={node.axis}
-          ratio={ratio}
-          className={separatorClass}
-          onChange={(next) => {
-            setWorkspace((current) => ({
-              ...current,
-              groups: current.groups.map((group) =>
-                group.id === activeGroup.id
-                  ? { ...group, root: updateSplitRatio(group.root, node.id, next) }
-                  : group
-              ),
-            }));
-          }}
-        />
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {renderNode(node.second, [...path, "second"])}
+        {sharesSpace ? (
+          <SplitDivider
+            axis={node.axis}
+            ratio={ratio}
+            className={separatorClass}
+            onChange={(next) => {
+              setWorkspace((current) => ({
+                ...current,
+                groups: current.groups.map((group) =>
+                  group.id === activeGroup.id
+                    ? { ...group, root: updateSplitRatio(group.root, node.id, next) }
+                    : group
+                ),
+              }));
+            }}
+          />
+        ) : null}
+        <div
+          className={`flex min-h-0 min-w-0 flex-col ${secondCollapsed ? "zest-split-collapsed" : ""}`}
+          style={secondStyle}
+        >
+          {renderNode(node.second, [...path, "second"], childStrip)}
         </div>
       </div>
     );
   };
 
   return (
-    <section aria-label="Split workspace" className="flex min-h-0 min-w-0 flex-1 bg-[var(--canvas-solid)]">
+    <section aria-label="Split workspace" className="relative flex min-h-0 min-w-0 flex-1 bg-[var(--canvas-solid)]">
       {sidebar}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {error ? (
@@ -733,9 +987,18 @@ export function SplitWorkspace({
           </p>
         ) : null}
         <div className="zest-split-panes flex min-h-0 flex-1">
-          {renderNode(activeGroup.root, [])}
+          {renderNode(activeGroup.root, [], "vertical")}
         </div>
       </div>
+      {paletteOpen ? (
+        <CommandPalette
+          open
+          scope="actions"
+          actions={paletteActions}
+          onClose={() => setPaletteOpen(false)}
+          onCommand={() => setPaletteOpen(false)}
+        />
+      ) : null}
     </section>
   );
 }
@@ -800,6 +1063,17 @@ function SplitPaneView({
   projectLabel,
   busy,
   states,
+  collapsed,
+  strip,
+  status,
+  zoomed,
+  canZoom,
+  minimizeBlockedReason,
+  zoomShortcut,
+  minimizeShortcut,
+  onZoom,
+  onMinimize,
+  onRestore,
   onChoose,
   onAddPane,
   onFork,
@@ -840,6 +1114,19 @@ function SplitPaneView({
   projectLabel: string;
   busy: boolean;
   states: ReadonlyMap<string, ChatUiState>;
+  /** Drawn as a strip. The content below stays mounted, only hidden. */
+  collapsed: boolean;
+  strip: "vertical" | "horizontal";
+  status: PaneStatus;
+  zoomed: boolean;
+  canZoom: boolean;
+  /** Why this pane cannot be minimized now, or undefined when it can. */
+  minimizeBlockedReason?: string;
+  zoomShortcut?: string;
+  minimizeShortcut?: string;
+  onZoom: () => void;
+  onMinimize: () => void;
+  onRestore: () => void;
   onChoose: () => void;
   onAddPane: () => void;
   onFork: () => void;
@@ -874,10 +1161,12 @@ function SplitPaneView({
   onPointerCancel: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   dropTarget: boolean;
 }) {
+  const bodyId = `split-pane-body-${pane.paneId}`;
   return (
     <section
       aria-label={label}
       data-split-pane-id={pane.paneId}
+      data-collapsed={collapsed ? strip : undefined}
       className={`zest-split-pane flex min-h-0 min-w-0 flex-col ${dragging ? "opacity-60" : ""} ${dropTarget ? "ring-2 ring-inset ring-primary" : canDrop ? "ring-1 ring-inset ring-primary/40" : ""}`}
       onDragOver={(event) => {
         if (!canDrop) return;
@@ -886,6 +1175,19 @@ function SplitPaneView({
       }}
       onDrop={onDrop}
     >
+      {collapsed ? (
+        <SplitPaneStrip
+          paneId={pane.paneId}
+          title={title}
+          status={status}
+          orientation={strip}
+          controlsId={bodyId}
+          onRestore={onRestore}
+        />
+      ) : null}
+      {/* Hidden, not unmounted, behind a strip: the transcript scroll, composer and
+          pickers keep their state, and the turn keeps streaming into them. */}
+      <div id={bodyId} className={collapsed ? "hidden" : "contents"}>
       <header className="flex min-w-0 shrink-0 items-center gap-1 border-b border-border/60 px-1.5 py-1">
         <button
           type="button"
@@ -925,6 +1227,33 @@ function SplitPaneView({
             <Button variant="ghost" size="icon-xs" title="Fork into another pane" aria-label="Fork into other pane" disabled={busy || states.get(pane.session.threadId)?.sending} onClick={onFork}>
               <GitForkIcon aria-hidden="true" />
             </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title={
+                canZoom
+                  ? `${zoomed ? "Restore pane layout" : "Zoom pane"}${zoomShortcut ? ` (${zoomShortcut})` : ""}`
+                  : "Open a second pane to zoom"
+              }
+              aria-label="Zoom pane"
+              aria-pressed={zoomed}
+              disabled={!canZoom}
+              onClick={onZoom}
+            >
+              {zoomed ? <ShrinkIcon aria-hidden="true" /> : <ExpandIcon aria-hidden="true" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title={minimizeBlockedReason ?? `Minimize pane${minimizeShortcut ? ` (${minimizeShortcut})` : ""}`}
+              aria-label="Minimize pane"
+              aria-expanded
+              aria-controls={bodyId}
+              disabled={Boolean(minimizeBlockedReason)}
+              onClick={onMinimize}
+            >
+              <MinusIcon aria-hidden="true" />
+            </Button>
             <Button variant="ghost" size="icon-xs" title="Continue in single view" aria-label="Continue in single view" disabled={busy} onClick={onContinue}>
               <Maximize2Icon aria-hidden="true" />
             </Button>
@@ -960,8 +1289,10 @@ function SplitPaneView({
           onResolveQuestion={onResolveQuestion}
           providers={providers}
           onUpdateOptions={onUpdateOptions}
+          active={!collapsed}
         />
       ) : null}
+      </div>
     </section>
   );
 }
@@ -1023,8 +1354,11 @@ function SplitConversation({
   onError,
   onResolveApproval,
   onResolveQuestion,
+  active = true,
 }: {
   session: SessionInfo;
+  /** False while the pane is a strip: its transcript is hidden but still mounted. */
+  active?: boolean;
   state?: ChatUiState;
   draft: string;
   busy: boolean;
@@ -1042,15 +1376,27 @@ function SplitConversation({
   const messages = state?.messages ?? session.messages;
   const sending = state?.sending ?? false;
 
+  const savedScroll = useRef(0);
+
   useEffect(() => {
     if (follow.current && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
   }, [messages]);
+
+  // A hidden element loses its scroll offset, so put the reader back where they
+  // were (or at the end, if they were following) when the pane returns.
+  useEffect(() => {
+    const node = viewport.current;
+    if (active && node) node.scrollTop = follow.current ? node.scrollHeight : savedScroll.current;
+  }, [active]);
 
   return (
     <>
       <div ref={viewport} className="min-h-0 flex-1 overflow-y-auto px-5 py-4" onScroll={() => {
         const node = viewport.current;
-        if (node) follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+        // Hiding the element reports a scroll to 0; that is not the reader moving.
+        if (!node || !active) return;
+        savedScroll.current = node.scrollTop;
+        follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
       }}>
         {session.hasOlderMessages ? <p className="mb-4 text-xs text-muted-foreground">Showing recent messages. Continue in single view to load earlier history.</p> : null}
         {!messages.length ? <p className="py-12 text-center text-sm text-muted-foreground">Start a conversation.</p> : null}

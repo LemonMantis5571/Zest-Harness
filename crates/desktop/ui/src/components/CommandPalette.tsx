@@ -40,6 +40,11 @@ function Highlight({ text, query }: { text: string; query: string }) {
 type Props = {
   open: boolean;
   actions: PaletteAction[];
+  /**
+   * "actions" lists only `actions`: no chats, slash commands, or filter tabs.
+   * Split view uses it, because there is no single chat for those to act on.
+   */
+  scope?: "all" | "actions";
   initialFilter?: PaletteFilter;
   onClose: () => void;
   onCommand: (name: string) => void;
@@ -53,6 +58,7 @@ type Props = {
 export function CommandPalette({
   open,
   actions,
+  scope = "all",
   initialFilter = "all",
   onClose,
   onCommand,
@@ -65,6 +71,7 @@ export function CommandPalette({
   const [filter, setFilter] = useState<PaletteFilter>("all");
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const actionsOnly = scope === "actions";
 
   useEffect(() => {
     if (!open) return;
@@ -73,6 +80,7 @@ export function CommandPalette({
     setFilter(initialFilter);
     setSearchHits([]);
     inputRef.current?.focus();
+    if (actionsOnly) return;
     const backend = getBackend();
     void Promise.all([
       backend
@@ -85,10 +93,10 @@ export function CommandPalette({
       setCommands(nextCommands);
       setChats(flattenChats(projects));
     });
-  }, [initialFilter, open]);
+  }, [actionsOnly, initialFilter, open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || actionsOnly) return;
     const needle = query.trim();
     if (!needle) {
       setSearchHits([]);
@@ -111,7 +119,7 @@ export function CommandPalette({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [open, query]);
+  }, [actionsOnly, open, query]);
 
   const chatsForPalette = useMemo(() => {
     const needle = query.trim();
@@ -120,8 +128,9 @@ export function CommandPalette({
   }, [chats, query, searchHits]);
 
   const sections = useMemo(
-    () => buildPaletteSections(filter, query, chatsForPalette, actions, commands),
-    [filter, query, chatsForPalette, actions, commands]
+    () =>
+      buildPaletteSections(actionsOnly ? "actions" : filter, query, chatsForPalette, actions, commands),
+    [actionsOnly, filter, query, chatsForPalette, actions, commands]
   );
   const numbered = useMemo(
     () =>
@@ -184,6 +193,8 @@ export function CommandPalette({
     } else if (event.key === "Enter" && items[index]) {
       event.preventDefault();
       run(items[index]);
+    } else if (actionsOnly) {
+      // No filter tabs to move between, so the arrow keys keep editing the query.
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
       setFilter((value) => shiftFilter(value, -1));
@@ -214,8 +225,8 @@ export function CommandPalette({
           <input
             ref={inputRef}
             value={query}
-            placeholder="Search chats, commands, and actions..."
-            aria-label="Search chats, commands, and actions"
+            placeholder={actionsOnly ? "Search split pane actions..." : "Search chats, commands, and actions..."}
+            aria-label={actionsOnly ? "Search split pane actions" : "Search chats, commands, and actions"}
             autoComplete="off"
             spellCheck={false}
             className="h-10 min-w-0 flex-1 bg-transparent text-[15px] text-foreground outline-none placeholder:text-muted-foreground/70"
@@ -243,7 +254,7 @@ export function CommandPalette({
           ) : null}
         </div>
 
-        <div
+        {actionsOnly ? null : <div
           role="tablist"
           aria-label="Search filters"
           className="flex items-center gap-1 border-b border-white/[0.06] px-3 pb-2"
@@ -273,7 +284,7 @@ export function CommandPalette({
               </button>
             );
           })}
-        </div>
+        </div>}
 
         <div role="listbox" aria-label="Search results" className="max-h-[min(440px,52vh)] overflow-y-auto px-2 py-2">
           {items.length === 0 ? (
@@ -369,7 +380,7 @@ export function CommandPalette({
         <div className="flex items-center gap-4 border-t border-white/[0.06] px-4 py-2 text-[11px] text-muted-foreground/80">
           <span>↑↓ Select</span>
           <span>↵ Open</span>
-          <span>← or Shift + → Change filter</span>
+          {actionsOnly ? null : <span>← or Shift + → Change filter</span>}
         </div>
       </div>
     </div>
