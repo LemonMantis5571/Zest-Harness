@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::advisor::{Advisor, ADVISOR_PARENT_SYSTEM};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
@@ -21,6 +22,7 @@ use crate::provider::registry::{ProviderRegistry, Skipped};
 use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
 use crate::tools::approval::{AllowApprover, ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
+use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
@@ -30,6 +32,19 @@ use crate::tools::{
     BrowserAdapter, FeatureDelegator, ToolRegistry,
 };
 use crate::usage::Ledger;
+
+/// The user's ledger, except in this crate's own unit tests, which build many
+/// runtimes without injecting one and must neither read nor rewrite the
+/// developer's real `usage.json`. Other crates' tests inject their own.
+#[cfg(not(test))]
+fn default_ledger() -> Ledger {
+    Ledger::load()
+}
+
+#[cfg(test)]
+fn default_ledger() -> Ledger {
+    Ledger::default()
+}
 
 /// Built runtime ready for a provider-pinned conversation.
 pub struct RuntimeSession {
@@ -86,12 +101,15 @@ pub struct RuntimeBuilder {
     questioner: Option<Arc<dyn Questioner>>,
     policy: Option<Arc<Mutex<ApprovalPolicy>>>,
     browser: Option<Arc<dyn BrowserAdapter>>,
+    html_artifacts: bool,
     enable_external_agents: bool,
     parent_thread_id: Option<String>,
     register_write: bool,
     register_exec: bool,
     jobs: Option<Arc<JobRegistry>>,
     job_owner: Option<String>,
+    mcp_catalog: Option<crate::mcp::McpCatalog>,
+    usage_correlation_id: Option<String>,
     role: RuntimeRole,
 }
 
@@ -110,12 +128,15 @@ impl RuntimeBuilder {
             questioner: None,
             policy: None,
             browser: None,
+            html_artifacts: false,
             enable_external_agents: true,
             parent_thread_id: None,
             register_write: true,
             register_exec: true,
             jobs: None,
             job_owner: None,
+            mcp_catalog: None,
+            usage_correlation_id: None,
             role: RuntimeRole::Parent,
         }
     }
@@ -193,6 +214,12 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Desktop artifact rendering; headless callers do not advertise a viewer.
+    pub fn with_html_artifacts(mut self, enabled: bool) -> Self {
+        self.html_artifacts = enabled;
+        self
+    }
+
     pub fn enable_external_agents(mut self, on: bool) -> Self {
         self.enable_external_agents = on;
         self
@@ -226,6 +253,20 @@ impl RuntimeBuilder {
     /// Fence model-facing job controls to one durable thread.
     pub fn with_job_owner(mut self, thread_id: impl Into<String>) -> Self {
         self.job_owner = Some(thread_id.into());
+        self
+    }
+
+    /// Use a cached MCP catalogue snapshot, primarily for deterministic fixture
+    /// runs. Omitted means the machine-local catalogue.
+    pub fn with_mcp_catalog(mut self, catalog: crate::mcp::McpCatalog) -> Self {
+        self.mcp_catalog = Some(catalog);
+        self
+    }
+
+    /// Correlate a native worker or reviewer trace with the delegation job that
+    /// launched it. The initiating turn records the same id on its tool call.
+    pub fn with_usage_correlation(mut self, job_id: impl Into<String>) -> Self {
+        self.usage_correlation_id = Some(job_id.into());
         self
     }
 
@@ -284,10 +325,24 @@ impl RuntimeBuilder {
         // A remembered model that this provider cannot serve is discarded here,
         // before it can reach validation and make the provider unreachable.
         // Cross-provider bleed is the usual cause: a Codex model left in a
-        // Claude slot by an old single-provider preference file.
+        // Claude slot by an old single-provider preference file. One the
+        // provider stopped listing moves to its successor first, so a saved
+        // `opus` stays an Opus rather than falling back to the default.
+        let offers = |model: &str| {
+            provider.validate_selection(model, "high").is_ok()
+                || provider.models().iter().any(|spec| spec.id == model)
+        };
+        let remembered_model = remembered_model.map(|m| {
+            if offers(&m) {
+                return m;
+            }
+            provider
+                .successor_model(&m)
+                .filter(|next| offers(next))
+                .unwrap_or(m)
+        });
         let remembered_model = remembered_model.filter(|m| {
-            let ok = provider.validate_selection(m, "high").is_ok()
-                || provider.models().iter().any(|spec| spec.id == *m);
+            let ok = offers(m);
             if !ok {
                 warnings.push(format!(
                     "ignored remembered model `{m}`: provider `{provider_id}` does not offer it"
@@ -302,7 +357,16 @@ impl RuntimeBuilder {
             .or_else(|| {
                 config.default_target().and_then(|t| {
                     if t.provider == provider_id {
-                        t.model.clone()
+                        t.model.map(|model| {
+                            if offers(&model) {
+                                model
+                            } else {
+                                provider
+                                    .successor_model(&model)
+                                    .filter(|next| offers(next))
+                                    .unwrap_or(model)
+                            }
+                        })
                     } else {
                         None
                     }
@@ -350,7 +414,10 @@ impl RuntimeBuilder {
 
         let ledger = self
             .ledger
-            .unwrap_or_else(|| Arc::new(Mutex::new(Ledger::load())));
+            .unwrap_or_else(|| Arc::new(Mutex::new(default_ledger())));
+        if let Ok(mut ledger) = ledger.lock() {
+            ledger.set_task_traces(config.usage.task_traces);
+        }
 
         let provider_owns_agent_loop = provider.owns_agent_loop();
 
@@ -363,7 +430,26 @@ impl RuntimeBuilder {
             && self.enable_external_agents
             && !provider_owns_agent_loop
             && !config.agents.is_empty();
-
+        // Resolved before the prompt is composed, for the same reason as the
+        // ACP tool above: the prompt mentions the advisor only when the tool is
+        // really there. An advisor that cannot load is a warning, never a
+        // reason the chat itself fails to start.
+        let advisor = match &config.advisor {
+            Some(settings) if is_parent && !provider_owns_agent_loop => {
+                match Advisor::resolve(settings, registry.get(&settings.provider)) {
+                    Ok(advisor) => Some(advisor),
+                    Err(reason) => {
+                        warnings.push(format!("The advisor is off for this chat: {reason}."));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let spill_thread_id = self
+            .parent_thread_id
+            .clone()
+            .unwrap_or_else(|| crate::thread::new_id("session"));
         let mut base_system = if provider_owns_agent_loop {
             match self.system {
                 // The CLI and desktop deliberately pass the normal Zest base
@@ -390,6 +476,18 @@ impl RuntimeBuilder {
         if is_parent && self.browser.is_some() && !provider_owns_agent_loop {
             base_system.push_str("\n\n");
             base_system.push_str(LOCAL_BROWSER_SYSTEM);
+        }
+        if is_parent && self.html_artifacts {
+            base_system.push_str("\n\n");
+            base_system.push_str(if provider_owns_agent_loop {
+                "For an interactive visualization in this chat, emit a complete fenced block with language zest-html, containing self-contained HTML with inline CSS/JavaScript and data images. No external resources, network, or local-file access is available in the viewer. Ordinary html fences remain code. The user opens the sandboxed card. This CLI path cannot run Zest's screenshot preview; do not claim it was previewed."
+            } else {
+                "For an interactive visualization in chat, build self-contained HTML with inline CSS/JavaScript and embedded data images. Use html_preview when available, inspect its real screenshot and diagnostics, correct errors, then publish with html_render. The user opens the isolated card. No external resources, network, or local-file access is available. If preview is unavailable or denied, state that explicitly; publication is still possible."
+            });
+        }
+        if advisor.is_some() {
+            base_system.push_str("\n\n");
+            base_system.push_str(ADVISOR_PARENT_SYSTEM);
         }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
@@ -452,12 +550,14 @@ impl RuntimeBuilder {
         // every server, so a configured-but-unreachable server cannot hold up
         // the first message.
         if is_parent && !provider_owns_agent_loop && !config.mcp.is_empty() {
-            let uncatalogued = register_mcp_tools(
-                &mut tools,
-                &config.mcp,
-                &crate::mcp::McpCatalog::load(),
-                &root,
-            );
+            let catalog = self
+                .mcp_catalog
+                .unwrap_or_else(crate::mcp::McpCatalog::load);
+            let uncatalogued = if config.tools.mcp_discovery {
+                crate::mcp::register_mcp_tool_discovery(&mut tools, &config.mcp, &catalog, &root)
+            } else {
+                register_mcp_tools(&mut tools, &config.mcp, &catalog, &root)
+            };
             if !uncatalogued.is_empty() {
                 // Saying nothing here is the bad outcome: the server is
                 // configured and switched on, so the user has every reason to
@@ -478,9 +578,6 @@ impl RuntimeBuilder {
 
         let registry = Arc::new(registry);
 
-        // Cloned before the delegation block below moves the field.
-        let spill_thread_id = self.parent_thread_id.clone();
-
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::with_parent_secret_envs(
                 &root,
@@ -497,6 +594,21 @@ impl RuntimeBuilder {
         if is_parent && self.questioner.is_some() && !provider_owns_agent_loop {
             register_question_tool(&mut tools);
         }
+        if is_parent && self.html_artifacts && !provider_owns_agent_loop {
+            crate::tools::html::register_html_tools(&mut tools, self.register_exec);
+        }
+        // One instance serves both the model's tool calls and the agent's own
+        // consultations, so they share one per-request budget.
+        let consult_advisor = advisor.map(|advisor| {
+            let entry = &config.providers[&advisor.provider_id];
+            Arc::new(
+                ConsultAdvisor::new(advisor, &provider_id, Some(ledger.clone()))
+                    .with_approval_scope(&root, entry),
+            )
+        });
+        if let Some(advisor) = &consult_advisor {
+            tools.register(advisor.clone());
+        }
 
         // Oversized results go to `.zest/spill/<chat-id>/` and the model gets a
         // locator instead of losing the bytes. A front-end that supplied no
@@ -504,8 +616,7 @@ impl RuntimeBuilder {
         // within this process, and the store's own sibling sweep collects them
         // later, since no thread deletion will ever name them.
         if config.tools.max_result_bytes > 0 {
-            let id = spill_thread_id.unwrap_or_else(|| crate::thread::new_id("session"));
-            match SpillStore::open(&root, &id) {
+            match SpillStore::open(&root, &spill_thread_id) {
                 Ok(store) => {
                     let policy = SpillPolicy::new(store, config.tools.max_result_bytes);
                     tools = tools.with_spill(Arc::new(policy));
@@ -536,6 +647,15 @@ impl RuntimeBuilder {
             .with_approver(approver)
             .with_questioner(questioner)
             .with_policy(policy.clone());
+        let usage_task_kind = match self.role {
+            RuntimeRole::Parent => "turn",
+            RuntimeRole::DelegationWorker => "worker",
+            RuntimeRole::DelegationReviewer => "reviewer",
+        };
+        agent = agent.with_usage_task_label(usage_task_kind, self.usage_correlation_id);
+        if let Some(advisor) = consult_advisor {
+            agent = agent.with_advisor(advisor);
+        }
         agent.model = model.clone();
         agent.effort = effort.clone();
 
@@ -668,6 +788,128 @@ mod tests {
     }
 
     #[test]
+    fn task_traces_follow_the_usage_setting() {
+        let traces_after_build = |setting: &str| {
+            let root = two_provider_dir("usage-traces");
+            let raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            std::fs::write(root.join("zest.toml"), format!("{setting}{raw}")).unwrap();
+            let ledger = Arc::new(Mutex::new(Ledger::default()));
+            RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_ledger(ledger.clone())
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap();
+            let enabled = ledger.lock().unwrap().task_traces_enabled();
+            enabled
+        };
+        assert!(!traces_after_build(""), "off unless asked for");
+        assert!(traces_after_build("[usage]\ntask_traces = true\n"));
+    }
+
+    #[test]
+    fn mcp_discovery_setting_swaps_every_schema_for_two_stable_tools() {
+        let mut catalog = crate::mcp::McpCatalog::default();
+        catalog.set(
+            "docs",
+            vec![crate::mcp::McpToolDef {
+                name: "search".into(),
+                description: "Search documentation".into(),
+                input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            }],
+        );
+        let build = |discovery: bool| {
+            let root = two_provider_dir(if discovery {
+                "mcp-on-demand"
+            } else {
+                "mcp-eager"
+            });
+            let mut raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            raw = format!(
+                "[tools]\nmcp_discovery = {discovery}\n{raw}\n[mcp.docs]\ncommand = \"node\"\n"
+            );
+            std::fs::write(root.join("zest.toml"), raw).unwrap();
+            let session = RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_mcp_catalog(catalog.clone())
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap();
+            session
+                .agent
+                .tool_names()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+
+        let eager = build(false);
+        assert!(
+            eager.contains(&"mcp__docs__search".to_string()),
+            "{eager:?}"
+        );
+        assert!(!eager.contains(&"mcp_discover_tools".to_string()));
+
+        let on_demand = build(true);
+        assert!(
+            on_demand.contains(&"mcp_discover_tools".to_string()),
+            "{on_demand:?}"
+        );
+        assert!(on_demand.contains(&"mcp_call_tool".to_string()));
+        assert!(!on_demand.contains(&"mcp__docs__search".to_string()));
+    }
+
+    #[test]
+    fn prompt_cache_bytes_and_tool_order_are_stable_across_project_roots() {
+        let first_root = two_provider_dir("stable-request-a");
+        let second_root = two_provider_dir("stable-request-b");
+        let build = |root: &Path| {
+            RuntimeBuilder::new(root)
+                .with_config(Config::find(root).unwrap())
+                .with_provider("codex")
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap()
+        };
+        let first = build(&first_root);
+        let second = build(&second_root);
+
+        let expected_tool_order = [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "web_search",
+            "write_file",
+            "edit_file",
+            "read_skill",
+        ];
+        assert_eq!(first.agent.tool_names(), expected_tool_order);
+        assert_eq!(first.agent.tool_names(), second.agent.tool_names());
+        assert_eq!(
+            blake3::hash(first.base_system.as_bytes()).to_hex().as_str(),
+            "1bc4094425d558a7eef2c08ee1829d11124954b3206ae78deb5c6d1dee65a111"
+        );
+        assert_eq!(
+            serde_json::to_value(first.agent.tools_for_model()).unwrap(),
+            serde_json::to_value(second.agent.tools_for_model()).unwrap()
+        );
+        let first_system = first.agent.system.as_ref().unwrap();
+        let second_system = second.agent.system.as_ref().unwrap();
+        assert_eq!(
+            first_system.cacheable.as_bytes(),
+            second_system.cacheable.as_bytes()
+        );
+        assert!(first_system.cacheable.starts_with(DEFAULT_SYSTEM));
+        assert_ne!(first_system.volatile, second_system.volatile);
+    }
+
+    #[test]
     fn interactive_question_guidance_requires_an_interactive_front_end() {
         let dir = two_provider_dir("question-runtime");
         let config = Config::find(&dir).unwrap();
@@ -695,6 +937,76 @@ mod tests {
             .agent
             .system_text()
             .contains("# Asking the user"));
+    }
+
+    #[test]
+    fn the_advisor_joins_parent_chats_only_and_a_broken_one_is_a_warning() {
+        let build = |advisor: &str, role: RuntimeRole| {
+            let root = two_provider_dir("advisor-runtime");
+            let raw = std::fs::read_to_string(root.join("zest.toml")).unwrap();
+            std::fs::write(root.join("zest.toml"), format!("{raw}\n{advisor}")).unwrap();
+            RuntimeBuilder::new(&root)
+                .with_config(Config::find(&root).unwrap())
+                .with_provider("codex")
+                .with_role(role)
+                .enable_external_agents(false)
+                .register_exec_tools(false)
+                .build()
+                .unwrap()
+        };
+        let configured = "[advisor]\nprovider = \"claude\"\nmodel = \"claude-opus-5\"\n";
+
+        let parent = build(configured, RuntimeRole::Parent);
+        assert!(parent.agent.tool_names().contains(&"consult_advisor"));
+        assert!(parent.agent.system_text().contains("consult_advisor"));
+        assert!(parent.warnings.is_empty(), "{:?}", parent.warnings);
+
+        let worker = build(configured, RuntimeRole::DelegationWorker);
+        assert!(!worker.agent.tool_names().contains(&"consult_advisor"));
+
+        let broken = build(
+            "[advisor]\nprovider = \"claude\"\nmodel = \"not-offered\"\n",
+            RuntimeRole::Parent,
+        );
+        assert!(!broken.agent.tool_names().contains(&"consult_advisor"));
+        assert!(!broken.agent.system_text().contains("consult_advisor"));
+        assert!(
+            broken.warnings.iter().any(|w| w.contains("advisor is off")),
+            "{:?}",
+            broken.warnings
+        );
+
+        let none = build("", RuntimeRole::Parent);
+        assert!(!none.agent.tool_names().contains(&"consult_advisor"));
+    }
+
+    #[test]
+    fn html_tools_append_only_in_enabled_parent_runtimes() {
+        let dir = two_provider_dir("html-runtime");
+        let make = |role, enabled, exec| {
+            RuntimeBuilder::new(&dir)
+                .with_config(Config::find(&dir).unwrap())
+                .with_provider("codex")
+                .with_html_artifacts(enabled)
+                .with_role(role)
+                .enable_external_agents(false)
+                .register_exec_tools(exec)
+                .build()
+                .unwrap()
+        };
+        let headless = make(RuntimeRole::Parent, false, false);
+        let parent = make(RuntimeRole::Parent, true, false);
+        let mut expected = headless.agent.tool_names();
+        expected.push("html_render");
+        assert_eq!(parent.agent.tool_names(), expected);
+        assert!(parent.agent.system_text().contains("html_render"));
+        assert!(!parent.agent.tool_names().contains(&"html_preview"));
+        let worker = make(RuntimeRole::DelegationWorker, true, false);
+        assert!(!worker.agent.tool_names().contains(&"html_render"));
+        assert!(!worker
+            .agent
+            .system_text()
+            .contains("interactive visualization"));
     }
 
     /// The environment block names the git branch, so it differs between two
@@ -1030,6 +1342,85 @@ model = "gpt-a"
             .register_exec_tools(false)
             .build();
         assert!(explicit.is_err(), "explicit effort must not be swallowed");
+    }
+
+    fn claude_code_config(model_line: &str) -> Config {
+        Config::parse(&format!(
+            r#"
+[providers.claude]
+kind = "claude_code"
+{model_line}
+
+[default]
+provider = "claude"
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn regression_configured_default_alias_migrates_to_its_successor() {
+        let root = scratch("configured-default-alias");
+        let mut config = claude_code_config("");
+        config.default.as_mut().unwrap().model = Some("opus".into());
+        let runtime = RuntimeBuilder::new(&root)
+            .with_config(config)
+            .enable_external_agents(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert_eq!(runtime.model, "claude-opus-5-5");
+    }
+
+    /// Zest stopped listing Claude Code's bare aliases. A chat that remembered
+    /// `opus` must stay on an Opus, not drop to the Sonnet default.
+    #[test]
+    fn a_remembered_alias_moves_to_its_explicit_successor() {
+        let dir = scratch("remembered-alias");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(""))
+            .with_provider("claude")
+            .with_remembered_options(Some("opus".into()), None)
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "claude-opus-5-5");
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
+    }
+
+    /// An alias the user configured is still on offer, so it is kept as is.
+    #[test]
+    fn a_remembered_alias_the_config_names_is_kept() {
+        let dir = scratch("configured-alias");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(r#"model = "opus""#))
+            .with_provider("claude")
+            .with_remembered_options(Some("opus".into()), None)
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "opus");
+    }
+
+    #[test]
+    fn a_new_claude_code_chat_defaults_to_sonnet_5_5() {
+        let dir = scratch("claude-code-default");
+        let session = RuntimeBuilder::new(&dir)
+            .with_config(claude_code_config(""))
+            .with_provider("claude")
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(session.model, "claude-sonnet-5-5");
     }
 
     #[test]

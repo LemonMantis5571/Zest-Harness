@@ -53,9 +53,10 @@ pub struct PreparedToolCall {
     pub metadata: Option<ToolMetadata>,
     /// The tool vouches for *this* invocation as read-only.
     ///
-    /// Only `bash` sets it, for a command that matches the allowlist and holds
-    /// no shell metacharacters. It is an input to the mode policy, never a
-    /// bypass: Manual mode still asks, and Plan mode still refuses.
+    /// Only `bash` sets it, for a command that matches the read-only allowlist
+    /// and can be spawned from a safely parsed argv vector. It is an input to
+    /// the mode policy, never a bypass: Manual mode still asks, and Plan mode
+    /// still refuses.
     pub auto_eligible: bool,
     pub(crate) kind: PreparedKind,
 }
@@ -132,7 +133,8 @@ impl PreparedToolCall {
     ) -> Self {
         Self {
             tool_name: tool_name.into(),
-            risk: ToolRisk::Write,
+            // A secret file (`.env`, keys) asks every time; see `write_risk`.
+            risk: super::sensitive::write_risk(&relative_path),
             preview,
             metadata: None,
             auto_eligible: false,

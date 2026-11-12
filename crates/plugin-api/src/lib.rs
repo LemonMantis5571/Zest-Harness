@@ -11,7 +11,9 @@ pub const NOW_PLAYING_ID: &str = "now-playing";
 pub const WALLPAPER_ID: &str = "wallpaper";
 
 /// Background looks the wallpaper add-on can render, `none` first.
-pub const WALLPAPER_FILTERS: [&str; 4] = ["none", "print", "frosted", "noir"];
+pub const WALLPAPER_FILTERS: [&str; 8] = [
+    "none", "print", "frosted", "noir", "sepia", "warm", "cool", "muted",
+];
 
 /// The matching filter id, or `none` for anything unrecognised.
 ///

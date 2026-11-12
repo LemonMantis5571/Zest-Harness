@@ -2,8 +2,9 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckCircle2Icon, XIcon } from "lucide-react";
 
 import { getBackend } from "@/lib/backend";
-import type { ContextUsage } from "@/lib/types";
+import { settleContextReading, type ContextReading } from "@/lib/contextUsageState";
 import { cn } from "@/lib/utils";
+import { useViewportPopover } from "@/lib/useViewportPopover";
 
 function formatTokens(n: number) {
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
@@ -12,34 +13,41 @@ function formatTokens(n: number) {
 
 type Props = {
   refreshKey: string | number;
+  /** The chat being measured; a reading is only ever shown for its own chat. */
+  scope: string;
   className?: string;
 };
 
-export function ContextUsageButton({ refreshKey, className }: Props) {
-  const [usage, setUsage] = useState<ContextUsage | null>(null);
+export function ContextUsageButton({ refreshKey, scope, className }: Props) {
+  const [reading, setReading] = useState<ContextReading>(null);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
   useEffect(() => {
     let cancelled = false;
     getBackend()
       .contextUsage()
-      .then((u) => {
-        if (!cancelled) setUsage(u);
+      .then((usage) => {
+        if (!cancelled) setReading((previous) => settleContextReading(previous, scope, { ok: true, usage }));
       })
-      .catch(() => {
-        if (!cancelled) setUsage(null);
+      .catch((error: unknown) => {
+        if (!cancelled) setReading((previous) => settleContextReading(previous, scope, { ok: false, error }));
       });
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [refreshKey, scope]);
+
+  const usage = reading?.scope === scope ? reading.usage : null;
+  useViewportPopover(open && usage !== null, triggerRef, panelRef);
 
   useEffect(() => {
     if (!open) return;
     const onPointer = (e: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      if (e.target instanceof Node && rootRef.current && !rootRef.current.contains(e.target)) {
         setOpen(false);
       }
     };
@@ -66,13 +74,14 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
   return (
     <div ref={rootRef} className={cn("relative", className)}>
       <button
+        ref={triggerRef}
         type="button"
         title="Context usage"
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground outline-none transition-colors",
+          "inline-flex min-h-6 min-w-6 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground outline-none transition-colors",
           "hover:bg-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
           open && "bg-secondary text-foreground"
         )}
@@ -94,9 +103,10 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
 
       {open ? (
         <div
+          ref={panelRef}
           role="dialog"
           aria-labelledby={titleId}
-          className="absolute bottom-[calc(100%+10px)] right-0 z-50 w-[280px] rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-xl"
+          className="absolute bottom-[calc(100%+10px)] right-0 z-50 max-h-[calc(100dvh-1rem)] w-[280px] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-xl"
         >
           <div className="mb-2 flex items-start justify-between gap-2">
             <div>
@@ -110,7 +120,7 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
             </div>
             <button
               type="button"
-              className="rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground"
               onClick={() => setOpen(false)}
               aria-label="Close"
             >
@@ -118,16 +128,16 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
             </button>
           </div>
 
-          <p className="m-0 text-[10px] leading-snug text-muted-foreground">
+          <p className="m-0 text-[11px] leading-snug text-muted-foreground">
             {usage.source === "last_turn"
               ? "Based on the latest response."
               : "Estimated from the conversation."}
           </p>
           <p
             className={cn(
-              "mt-1.5 m-0 text-[10px] leading-snug",
+              "mt-1.5 m-0 text-[11px] leading-snug",
               usage.shouldAutoCompact
-                ? "text-amber-400"
+                ? "text-amber-800 dark:text-amber-400"
                 : "text-muted-foreground"
             )}
           >
@@ -142,6 +152,10 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
             <span className="text-muted-foreground">Conversation</span>
             <span className="font-mono tabular-nums">
               {formatTokens(usage.conversationTokens)}
+            </span>
+            <span className="text-muted-foreground">Tool schemas</span>
+            <span className="font-mono tabular-nums">
+              {formatTokens(usage.toolSchemaTokens)}
             </span>
             <span className="text-muted-foreground">Messages</span>
             <span className="font-mono tabular-nums">{usage.messageCount}</span>

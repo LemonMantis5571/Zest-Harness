@@ -7,8 +7,12 @@
 
 mod attachments;
 mod browser;
+mod btw;
 mod context_meter;
 mod delegation;
+mod html;
+#[cfg(debug_assertions)]
+mod html_native_check;
 mod plugins;
 #[cfg(test)]
 mod scratch_dir;
@@ -40,8 +44,8 @@ use ts_rs::TS;
 use zest_core::{
     can_start_login, codex_cli_on_path, compose_system_with_docs, contains_ignore_ascii_case,
     derive_profile_stats, descriptor_for_picker_id, descriptor_from_config, detect_all,
-    detect_claude_code, detect_codex_cli, detect_codex_oauth, display_path, driver_for,
-    env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
+    detect_claude_code, detect_codex_cli, detect_codex_oauth, detect_cursor_cli, display_path,
+    driver_for, env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
     save_custom_system, start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
@@ -64,6 +68,7 @@ use zest_core::{
 use attachments::{
     build_user_content, format_display_message, has_images, has_usable_attachment,
     prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
+    MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES,
 };
 use browser::BrowserHost;
 use context_meter::{estimate_context, CompactionResultView, ContextUsageView};
@@ -81,7 +86,7 @@ use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 ///
 /// Claude Code is available as a first-class parent and remains separately
 /// configurable as a delegated worker. Gemini remains worker-only.
-const PICKER_IDS: &[&str] = &["codex", "claude"];
+const PICKER_IDS: &[&str] = &["codex", "claude", "cursor"];
 
 /// Sign-in flows Zest can launch from the desktop. Claude here means the
 /// first-class parent provider; worker authentication remains CLI-owned.
@@ -337,17 +342,26 @@ impl Questioner for HubQuestioner {
 struct DesktopProviderInteraction {
     approval_hub: Arc<ApprovalHub>,
     question_hub: Arc<QuestionHub>,
+    policy: Arc<Mutex<ApprovalPolicy>>,
 }
 
 #[async_trait]
 impl ProviderInteractionHost for DesktopProviderInteraction {
+    fn approval_policy(&self) -> Option<Arc<Mutex<ApprovalPolicy>>> {
+        Some(self.policy.clone())
+    }
+
     async fn prepare_command_approval(&self, approval_id: &str) {
         self.approval_hub.prepare(approval_id);
     }
 
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+        self.approval_hub.wait(&request.approval_id).await
+    }
+
     async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
         matches!(
-            self.approval_hub.wait(&request.approval_id).await,
+            self.decide_command(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
@@ -356,9 +370,13 @@ impl ProviderInteractionHost for DesktopProviderInteraction {
         self.approval_hub.prepare(approval_id);
     }
 
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+        self.approval_hub.wait(&request.approval_id).await
+    }
+
     async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
         matches!(
-            self.approval_hub.wait(&request.approval_id).await,
+            self.decide_file_change(request).await,
             ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
         )
     }
@@ -454,6 +472,59 @@ struct ModelCapability {
     context_window: u64,
     supports_tools: bool,
     supports_vision: bool,
+    /// For a provider-decided alias, the model it last ran as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    resolves_to: Option<String>,
+    /// Set when the installed vendor CLI is known to be too old for this model.
+    /// The model is still selectable; the picker marks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    needs_cli: Option<CliRequirementView>,
+}
+
+impl From<zest_core::ModelSpec> for ModelCapability {
+    fn from(spec: zest_core::ModelSpec) -> Self {
+        Self {
+            id: spec.id,
+            efforts: spec.efforts,
+            context_window: spec.context_window,
+            supports_tools: spec.supports_tools,
+            supports_vision: spec.supports_vision,
+            resolves_to: spec.resolves_to,
+            needs_cli: spec.needs_cli.map(CliRequirementView::from),
+        }
+    }
+}
+
+/// Desktop wire view of core `CliRequirement`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "CliRequirement.ts", rename_all = "camelCase")
+)]
+struct CliRequirementView {
+    /// The CLI's display name, such as "Claude Code".
+    cli: String,
+    /// The oldest version that runs the model.
+    minimum: String,
+    /// The version installed now.
+    installed: String,
+    /// The command that updates the CLI, such as `claude update`.
+    update: String,
+}
+
+impl From<zest_core::CliRequirement> for CliRequirementView {
+    fn from(requirement: zest_core::CliRequirement) -> Self {
+        Self {
+            cli: requirement.cli,
+            minimum: requirement.minimum,
+            installed: requirement.installed,
+            update: requirement.update,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -728,6 +799,54 @@ struct ProviderView {
     models: Vec<ModelCapability>,
 }
 
+/// A provider Settings offers as the advisor: configured, and one whose agent
+/// loop Zest drives, so it can answer a plain request without running tools.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "AdvisorProviderOption.ts",
+        rename_all = "camelCase"
+    )
+)]
+struct AdvisorProviderOption {
+    id: String,
+    label: String,
+    status_label: String,
+    /// Keyed or signed in, so a consultation can actually be sent.
+    ready: bool,
+    default_model: String,
+    models: Vec<String>,
+}
+
+/// `[advisor]` as Settings shows it, with the providers it may choose from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "AdvisorSettingsView.ts", rename_all = "camelCase")
+)]
+struct AdvisorSettingsView {
+    /// Empty when no advisor is set.
+    provider: String,
+    /// Empty means the provider's default model.
+    model: String,
+    max_uses: u32,
+    /// Zest consults on its own before finishing and after repeated failures.
+    auto_review: bool,
+    /// Which `zest.toml` Settings writes to.
+    scope: String,
+    /// Why the saved advisor will not load, when it will not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    issue: Option<String>,
+    options: Vec<AdvisorProviderOption>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -776,6 +895,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     let auth_status = match configured_provider {
         Some(ProviderConfig::ClaudeCode { .. }) => detect_claude_code(),
         Some(ProviderConfig::CodexCli { .. }) => detect_codex_cli(),
+        Some(ProviderConfig::CursorAcp { .. }) => detect_cursor_cli(),
         Some(ProviderConfig::CodexOAuth { credential, .. }) => detect_codex_oauth(
             credential
                 .as_deref()
@@ -858,13 +978,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         models: descriptor
             .models
             .into_iter()
-            .map(|m| ModelCapability {
-                id: m.id,
-                efforts: m.efforts,
-                context_window: m.context_window,
-                supports_tools: m.supports_tools,
-                supports_vision: m.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -935,13 +1049,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         models: descriptor
             .models
             .into_iter()
-            .map(|model| ModelCapability {
-                id: model.id,
-                efforts: model.efforts,
-                context_window: model.context_window,
-                supports_tools: model.supports_tools,
-                supports_vision: model.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -981,6 +1089,10 @@ fn provider_method(config: &ProviderConfig) -> String {
     ts(export, export_to = "ToolMetaView.ts", rename_all = "snake_case")
 )]
 enum ToolMetaView {
+    HtmlDocument {
+        title: String,
+        html: String,
+    },
     Delegation {
         provider_id: String,
         model: String,
@@ -1005,6 +1117,7 @@ enum ToolMetaView {
 impl From<ToolMetadata> for ToolMetaView {
     fn from(meta: ToolMetadata) -> Self {
         match meta {
+            ToolMetadata::HtmlDocument { title, html } => Self::HtmlDocument { title, html },
             ToolMetadata::Delegation {
                 provider_id,
                 model,
@@ -1257,9 +1370,9 @@ enum ChatEvent {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        /// Slash command that produced this turn, when one did. The UI titles
-        /// the answer with it — Rust decides, because only Rust knows whether
-        /// a leading `/token` matched a real skill.
+        /// Slash command(s) that produced this turn, when any did. The UI
+        /// titles the answer with it — Rust decides which tokens matched real
+        /// skills or enabled MCP servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
@@ -1277,9 +1390,9 @@ enum ChatEvent {
         message_id: String,
         text: String,
     },
-    /// Ephemeral activity from a provider-owned loop (for example Claude
-    /// Code reading a file). It is deliberately not persisted as a Zest tool
-    /// call and never enters the local tool executor.
+    /// Activity from a provider-owned loop (for example Claude Code reading a
+    /// file). Saved on the assistant message so a reopened chat still shows
+    /// it, but never a Zest tool call and never run by the local executor.
     ProviderActivity {
         session_id: String,
         thread_id: String,
@@ -1288,6 +1401,11 @@ enum ChatEvent {
         id: String,
         title: String,
         status: String,
+        /// The activity this one ran inside, such as a subagent's tool call
+        /// under its `Agent` row. No provider reports one yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        parent_id: Option<String>,
     },
     ToolCallStart {
         session_id: String,
@@ -1441,6 +1559,9 @@ enum ChatEvent {
         #[cfg_attr(feature = "export-bindings", ts(optional))]
         turn_id: Option<String>,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        title: Option<String>,
     },
 }
 
@@ -1502,16 +1623,21 @@ fn map_session_err(e: SessionError) -> String {
 fn load_workspace_config(state: &AppState) -> Config {
     let root = resolve_workspace_root(state).ok();
     let mut config = match root.as_ref() {
-        Some(root) => Config::find(root).unwrap_or_else(|_| Config::env_fallback()),
+        Some(root) => worktree_config_root(root)
+            .ok()
+            .and_then(|config_root| Config::find(config_root).ok())
+            .unwrap_or_else(Config::env_fallback),
         None => zest_core::user_config_path()
             .filter(|path| path.is_file())
             .and_then(|path| Config::load_from(path).ok())
             .unwrap_or_else(Config::env_fallback),
     };
     if root.as_ref().is_none()
-        || root
-            .as_ref()
-            .is_some_and(|root| can_inherit_workspace_config(root))
+        || root.as_ref().is_some_and(|root| {
+            worktree_config_root(root)
+                .ok()
+                .is_some_and(|config_root| can_inherit_workspace_config(&config_root))
+        })
     {
         merge_cached_providers(state, &mut config, None);
     }
@@ -1534,8 +1660,9 @@ fn lock_config_edit(state: &AppState) -> std::sync::MutexGuard<'_, ()> {
 
 fn editable_config_path(state: &AppState) -> Result<PathBuf, String> {
     if let Ok(root) = resolve_workspace_root(state) {
-        if root.join(zest_core::config::CONFIG_FILE).is_file() {
-            return Ok(root.join(zest_core::config::CONFIG_FILE));
+        let config_root = worktree_config_root(&root)?;
+        if config_root.join(zest_core::config::CONFIG_FILE).is_file() {
+            return Ok(config_root.join(zest_core::config::CONFIG_FILE));
         }
     }
     zest_core::ensure_user_config()
@@ -1599,8 +1726,9 @@ fn merge_provider_tables(config: &mut Config, cached: &Config, only_provider: Op
 }
 
 fn config_for_session(state: &AppState, root: &Path) -> Result<Config, String> {
-    let mut config = Config::find(root).map_err(|e| e.to_string())?;
-    if can_inherit_workspace_config(root) {
+    let config_root = worktree_config_root(root)?;
+    let mut config = Config::find(&config_root).map_err(|e| e.to_string())?;
+    if can_inherit_workspace_config(&config_root) {
         merge_cached_providers(state, &mut config, None);
     }
     Ok(config)
@@ -1668,13 +1796,7 @@ fn chatgpt_codex_offer_view() -> ProviderView {
         models: descriptor
             .models
             .into_iter()
-            .map(|model| ModelCapability {
-                id: model.id,
-                efforts: model.efforts,
-                context_window: model.context_window,
-                supports_tools: model.supports_tools,
-                supports_vision: model.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     }
 }
@@ -1716,8 +1838,11 @@ fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     list_providers(state)
 }
 
-const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] =
-    &[("claude", "Claude Code"), ("gemini", "Gemini CLI")];
+const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("gemini", "Gemini CLI"),
+    ("cursor", "Cursor CLI"),
+];
 
 #[tauri::command]
 fn list_external_agents(state: State<'_, AppState>) -> Vec<ExternalAgentView> {
@@ -1950,6 +2075,79 @@ fn set_external_agent_model(
     zest_core::config_edit::upsert_external_agent(&path, &preset)?;
     clear_workspace_config_cache(&state);
     Ok(())
+}
+
+fn advisor_settings_view(state: &AppState) -> AdvisorSettingsView {
+    let config = load_workspace_config(state);
+    let options = config
+        .providers
+        .iter()
+        .filter(|(_, provider)| !provider.owns_agent_loop())
+        .map(|(id, _)| {
+            let view = configured_provider_view(id, &config);
+            AdvisorProviderOption {
+                id: id.clone(),
+                label: view.label,
+                status_label: view.status_label,
+                ready: view.status_kind == "ready",
+                default_model: view.default_model,
+                models: view.models.into_iter().map(|model| model.id).collect(),
+            }
+        })
+        .collect();
+    let advisor = config.advisor.as_ref();
+    // The same text `Config::lint` gives, so Settings and the session warning
+    // never disagree about why an advisor is off.
+    let issue = advisor.and_then(|_| {
+        config
+            .lint()
+            .into_iter()
+            .find(|issue| issue.starts_with("[advisor]"))
+    });
+    AdvisorSettingsView {
+        provider: advisor
+            .map(|advisor| advisor.provider.clone())
+            .unwrap_or_default(),
+        model: advisor
+            .and_then(|advisor| advisor.model.clone())
+            .unwrap_or_default(),
+        max_uses: advisor.map(|advisor| advisor.max_uses).unwrap_or(3),
+        auto_review: advisor.is_none_or(|advisor| advisor.auto_review),
+        scope: external_agent_scope(state),
+        issue,
+        options,
+    }
+}
+
+#[tauri::command]
+fn advisor_settings(state: State<'_, AppState>) -> AdvisorSettingsView {
+    let _read_guard = state.config_edit.lock().ok();
+    advisor_settings_view(&state)
+}
+
+/// Save the advisor, or turn it off with no `provider`. The running chat picks
+/// it up when the front-end rebuilds the session.
+#[tauri::command]
+fn set_advisor(
+    state: State<'_, AppState>,
+    provider: Option<String>,
+    model: Option<String>,
+    max_uses: Option<u32>,
+    auto_review: Option<bool>,
+) -> Result<AdvisorSettingsView, String> {
+    {
+        let _edit_guard = lock_config_edit(&state);
+        let path = editable_config_path(&state)?;
+        let input = provider.map(|provider| zest_core::config_edit::AdvisorInput {
+            provider,
+            model,
+            max_uses: max_uses.unwrap_or(3),
+            auto_review: auto_review.unwrap_or(true),
+        });
+        zest_core::config_edit::set_advisor(&path, input.as_ref())?;
+        clear_workspace_config_cache(&state);
+    }
+    Ok(advisor_settings_view(&state))
 }
 
 fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
@@ -2682,13 +2880,51 @@ fn configure_claude_code_provider(
             id,
             command: "claude".into(),
             model,
-            models: vec!["sonnet".into(), "opus".into(), "haiku".into()],
+            // No allow-list: the built-in catalogue applies and keeps up with
+            // new models. This used to write the CLI's bare aliases, which run
+            // the previous generation.
+            models: Vec::new(),
             allow_mcp: false,
             // Not `accept_edits`: that auto-approves inside the CLI before zest
             // is consulted, so edits would land with no approval card and no
-            // diff. The provider downgrades it anyway — writing it here would
-            // only mislead someone reading their own zest.toml.
-            permission_mode: zest_core::ClaudeCodePermissionMode::Default,
+            // diff. `auto` approves routine work and still refers everything it
+            // is unsure about to the card, which is the behaviour the old
+            // `default` value was standing in for.
+            permission_mode: zest_core::ClaudeCodePermissionMode::Auto,
+            timeout_secs: 900,
+        },
+    )?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn configure_cursor_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let _edit_guard = lock_config_edit(&state);
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_cursor_provider(
+        &path,
+        &zest_core::config_edit::CursorProviderInput {
+            id,
+            command: "cursor-agent".into(),
+            model,
+            // Empty on purpose, and `add_cursor_provider` removes any stale key
+            // it finds. A written-out list is an allow-list: it is taken
+            // literally and suppresses discovery, so enabling Cursor used to
+            // pin whichever five models happened to be hard-coded here and hide
+            // every other one the account owns.
+            models: Vec::new(),
+            allow_mcp: false,
+            // `agent` on purpose, and the reason is worth stating where someone
+            // enabling this will read it: Cursor never asks before editing a
+            // file — `session/request_permission` covers shell commands only —
+            // so this chat can edit the checkout without an approval card. Set
+            // `mode = "plan"` in zest.toml for a read-only Cursor instead.
+            mode: zest_core::CursorMode::Agent,
             timeout_secs: 900,
         },
     )?;
@@ -2752,7 +2988,7 @@ fn codex_cli_available() -> bool {
 #[tauri::command]
 fn open_project_config(root: String) -> Result<(), String> {
     let root = canonicalize_dir(PathBuf::from(root.trim()))?;
-    let path = root.join(zest_core::config::CONFIG_FILE);
+    let path = worktree_config_root(&root)?.join(zest_core::config::CONFIG_FILE);
     if !path.is_file() {
         return Err(
             "This project has no zest.toml yet. Add the provider to its project configuration first."
@@ -2975,7 +3211,7 @@ fn set_local_offset(minutes: i32) {
 /// reaches are kept distinct in the payload rather than blended.
 #[tauri::command]
 fn profile_stats(state: State<'_, AppState>) -> Result<ProfileStats, String> {
-    let mut roots = load_known_workspaces();
+    let mut roots = sidebar_workspaces();
     if let Ok(active) = resolve_workspace_root(&state) {
         if !roots.iter().any(|p| p == &active) {
             roots.insert(0, active);
@@ -3198,9 +3434,14 @@ fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
                         detail: Some(detail),
                     });
                 }
+                return Ok(LoginStatus {
+                    state: "running".into(),
+                    detail: None,
+                });
             }
+            *active = None;
             Ok(LoginStatus {
-                state: "running".into(),
+                state: "succeeded".into(),
                 detail: None,
             })
         }
@@ -3352,7 +3593,7 @@ fn initial_workspace_root() -> Option<PathBuf> {
 fn remembered_workspace() -> Option<PathBuf> {
     let path = zest_config_dir().ok()?.join("last-workspace");
     let raw = std::fs::read_to_string(path).ok()?;
-    choose_remembered_workspace(raw.trim(), &load_known_workspaces())
+    choose_remembered_workspace(raw.trim(), &sidebar_workspaces())
 }
 
 fn choose_remembered_workspace(raw: &str, known: &[PathBuf]) -> Option<PathBuf> {
@@ -3403,6 +3644,529 @@ fn persist_workspace(root: &Path) -> Result<(), String> {
 const KNOWN_WORKSPACES_FILE: &str = "known-workspaces.json";
 const MAX_KNOWN_WORKSPACES: usize = 40;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeChatRecord {
+    path: PathBuf,
+    source_root: PathBuf,
+    branch: String,
+    #[serde(default = "worktree_visible_default")]
+    visible: bool,
+    /// The commit the checkout started from. Absent in records written before
+    /// worktree status existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_commit: Option<String>,
+}
+
+fn worktree_visible_default() -> bool {
+    true
+}
+
+fn worktree_storage_root(config_dir: &Path) -> PathBuf {
+    let storage = config_dir.join("worktrees");
+    storage.canonicalize().unwrap_or(storage)
+}
+
+fn canonical_managed_worktree_path(config_dir: &Path, path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let storage = worktree_storage_root(config_dir);
+    let canonical = path.canonicalize().ok()?;
+    (canonical != storage && canonical.starts_with(&storage)).then_some(canonical)
+}
+
+fn worktree_record_path(config_dir: &Path, root: &Path) -> PathBuf {
+    let key = display_path(root);
+    let key = if cfg!(windows) {
+        key.to_ascii_lowercase()
+    } else {
+        key
+    };
+    config_dir
+        .join("worktree-chat-records")
+        .join(format!("{}.json", blake3::hash(key.as_bytes()).to_hex()))
+}
+
+fn save_worktree_chat_record_at(
+    config_dir: &Path,
+    record: &WorktreeChatRecord,
+) -> Result<(), String> {
+    let path = worktree_record_path(config_dir, &record.path);
+    std::fs::create_dir_all(path.parent().expect("record path has a parent"))
+        .map_err(|error| format!("cannot prepare worktree chat registry: {error}"))?;
+    zest_core::fsutil::atomic_write_json(&path, record)
+        .map_err(|error| format!("cannot save worktree chat registry: {error}"))
+}
+
+fn load_worktree_chat_records_from(config_dir: &Path) -> Vec<WorktreeChatRecord> {
+    let mut by_path = BTreeMap::<PathBuf, WorktreeChatRecord>::new();
+    // Older builds wrote one shared array. Keep reading it, but a bad array
+    // cannot prevent ordinary projects or independently saved records opening.
+    if let Ok(body) = std::fs::read_to_string(config_dir.join("worktree-chats.json")) {
+        if let Ok(records) = serde_json::from_str::<Vec<WorktreeChatRecord>>(&body) {
+            for mut record in records {
+                if let Some(canonical_path) =
+                    canonical_managed_worktree_path(config_dir, &record.path)
+                {
+                    let sidecar = worktree_record_path(config_dir, &canonical_path);
+                    let sidecar_is_missing = std::fs::symlink_metadata(sidecar)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                    if sidecar_is_missing {
+                        record.path = canonical_path.clone();
+                        by_path.insert(canonical_path, record);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(config_dir.join("worktree-chat-records")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<WorktreeChatRecord>(&body) else {
+                continue;
+            };
+            let Some(canonical_path) = canonical_managed_worktree_path(config_dir, &record.path)
+            else {
+                continue;
+            };
+            if canonical_path == record.path
+                && path == worktree_record_path(config_dir, &canonical_path)
+            {
+                by_path.insert(canonical_path, record);
+            }
+        }
+    }
+    by_path.into_values().collect()
+}
+
+fn load_worktree_chat_records() -> Vec<WorktreeChatRecord> {
+    zest_config_dir()
+        .map(|config_dir| load_worktree_chat_records_from(&config_dir))
+        .unwrap_or_default()
+}
+
+fn save_worktree_chat_record(record: &WorktreeChatRecord) -> Result<(), String> {
+    save_worktree_chat_record_at(&zest_config_dir()?, record)
+}
+
+fn sidebar_workspaces_from(known: Vec<PathBuf>, records: &[WorktreeChatRecord]) -> Vec<PathBuf> {
+    let mut roots = known
+        .into_iter()
+        .filter(|root| {
+            !records
+                .iter()
+                .any(|record| record.path == *root && !record.visible)
+        })
+        .collect::<Vec<_>>();
+    for record in records.iter().filter(|record| record.visible) {
+        if !roots.contains(&record.path) {
+            roots.push(record.path.clone());
+        }
+    }
+    roots
+}
+
+fn sidebar_workspaces() -> Vec<PathBuf> {
+    sidebar_workspaces_from(load_known_workspaces(), &load_worktree_chat_records())
+}
+
+fn worktree_config_root(root: &Path) -> Result<PathBuf, String> {
+    let storage = worktree_storage_root(&zest_config_dir()?);
+    worktree_config_root_from_records(root, &load_worktree_chat_records(), &storage)
+}
+
+fn set_worktree_chat_visible(root: &Path, visible: bool) -> Result<(), String> {
+    let config_dir = zest_config_dir()?;
+    if !root.starts_with(worktree_storage_root(&config_dir)) {
+        return Ok(());
+    }
+    let mut record = load_worktree_chat_records_from(&config_dir)
+        .into_iter()
+        .find(|record| record.path == root)
+        .ok_or_else(|| {
+            format!(
+                "This Zest worktree has no provider mapping: {}",
+                display_path(root)
+            )
+        })?;
+    if record.visible != visible {
+        record.visible = visible;
+        save_worktree_chat_record_at(&config_dir, &record)?;
+    }
+    Ok(())
+}
+
+fn worktree_config_root_from_records(
+    root: &Path,
+    records: &[WorktreeChatRecord],
+    storage: &Path,
+) -> Result<PathBuf, String> {
+    if !root.starts_with(storage) {
+        return Ok(root.to_path_buf());
+    }
+    let Some(record) = records.iter().find(|record| record.path == root) else {
+        return Err(format!(
+            "This Zest worktree has no provider mapping: {}. Restore its worktree chat record before opening it.",
+            display_path(root)
+        ));
+    };
+    if !record.source_root.is_dir() {
+        return Err(format!(
+            "The original project for this worktree is missing: {}",
+            display_path(&record.source_root)
+        ));
+    }
+    Ok(record.source_root.clone())
+}
+
+#[cfg(test)]
+mod worktree_chat_tests {
+    use super::*;
+
+    #[test]
+    fn worktree_inherits_its_source_project_config_and_fails_if_source_is_missing() {
+        let scratch = ScratchDir::new("zest-worktree-config-");
+        let source = scratch.join("source");
+        let worktree = scratch.join("worktree");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            source.join("zest.toml"),
+            "[providers.claude]\nkind = \"claude_code\"\n\
+             [providers.codex]\nkind = \"codex_cli\"\n\
+             [providers.deepseek]\nkind = \"openai_compatible\"\n\
+             base_url = \"https://api.deepseek.com\"\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .unwrap();
+        let records = vec![WorktreeChatRecord {
+            path: worktree.clone(),
+            source_root: source.clone(),
+            branch: "zest/chat-test".into(),
+            visible: true,
+            base_commit: None,
+        }];
+        assert_eq!(
+            worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).unwrap(),
+            source
+        );
+        let config = Config::find(
+            worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).unwrap(),
+        )
+        .unwrap();
+        for provider in ["claude", "codex", "deepseek"] {
+            assert!(config.providers.contains_key(provider));
+        }
+        assert_eq!(
+            worktree_config_root_from_records(scratch.as_ref(), &records, &worktree).unwrap(),
+            scratch.to_path_buf()
+        );
+        std::fs::remove_dir_all(&source).unwrap();
+        assert!(worktree_config_root_from_records(&worktree, &records, scratch.as_ref()).is_err());
+    }
+
+    #[test]
+    fn independent_records_survive_concurrent_writes_and_a_corrupt_legacy_registry() {
+        let scratch = ScratchDir::new("zest-worktree-records-");
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(config_dir.join("worktrees")).unwrap();
+        std::fs::write(config_dir.join("worktree-chats.json"), "broken JSON").unwrap();
+        let storage = worktree_storage_root(&config_dir);
+        for name in ["one", "two"] {
+            std::fs::create_dir_all(storage.join(name)).unwrap();
+        }
+        let records = ["one", "two"].map(|name| WorktreeChatRecord {
+            path: storage.join(name),
+            source_root: scratch.join("source"),
+            branch: format!("zest/chat-{name}"),
+            visible: true,
+            base_commit: None,
+        });
+        std::thread::scope(|scope| {
+            for record in &records {
+                let config_dir = &config_dir;
+                scope.spawn(move || save_worktree_chat_record_at(config_dir, record).unwrap());
+            }
+        });
+        let loaded = load_worktree_chat_records_from(&config_dir);
+        assert_eq!(loaded.len(), 2);
+        for record in &records {
+            assert!(loaded.iter().any(|loaded| loaded.path == record.path));
+        }
+        let ordinary = scratch.join("ordinary");
+        assert_eq!(
+            worktree_config_root_from_records(&ordinary, &loaded, &storage).unwrap(),
+            ordinary
+        );
+        assert!(
+            worktree_config_root_from_records(&storage.join("missing"), &loaded, &storage).is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_registry_is_read_and_a_hidden_sidecar_overrides_it() {
+        let scratch = ScratchDir::new("zest-worktree-legacy-");
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(config_dir.join("worktrees")).unwrap();
+        let worktree = worktree_storage_root(&config_dir).join("chat-old");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let source = scratch.join("source");
+        let legacy = serde_json::json!([{
+            "path": worktree,
+            "sourceRoot": source,
+            "branch": "zest/chat-old"
+        }]);
+        std::fs::write(
+            config_dir.join("worktree-chats.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let mut loaded = load_worktree_chat_records_from(&config_dir);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].visible);
+        assert_eq!(loaded[0].base_commit, None);
+        loaded[0].visible = false;
+        save_worktree_chat_record_at(&config_dir, &loaded[0]).unwrap();
+        let loaded = load_worktree_chat_records_from(&config_dir);
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].visible);
+        assert!(sidebar_workspaces_from(vec![loaded[0].path.clone()], &loaded).is_empty());
+    }
+
+    #[test]
+    fn damaged_sidecar_does_not_revive_a_legacy_worktree_record() {
+        let scratch = ScratchDir::new("zest-worktree-damaged-sidecar-");
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(config_dir.join("worktrees")).unwrap();
+        let storage = worktree_storage_root(&config_dir);
+        let worktree = storage.join("chat-hidden");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let record = WorktreeChatRecord {
+            path: worktree.clone(),
+            source_root: scratch.join("source"),
+            branch: "zest/chat-hidden".into(),
+            visible: false,
+            base_commit: None,
+        };
+        let legacy = serde_json::json!([{
+            "path": worktree,
+            "sourceRoot": record.source_root,
+            "branch": record.branch
+        }]);
+        std::fs::write(
+            config_dir.join("worktree-chats.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        save_worktree_chat_record_at(&config_dir, &record).unwrap();
+        let sidecar = worktree_record_path(&config_dir, &record.path);
+        std::fs::write(sidecar, "damaged JSON").unwrap();
+
+        let loaded = load_worktree_chat_records_from(&config_dir);
+        assert!(loaded.is_empty());
+        assert!(sidebar_workspaces_from(Vec::new(), &loaded).is_empty());
+        assert!(worktree_config_root_from_records(&worktree, &loaded, &storage).is_err());
+    }
+
+    #[test]
+    fn legacy_and_sidecar_records_cannot_escape_worktree_storage() {
+        let scratch = ScratchDir::new("zest-worktree-path-validation-");
+        let config_dir = scratch.join("config");
+        let storage = config_dir.join("worktrees");
+        std::fs::create_dir_all(&storage).unwrap();
+        let outside = scratch.join("another-project");
+        std::fs::create_dir_all(&outside).unwrap();
+        let escaped_path = storage.join("..").join("..").join("another-project");
+        let record = WorktreeChatRecord {
+            path: escaped_path,
+            source_root: outside.clone(),
+            branch: "zest/chat-escaped".into(),
+            visible: true,
+            base_commit: None,
+        };
+
+        std::fs::write(
+            config_dir.join("worktree-chats.json"),
+            serde_json::to_vec(&[&record]).unwrap(),
+        )
+        .unwrap();
+        assert!(load_worktree_chat_records_from(&config_dir).is_empty());
+
+        save_worktree_chat_record_at(&config_dir, &record).unwrap();
+        assert!(load_worktree_chat_records_from(&config_dir).is_empty());
+        assert_eq!(canonical_managed_worktree_path(&config_dir, &outside), None);
+    }
+
+    #[test]
+    fn status_is_only_read_for_visible_registered_worktrees() {
+        let scratch = ScratchDir::new("zest-worktree-status-");
+        let repository = scratch.join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(
+            repository.join("file.txt"),
+            "base
+",
+        )
+        .unwrap();
+        git(&["add", "file.txt"]);
+        git(&[
+            "-c",
+            "user.name=Zest Test",
+            "-c",
+            "user.email=zest@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        std::fs::write(
+            repository.join("loose.txt"),
+            "untracked
+",
+        )
+        .unwrap();
+        let path = canonicalize_dir(repository.clone()).unwrap();
+        let record = |visible| WorktreeChatRecord {
+            path: path.clone(),
+            source_root: path.clone(),
+            branch: "zest/chat-status".into(),
+            visible,
+            base_commit: None,
+        };
+        let shown = display_path(&path);
+
+        // A repository nobody registered is never read, whatever its state.
+        assert_eq!(worktree_status_from_records(&shown, &[]), None);
+        assert_eq!(worktree_status_from_records(&shown, &[record(false)]), None);
+        let status = worktree_status_from_records(&shown, &[record(true)]).unwrap();
+        assert_eq!((status.ahead, status.behind, status.dirty), (0, 0, 1));
+        assert_eq!(
+            worktree_status_from_records("   ", &[record(true)]),
+            None,
+            "an empty path matches nothing"
+        );
+    }
+
+    #[test]
+    fn visible_worktrees_survive_the_ordinary_project_limit_and_hidden_records_stay_hidden() {
+        let scratch = ScratchDir::new("zest-worktree-sidebar-");
+        let source = scratch.join("source");
+        let storage = scratch.join("worktrees");
+        let mut records = (0..45)
+            .map(|index| WorktreeChatRecord {
+                path: storage.join(format!("chat-{index}")),
+                source_root: source.clone(),
+                branch: format!("zest/chat-{index}"),
+                visible: true,
+                base_commit: None,
+            })
+            .collect::<Vec<_>>();
+        let roots = sidebar_workspaces_from(vec![source.clone()], &records);
+        assert_eq!(roots.len(), 46);
+        assert!(roots.contains(&source));
+        records[0].visible = false;
+        let roots = sidebar_workspaces_from(vec![source, records[0].path.clone()], &records);
+        assert_eq!(roots.len(), 45);
+        assert!(!roots.contains(&records[0].path));
+    }
+}
+
+/// Make a persistent checkout for a new chat. It becomes an ordinary Zest
+/// workspace, so all providers and the file review use the same isolated root.
+#[tauri::command]
+async fn create_worktree_chat(project_path: String) -> Result<String, String> {
+    let source = require_known_workspace(Path::new(project_path.trim()))?;
+    let config_root = worktree_config_root(&source)?;
+    let storage = zest_config_dir()?.join("worktrees");
+    let created = tokio::task::spawn_blocking(move || {
+        zest_core::worktree_chat::create_chat_worktree(&source, &storage)
+    })
+    .await
+    .map_err(|error| format!("Worktree creation stopped: {error}"))??;
+    let path = canonicalize_dir(created.path)?;
+    let record = WorktreeChatRecord {
+        path: path.clone(),
+        source_root: config_root,
+        branch: created.branch,
+        visible: true,
+        base_commit: Some(created.base_commit),
+    };
+    save_worktree_chat_record(&record).map_err(|error| {
+        format!(
+            "Worktree created at {} but could not be registered: {error}",
+            display_path(&path)
+        )
+    })?;
+    Ok(display_path(&path))
+}
+
+/// Counts only, so the sidebar can show a worktree chat's Git state without
+/// ever receiving a file path.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "WorktreeChatStatus.ts", rename_all = "camelCase")
+)]
+struct WorktreeChatStatusView {
+    ahead: u32,
+    behind: u32,
+    dirty: u32,
+}
+
+const WORKTREE_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Only a path with a visible worktree record is ever handed to Git, so this
+/// command cannot be used to probe an arbitrary repository.
+fn worktree_status_from_records(
+    project_path: &str,
+    records: &[WorktreeChatRecord],
+) -> Option<zest_core::worktree_chat::ChatWorktreeStatus> {
+    let root = canonicalize_dir(PathBuf::from(project_path.trim())).ok()?;
+    let record = records
+        .iter()
+        .find(|record| record.path == root && record.visible)?;
+    zest_core::worktree_chat::chat_worktree_status(
+        &record.path,
+        &record.source_root,
+        record.base_commit.as_deref(),
+    )
+}
+
+/// Git counts for one worktree chat's sidebar row. It answers `None` for any
+/// path that is not a registered worktree chat and whenever Git cannot read
+/// the checkout, so a broken or missing worktree never becomes an error.
+#[tauri::command]
+async fn worktree_chat_status(project_path: String) -> Option<WorktreeChatStatusView> {
+    let lookup = tokio::task::spawn_blocking(move || {
+        worktree_status_from_records(&project_path, &load_worktree_chat_records())
+    });
+    let status = tokio::time::timeout(WORKTREE_STATUS_TIMEOUT, lookup)
+        .await
+        .ok()?
+        .ok()??;
+    Some(WorktreeChatStatusView {
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty,
+    })
+}
+
 fn known_workspaces_path() -> Result<PathBuf, String> {
     Ok(zest_config_dir()?.join(KNOWN_WORKSPACES_FILE))
 }
@@ -3452,7 +4216,7 @@ fn append_known_workspace(list: &mut Vec<PathBuf>, root: PathBuf) {
 fn require_known_workspace(path: &Path) -> Result<PathBuf, String> {
     let root = canonicalize_dir(path.to_path_buf())?;
     let root_key = display_path(&root);
-    if load_known_workspaces()
+    if sidebar_workspaces()
         .iter()
         .any(|known| display_path(known) == root_key)
     {
@@ -3468,6 +4232,14 @@ fn remember_workspace(root: &Path) {
     let Ok(root) = canonicalize_dir(root.to_path_buf()) else {
         return;
     };
+    // Worktree records are their own durable sidebar entries and do not use
+    // up one of the 40 ordinary-project slots.
+    if load_worktree_chat_records()
+        .iter()
+        .any(|record| record.path == root)
+    {
+        return;
+    }
     let mut list = load_known_workspaces();
     append_known_workspace(&mut list, root);
     let _ = write_known_workspaces(&list);
@@ -3508,15 +4280,6 @@ fn remove_known_workspace_metadata(
     root_key: &str,
     known_roots: &[PathBuf],
 ) -> Result<(), String> {
-    if !known_roots
-        .iter()
-        .any(|root| display_path(root) == root_key)
-    {
-        return Err(format!(
-            "That folder is not a known Zest workspace: {root_key}"
-        ));
-    }
-
     let mut remaining = known_roots.to_vec();
     remaining.retain(|root| display_path(root) != root_key);
     let previous_persisted_workspace = clear_persisted_workspace(root_key)?;
@@ -3547,7 +4310,7 @@ fn workspace_removal_target(
         return Err("Switch to another project before removing the active workspace.".to_string());
     }
     let known_roots = load_known_workspaces();
-    if !known_roots
+    if !sidebar_workspaces()
         .iter()
         .any(|known| display_path(known) == root_key)
     {
@@ -3622,6 +4385,7 @@ fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String
             display_path(&root)
         ));
     }
+    set_worktree_chat_visible(&root, true)?;
     persist_workspace(&root)?;
     if let Ok(mut guard) = state.workspace_root.lock() {
         *guard = Some(root.clone());
@@ -3642,6 +4406,7 @@ fn recover_chat_on_load(
     root: &std::path::Path,
     thread: Thread,
     warning_already_present: bool,
+    provider: Option<&dyn zest_core::Provider>,
 ) -> Result<(Thread, Option<String>, Option<RecoverableRun>), String> {
     let persistence = ChatPersistence::open(root).map_err(|error| error.to_string())?;
     let reconstructed = persistence
@@ -3651,7 +4416,7 @@ fn recover_chat_on_load(
     let had_unfinished_state =
         reconstructed.active_run.is_some() || !reconstructed.pending_interrupts.is_empty();
     let reconciliation = persistence
-        .reconcile_after_restart(&reconstructed.thread.id)
+        .reconcile_after_restart_with_provider(&reconstructed.thread.id, provider)
         .map_err(|error| error.to_string())?;
     let recovery_warning = if !(warning_already_present || reconstructed.thread_warning.is_some())
         && (had_unfinished_state
@@ -3869,13 +4634,7 @@ fn session_capabilities(session: &Session) -> (String, Vec<ModelCapability>) {
         descriptor
             .models
             .into_iter()
-            .map(|m| ModelCapability {
-                id: m.id,
-                efforts: m.efforts,
-                context_window: m.context_window,
-                supports_tools: m.supports_tools,
-                supports_vision: m.supports_vision,
-            })
+            .map(ModelCapability::from)
             .collect(),
     )
 }
@@ -4029,7 +4788,14 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::ThinkingDelta {
             message_id, text, ..
         } => thread.apply_thinking_delta(message_id, text),
-        ChatEvent::ProviderActivity { .. } => {}
+        ChatEvent::ProviderActivity {
+            message_id,
+            id,
+            title,
+            status,
+            parent_id,
+            ..
+        } => thread.apply_provider_activity(message_id, id, title, status, parent_id.as_deref()),
         ChatEvent::ToolCallStart {
             message_id,
             name,
@@ -4049,6 +4815,9 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             ..
         } => {
             let core_meta = metadata.clone().map(|m| match m {
+                ToolMetaView::HtmlDocument { title, html } => {
+                    ToolMetadata::HtmlDocument { title, html }
+                }
                 ToolMetaView::Delegation {
                     provider_id,
                     model,
@@ -4119,7 +4888,11 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
 
 fn event_priority(event: &ChatEvent) -> PersistPriority {
     match event {
-        ChatEvent::TextDelta { .. } | ChatEvent::ThinkingDelta { .. } => PersistPriority::Delta,
+        // A subagent retitles its row on every step it takes; those coalesce
+        // like deltas rather than forcing a write each.
+        ChatEvent::TextDelta { .. }
+        | ChatEvent::ThinkingDelta { .. }
+        | ChatEvent::ProviderActivity { .. } => PersistPriority::Delta,
         _ => PersistPriority::Immediate,
     }
 }
@@ -4127,8 +4900,7 @@ fn event_priority(event: &ChatEvent) -> PersistPriority {
 fn event_mutates_thread(event: &ChatEvent) -> bool {
     !matches!(
         event,
-        ChatEvent::ProviderActivity { .. }
-            | ChatEvent::ToolCallUpdate { .. }
+        ChatEvent::ToolCallUpdate { .. }
             | ChatEvent::QuestionNeeded { .. }
             | ChatEvent::WorkspaceChanged { .. }
             | ChatEvent::InputQueued { .. }
@@ -4216,23 +4988,6 @@ async fn start_session_inner(
     let claiming_legacy_thread = thread.provider_id.is_none();
     // A never-saved draft has no row for the restart reconciler to close.
     // Opening one after deleting a busy chat must not look like a crash.
-    let (recovery_warning, recovery) = if live_turn || thread_is_draft {
-        (None, None)
-    } else {
-        match recover_chat_on_load(&root, thread.clone(), load_warning.is_some()) {
-            Ok((recovered_thread, warning, recovery)) => {
-                thread = recovered_thread;
-                (warning, recovery)
-            }
-            Err(_) => (
-                Some(
-                    "Chat recovery state could not be checked; the saved transcript is still available."
-                        .into(),
-                ),
-                None,
-            ),
-        }
-    };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
     let initial_branch = read_git_branch(&root);
     // Branch comes from `.git/HEAD` (a small file). `git rev-parse` for the
@@ -4260,6 +5015,7 @@ async fn start_session_inner(
         .with_policy(state.policy.clone())
         .with_ledger(state.ledger.clone())
         .with_browser_adapter(state.browser.adapter())
+        .with_html_artifacts(true)
         .with_job_registry(state.jobs.clone())
         .with_job_owner(thread.id.clone())
         .with_parent_thread_id(&thread.id)
@@ -4287,11 +5043,26 @@ async fn start_session_inner(
     };
     let runtime_warnings = runtime.warnings.clone();
     let mut agent = runtime.agent;
+    let (recovery_warning, recovery) = if live_turn || thread_is_draft {
+        (None, None)
+    } else {
+        match recover_chat_on_load(&root, thread.clone(), load_warning.is_some(), Some(agent.provider().as_ref())) {
+            Ok((recovered_thread, warning, recovery)) => {
+                thread = recovered_thread;
+                (warning, recovery)
+            }
+            Err(_) => (
+                Some("Chat recovery state could not be checked; the saved transcript is still available.".into()),
+                None,
+            ),
+        }
+    };
     agent.messages = thread.agent_messages.clone();
     agent.provider_session = thread.provider_session.clone();
     agent.provider_interaction = Some(Arc::new(DesktopProviderInteraction {
         approval_hub: approval_hub.clone(),
         question_hub: question_hub.clone(),
+        policy: state.policy.clone(),
     }));
 
     // A legacy thread is claimed only after the target provider has built a
@@ -4609,8 +5380,9 @@ fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadSummary>, String
 /// folder or the chats stored inside it.
 #[tauri::command]
 fn forget_workspace(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
-    let (_root, root_key, known_roots) = workspace_removal_target(&state, &project_path)?;
-    remove_known_workspace_metadata(&state, &root_key, &known_roots)
+    let (root, root_key, known_roots) = workspace_removal_target(&state, &project_path)?;
+    remove_known_workspace_metadata(&state, &root_key, &known_roots)?;
+    set_worktree_chat_visible(&root, false)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4620,6 +5392,8 @@ struct ProjectChats {
     /// `None` is the user-local free-chat bucket rendered under RECENT.
     path: Option<String>,
     active: bool,
+    /// A `zest/chat-*` checkout, whose row shows its Git status.
+    worktree: bool,
     threads: Vec<ThreadSummary>,
 }
 
@@ -4724,13 +5498,15 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             .then(|| resolve_workspace_root(&state).ok())
             .flatten(),
     );
-    let mut roots = load_known_workspaces();
+    let mut roots = sidebar_workspaces();
     if let Some(active_root) = active_root.as_ref() {
         // Keep the listing call read-only for existing projects. A selected
         // project is normally persisted by `set_workspace_root`; this only
         // keeps an active legacy/root override visible if its registry write
         // was unavailable.
-        append_known_workspace(&mut roots, active_root.clone());
+        if !roots.contains(active_root) {
+            roots.push(active_root.clone());
+        }
     }
 
     let free_root = free_chats_root()?;
@@ -4740,6 +5516,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         .chat_summary_cache
         .lock()
         .map_err(|_| "chat summary cache lock poisoned".to_string())?;
+    let worktree_records = load_worktree_chat_records();
     let mut out = Vec::new();
     for root in roots {
         if !root.is_dir() {
@@ -4754,10 +5531,20 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             Err(_) => Vec::new(),
         };
         let active = active_root.as_ref().is_some_and(|active| root == *active);
+        let worktree = worktree_records.iter().find(|record| record.path == root);
         out.push(ProjectChats {
-            name: project_display_name(&root),
+            name: worktree
+                .map(|record| {
+                    format!(
+                        "{} · {}",
+                        project_display_name(&record.source_root),
+                        read_git_branch(&root).unwrap_or_else(|| record.branch.clone())
+                    )
+                })
+                .unwrap_or_else(|| project_display_name(&root)),
             path: Some(display_path(&root)),
             active,
+            worktree: worktree.is_some(),
             threads,
         });
     }
@@ -4777,6 +5564,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             active: active_session_root
                 .as_ref()
                 .is_some_and(|root| is_free_chat_root(root)),
+            worktree: false,
             threads: free_threads,
         });
     }
@@ -4820,9 +5608,11 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
             .then(|| resolve_workspace_root(&state).ok())
             .flatten(),
     );
-    let mut roots = load_known_workspaces();
+    let mut roots = sidebar_workspaces();
     if let Some(active_root) = active_root.as_ref() {
-        append_known_workspace(&mut roots, active_root.clone());
+        if !roots.contains(active_root) {
+            roots.push(active_root.clone());
+        }
     }
     let free_root = free_chats_root()?;
 
@@ -5567,7 +6357,7 @@ mod chat_recovery_tests {
             .unwrap();
 
         let (recovered, warning, retry) =
-            recover_chat_on_load(&root, thread.clone(), false).unwrap();
+            recover_chat_on_load(&root, thread.clone(), false, None).unwrap();
         assert_eq!(recovered.id, thread.id);
         assert_eq!(
             warning.as_deref(),
@@ -5975,6 +6765,7 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
                 &session.root,
                 loaded_thread.clone(),
                 load_warning.is_some(),
+                Some(session.agent.provider().as_ref()),
             ) {
                 Ok((recovered_thread, warning, recovery)) => {
                     session.agent.clear_messages();
@@ -6255,6 +7046,10 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
 /// a send or an approval, but it does not add a visible assistant answer.
 #[tauri::command]
 async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultView, String> {
+    compact_context_inner(&state).await
+}
+
+async fn compact_context_inner(state: &AppState) -> Result<CompactionResultView, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
@@ -6280,7 +7075,18 @@ async fn compact_context(state: State<'_, AppState>) -> Result<CompactionResultV
         return Err(error.to_string());
     }
 
-    let result = session.agent.compact_context().await;
+    let run_id = session
+        .thread
+        .events
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            ThreadEventKind::TurnCompleted { turn_id, status } if status == "completed" => {
+                Some(turn_id.clone())
+            }
+            _ => None,
+        });
+    let result = session.agent.compact_context_for_run(run_id).await;
     let output = match result {
         // Both paths rewrote history, so both need the same persistence handling.
         // The checkpoint written above is kept either way: the UI transcript
@@ -6691,6 +7497,12 @@ async fn send_message(
     attachments: Option<Vec<AttachmentInput>>,
     target: Option<String>,
 ) -> Result<(), String> {
+    if zest_core::commands::btw_question(&text).is_some() {
+        return Err(desktop_err(
+            "invalid",
+            "Open /btw from the main chat composer to ask a side question.",
+        ));
+    }
     let explicit_target = target.is_some();
     let target = parse_input_target(target.as_deref())?;
     let requested_text = text.clone();
@@ -7963,7 +8775,14 @@ fn prepare_pasted_image(
     let raw = data_base64
         .split(',')
         .next_back()
-        .unwrap_or(data_base64.as_str());
+        .unwrap_or(data_base64.as_str())
+        .trim();
+    if raw.len() > MAX_IMAGE_BASE64_CHARS {
+        return Err(format!(
+            "image too large (max {} MB)",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(raw.trim())
@@ -7982,13 +8801,30 @@ fn prepare_pasted_image(
 
 #[tauri::command]
 fn git_branch(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let root = resolve_workspace_root(&state)?;
-    Ok(read_git_branch(&root))
+    let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
+    Ok(branch_for_session(
+        active_session_root.as_deref(),
+        active_session_root
+            .is_none()
+            .then(|| resolve_workspace_root(&state).ok())
+            .flatten(),
+    ))
+}
+
+/// The branch of the chat on screen, not of the selected project. A free chat
+/// keeps the last project selected for the next project chat, and reading that
+/// project's HEAD put its branch beside "No workspace".
+fn branch_for_session(
+    active_session_root: Option<&Path>,
+    fallback_root: Option<PathBuf>,
+) -> Option<String> {
+    project_root_for_session(active_session_root, fallback_root)
+        .as_deref()
+        .and_then(read_git_branch)
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {
-    let head = root.join(".git").join("HEAD");
-    let contents = std::fs::read_to_string(head).ok()?;
+    let contents = zest_core::prompt::git_head_contents(root)?;
     let line = contents.lines().next()?.trim();
     if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
         return Some(branch.to_string());
@@ -8160,6 +8996,19 @@ struct GitContextInspection {
     view: GitContextView,
 }
 
+fn free_chat_git_context() -> GitContextView {
+    GitContextView {
+        branch: None,
+        base_branch: None,
+        branch_changed: false,
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        stats_source: "branch".to_string(),
+        pull_request: None,
+    }
+}
+
 async fn inspect_git_context(
     root: &Path,
     existing: Option<&ThreadGitContext>,
@@ -8233,6 +9082,12 @@ async fn git_context(state: State<'_, AppState>) -> Result<GitContextView, Strin
         .map_err(map_session_err)?
         .ok_or_else(|| "no active session".to_string())?;
     let (root, thread_id, existing) = snapshot;
+    // A free chat has no repository. `git rev-parse` would walk up from the
+    // free-chat store into whatever repo contains it, and a context copied in
+    // from a project chat would keep showing that project's branch.
+    if is_free_chat_root(&root) {
+        return Ok(free_chat_git_context());
+    }
     let inspection = inspect_git_context(&root, existing.as_ref()).await;
     let next_context = inspection.thread_context.clone();
     match state
@@ -8367,7 +9222,13 @@ async fn verify_workspace(state: State<'_, AppState>) -> Result<WorkspaceReview,
 #[tauri::command]
 fn list_delegation_jobs(state: State<'_, AppState>) -> Result<Vec<DelegationJobView>, String> {
     let root = resolve_workspace_root(&state)?;
-    let _ = state.delegations.reconcile(&root)?;
+    match state.delegations.reconcile(&root) {
+        Ok(_) => {}
+        // Another process (usually `zest serve`) owns this project's queue.
+        // Show its jobs read-only; actions report the lock when tried.
+        Err(error) if zest_coordinator::is_lock_held_error(&error) => {}
+        Err(error) => return Err(error),
+    }
     list_delegation_views(&root)
 }
 
@@ -8594,6 +9455,9 @@ fn format_turn_error(err: &HarnessError) -> String {
             "The provider stopped sending a reply before it finished.".into()
         }
         HarnessError::StreamIdleTimeout => "The provider went quiet. Try again.".into(),
+        HarnessError::ResponseTimeout { .. } => {
+            "The provider did not start answering in time. A local server may still be loading the model; try again.".into()
+        }
         HarnessError::StoppedEarly(reason) if reason.contains("max_tokens") => {
             "The model hit its output limit before it finished.".into()
         }
@@ -8687,6 +9551,22 @@ mod tests {
         assert_eq!(
             message,
             "This provider needs you to sign in again. Reconnect, then send your message again."
+        );
+    }
+
+    #[test]
+    fn a_claude_oauth_expiry_keeps_the_cli_words_and_offers_reconnect() {
+        let failure = HarnessError::from_provider_stream(
+            "cli",
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+        );
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "claude"),
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        );
+        assert_eq!(
+            reconnect_provider_for_auth_failure(&failure, "claude"),
+            Some("claude".into())
         );
     }
 
@@ -8805,6 +9685,18 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_code_cli_error_is_shown_instead_of_try_again() {
+        let failure = HarnessError::from_provider_stream(
+            "claude_code",
+            "process exited with exit status: 1: Rate limit reached",
+        );
+        assert_eq!(
+            format_turn_error(&failure),
+            "process exited with exit status: 1: Rate limit reached"
+        );
+    }
+
+    #[test]
     fn a_chatgpt_usage_limit_is_shown_instead_of_try_again() {
         let failure = HarnessError::Api {
             status: 429,
@@ -8891,13 +9783,18 @@ timeout_secs = 900
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|arg| arg == "--html-native-check") {
+        html_native_check::run();
+        return;
+    }
     if let Err(err) = zest_core::ensure_user_config() {
         eprintln!("warning: could not create the user config: {err}");
     }
     zest_core::load_env();
     remove_implicit_internal_workspace();
 
-    tauri::Builder::default()
+    html::install(tauri::Builder::default())
         .plugin(tauri_plugin_notification::init())
         .manage({
             let ledger = Arc::new(Mutex::new(Ledger::load()));
@@ -8916,11 +9813,18 @@ pub fn run() {
                 ledger: ledger.clone(),
                 config_edit: Mutex::new(()),
                 chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
-                delegations: Arc::new(DelegationCoordinator::with_runtime(
-                    ledger,
-                    Arc::new(crate::delegation::TauriSpawner),
-                    Arc::new(zest_coordinator::NoopNotifier),
-                )),
+                // The desktop moves between projects, so it only keeps a
+                // project's lock while it has work queued or running there;
+                // otherwise `zest serve` could not start for any project the
+                // app had opened.
+                delegations: Arc::new(
+                    DelegationCoordinator::with_runtime(
+                        ledger,
+                        Arc::new(crate::delegation::TauriSpawner),
+                        Arc::new(zest_coordinator::NoopNotifier),
+                    )
+                    .with_lock_retention(zest_coordinator::LockRetention::WhileActive),
+                ),
             }
         })
         .setup(|app| {
@@ -8935,120 +9839,141 @@ pub fn run() {
             remove_retired_spaces_state();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            list_providers,
-            refresh_providers,
-            list_external_agents,
-            set_external_agent,
-            set_external_agent_mcp,
-            set_external_agent_model,
-            check_external_agent,
-            list_mcp_servers,
-            save_mcp_server,
-            set_mcp_server_enabled,
-            remove_mcp_server,
-            check_mcp_server,
-            set_provider_key,
-            delete_provider_key,
-            provider_key_present,
-            configure_api_provider,
-            configure_anthropic_provider,
-            configure_claude_code_provider,
-            configure_codex_cli_provider,
-            configure_codex_oauth_provider,
-            codex_cli_available,
-            open_project_config,
-            open_external_url,
-            set_window_chrome,
-            usage_snapshot,
-            provider_quota,
-            list_plugins,
-            open_plugins_folder,
-            set_plugin_enabled,
-            now_playing,
-            control_now_playing,
-            set_now_playing_volume,
-            wallpaper,
-            pick_wallpaper,
-            set_wallpaper_filter,
-            clear_wallpaper,
-            usage_report,
-            open_prices_file,
-            refresh_rates,
-            profile_stats,
-            set_local_offset,
-            last_provider,
-            start_login,
-            login_status,
-            cancel_login,
-            verify_provider,
-            start_session,
-            switch_session_provider,
-            update_session_options,
-            reset_session_options,
-            list_threads,
-            forget_workspace,
-            list_chat_projects,
-            search_chats,
-            open_project_chat,
-            load_older_thread_messages,
-            load_newer_thread_messages,
-            load_thread,
-            new_thread,
-            fork_thread,
-            fork_thread_from_checkpoint,
-            rewind_thread,
-            edit_message,
-            compact_context,
-            delete_thread,
-            set_thread_pinned,
-            rename_thread,
-            send_message,
-            update_queued_input,
-            remove_queued_input,
-            resume_queued_inputs,
-            list_jobs,
-            job_output,
-            job_kill,
-            save_markdown,
-            cancel_turn,
-            resolve_approval,
-            resolve_question,
-            generate_reading_diff,
-            set_approval_mode,
-            approval_mode,
-            end_session,
-            session_info,
-            get_system_prompt,
-            set_system_prompt,
-            list_skills,
-            list_commands,
-            get_workspace_folder,
-            reveal_workspace_folder,
-            list_workspace_files,
-            read_workspace_file,
-            pick_workspace_folder,
-            pick_files,
-            prepare_pasted_image,
-            git_branch,
-            git_context,
-            pull_request_diff,
-            workspace_changes,
-            verify_workspace,
-            context_usage,
-            get_user_profile,
-            set_user_profile,
-            list_delegation_jobs,
-            list_delegation_targets,
-            create_delegation_job,
-            update_delegation_job,
-            approve_delegation_job,
-            prepare_delegation_handoff,
-            get_delegation_job,
-            cancel_delegation_job,
-            retry_delegation_job,
-            apply_delegation_job
-        ])
+        .invoke_handler(|invoke| {
+            if !html::trusted_host(invoke.message.webview_ref(), invoke.message.headers()) {
+                invoke
+                    .resolver
+                    .reject("Commands require the trusted main host");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                html::prepare_html_view,
+                html::release_html_view,
+                html::save_html_document,
+                list_providers,
+                refresh_providers,
+                list_external_agents,
+                set_external_agent,
+                set_external_agent_mcp,
+                set_external_agent_model,
+                advisor_settings,
+                set_advisor,
+                check_external_agent,
+                list_mcp_servers,
+                save_mcp_server,
+                set_mcp_server_enabled,
+                remove_mcp_server,
+                check_mcp_server,
+                set_provider_key,
+                delete_provider_key,
+                provider_key_present,
+                configure_api_provider,
+                configure_anthropic_provider,
+                configure_claude_code_provider,
+                configure_cursor_provider,
+                configure_codex_cli_provider,
+                configure_codex_oauth_provider,
+                codex_cli_available,
+                open_project_config,
+                open_external_url,
+                set_window_chrome,
+                usage_snapshot,
+                provider_quota,
+                list_plugins,
+                open_plugins_folder,
+                set_plugin_enabled,
+                now_playing,
+                control_now_playing,
+                set_now_playing_volume,
+                wallpaper,
+                pick_wallpaper,
+                set_wallpaper_filter,
+                clear_wallpaper,
+                usage_report,
+                open_prices_file,
+                refresh_rates,
+                profile_stats,
+                set_local_offset,
+                last_provider,
+                start_login,
+                login_status,
+                cancel_login,
+                verify_provider,
+                start_session,
+                switch_session_provider,
+                update_session_options,
+                reset_session_options,
+                list_threads,
+                forget_workspace,
+                list_chat_projects,
+                create_worktree_chat,
+                worktree_chat_status,
+                search_chats,
+                open_project_chat,
+                load_older_thread_messages,
+                load_newer_thread_messages,
+                load_thread,
+                new_thread,
+                fork_thread,
+                fork_thread_from_checkpoint,
+                rewind_thread,
+                edit_message,
+                compact_context,
+                delete_thread,
+                set_thread_pinned,
+                rename_thread,
+                send_message,
+                btw::start_btw,
+                btw::send_btw,
+                btw::cancel_btw,
+                btw::close_btw,
+                update_queued_input,
+                remove_queued_input,
+                resume_queued_inputs,
+                list_jobs,
+                job_output,
+                job_kill,
+                save_markdown,
+                cancel_turn,
+                resolve_approval,
+                resolve_question,
+                generate_reading_diff,
+                set_approval_mode,
+                approval_mode,
+                end_session,
+                session_info,
+                get_system_prompt,
+                set_system_prompt,
+                list_skills,
+                list_commands,
+                get_workspace_folder,
+                reveal_workspace_folder,
+                list_workspace_files,
+                read_workspace_file,
+                pick_workspace_folder,
+                pick_files,
+                prepare_pasted_image,
+                git_branch,
+                git_context,
+                pull_request_diff,
+                workspace_changes,
+                verify_workspace,
+                context_usage,
+                get_user_profile,
+                set_user_profile,
+                list_delegation_jobs,
+                list_delegation_targets,
+                create_delegation_job,
+                update_delegation_job,
+                approve_delegation_job,
+                prepare_delegation_handoff,
+                get_delegation_job,
+                cancel_delegation_job,
+                retry_delegation_job,
+                apply_delegation_job
+            ];
+            handler(invoke)
+        })
         .build(tauri::generate_context!())
         .expect("error while building Zest desktop")
         .run(|_app_handle, _event| {});
@@ -9064,6 +9989,7 @@ mod persist_event_tests {
             thread_id: "t".into(),
             turn_id: None,
             message: "x".into(),
+            title: None,
         }
     }
 
@@ -9133,6 +10059,38 @@ mod persist_event_tests {
             }),
             PersistPriority::Delta
         ));
+    }
+
+    #[test]
+    fn html_tool_event_keeps_source_through_wire_view_and_thread_projection() {
+        let document =
+            zest_core::html::HtmlDocument::parse("Counter".into(), "<button>0</button>".into())
+                .unwrap();
+        let metadata = ToolMetadata::HtmlDocument {
+            title: document.title().into(),
+            html: document.source().into(),
+        };
+        let mut event = tool_result();
+        if let ChatEvent::ToolCallResult {
+            name,
+            metadata: view,
+            ..
+        } = &mut event
+        {
+            *name = "html_render".into();
+            *view = Some(ToolMetaView::from(metadata.clone()));
+        }
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["metadata"]["kind"], "html_document");
+        assert_eq!(wire["metadata"]["html"], document.source());
+        let mut thread = Thread::new();
+        thread.apply_assistant_start("m", None);
+        apply_event_to_thread(&mut thread, &event);
+        let StoredMessage::Assistant { tools, .. } = &thread.messages[0] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(tools[0].metadata, Some(metadata));
+        assert!(matches!(event_priority(&event), PersistPriority::Immediate));
     }
 }
 
@@ -9345,6 +10303,32 @@ mod workspace_root_tests {
         assert_eq!(project_root_for_session(Some(&free), Some(stale)), None);
     }
 
+    #[test]
+    fn free_chat_shows_no_branch_from_the_selected_project() {
+        let free = free_chats_root().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        std::fs::write(
+            project.path().join(".git").join("HEAD"),
+            "ref: refs/heads/feat/removed-project\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_for_session(Some(&free), Some(project.path().to_path_buf())),
+            None
+        );
+        assert_eq!(
+            branch_for_session(Some(project.path()), None).as_deref(),
+            Some("feat/removed-project")
+        );
+        assert_eq!(
+            branch_for_session(None, Some(project.path().to_path_buf())).as_deref(),
+            Some("feat/removed-project")
+        );
+        assert!(free_chat_git_context().branch.is_none());
+    }
+
     /// The UI keys the "choose another folder" guidance off this token, so the
     /// wording of the OS error must never be what decides whether it appears.
     #[test]
@@ -9375,46 +10359,59 @@ mod export_bindings {
 
     #[test]
     fn export_bindings() {
-        ChatEvent::export_all().expect("export ChatEvent bindings");
-        SessionInfo::export_all().expect("export SessionInfo bindings");
-        OlderThreadMessages::export_all().expect("export OlderThreadMessages bindings");
-        SessionMeta::export_all().expect("export SessionMeta bindings");
-        ProviderView::export_all().expect("export ProviderView bindings");
-        ExternalAgentView::export_all().expect("export ExternalAgentView bindings");
-        ExternalAgentCheckView::export_all().expect("export ExternalAgentCheckView bindings");
-        ModelCapability::export_all().expect("export ModelCapability bindings");
-        WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
-        WorkspaceFileChangeView::export_all().expect("export WorkspaceFileChange bindings");
-        WorkspaceChangeView::export_all().expect("export WorkspaceChange bindings");
-        PullRequestView::export_all().expect("export PullRequestView bindings");
-        GitContextView::export_all().expect("export GitContext bindings");
-        ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
-        PendingInputAttachmentView::export_all().expect("export PendingInputAttachment bindings");
-        PendingInputView::export_all().expect("export PendingInput bindings");
-        TurnRecoveryView::export_all().expect("export TurnRecovery bindings");
-        ToolMetaView::export_all().expect("export ToolMetaView bindings");
-        delegation::DelegationStatus::export_all().expect("export DelegationStatus bindings");
-        delegation::ReviewSeverity::export_all().expect("export ReviewSeverity bindings");
-        delegation::AcceptanceCheckStatus::export_all()
+        let config = ts_rs::Config::from_env();
+
+        ChatEvent::export_all(&config).expect("export ChatEvent bindings");
+        SessionInfo::export_all(&config).expect("export SessionInfo bindings");
+        OlderThreadMessages::export_all(&config).expect("export OlderThreadMessages bindings");
+        SessionMeta::export_all(&config).expect("export SessionMeta bindings");
+        ProviderView::export_all(&config).expect("export ProviderView bindings");
+        ExternalAgentView::export_all(&config).expect("export ExternalAgentView bindings");
+        AdvisorSettingsView::export_all(&config).expect("export AdvisorSettingsView bindings");
+        ExternalAgentCheckView::export_all(&config)
+            .expect("export ExternalAgentCheckView bindings");
+        ModelCapability::export_all(&config).expect("export ModelCapability bindings");
+        WorkspaceReview::export_all(&config).expect("export WorkspaceReview bindings");
+        WorkspaceFileChangeView::export_all(&config).expect("export WorkspaceFileChange bindings");
+        WorkspaceChangeView::export_all(&config).expect("export WorkspaceChange bindings");
+        PullRequestView::export_all(&config).expect("export PullRequestView bindings");
+        GitContextView::export_all(&config).expect("export GitContext bindings");
+        WorktreeChatStatusView::export_all(&config).expect("export WorktreeChatStatus bindings");
+        ThreadCheckpointView::export_all(&config).expect("export ThreadCheckpoint bindings");
+        PendingInputAttachmentView::export_all(&config)
+            .expect("export PendingInputAttachment bindings");
+        PendingInputView::export_all(&config).expect("export PendingInput bindings");
+        TurnRecoveryView::export_all(&config).expect("export TurnRecovery bindings");
+        ToolMetaView::export_all(&config).expect("export ToolMetaView bindings");
+        delegation::DelegationStatus::export_all(&config)
+            .expect("export DelegationStatus bindings");
+        delegation::ReviewSeverity::export_all(&config).expect("export ReviewSeverity bindings");
+        delegation::AcceptanceCheckStatus::export_all(&config)
             .expect("export AcceptanceCheckStatus bindings");
-        delegation::ReviewFinding::export_all().expect("export ReviewFinding bindings");
-        delegation::AcceptanceCheckView::export_all().expect("export AcceptanceCheckView bindings");
-        delegation::DelegationTargetView::export_all().expect("export DelegationTarget bindings");
-        delegation::ReviewerTargetView::export_all().expect("export ReviewerTarget bindings");
-        delegation::AttemptUsageView::export_all().expect("export AttemptUsageView bindings");
-        delegation::DelegationAttemptView::export_all()
+        delegation::ReviewFinding::export_all(&config).expect("export ReviewFinding bindings");
+        delegation::AcceptanceCheckView::export_all(&config)
+            .expect("export AcceptanceCheckView bindings");
+        delegation::DelegationTargetView::export_all(&config)
+            .expect("export DelegationTarget bindings");
+        delegation::ReviewerTargetView::export_all(&config)
+            .expect("export ReviewerTarget bindings");
+        delegation::AttemptUsageView::export_all(&config)
+            .expect("export AttemptUsageView bindings");
+        delegation::DelegationAttemptView::export_all(&config)
             .expect("export DelegationAttemptView bindings");
-        delegation::DelegationOriginView::export_all()
+        delegation::DelegationOriginView::export_all(&config)
             .expect("export DelegationOriginView bindings");
-        delegation::DelegationJobView::export_all().expect("export DelegationJobView bindings");
-        delegation::DelegationEvent::export_all().expect("export DelegationEvent bindings");
-        delegation::CreateDelegationJobRequest::export_all()
+        delegation::DelegationJobView::export_all(&config)
+            .expect("export DelegationJobView bindings");
+        delegation::DelegationEvent::export_all(&config).expect("export DelegationEvent bindings");
+        delegation::CreateDelegationJobRequest::export_all(&config)
             .expect("export DelegationCreateRequest bindings");
-        delegation::UpdateDelegationJobRequest::export_all()
+        delegation::UpdateDelegationJobRequest::export_all(&config)
             .expect("export DelegationUpdateRequest bindings");
-        delegation::DelegationTargetOption::export_all()
+        delegation::DelegationTargetOption::export_all(&config)
             .expect("export DelegationTargetOption bindings");
-        delegation::DelegationHandoff::export_all().expect("export DelegationHandoff bindings");
+        delegation::DelegationHandoff::export_all(&config)
+            .expect("export DelegationHandoff bindings");
     }
 }
 
@@ -9528,6 +10525,67 @@ mod characterization {
         assert_eq!(thread.messages.len(), 2);
     }
 
+    /// A Claude Code subagent used to vanish on reopen: its `Agent` row was
+    /// only ever in the live UI.
+    #[test]
+    fn provider_activity_is_saved_in_order_and_settles_on_done() {
+        let activity = |id: &str, title: &str, status: &str, parent: Option<&str>| {
+            ChatEvent::ProviderActivity {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "a1".into(),
+                id: id.into(),
+                title: title.into(),
+                status: status.into(),
+                parent_id: parent.map(str::to_string),
+            }
+        };
+        let mut thread = Thread::new();
+        let first = activity("agent-1", "Agent Map the parser", "running", None);
+        assert!(event_mutates_thread(&first));
+        assert_eq!(event_priority(&first), PersistPriority::Delta);
+        apply_event_to_thread(&mut thread, &first);
+        apply_event_to_thread(
+            &mut thread,
+            &activity("read-1", "Read src/lib.rs", "done", Some("agent-1")),
+        );
+        apply_event_to_thread(
+            &mut thread,
+            &activity(
+                "agent-1",
+                "Agent Map the parser: Read src/lib.rs",
+                "running",
+                None,
+            ),
+        );
+        apply_event_to_thread(
+            &mut thread,
+            &ChatEvent::Done {
+                session_id: "s".into(),
+                thread_id: "t".into(),
+                turn_id: "turn".into(),
+                message_id: "a1".into(),
+            },
+        );
+
+        let saved = serde_json::to_value(&thread.messages[0]).unwrap();
+        assert_eq!(saved["providerActivity"][0]["id"], "agent-1");
+        assert_eq!(
+            saved["providerActivity"][0]["title"],
+            "Agent Map the parser: Read src/lib.rs"
+        );
+        assert_eq!(saved["providerActivity"][0]["status"], "done");
+        assert_eq!(saved["providerActivity"][1]["parentId"], "agent-1");
+        assert_eq!(
+            saved["steps"],
+            serde_json::json!([
+                { "kind": "activity", "id": "agent-1" },
+                { "kind": "activity", "id": "read-1" }
+            ])
+        );
+    }
+
     #[test]
     fn workspace_review_parses_porcelain_paths_without_status_codes() {
         let files =
@@ -9619,11 +10677,15 @@ mod characterization {
 
     #[test]
     fn desktop_exposes_claude_as_a_parent_login_choice() {
-        assert_eq!(PICKER_IDS, &["codex", "claude"]);
+        assert_eq!(PICKER_IDS, &["codex", "claude", "cursor"]);
         assert!(desktop_can_start_login("codex"));
         assert!(desktop_can_start_login("claude"));
         assert!(desktop_can_start_login("codex-chatgpt"));
         assert!(!desktop_can_start_login("antigravity"));
+        // Cursor is pickable but its sign-in is not ours to drive: the CLI
+        // opens its own browser flow, so the row points at `cursor-agent
+        // login` rather than offering a Connect button Zest cannot honour.
+        assert!(!desktop_can_start_login("cursor"));
     }
 
     #[test]
@@ -9731,6 +10793,7 @@ model = "gpt-5.6-sol"
                 models: vec!["sonnet".into()],
                 allow_mcp: false,
                 permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+                disallowed_tools: Vec::new(),
                 timeout_secs: 900,
             }),
             "Claude Code subscription"

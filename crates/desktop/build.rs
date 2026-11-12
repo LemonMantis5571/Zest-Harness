@@ -22,5 +22,21 @@ fn main() {
 
     println!("cargo:rerun-if-changed=ui/dist/index.html");
     println!("cargo:rerun-if-changed=tauri.conf.json");
-    tauri_build::build();
+    let windows_target = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let attributes = if windows_target {
+        tauri_build::Attributes::new()
+            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
+    } else {
+        tauri_build::Attributes::new()
+    };
+    tauri_build::try_build(attributes).expect("Tauri build failed");
+    if windows_target {
+        // Embed Tauri's default Common Controls dependency in every executable,
+        // including library tests. The binary-only resource is kept for icons.
+        println!("cargo:rerun-if-changed=windows-common-controls.rc");
+        println!("cargo:rerun-if-changed=windows-common-controls.manifest");
+        embed_resource::compile_for_everything("windows-common-controls.rc", embed_resource::NONE)
+            .manifest_required()
+            .expect("Common Controls manifest compilation failed");
+    }
 }

@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::claude_control::{preview_permission, remember_session_grant, Surface};
 use super::session::JsonlProcess;
 use super::{
     catalogue, Completion, EffortPolicy, ModelSpec, Provider, ProviderCommandRequest,
@@ -23,11 +24,13 @@ use crate::auth::{detect_codex_cli, AuthStatus};
 use crate::config::DEFAULT_CODEX_MODEL;
 use crate::error::{HarnessError, Result, PROVIDER_MESSAGE_PREFIX};
 use crate::thread::new_id;
-use crate::tools::approval::ToolRisk;
+use crate::tools::approval::{ApprovalDecision, ApprovalPolicy, PolicyOutcome, ToolRisk};
+use crate::tools::bash::auto_eligible_for_external_provider;
 use crate::tools::external_agent::{
     prepare_external_command, resolve_program, scrub_secret_environment,
     scrub_zest_secret_environment,
 };
+use crate::tools::sensitive::write_risk;
 
 const APP_SERVER_ARGS: &[&str] = &["app-server", "--listen", "stdio://"];
 /// `thread/start.sandbox` is the CLI kebab-case enum.
@@ -39,6 +42,40 @@ const TURN_SANDBOX_READ_ONLY: &str = "readOnly";
 const CLIENT_NAME: &str = "zest";
 const CLIENT_TITLE: &str = "Zest";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Tool names the session policy files Codex approvals under. Stable strings,
+/// because a session grant is keyed on them: a per-call name would make "Allow
+/// for session" grant something nothing can ever match again.
+const COMMAND_TOOL: &str = "codex_command";
+const FILE_CHANGE_TOOL: &str = "codex_file_change";
+
+fn allowed(decision: ApprovalDecision) -> bool {
+    matches!(
+        decision,
+        ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+    )
+}
+
+/// Record "Allow for session" so the next call does not ask again.
+///
+/// Without this the button was indistinguishable from Allow once, which is the
+/// bug `2ebb00a` fixed for Claude Code and this provider never picked up.
+fn remember(
+    policy: &Option<Arc<std::sync::Mutex<ApprovalPolicy>>>,
+    decision: ApprovalDecision,
+    surface: Surface,
+    tool_name: &str,
+    target: &str,
+) {
+    if decision != ApprovalDecision::AllowSession {
+        return;
+    }
+    if let Some(policy) = policy {
+        if let Ok(mut guard) = policy.lock() {
+            remember_session_grant(&mut guard, surface, tool_name, target);
+        }
+    }
+}
 
 /// How Zest launches a Codex turn.
 ///
@@ -53,10 +90,19 @@ struct CodexLaunchPolicy {
     turn_sandbox: &'static str,
 }
 
-fn launch_policy(has_host: bool) -> CodexLaunchPolicy {
+fn launch_policy(has_host: bool, allow_tool_use: bool) -> CodexLaunchPolicy {
     if has_host {
         CodexLaunchPolicy {
             approval_policy: "on-request",
+            thread_sandbox: THREAD_SANDBOX_READ_ONLY,
+            turn_sandbox: TURN_SANDBOX_READ_ONLY,
+        }
+    } else if !allow_tool_use {
+        // Provider-owned maintenance/side turns have no interaction host. They
+        // must still be unable to mutate the workspace, even when the provider
+        // owns its own agent loop and does not consult Zest's tool gate.
+        CodexLaunchPolicy {
+            approval_policy: "never",
             thread_sandbox: THREAD_SANDBOX_READ_ONLY,
             turn_sandbox: TURN_SANDBOX_READ_ONLY,
         }
@@ -240,24 +286,34 @@ impl CodexAppServerProvider {
         .await?;
         process.send(&json!({"method":"initialized"})).await?;
 
-        let policy = launch_policy(req.interaction.is_some());
+        let policy = launch_policy(req.interaction.is_some(), req.allow_tool_use);
         let thread_params = thread_start_params(
             &self.root,
             &req.model,
             policy.approval_policy,
             policy.thread_sandbox,
             req.system.as_ref(),
-            self.allow_mcp,
+            self.allow_mcp && req.allow_tool_use,
+            !req.allow_tool_use,
         );
         let mut resumed = false;
         let mut resume_failed = false;
         let requested_thread = match req.provider_session.as_ref() {
-            Some(ProviderSessionRef::CodexAppServer { thread_id }) => {
+            Some(ProviderSessionRef::CodexAppServer { thread_id })
+            | Some(ProviderSessionRef::CodexAppServerFork { thread_id }) => {
+                let forking = matches!(
+                    req.provider_session,
+                    Some(ProviderSessionRef::CodexAppServerFork { .. })
+                );
                 let response = rpc_request(
                     &mut process,
                     &mut request_id,
-                    "thread/resume",
-                    add_thread_id(thread_params.clone(), thread_id),
+                    if forking {
+                        "thread/fork"
+                    } else {
+                        "thread/resume"
+                    },
+                    add_thread_id(thread_params.clone(), thread_id, forking),
                     self.timeout(),
                     req.cancel.as_ref(),
                     req.interaction.clone(),
@@ -267,15 +323,16 @@ impl CodexAppServerProvider {
                 .await;
                 match response {
                     Ok(value) => match parse_thread_id(&value) {
-                        Some(thread_id) => {
+                        Some(child_id) if !forking || child_id != *thread_id => {
                             resumed = true;
-                            thread_id
+                            child_id
                         }
-                        None => {
+                        _ => {
                             resume_failed = true;
                             String::new()
                         }
                     },
+                    Err(HarnessError::Cancelled) => return Err(HarnessError::Cancelled),
                     Err(_) => {
                         // A provider-native cursor is an optimization. If the
                         // server cannot resume it, the transcript remains the
@@ -285,7 +342,7 @@ impl CodexAppServerProvider {
                     }
                 }
             }
-            None => String::new(),
+            _ => String::new(),
         };
         let thread_id = if requested_thread.is_empty() {
             let response = rpc_request(
@@ -604,30 +661,54 @@ async fn server_request_result(
                 .unwrap_or_else(|| new_id("provider-approval"));
             let command = command_line(&params);
             let cwd = string_field(&params, &["cwd"]);
+            // Ask the session policy before drawing anything. Codex is launched
+            // with `approvalPolicy: "on-request"` whenever a host exists, so it
+            // routes *everything* here — without this, Auto and an earlier
+            // "Allow for session" both drew a card anyway.
+            let policy = interaction.as_ref().and_then(|host| host.approval_policy());
+            let auto_eligible = auto_eligible_for_external_provider(&command);
+            match preview_permission(
+                policy.as_ref(),
+                COMMAND_TOOL,
+                &command,
+                ToolRisk::Exec,
+                auto_eligible,
+            ) {
+                PolicyOutcome::Allow => return json!({"decision": "accept"}),
+                PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
+                PolicyOutcome::Ask => {}
+            }
             if let Some(host) = interaction.as_ref() {
                 host.prepare_command_approval(&approval_id).await;
             }
             on_event(StreamEvent::ApprovalNeeded {
                 approval_id: approval_id.clone(),
-                tool_name: "codex_command".into(),
+                tool_name: COMMAND_TOOL.into(),
                 tool_call_id: approval_id.clone(),
                 risk: ToolRisk::Exec,
                 path: cwd.clone().unwrap_or_default(),
                 summary: command.clone(),
                 diff: String::new(),
             });
-            let approved = if let Some(host) = interaction {
-                host.approve_command(ProviderCommandRequest {
+            let decision = if let Some(host) = interaction {
+                host.decide_command(ProviderCommandRequest {
                     approval_id,
-                    command,
+                    command: command.clone(),
                     cwd,
                     reason: string_field(&params, &["reason"]),
                 })
                 .await
             } else {
-                false
+                ApprovalDecision::Deny
             };
-            json!({"decision": if approved { "accept" } else { "decline" }})
+            remember(
+                &policy,
+                decision,
+                Surface::Command(ToolRisk::Exec),
+                COMMAND_TOOL,
+                &command,
+            );
+            json!({"decision": if allowed(decision) { "accept" } else { "decline" }})
         }
         "item/fileChange/requestApproval" => {
             let approval_id = string_field(&params, &["approvalId", "id"])
@@ -648,30 +729,53 @@ async fn server_request_result(
             if params.get("grantRoot").is_some() && path.is_empty() {
                 return json!({"decision": "decline"});
             }
+            // A file-change grant is per path, so the policy is asked about this
+            // file rather than about writing in general — trusting `notes.txt`
+            // must never be trusting `.env`.
+            let policy = interaction.as_ref().and_then(|host| host.approval_policy());
+            // A secret file asks every time, even in modes that auto-approve writes.
+            let risk = write_risk(&path);
+            match preview_permission(policy.as_ref(), FILE_CHANGE_TOOL, &path, risk, false) {
+                PolicyOutcome::Allow => return json!({"decision": "accept"}),
+                PolicyOutcome::Block(_) => return json!({"decision": "decline"}),
+                PolicyOutcome::Ask => {}
+            }
             if let Some(host) = interaction.as_ref() {
                 host.prepare_file_change_approval(&approval_id).await;
             }
             on_event(StreamEvent::ApprovalNeeded {
                 approval_id: approval_id.clone(),
-                tool_name: "codex_file_change".into(),
+                tool_name: FILE_CHANGE_TOOL.into(),
                 tool_call_id: approval_id.clone(),
-                risk: ToolRisk::Write,
+                risk,
                 path: path.clone(),
                 summary: "Codex requested a file change".into(),
-                diff: diff.clone(),
+                // Like the parent agent, keep a secret file's lines off the card.
+                diff: if risk == ToolRisk::Sensitive {
+                    String::new()
+                } else {
+                    diff.clone()
+                },
             });
-            let approved = if let Some(host) = interaction {
-                host.approve_file_change(ProviderFileChangeRequest {
+            let decision = if let Some(host) = interaction {
+                host.decide_file_change(ProviderFileChangeRequest {
                     approval_id,
-                    path: (!path.is_empty()).then_some(path),
-                    diff: (!diff.is_empty()).then_some(diff),
+                    path: (!path.is_empty()).then_some(path.clone()),
+                    diff: (!diff.is_empty() && risk != ToolRisk::Sensitive).then_some(diff),
                     reason: string_field(&params, &["reason"]),
                 })
                 .await
             } else {
-                false
+                ApprovalDecision::Deny
             };
-            json!({"decision": if approved { "accept" } else { "decline" }})
+            remember(
+                &policy,
+                decision,
+                Surface::FileChange,
+                FILE_CHANGE_TOOL,
+                &path,
+            );
+            json!({"decision": if allowed(decision) { "accept" } else { "decline" }})
         }
         "item/permissions/requestApproval" => {
             // A workspace-root write grant would let later edits skip the
@@ -706,9 +810,12 @@ async fn server_request_result(
     }
 }
 
-fn add_thread_id(mut params: Value, thread_id: &str) -> Value {
+fn add_thread_id(mut params: Value, thread_id: &str, ephemeral: bool) -> Value {
     if let Some(object) = params.as_object_mut() {
         object.insert("threadId".into(), Value::String(thread_id.to_string()));
+        if ephemeral {
+            object.insert("ephemeral".into(), Value::Bool(true));
+        }
     }
     params
 }
@@ -720,8 +827,9 @@ fn thread_start_params(
     sandbox: &str,
     system: Option<&SystemPrompt>,
     allow_mcp: bool,
+    ephemeral: bool,
 ) -> Value {
-    json!({
+    let mut params = json!({
         "model": model,
         "cwd": root.to_string_lossy(),
         // `thread/start` uses the CLI-facing sandbox enum. The nested
@@ -731,7 +839,11 @@ fn thread_start_params(
         "approvalPolicy": approval_policy,
         "baseInstructions": system.map(SystemPrompt::text),
         "config": if allow_mcp { json!({}) } else { json!({"mcp_servers": {}}) },
-    })
+    });
+    if ephemeral {
+        params["ephemeral"] = Value::Bool(true);
+    }
+    params
 }
 
 fn turn_sandbox_policy(kind: &str, root: &std::path::Path) -> Value {
@@ -876,14 +988,24 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
         .into_iter()
         .filter_map(|item| {
             let id = string_field(&item, &["id", "model"])?;
-            let efforts = item
+            let efforts = match item
                 .get("supportedReasoningEfforts")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
+            {
+                Some(efforts) => efforts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                None if matches!(id.as_str(), "gpt-6-sol" | "gpt-6-luna") => {
+                    super::default_efforts_for_model(&id)
+                }
+                None => Vec::new(),
+            };
+            let supports_vision = item
+                .get("supportsVision")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| super::model_supports_vision(&id));
             Some(ModelSpec {
                 context_window: item
                     .get("contextWindow")
@@ -892,7 +1014,9 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
                 id,
                 efforts,
                 supports_tools: true,
-                supports_vision: false,
+                supports_vision,
+                resolves_to: None,
+                needs_cli: None,
             })
         })
         .collect::<Vec<_>>();
@@ -904,13 +1028,12 @@ fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
             0,
             ModelSpec {
                 id: default_model.to_string(),
-                efforts: super::STANDARD_EFFORTS
-                    .iter()
-                    .map(|effort| (*effort).into())
-                    .collect(),
+                efforts: super::default_efforts_for_model(default_model),
                 context_window: super::context_window_for_model(default_model),
                 supports_tools: true,
-                supports_vision: false,
+                supports_vision: super::model_supports_vision(default_model),
+                resolves_to: None,
+                needs_cli: None,
             },
         );
     }
@@ -1263,6 +1386,7 @@ mod tests {
             THREAD_SANDBOX_WRITE,
             None,
             false,
+            false,
         );
         assert_eq!(params["sandbox"], "workspace-write");
         assert_ne!(params["sandbox"], TURN_SANDBOX_WRITE);
@@ -1272,7 +1396,7 @@ mod tests {
     fn a_hosted_turn_asks_before_workspace_writes() {
         // `on-request` + `workspace-write` is Codex Auto: in-repo edits never
         // raise a file-change card. A host has to force the read-only pair.
-        let policy = launch_policy(true);
+        let policy = launch_policy(true, true);
         assert_eq!(policy.approval_policy, "on-request");
         assert_eq!(policy.thread_sandbox, "read-only");
         assert_eq!(policy.turn_sandbox, "readOnly");
@@ -1283,13 +1407,37 @@ mod tests {
 
     #[test]
     fn an_unhosted_turn_keeps_the_unattended_write_sandbox() {
-        let policy = launch_policy(false);
+        let policy = launch_policy(false, true);
         assert_eq!(policy.approval_policy, "never");
         assert_eq!(policy.thread_sandbox, "workspace-write");
         assert_eq!(policy.turn_sandbox, "workspaceWrite");
         let turn = turn_sandbox_policy(policy.turn_sandbox, std::path::Path::new("C:/workspace"));
         assert_eq!(turn["type"], "workspaceWrite");
         assert_eq!(turn["writableRoots"][0], "C:/workspace");
+    }
+
+    #[test]
+    fn a_side_turn_is_ephemeral_and_read_only_without_a_host() {
+        let policy = launch_policy(false, false);
+        assert_eq!(policy.approval_policy, "never");
+        assert_eq!(policy.thread_sandbox, THREAD_SANDBOX_READ_ONLY);
+        assert_eq!(policy.turn_sandbox, TURN_SANDBOX_READ_ONLY);
+
+        let params = add_thread_id(
+            thread_start_params(
+                std::path::Path::new("C:/workspace"),
+                "gpt-5.6-terra",
+                policy.approval_policy,
+                policy.thread_sandbox,
+                None,
+                false,
+                true,
+            ),
+            "parent",
+            true,
+        );
+        assert_eq!(params["sandbox"], THREAD_SANDBOX_READ_ONLY);
+        assert_eq!(params["ephemeral"], true);
     }
 
     #[test]
@@ -1357,6 +1505,110 @@ mod tests {
             ));
             self.allow
         }
+    }
+
+    /// A host with a real session policy, answering with a fixed decision.
+    struct SessionHost {
+        policy: Arc<std::sync::Mutex<ApprovalPolicy>>,
+        decision: ApprovalDecision,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SessionHost {
+        fn new(decision: ApprovalDecision) -> Arc<Self> {
+            Arc::new(Self {
+                policy: Arc::new(std::sync::Mutex::new(ApprovalPolicy::new(
+                    crate::tools::approval::ApprovalMode::Manual,
+                ))),
+                decision,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderInteractionHost for SessionHost {
+        fn approval_policy(&self) -> Option<Arc<std::sync::Mutex<ApprovalPolicy>>> {
+            Some(self.policy.clone())
+        }
+
+        async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+            self.asked.lock().unwrap().push(request.command);
+            self.decision
+        }
+
+        async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(request.path.unwrap_or_default());
+            self.decision
+        }
+    }
+
+    async fn ask_command(host: Arc<SessionHost>, command: &str) -> Value {
+        server_request_result(
+            "item/commandExecution/requestApproval",
+            Some(&json!({"approvalId": "c", "command": [command], "cwd": "/w"})),
+            &mut StreamState::default(),
+            Some(host),
+            &mut |_| {},
+        )
+        .await
+    }
+
+    async fn ask_write(host: Arc<SessionHost>, path: &str) -> Value {
+        server_request_result(
+            "item/fileChange/requestApproval",
+            Some(&json!({"approvalId": "f", "changes": [{"path": path, "diff": "x"}]})),
+            &mut StreamState::default(),
+            Some(host),
+            &mut |_| {},
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn allow_for_session_on_a_command_covers_the_next_one() {
+        let host = SessionHost::new(ApprovalDecision::AllowSession);
+        assert_eq!(
+            ask_command(host.clone(), "cargo test").await["decision"],
+            "accept"
+        );
+        assert_eq!(host.asked.lock().unwrap().len(), 1);
+
+        // A command grant is per tool, so a different command is covered too.
+        // Before this the button meant "allow once" and every call asked again.
+        assert_eq!(
+            ask_command(host.clone(), "cargo build").await["decision"],
+            "accept"
+        );
+        assert_eq!(
+            host.asked.lock().unwrap().len(),
+            1,
+            "the session grant was not remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_grant_is_per_path_so_it_never_covers_dot_env() {
+        let host = SessionHost::new(ApprovalDecision::AllowSession);
+        assert_eq!(
+            ask_write(host.clone(), "notes.txt").await["decision"],
+            "accept"
+        );
+        assert_eq!(
+            ask_write(host.clone(), "notes.txt").await["decision"],
+            "accept"
+        );
+        assert_eq!(host.asked.lock().unwrap().len(), 1, "same path re-asked");
+
+        // Trusting `notes.txt` is not trusting `.env`: a second path still asks.
+        ask_write(host.clone(), ".env").await;
+        assert_eq!(
+            host.asked.lock().unwrap().as_slice(),
+            &["notes.txt".to_string(), ".env".to_string()]
+        );
     }
 
     #[tokio::test]

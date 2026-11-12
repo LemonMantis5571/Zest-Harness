@@ -2,11 +2,26 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  btwQuestion,
   filterSlashCommands,
   isModelSlash,
+  slashTokenAt,
   splitSlashMatch,
 } from "./slashCommands.ts";
 import type { CommandView } from "./types.ts";
+
+describe("temporary side question command", () => {
+  it("recognizes a complete leading /btw, including an empty question", () => {
+    assert.equal(btwQuestion("/btw"), "");
+    assert.equal(btwQuestion("  /BTW\n¿Por qué?  "), "¿Por qué?");
+    assert.equal(btwQuestion("/btw first\nsecond"), "first\nsecond");
+  });
+  it("preserves paths, escaped commands, and inline mentions", () => {
+    for (const text of ["//btw", "/btw/file", "/btw-next", "explain /btw", "/btw?"]) {
+      assert.equal(btwQuestion(text), null, text);
+    }
+  });
+});
 
 const commands: CommandView[] = [
   { name: "plan", description: "Write a plan", kind: "skill" },
@@ -47,5 +62,30 @@ describe("slash command matching", () => {
       match: "supa",
       suffix: "base",
     });
+  });
+
+  it("finds the command token at the caret anywhere in a draft", () => {
+    const draft = "review this /plan then /hai";
+    assert.deepEqual(slashTokenAt(draft, draft.length), {
+      query: "hai",
+      start: draft.lastIndexOf("/hai"),
+      end: draft.length,
+    });
+    assert.deepEqual(slashTokenAt(draft, draft.indexOf("/plan") + "/plan".length), {
+      query: "plan",
+      start: draft.indexOf("/plan"),
+      end: draft.indexOf("/plan") + "/plan".length,
+    });
+  });
+
+  it("opens for an empty token but ignores paths and embedded slashes", () => {
+    const draft = "look at /etc/hosts and ";
+    assert.deepEqual(slashTokenAt(`${draft}/`, `${draft}/`.length), {
+      query: "",
+      start: draft.length,
+      end: draft.length + 1,
+    });
+    assert.equal(slashTokenAt("/etc/hosts", "/etc/hosts".length), null);
+    assert.equal(slashTokenAt("hello/plan", "hello/plan".length), null);
   });
 });

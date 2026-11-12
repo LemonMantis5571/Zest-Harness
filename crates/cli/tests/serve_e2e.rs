@@ -275,6 +275,7 @@ fn serve_completes_create_approve_review_and_apply() {
         &daemon,
         "delegation_approve",
         json!({
+            "commandId": "approve-e2e",
             "jobId": created["jobId"],
             "expectedUpdatedAt": created["updatedAt"]
         }),
@@ -312,24 +313,53 @@ fn serve_completes_create_approve_review_and_apply() {
             .contains("delegated.txt"),
         "{diff}"
     );
+    let retried_approval = call_tool(
+        &daemon,
+        "delegation_approve",
+        json!({
+            "commandId": "approve-e2e",
+            "jobId": created["jobId"],
+            "expectedUpdatedAt": created["updatedAt"]
+        }),
+    );
+    assert_eq!(
+        retried_approval, approved,
+        "a lost reply returns the original outcome even after work finishes"
+    );
+    let conflict: Value = rpc_response(
+        &daemon,
+        TOKEN,
+        "tools/call",
+        json!({
+            "name": "delegation_cancel", "arguments": {"commandId": "approve-e2e", "jobId": job_id}
+        }),
+    )
+    .json()
+    .unwrap();
+    assert_eq!(conflict["error"]["code"], -32010);
 
     let applied = call_tool(
         &daemon,
         "delegation_apply",
         json!({
+            "commandId": "apply-e2e",
             "jobId": job_id,
             "expectedUpdatedAt": ready["updatedAt"]
         }),
     );
     assert_eq!(job_status(&applied), "accepted");
+    drop(daemon);
+    let daemon = spawn_serve(root);
     let again = call_tool(
         &daemon,
         "delegation_apply",
         json!({
+            "commandId": "apply-e2e",
             "jobId": job_id,
             "expectedUpdatedAt": ready["updatedAt"]
         }),
     );
+    assert_eq!(again, applied, "receipt survives a daemon restart");
     assert_eq!(job_status(&again), "accepted");
     assert_eq!(
         std::fs::read_to_string(root.join("delegated.txt"))

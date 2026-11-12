@@ -1,11 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatSkeleton } from "@/components/ChatSkeleton";
+import { ChatHistorySidebar } from "@/components/ChatHistorySidebar";
 import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDialog";
 import { ProviderPicker } from "@/components/ProviderPicker";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
-import { admitAttachments } from "@/lib/attachmentLimits";
+import { admitAttachments, MAX_IMAGE_BYTES } from "@/lib/attachmentLimits";
 import { getBackend } from "@/lib/backend";
 import {
   fallbackOnFailure,
@@ -22,6 +23,9 @@ import {
   type ChatUiState,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { createSerialActions } from "@/lib/serialActions";
+import { loginSessionIsNew } from "@/lib/loginWait";
+import { sendOwnsComposer, type SendTurnRequest } from "@/lib/sendTurn";
 import {
   busyTurnMessage,
   conversationRecovery,
@@ -32,7 +36,17 @@ import {
   type ConversationRecovery,
 } from "@/lib/invokeErrors";
 import { approvalNotice } from "@/lib/mcpDisplay";
-import { isLongTurn } from "@/lib/notificationPolicy";
+import {
+  attentionChatName,
+  attentionRoute,
+  attentionTitle,
+  attentionToastTimeout,
+  isLongTurn,
+  replyExcerpt,
+  shownInTranscript,
+  WAITS_FOR_USER,
+  type AttentionKind,
+} from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
 import {
   DEFAULT_CODEX_MODEL,
@@ -64,9 +78,15 @@ import {
 } from "@/lib/navigationHistory";
 import { markStartup, measureStartup } from "@/lib/startupPerf";
 import {
+  addTranscriptNotice,
+  compactionNoticeText,
+  type TranscriptNoticeMap,
+} from "@/lib/transcriptNotices";
+import {
   reduceThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
+import { markThreadSeen, recordUnreadEvent } from "@/lib/threadUnread";
 import {
   pendingInputToQueuedTurn,
   updateThreadTurn,
@@ -100,6 +120,13 @@ import type {
   WorkspaceReview,
   WallpaperView,
 } from "@/lib/types";
+import {
+  layoutPaneIds,
+  revealPane,
+  splitSidebarGroups,
+  visiblePaneIds,
+  type SplitWorkspaceSnapshot,
+} from "@/lib/splitLayout";
 import { applyFont, getSavedFontId } from "@/lib/fonts";
 import { applyTheme, getSavedThemeId } from "@/lib/themes";
 import { WALLPAPER_CHANGED_EVENT } from "@/lib/wallpaperSync";
@@ -108,6 +135,7 @@ import { cn } from "@/lib/utils";
 const ChatScreen = lazy(() =>
   import("@/components/ChatScreen").then((m) => ({ default: m.ChatScreen }))
 );
+const SplitWorkspace = lazy(() => import("@/components/SplitWorkspace").then((module) => ({ default: module.SplitWorkspace })));
 
 type Screen =
   | "boot"
@@ -150,17 +178,27 @@ function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   });
 }
 
-async function showAttention(
-  title: string,
-  description: string,
-  type: "warning" | "success"
-) {
-  if (await isWindowActuallyActive()) {
-    toast.add({ type, title, description });
-  } else {
-    await notifyWhenAway(title, description);
-  }
+type PendingConversationRecovery = {
+  recovery: ConversationRecovery;
+  root: string | null;
+};
+
+/**
+ * Whether Configure in the recovery dialog opens the project's zest.toml.
+ *
+ * A free chat has no project file, and a provider that is configured but not
+ * ready is fixed in the provider sheet instead.
+ */
+function configureOpensProjectFile(pending: PendingConversationRecovery | null) {
+  if (!pending || pending.root === null) return false;
+  return pending.recovery.kind === "unknown_owner" || !pending.recovery.configured;
 }
+
+type AttentionNotice = {
+  title: string;
+  description: string;
+  type: "warning" | "success" | "error";
+};
 
 /**
  * What "Build plan" says on the user's behalf.
@@ -257,8 +295,16 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
           path: t.path,
           diff: t.diff,
           metadata: t.metadata,
+          startedAt: t.startedAt,
+          finishedAt: t.finishedAt,
         };
       }),
+      // Nothing is still running on a reopened chat; a row left running was
+      // cut off, as tools above are.
+      providerActivity: msg.providerActivity?.map((activity) =>
+        activity.status === "running" ? { ...activity, status: "error" as const } : activity
+      ),
+      steps: msg.steps,
       error: msg.error,
       providerSelection: msg.providerSelection ?? msg.provider_selection,
       // Persisted, so a reopened plan still renders as a plan.
@@ -427,6 +473,8 @@ export default function App() {
    * transcript itself. Each Customize tab is its own history entry.
    */
   const [shellPanel, setShellPanel] = useState<ShellPanel | null>(null);
+  const shellPanelRef = useRef(shellPanel);
+  shellPanelRef.current = shellPanel;
   const [navigation, setNavigation] = useState<NavigationHistory>(createNavigationHistory);
   const navigationRef = useRef<NavigationHistory>(createNavigationHistory());
   const [providerSwitchRequest, setProviderSwitchRequest] = useState(0);
@@ -443,20 +491,31 @@ export default function App() {
   const [pickerError, setPickerError] = useState<PickerError | null>(null);
   const [continuing, setContinuing] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [pendingConversationRecovery, setPendingConversationRecovery] = useState<{
-    recovery: ConversationRecovery;
-    root: string | null;
-  } | null>(null);
+  const [pendingConversationRecovery, setPendingConversationRecovery] =
+    useState<PendingConversationRecovery | null>(null);
   const [conversationRecoveryBusy, setConversationRecoveryBusy] = useState(false);
 
   const [waitingTitle, setWaitingTitle] = useState("Sign in");
   const [waitingBody, setWaitingBody] = useState(
-    "Finish in your browser. This window will update when you’re done."
+    "A sign-in window should open. Finish in the browser, then press Enter there if it asks."
   );
   const [waitingHint, setWaitingHint] = useState("Waiting for browser sign-in…");
   const [waitingError, setWaitingError] = useState<string | null>(null);
 
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const [splitVisible, setSplitVisible] = useState(false);
+  const [splitSnapshot, setSplitSnapshot] = useState<SplitWorkspaceSnapshot | null>(null);
+  const splitSnapshotRef = useRef<SplitWorkspaceSnapshot | null>(null);
+  const splitVisibleRef = useRef(false);
+  const splitChoosingPaneRef = useRef<string | null>(null);
+  splitSnapshotRef.current = splitSnapshot;
+  splitVisibleRef.current = splitVisible;
+  const [splitStartNewGroup, setSplitStartNewGroup] = useState(false);
+  const [chatListRevision, setChatListRevision] = useState(0);
+  const [deletedThreadId, setDeletedThreadId] = useState<string | null>(null);
+  const [, publishSplit] = useState(0);
+  const splitActions = useRef(createSerialActions());
+  const splitSendAcks = useRef(new Map<string, () => void>());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [hasNewerMessages, setHasNewerMessages] = useState(false);
@@ -480,6 +539,7 @@ export default function App() {
   const [threadQueues, setThreadQueues] = useState<ThreadQueueMap>({});
   const [resumingQueuedThread, setResumingQueuedThread] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const [transcriptNotices, setTranscriptNotices] = useState<TranscriptNoticeMap>({});
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
   // Mirrors DESKTOP_DEFAULT_MODE in Rust; reconciled on session start.
@@ -503,6 +563,7 @@ export default function App() {
         // Profile, Usage, and Customize are all reached from the sidebar, so
         // they render inside the chat shell rather than replacing it.
         case "profile":
+        case "pullRequests":
         case "usage":
         case "customize":
           setShellPanel(destination);
@@ -581,8 +642,46 @@ export default function App() {
    * panel.
    */
   const showTranscript = useCallback(() => {
+    // Navigation history can already say "chat" when a panel was opened by
+    // another control. In that case pushNavigation correctly returns the same
+    // history object, but the shell still needs the panel cleared.
+    if (navigationRef.current.current?.kind === "chat") {
+      applyNavigationDestination({ kind: "chat" });
+      return;
+    }
     navigateTo({ kind: "chat" });
-  }, [navigateTo]);
+  }, [applyNavigationDestination, navigateTo]);
+
+  const rememberSplitSnapshot = useCallback((next: SplitWorkspaceSnapshot, choosingPaneId: string | null = null) => {
+    const choosingChanged = splitChoosingPaneRef.current !== choosingPaneId;
+    splitChoosingPaneRef.current = choosingPaneId;
+    splitSnapshotRef.current = next;
+    setSplitSnapshot(next);
+    if (choosingChanged) publishSplit((revision) => revision + 1);
+  }, []);
+
+  const activateSplitLocation = useCallback(
+    (groupId: string, paneId?: string) => {
+      const current = splitSnapshotRef.current;
+      const group = current?.groups.find((candidate) => candidate.id === groupId);
+      if (!current || !group) return;
+      const next: SplitWorkspaceSnapshot = {
+        ...current,
+        activeGroupId: groupId,
+        // Going to a pane means seeing it: it leaves a minimized strip or zoom.
+        groups: current.groups.map((candidate) =>
+          candidate.id === groupId && paneId
+            ? revealPane(candidate, current.panes, paneId)
+            : candidate
+        ),
+      };
+      rememberSplitSnapshot(next);
+      setSplitStartNewGroup(false);
+      splitVisibleRef.current = true;
+      setSplitVisible(true);
+    },
+    [rememberSplitSnapshot]
+  );
 
   // The first loaded chat establishes the root of the app-view history. Boot,
   // provider selection, and sign-in progress are lifecycle states, not places
@@ -647,6 +746,7 @@ export default function App() {
   const loginAttemptRef = useRef(0);
   /** Prevent duplicate vendor login processes while the first spawn is pending. */
   const loginStartingRef = useRef(false);
+  const loginReadyAtStartRef = useRef(false);
   const activeAssistantId = useRef<string | null>(null);
   /** Live UI projections for chats that continue while another one is open. */
   const chatStatesRef = useRef(new Map<string, ChatUiState>());
@@ -675,6 +775,8 @@ export default function App() {
   const resolvingApprovalIdsRef = useRef(new Set<string>());
   const resolvingQuestionIdsRef = useRef(new Set<string>());
   const notifiedDelegationEventsRef = useRef(new Set<string>());
+  /** `cancelled:<job>` / `applied:<job>` for delegation outcomes the user clicked here. */
+  const ownDelegationActionsRef = useRef(new Set<string>());
   const compactionInFlightRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -698,6 +800,196 @@ export default function App() {
       throw new Error("session start is not ready yet");
     }
   );
+
+  /**
+   * Whether the user can see this chat's transcript right now: the open chat
+   * in single view with no panel covering it, or a pane of the split group on
+   * screen.
+   */
+  const visibleChatThreads = useCallback(() => {
+    const snapshot = splitSnapshotRef.current;
+    if (splitVisibleRef.current) {
+      if (!snapshot) return [];
+      const group = snapshot.groups.find(
+        (candidate) => candidate.id === snapshot.activeGroupId
+      );
+      if (!group) return [];
+      // Panes put away as strips (minimized, or hidden behind a zoomed pane)
+      // are off screen, like a pane covered by its chooser.
+      return visiblePaneIds(group, snapshot.panes).flatMap((paneId) => {
+        if (paneId === splitChoosingPaneRef.current) return [];
+        const threadId = snapshot.panes[paneId]?.session?.threadId;
+        return threadId ? [threadId] : [];
+      });
+    }
+    const threadId = threadIdRef.current;
+    return threadId && shellPanelRef.current === null ? [threadId] : [];
+  }, []);
+  const isChatOnScreen = useCallback(
+    (threadId: string) => visibleChatThreads().includes(threadId),
+    [visibleChatThreads]
+  );
+  const visibleThreadsKey = JSON.stringify(visibleChatThreads());
+
+  /**
+   * Name a chat for an alert and find where it lives.
+   *
+   * `root` is the project path (`null` for a free chat), or `undefined` when
+   * the chat is not in the catalogue and cannot be reopened from here.
+   */
+  const describeChat = useCallback(async (threadId: string) => {
+    let listed: { title?: string; root: string | null } | undefined;
+    try {
+      for (const project of await backend.listChatProjects()) {
+        const thread = project.threads.find((candidate) => candidate.id === threadId);
+        if (thread) {
+          listed = { title: thread.title, root: project.path };
+          break;
+        }
+      }
+    } catch (error) {
+      // The alert still goes out, named from the transcript instead.
+      ignoreExpectedFailure(error, "name chat for notification");
+    }
+    const transcript =
+      threadIdRef.current === threadId
+        ? messagesRef.current
+        : chatStatesRef.current.get(threadId)?.messages;
+    const firstPrompt = transcript?.find((message) => message.role === "user")?.text;
+    return {
+      name: attentionChatName(listed?.title, firstPrompt),
+      root: listed?.root,
+    };
+  }, []);
+
+  /** Attention toasts for transcript events, per chat, so they can close when no longer needed. */
+  const attentionToastsRef = useRef(
+    new Map<string, { id: string; kind: AttentionKind }[]>()
+  );
+
+  const openProjectChatRef = useRef<
+    ((options: { root: string | null; threadId: string }) => Promise<boolean>) | null
+  >(null);
+
+  /**
+   * Bring a chat on screen from an alert: its split pane, the transcript
+   * behind a panel, or the chat itself. Returns null when there is no way to
+   * reach it from here.
+   */
+  const chatOpener = useCallback(
+    (threadId: string, root: string | null | undefined) => {
+      const snapshot = splitSnapshotRef.current;
+      if (splitVisibleRef.current && snapshot) {
+        for (const group of snapshot.groups) {
+          const paneId = layoutPaneIds(group.root).find(
+            (candidate) => snapshot.panes[candidate]?.session?.threadId === threadId
+          );
+          if (paneId) return () => activateSplitLocation(group.id, paneId);
+        }
+      }
+      if (!splitVisibleRef.current && threadIdRef.current === threadId) {
+        return showTranscript;
+      }
+      if (root === undefined) return null;
+      return () => {
+        void openProjectChatRef.current?.({ root, threadId }).catch((error) =>
+          // onOpenProjectChat already toasted the failure.
+          ignoreExpectedFailure(error, "open chat from notification")
+        );
+      };
+    },
+    [activateSplitLocation, showTranscript]
+  );
+
+  /**
+   * Announce an event as `attentionRoute` decides: nothing, a toast, or an OS
+   * notification. Both name the chat, and a toast for a chat that is not on
+   * screen offers to open it.
+   */
+  const showAttention = useCallback(
+    async (
+      kind: AttentionKind,
+      threadId: string,
+      notice: AttentionNotice,
+      { byUser = false, isCurrent = () => true }: {
+        byUser?: boolean;
+        isCurrent?: () => boolean;
+      } = {}
+    ) => {
+      if (byUser || !isCurrent()) return;
+      const focused = await isWindowActuallyActive();
+      if (!isCurrent()) return;
+      const route = attentionRoute(kind, { onScreen: isChatOnScreen(threadId), focused });
+      if (route === "none") return;
+
+      const chat = await describeChat(threadId);
+      if (!isCurrent()) return;
+      const onScreen = isChatOnScreen(threadId);
+      const currentRoute = attentionRoute(kind, { onScreen, focused });
+      if (currentRoute === "none") return;
+      const title = attentionTitle(notice.title, chat.name);
+      const open = chatOpener(threadId, chat.root);
+      if (currentRoute === "os") {
+        await notifyWhenAway(title, notice.description, {
+          onClick: open ?? undefined,
+          isCurrent,
+        });
+        return;
+      }
+      const id = toast.add({
+        ...notice,
+        title,
+        groupKey: JSON.stringify([threadId, kind]),
+        timeout: attentionToastTimeout(kind),
+        actionProps:
+          !onScreen && open
+            ? {
+                children: "Open",
+                onClick: () => {
+                  toast.close(id);
+                  open();
+                },
+              }
+            : undefined,
+      });
+      if (shownInTranscript(kind)) {
+        const entries = attentionToastsRef.current.get(threadId) ?? [];
+        attentionToastsRef.current.set(threadId, [...entries, { id, kind }]);
+      }
+    },
+    [chatOpener, describeChat, isChatOnScreen]
+  );
+
+  /** Close a chat's attention toasts, or only those of the given kinds. */
+  const closeAttentionToasts = useCallback(
+    (threadId: string, kinds?: ReadonlySet<AttentionKind>) => {
+      const entries = attentionToastsRef.current.get(threadId);
+      if (!entries) return;
+      const kept = entries.filter((entry) => kinds && !kinds.has(entry.kind));
+      for (const entry of entries) {
+        if (!kept.includes(entry)) toast.close(entry.id);
+      }
+      if (kept.length) attentionToastsRef.current.set(threadId, kept);
+      else attentionToastsRef.current.delete(threadId);
+    },
+    []
+  );
+
+  // A toast that stays until dismissed must not outlive its reason: once its
+  // chat is on screen, the transcript says the same thing.
+  useEffect(() => {
+    for (const threadId of [...attentionToastsRef.current.keys()]) {
+      if (isChatOnScreen(threadId)) closeAttentionToasts(threadId);
+    }
+  }, [
+    closeAttentionToasts,
+    isChatOnScreen,
+    session?.threadId,
+    shellPanel,
+    splitSnapshot,
+    splitVisible,
+    visibleThreadsKey,
+  ]);
 
   const recordThreadActivity = useCallback((event: ChatEvent) => {
     const previous = threadActivityRef.current;
@@ -736,18 +1028,26 @@ export default function App() {
       const notificationId = `${event.kind}:${event.job.jobId}:${event.job.updatedAt}`;
       if (notifiedDelegationEventsRef.current.has(notificationId)) return;
       notifiedDelegationEventsRef.current.add(notificationId);
-      const copy: Record<string, [string, "warning" | "success"]> = {
-        ready_to_apply: ["Changes ready to apply", "success"],
-        changes_requested: ["Review requested changes", "warning"],
-        blocked: ["Delegation needs attention", "warning"],
-        failed: ["Delegation failed", "warning"],
-        applied: ["Accepted changes applied", "success"],
-        cancelled: ["Delegation cancelled", "warning"],
+      const copy: Record<string, [AttentionKind, string, "warning" | "success"]> = {
+        ready_to_apply: ["delegation_ready", "Changes ready to apply", "success"],
+        changes_requested: ["delegation_changes_requested", "Review requested changes", "warning"],
+        blocked: ["delegation_blocked", "Delegation needs attention", "warning"],
+        failed: ["delegation_failed", "Delegation failed", "warning"],
+        applied: ["delegation_applied", "Accepted changes applied", "success"],
+        cancelled: ["delegation_cancelled", "Delegation cancelled", "warning"],
       };
-      const [title, type] = copy[event.kind as keyof typeof copy];
-      void showAttention(title, event.job.title, type);
+      const [kind, title, type] = copy[event.kind as keyof typeof copy];
+      const byUser = ownDelegationActionsRef.current.delete(
+        `${event.kind}:${event.job.jobId}`
+      );
+      void showAttention(
+        kind,
+        event.job.parentThreadId,
+        { title, description: event.job.title, type },
+        { byUser }
+      );
     },
-    [replaceDelegationJob, session?.root]
+    [replaceDelegationJob, session?.root, showAttention]
   );
 
   const updateQueuedTurn = useCallback(
@@ -850,8 +1150,11 @@ export default function App() {
           return;
         }
         markProviderVerifyFailed(row.id);
-        setWaitingHint("Provider unavailable");
-        setWaitingError(`Could not connect to ${row.label}. Try connecting again.`);
+        setWaitingHint("Sign-in did not work");
+        setWaitingError(
+          formatInvokeError(err) ||
+            `Could not connect to ${row.label}. Try connecting again.`
+        );
         return;
       }
       markProviderVerified(row.id);
@@ -888,12 +1191,11 @@ export default function App() {
         consecutiveFailures = 0;
         const row = rows.find((p) => p.id === selectedIdRef.current);
         // Ready, or a session file appeared but looked incomplete — either way
-        // prove it with a probe instead of spinning on "Waiting…".
-        const fileAppeared =
-          row?.statusKind === "ready" ||
-          (row?.statusKind === "not_logged_in" &&
-            row.detail.toLowerCase().includes("incomplete"));
-        if (row && fileAppeared) {
+        // prove it with a probe instead of spinning on "Waiting…". A file that
+        // was already ready when Connect started is the expired session we
+        // are replacing, so ignore it until `claude login` writes a new one
+        // or the CLI exits successfully.
+        if (row && loginSessionIsNew(row, loginReadyAtStartRef.current)) {
           stopPolling();
           await finishVerifiedLogin(row, attempt);
           return;
@@ -901,6 +1203,11 @@ export default function App() {
 
         const login = await withTimeout(backend.loginStatus(), "login status");
         if (attempt !== loginAttemptRef.current) return;
+        if (login.state === "succeeded") {
+          stopPolling();
+          if (row) await finishVerifiedLogin(row, attempt);
+          return;
+        }
         if (login.state === "exited") {
           stopPolling();
           setWaitingHint("Sign-in stopped");
@@ -943,14 +1250,14 @@ export default function App() {
           if (info && info.sessionId === sessionIdRef.current) {
             setSession((current) =>
               current
-                ? { ...current, checkpoints: info.checkpoints }
+                ? { ...current, checkpoints: info.checkpoints, models: info.models }
                 : current
             );
             return;
           }
           // `done` is emitted just before the Rust session slot is released.
-          // Retry briefly so the new checkpoint is visible without racing the
-          // turn finalizer.
+          // Retry briefly so checkpoints and resolved model aliases become
+          // visible without racing the turn finalizer.
           if (remaining > 0) {
             window.setTimeout(() => attempt(remaining - 1), 40);
           }
@@ -965,8 +1272,15 @@ export default function App() {
   }, []);
 
   const maybeAutoCompact = useCallback(() => {
+    if (splitVisibleRef.current) return;
     const targetSessionId = sessionIdRef.current;
-    if (!targetSessionId || compactionInFlightRef.current || sendingRef.current) {
+    const targetThreadId = threadIdRef.current;
+    if (
+      !targetSessionId ||
+      !targetThreadId ||
+      compactionInFlightRef.current ||
+      sendingRef.current
+    ) {
       return;
     }
 
@@ -983,7 +1297,7 @@ export default function App() {
         .contextUsage()
         .then((usage) => {
           if (
-            targetSessionId !== sessionIdRef.current ||
+            splitVisibleRef.current || targetSessionId !== sessionIdRef.current ||
             compactionInFlightRef.current ||
             sendingRef.current
           ) {
@@ -1008,24 +1322,23 @@ export default function App() {
               } catch {
                 /* checkpoint metadata refresh is best-effort */
               }
-              // Trimming long tool output and summarizing are different things
-              // to have happened to a conversation, so they get different copy.
-              toast.add(
-                result.prunedOnly
-                  ? {
-                      type: "success",
-                      title: "Trimmed long tool output",
-                      description: `Shortened ${result.resultsPruned} long tool ${
-                        result.resultsPruned === 1 ? "result" : "results"
-                      }. The conversation was kept as it was; the full output is in the restore point.`,
-                    }
-                  : {
-                      type: "success",
-                      title: "Conversation compacted automatically",
-                      description:
-                        "You can restore the conversation from before compaction.",
-                    }
-              );
+              // Housekeeping, not news: a divider after the turn it followed
+              // instead of a toast. Compaction rewrites the model's history,
+              // not the transcript, so that message is still there.
+              const transcript =
+                targetThreadId === threadIdRef.current
+                  ? messagesRef.current
+                  : chatStatesRef.current.get(targetThreadId)?.messages;
+              const afterMessageId = transcript?.at(-1)?.id;
+              if (afterMessageId) {
+                setTranscriptNotices((current) =>
+                  addTranscriptNotice(current, targetThreadId, {
+                    id: newId("notice"),
+                    afterMessageId,
+                    text: compactionNoticeText(result),
+                  })
+                );
+              }
             })
             .catch((err) => {
               toast.add({
@@ -1099,11 +1412,15 @@ export default function App() {
       return;
     }
     if (event.kind === "job_completed") {
-      void showAttention(
-        "Background job finished",
-        `${event.label} · ${event.status}`,
-        event.status === "completed" ? "success" : "warning"
-      );
+      // `killed` was asked for by the user or the agent; only `failed` is news.
+      const failed = event.status === "failed";
+      void showAttention(failed ? "job_failed" : "job_finished", threadKey, {
+        title: failed ? "Background job failed" : "Background job finished",
+        description: [event.label, event.status, event.detail]
+          .filter(Boolean)
+          .join(" · "),
+        type: failed ? "error" : "success",
+      });
       return;
     }
 
@@ -1150,6 +1467,8 @@ export default function App() {
       threadId: threadKey,
     };
     chatStatesRef.current.set(threadKey, state);
+    if (splitVisibleRef.current) publishSplit((revision) => revision + 1);
+    if (event.kind === "user") splitSendAcks.current.get(threadKey)?.();
 
     if (isCurrent) {
       const prevSending = sendingRef.current;
@@ -1163,16 +1482,18 @@ export default function App() {
       }
     }
     if (effects.errorToast) {
-      toast.add({
-        type: "error",
+      // The error is also drawn on the failed message, so a chat on screen
+      // already shows it.
+      void showAttention("request_failed", threadKey, {
         title: "Request failed",
         description: effects.errorToast,
+        type: "error",
       });
     }
     if (effects.warningToast) {
       toast.add({
         type: "warning",
-        title: "Chat history not saved",
+        title: effects.warningTitle ?? "Chat history not saved",
         description: effects.warningToast,
       });
     }
@@ -1188,26 +1509,53 @@ export default function App() {
       notifiedApprovalIdsByThreadRef.current.set(threadKey, notified);
       if (!notified.has(event.approval_id)) {
         notified.add(event.approval_id);
-        const description = approvalNotice(event.tool_name, event.summary);
-        if (isCurrent) {
-          void notifyWhenAway("Approval needed", description);
-        } else {
-          void showAttention("Approval needed", description, "warning");
-        }
+        void showAttention("approval_needed", threadKey, {
+          title: "Approval needed",
+          description: approvalNotice(event.tool_name, event.summary),
+          type: "warning",
+        }, {
+          isCurrent: () => {
+            const current = chatStatesRef.current.get(threadKey);
+            return current?.currentTurnId === event.turn_id && current.messages.some(
+              (message) => message.role === "assistant" && message.tools.some((tool) =>
+                tool.approvalId === event.approval_id && tool.status === "awaiting_approval"
+              )
+            );
+          },
+        });
       }
     }
 
     if (event.kind === "question_needed") {
-      void showAttention("Input needed", event.prompt, "warning");
+      void showAttention("input_needed", threadKey, {
+        title: "Input needed",
+        description: event.prompt,
+        type: "warning",
+      }, {
+        isCurrent: () => {
+          const current = chatStatesRef.current.get(threadKey);
+          return current?.currentTurnId === event.turn_id && current.messages.some(
+            (message) => message.role === "assistant" && message.question?.questionId === event.question_id
+          );
+        },
+      });
     }
 
     if (event.kind === "done") {
       const startedAt = turnStartedAtByThreadRef.current.get(threadKey);
       if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
-        void showAttention("Response ready", "Zest finished the turn.", "success");
+        const reply = state.messages.findLast(
+          (message) => message.role === "assistant" && message.text.trim()
+        );
+        void showAttention("response_ready", threadKey, {
+          title: "Response ready",
+          description: reply ? replyExcerpt(reply.text) : "Zest finished the turn.",
+          type: "success",
+        });
       }
       turnStartedAtByThreadRef.current.delete(threadKey);
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
+      closeAttentionToasts(threadKey, WAITS_FOR_USER);
       if (isCurrent) {
         refreshCheckpointMetadata();
         maybeAutoCompact();
@@ -1217,9 +1565,10 @@ export default function App() {
     if (event.kind === "error" || event.kind === "cancelled") {
       turnStartedAtByThreadRef.current.delete(threadKey);
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
+      closeAttentionToasts(threadKey, WAITS_FOR_USER);
     }
 
-  }, [maybeAutoCompact, refreshCheckpointMetadata]);
+  }, [closeAttentionToasts, maybeAutoCompact, refreshCheckpointMetadata, showAttention]);
 
   /**
    * Publish at most one transcript update per thread for a rendered frame.
@@ -1261,6 +1610,7 @@ export default function App() {
       if (threadKey === currentThread) currentState = state;
     }
 
+    if (splitVisibleRef.current) publishSplit((revision) => revision + 1);
     if (!currentState) return;
     messagesRef.current = currentState.messages;
     activeAssistantId.current = currentState.activeAssistantId;
@@ -1282,6 +1632,7 @@ export default function App() {
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
       recordThreadActivity(event);
+      recordUnreadEvent(event, isChatOnScreen(event.thread_id));
       if (event.kind === "text_delta" || event.kind === "thinking_delta") {
         deltaQueueRef.current.push(event);
         if (deltaRafRef.current == null) {
@@ -1300,7 +1651,7 @@ export default function App() {
       }
       applyChatEventNow(event);
     },
-    [applyChatEventNow, flushDeltaQueue, recordThreadActivity]
+    [applyChatEventNow, flushDeltaQueue, isChatOnScreen, recordThreadActivity]
   );
 
   /**
@@ -1599,21 +1950,24 @@ export default function App() {
 
     if (backend.mode === "fixture") {
       void (async () => {
+        let info: SessionInfo;
         try {
-          const info = await withTimeout(
-            backend.startSession("fixture"),
-            "fixture session"
-          );
-          applySession(info);
-          setSending(true);
-          sendingRef.current = true;
-          await withTimeout(
-            Promise.resolve(backend.boot?.(handleChatEvent)),
-            "fixture boot"
-          );
+          info = await withTimeout(backend.startSession("fixture"), "fixture session");
         } catch (err) {
           setPickerError(startupPickerErrorFrom(err));
           setScreen("picker");
+          return;
+        }
+        applySession(info);
+        setSending(true);
+        sendingRef.current = true;
+        try {
+          // The canned boot stream is a turn, not startup: the chat is already
+          // open. Bounding it with BOOT_TIMEOUT_MS sent a slow machine (a CI
+          // runner) back to the picker mid-test once the stream passed 15 s.
+          await backend.boot?.(handleChatEvent);
+        } catch (error) {
+          ignoreExpectedFailure(error, "fixture boot stream");
         } finally {
           setSending(false);
           sendingRef.current = false;
@@ -1745,6 +2099,11 @@ export default function App() {
     };
   }, [activeDelegationRoot]);
 
+  // All visible panes count as read, not only the backend-active session.
+  useEffect(() => {
+    for (const threadId of new Set(visibleChatThreads())) markThreadSeen(threadId);
+  }, [visibleThreadsKey, visibleChatThreads]);
+
   // Persist sticky draft for the active thread.
   useEffect(() => {
     const threadId = session?.threadId;
@@ -1762,13 +2121,17 @@ export default function App() {
             if (attempt !== loginAttemptRef.current) return;
             const row = rows.find((p) => p.id === selectedIdRef.current);
             if (!row) return;
-            const fileAppeared =
-              row.statusKind === "ready" ||
-              (row.statusKind === "not_logged_in" &&
-                row.detail.toLowerCase().includes("incomplete"));
-            if (!fileAppeared) return;
-            stopPolling();
-            await finishVerifiedLogin(row, attempt);
+            if (loginSessionIsNew(row, loginReadyAtStartRef.current)) {
+              stopPolling();
+              await finishVerifiedLogin(row, attempt);
+              return;
+            }
+            const login = await withTimeout(backend.loginStatus(), "login status");
+            if (attempt !== loginAttemptRef.current) return;
+            if (login.state === "succeeded") {
+              stopPolling();
+              await finishVerifiedLogin(row, attempt);
+            }
           } catch {
             /* keep waiting */
           }
@@ -1813,6 +2176,7 @@ export default function App() {
         backend.startLogin(row.id),
         "sign-in start"
       );
+      loginReadyAtStartRef.current = row.statusKind === "ready";
       setWaitingTitle(started.browserTitle);
       setWaitingBody(started.browserBody);
       setScreen("waiting");
@@ -1885,6 +2249,8 @@ export default function App() {
           backend.startLogin(providerId),
           "sign-in start"
         );
+        const existing = providers.find((row) => row.id === providerId);
+        loginReadyAtStartRef.current = existing?.statusKind === "ready";
         setSelectedId(providerId);
         setWaitingTitle(started.browserTitle);
         setWaitingBody(started.browserBody);
@@ -1900,7 +2266,7 @@ export default function App() {
         loginStartingRef.current = false;
       }
     },
-    [startWaitingPoll]
+    [providers, startWaitingPoll]
   );
 
   const onNewChat = useCallback(async () => {
@@ -1917,6 +2283,9 @@ export default function App() {
         providerId: current?.provider ?? selectedIdRef.current ?? undefined,
       });
       applySession(info, { clearDraft: true });
+      splitVisibleRef.current = false;
+      setSplitVisible(false);
+      setSplitStartNewGroup(false);
       showTranscript();
     } catch (err) {
       const recovery = conversationRecovery(err);
@@ -1945,11 +2314,6 @@ export default function App() {
       const info = await backend.forkThread();
       applySession(info, { clearDraft: true });
       showTranscript();
-      toast.add({
-        type: "success",
-        title: "Fork created",
-        description: "You are now in a new conversation with the same history.",
-      });
     } catch (err) {
       toast.add({
         type: "error",
@@ -2019,11 +2383,6 @@ export default function App() {
       try {
         const info = await backend.rewindThread(checkpointId);
         applySession(info, { clearDraft: true });
-        toast.add({
-          type: "success",
-          title: "Conversation rewound",
-          description: "Conversation restored. Your files were not changed.",
-        });
       } catch (err) {
         toast.add({
           type: "error",
@@ -2050,9 +2409,9 @@ export default function App() {
         return { accepted: false, retryable: false };
       }
       const turnThreadId = threadIdRef.current;
-      const chips: UserAttachmentChip[] = pending
-        .filter((a) => a.status === "done")
-        .map((a) => ({ name: a.name, kind: a.kind }));
+      const chips: UserAttachmentChip[] = pending.flatMap((a) =>
+        a.status === "done" ? [{ name: a.name, kind: a.kind }] : []
+      );
       if (turnThreadId && chips.length > 0) {
         pendingUserAttachmentsRef.current.set(turnThreadId, chips);
       }
@@ -2168,6 +2527,8 @@ export default function App() {
         if (deletedActive) {
           applySession(info, { clearDraft: true });
         }
+        setChatListRevision((revision) => revision + 1);
+        setDeletedThreadId(id);
         setWorkspacePath(info.isFreeChat ? null : info.root);
         void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
         toast.add({
@@ -2206,6 +2567,9 @@ export default function App() {
         const info = await backend.openProjectChat(options);
         setPendingConversationRecovery(null);
         applySession(info, { clearDraft: Boolean(options.newThread) });
+        splitVisibleRef.current = false;
+        setSplitVisible(false);
+        setSplitStartNewGroup(false);
         showTranscript();
         // Refresh the picker catalogue so the model list and key status match
         // the project we actually opened instead of the project we just left.
@@ -2231,6 +2595,7 @@ export default function App() {
     },
     [applySession, loadProviders, showTranscript]
   );
+  openProjectChatRef.current = onOpenProjectChat;
 
   async function chooseConversationProvider(providerId: string) {
     const pending = pendingConversationRecovery;
@@ -2245,7 +2610,6 @@ export default function App() {
         providerId,
         copyThread: pending.recovery.kind === "owner_unavailable",
       });
-      const provider = pending.recovery.providers.find((item) => item.id === providerId);
       setPendingConversationRecovery(null);
       applySession(info);
       showTranscript();
@@ -2254,21 +2618,6 @@ export default function App() {
       );
       setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
-      toast.add({
-        type: "success",
-        title:
-          pending.recovery.kind === "owner_unavailable"
-            ? "Copy opened"
-            : pending.recovery.kind === "new_chat_unavailable"
-              ? "Chat opened"
-              : "Provider saved",
-        description:
-          pending.recovery.kind === "owner_unavailable"
-            ? `Opened a copy with ${provider?.label ?? providerId}. The original chat was kept.`
-            : pending.recovery.kind === "new_chat_unavailable"
-              ? `Opened a new chat with ${provider?.label ?? providerId}.`
-              : `This chat now uses ${provider?.label ?? providerId}.`,
-      });
     } catch (err) {
       const recovery = conversationRecovery(err);
       if (recovery) {
@@ -2301,7 +2650,7 @@ export default function App() {
       return;
     }
 
-    if (pending.recovery.kind !== "unknown_owner" && pending.recovery.configured) {
+    if (!configureOpensProjectFile(pending)) {
       // The provider is present in the project but no longer ready, which is
       // the API-key-deleted case. Open the provider sheet so the user can
       // replace the key or explicitly choose another provider; project config
@@ -2312,18 +2661,10 @@ export default function App() {
     }
 
     try {
+      // The dialog already said what to do in the file; the opened editor is
+      // the confirmation.
       await backend.openProjectConfig(pending.root);
       setPendingConversationRecovery(null);
-      toast.add({
-        type: "success",
-        title: "Project configuration opened",
-        description:
-          pending.recovery.kind === "owner_unavailable"
-            ? `Add ${pending.recovery.providerLabel} to this project's zest.toml, then open the chat again.`
-            : pending.recovery.kind === "new_chat_unavailable"
-              ? `Configure ${pending.recovery.providerLabel} or another provider in this project's zest.toml, then open the chat again.`
-              : "Add a provider to this project's zest.toml, then open the chat again.",
-      });
     } catch (err) {
       toast.add({
         type: "error",
@@ -2383,6 +2724,14 @@ export default function App() {
       try {
         const prepared: PreparedAttachment[] = [];
         for (const file of files) {
+          if (file.size > MAX_IMAGE_BYTES) {
+            toast.add({
+              type: "error",
+              title: "Could not paste image",
+              description: `Image is too large (max ${MAX_IMAGE_BYTES / (1024 * 1024)} MB).`,
+            });
+            continue;
+          }
           const dataUrl = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () =>
@@ -2446,10 +2795,11 @@ export default function App() {
   }, [enterChat, loadProviders]);
 
   const onSend = useCallback(
-    async (textOverride?: string) => {
-      const directAnswer = textOverride !== undefined;
-      const text = (textOverride ?? draftRef.current).trim();
-      const pending = directAnswer ? [] : attachmentsRef.current;
+    async (request?: SendTurnRequest) => {
+      const origin = request?.origin ?? "composer";
+      const keepComposer = !sendOwnsComposer(origin);
+      const text = (request?.text ?? draftRef.current).trim();
+      const pending = keepComposer ? [] : attachmentsRef.current;
       const hasOk = pending.some(
         (a) =>
           a.status === "done" &&
@@ -2468,6 +2818,14 @@ export default function App() {
         (sendingRef.current ||
           (threadQueuesRef.current[queueThreadId]?.length ?? 0) > 0);
 
+      if (!keepComposer) {
+        setDraft("");
+        setAttachments([]);
+        if (queueThreadId) {
+          saveDraft(queueThreadId, "");
+        }
+      }
+
       if (shouldQueue && queueThreadId) {
         try {
           await backend.sendMessage(
@@ -2483,12 +2841,12 @@ export default function App() {
             })),
             "followup"
           );
-          if (!directAnswer) {
-            setDraft("");
-            setAttachments([]);
-            saveDraft(queueThreadId, "");
-          }
         } catch (error) {
+          if (!keepComposer) {
+            setDraft(text);
+            setAttachments(pending);
+            saveDraft(queueThreadId, text);
+          }
           toast.add({
             type: "error",
             title: "Could not queue message",
@@ -2498,15 +2856,7 @@ export default function App() {
         return;
       }
 
-      if (!directAnswer) {
-        setDraft("");
-        setAttachments([]);
-        const threadId = threadIdRef.current;
-        if (threadId) {
-          saveDraft(threadId, "");
-        }
-      }
-      await submitTurn(text, pending, { restoreDraftOnFailure: !directAnswer });
+      await submitTurn(text, pending, { restoreDraftOnFailure: !keepComposer });
     },
     [submitTurn]
   );
@@ -2560,46 +2910,56 @@ export default function App() {
     }
   }, []);
 
+  const updateInteractionMessages = useCallback((threadId: string, update: (state: ChatUiState) => ChatMessage[]) => {
+    const current = chatStatesRef.current.get(threadId);
+    if (!current) return;
+    const next = update(current);
+    if (next === current.messages) return;
+    chatStatesRef.current.set(threadId, { ...current, messages: next });
+    if (threadIdRef.current === threadId) {
+      messagesRef.current = next;
+      setMessages(next);
+    }
+    if (splitVisibleRef.current) publishSplit((revision) => revision + 1);
+  }, []);
+
   const onResolveApproval = useCallback(
-    async (approvalId: string, decision: ApprovalChoice) => {
+    async (approvalId: string, decision: ApprovalChoice, targetThreadId?: string) => {
       const resolving = resolvingApprovalIdsRef.current;
       if (resolving.has(approvalId)) return;
 
+      const threadId = targetThreadId ?? threadIdRef.current;
+      if (!threadId) return;
       const allow = decision !== "deny";
-      const snapshot = findApprovalTool(messagesRef.current, approvalId);
+      const state = chatStatesRef.current.get(threadId);
+      const snapshot = findApprovalTool(state?.messages ?? [], approvalId);
       if (!snapshot || snapshot.status !== "awaiting_approval") return;
       resolving.add(approvalId);
-      const threadId = threadIdRef.current;
-      if (allow) {
-        const next = markApprovalRunning(messagesRef.current, approvalId);
-        messagesRef.current = next;
-        setMessages(next);
-      }
+
+      // Every decision consumes the waiter before its tool result arrives.
+      updateInteractionMessages(threadId, (current) => markApprovalRunning(current.messages, approvalId));
       try {
         await backend.resolveApproval(
           approvalId,
           decision,
-          threadId ?? undefined
+          threadId
         );
       } catch (err) {
         // A dropped waiter is permanent: putting the card back would leave a
         // button that can only fail, and because the approval queue is ordered
         // by transcript position it would keep shadowing the live card behind
         // it. Retire it instead so the queue advances.
-        if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) {
-          const retired = retireApprovalCard(
-            messagesRef.current,
-            approvalId,
-            snapshot.id
-          );
-          messagesRef.current = retired;
-          setMessages(retired);
-          return;
-        } else if (allow && snapshot) {
-          const restored = restoreApprovalCard(messagesRef.current, snapshot);
-          messagesRef.current = restored;
-          setMessages(restored);
-        }
+        const dropped = isDroppedApprovalError(rawInvokeError(err).toLowerCase());
+        updateInteractionMessages(threadId, (current) => {
+          if (current.currentTurnId !== state?.currentTurnId) return current.messages;
+          const tool = current.messages.flatMap((message) => message.role === "assistant" ? message.tools : [])
+            .find((candidate) => candidate.id === snapshot.id);
+          if (tool?.status !== "running" || tool.approvalId) return current.messages;
+          return dropped
+            ? retireApprovalCard(current.messages, approvalId, snapshot.id)
+            : restoreApprovalCard(current.messages, snapshot);
+        });
+        if (dropped) return;
         toast.add({
           type: "error",
           title: allow ? "Could not allow tool" : "Could not deny tool",
@@ -2610,25 +2970,41 @@ export default function App() {
         resolving.delete(approvalId);
       }
     },
-    []
+    [updateInteractionMessages]
   );
 
   const onResolveQuestion = useCallback(
-    async (questionId: string, answer: string) => {
+    async (questionId: string, answer: string, targetThreadId?: string) => {
       const resolving = resolvingQuestionIdsRef.current;
       if (resolving.has(questionId)) return;
-      const isPending = messagesRef.current.some(
+      const threadId = targetThreadId ?? threadIdRef.current;
+      if (!threadId) return;
+      const state = chatStatesRef.current.get(threadId);
+      const snapshot = state?.messages.find(
         (message) =>
           message.role === "assistant" &&
           message.question?.questionId === questionId
       );
-      if (!isPending) return;
+      if (snapshot?.role !== "assistant" || !snapshot.question) return;
+      const question = snapshot.question;
       resolving.add(questionId);
-      const threadId = threadIdRef.current;
+      updateInteractionMessages(threadId, (current) => current.messages.map((message) =>
+        message.role === "assistant" && message.question?.questionId === questionId
+          ? { ...message, question: undefined }
+          : message
+      ));
       try {
-        await backend.resolveQuestion(questionId, answer, threadId ?? undefined);
+        await backend.resolveQuestion(questionId, answer, threadId);
       } catch (err) {
         if (isDroppedApprovalError(rawInvokeError(err).toLowerCase())) return;
+        updateInteractionMessages(threadId, (current) => {
+          if (current.currentTurnId !== state?.currentTurnId) return current.messages;
+          return current.messages.map((message) => {
+            if (message.id !== snapshot.id || message.role !== "assistant" || message.question || !message.streaming) return message;
+            const tool = message.tools.find((candidate) => candidate.id === question.toolCallId);
+            return tool && tool.status !== "running" ? message : { ...message, question };
+          });
+        });
         toast.add({
           type: "error",
           title: "Could not send answer",
@@ -2639,7 +3015,7 @@ export default function App() {
         resolving.delete(questionId);
       }
     },
-    []
+    [updateInteractionMessages]
   );
 
   const onApprovalModeChange = useCallback(async (next: ApprovalMode) => {
@@ -2778,10 +3154,14 @@ export default function App() {
 
   const onCancelDelegation = useCallback(
     async (jobId: string) => {
+      // Recorded before the call: the `cancelled` event can beat its reply.
+      const ownAction = `cancelled:${jobId}`;
+      ownDelegationActionsRef.current.add(ownAction);
       try {
         const job = await backend.cancelDelegationJob(jobId);
         replaceDelegationJob(job);
       } catch (err) {
+        ownDelegationActionsRef.current.delete(ownAction);
         toast.add({
           type: "error",
           title: "Could not cancel feature card",
@@ -2812,9 +3192,16 @@ export default function App() {
 
   const onApplyDelegation = useCallback(
     async (jobId: string) => {
+      // This click confirms itself below, so its `applied` event stays quiet.
+      // Recorded before the call: the event can beat the reply.
+      const ownAction = `applied:${jobId}`;
+      ownDelegationActionsRef.current.add(ownAction);
       try {
         const job = await backend.applyDelegationJob(jobId);
         replaceDelegationJob(job);
+        if (job.status !== "accepted") {
+          ownDelegationActionsRef.current.delete(ownAction);
+        }
         if (job.status === "accepted") {
           toast.add({
             type: "success",
@@ -2830,6 +3217,7 @@ export default function App() {
           });
         }
       } catch (err) {
+        ownDelegationActionsRef.current.delete(ownAction);
         toast.add({
           type: "error",
           title: "Could not apply accepted changes",
@@ -2842,10 +3230,17 @@ export default function App() {
   );
 
   const authMode = screen !== "chat";
+  // Customize and the other shell panels stay inside the chat screen, but
+  // replace the transcript. Give those panels the full-page wallpaper layer;
+  // the transcript owns its clipped layer when no shell panel is open.
+  const showGlobalWallpaper =
+    wallpaper?.status === "ready" &&
+    Boolean(wallpaper.imageDataUrl) &&
+    (authMode || shellPanel !== null);
 
   return (
     <>
-      {wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+      {showGlobalWallpaper ? (
         <div
           aria-hidden
           className="zest-wallpaper"
@@ -2904,12 +3299,172 @@ export default function App() {
 
         {screen === "chat" && session ? (
           <Suspense fallback={<ChatSkeleton />}>
-          <ChatScreen
+          {splitVisible ? <SplitWorkspace
+            initial={session}
+            initialDraft={draftRef.current}
+            states={chatStatesRef.current}
+            snapshot={splitSnapshot}
+            startNewGroup={splitStartNewGroup}
+            onStateChange={rememberSplitSnapshot}
+            onResolveApproval={onResolveApproval}
+            onResolveQuestion={onResolveQuestion}
+            threadActivity={threadActivity}
+            providers={providers}
+            chatListRevision={chatListRevision}
+            deletedThreadId={deletedThreadId}
+            renderSidebar={(model) => (
+              <ChatHistorySidebar
+                onOpenPullRequests={() => navigateTo({ kind: "pullRequests" })}
+                pullRequestsActive={shellPanel?.kind === "pullRequests"}
+                open={model.open}
+                activeThreadId={model.activeThreadId}
+                activeProjectPath={model.activeProjectPath}
+                activeProviderId={model.activeProviderId}
+                sending={Boolean(chatStatesRef.current.get(model.activeThreadId)?.sending)}
+                threadActivity={threadActivity}
+                onOpenChange={model.onOpenChange}
+                onNewChat={onNewChat}
+                onOpenProjectChat={onOpenProjectChat}
+                onForkThread={onForkThread}
+                onDeleteThread={onDeleteThread}
+                onOpenFolder={onOpenFolder}
+                onOpenCustomize={() => navigateTo({ kind: "customize", tab: "mcp" })}
+                customizeActive={shellPanel?.kind === "customize"}
+                profileActive={shellPanel?.kind === "profile"}
+                profile={profile}
+                providerLabel={model.activeProviderId}
+                onOpenProfile={() => navigateTo({ kind: "profile" })}
+                providers={providers}
+                quotaRefreshKey={model.activeThreadId}
+                onSearch={model.onSearch}
+                onRevealTranscript={showTranscript}
+                canNavigateBack={navigation.back.length > 0}
+                canNavigateForward={navigation.forward.length > 0}
+                onNavigateBack={navigateBack}
+                onNavigateForward={navigateForward}
+                splitGroups={model.groups}
+                activeSplitGroupId={model.activeGroupId}
+                onOpenSplitGroup={model.onOpenSplitGroup}
+                onFocusSplitPane={model.onFocusSplitPane}
+              />
+            )}
+            onOpen={(target, fork = false) => splitActions.current(async () => {
+              let info = await backend.openProjectChat(target);
+              if (fork) info = await backend.forkThread();
+              applySession(info);
+              return info;
+            })}
+            onUpdateOptions={(targetSession, target, options) => splitActions.current(async () => {
+              let info = sessionRef.current;
+              if (!info || info.threadId !== targetSession.threadId) {
+                info = await backend.openProjectChat({
+                  root: target.root,
+                  threadId: target.newThread ? undefined : target.threadId ?? targetSession.threadId,
+                  newThread: target.newThread,
+                  providerId: target.providerId ?? targetSession.provider,
+                });
+              }
+
+              if (options.providerId && options.providerId !== info.provider) {
+                info = await backend.switchSessionProvider(options.providerId, options.model);
+              } else if (options.reset) {
+                const meta = await backend.resetSessionOptions();
+                info = { ...info, ...meta };
+              } else {
+                const meta = await backend.updateSessionOptions({
+                  model: options.model,
+                  effort: options.effort,
+                });
+                info = { ...info, ...meta };
+              }
+              applySession(info);
+              return info;
+            })}
+            onSend={(targetSession, target, text) => splitActions.current(async () => {
+              const current = sessionRef.current;
+              let info: SessionInfo;
+              if (current?.threadId === targetSession.threadId) {
+                // New split chats are intentionally not persisted until their
+                // first message. Reuse the live draft instead of asking Rust
+                // to load a history row that does not exist yet.
+                info = current;
+              } else if (target.newThread) {
+                // An untouched draft in the other pane has no durable ID to
+                // reopen. Create its replacement immediately before sending;
+                // the returned session becomes durable with this turn.
+                info = await backend.openProjectChat({
+                  root: target.root,
+                  newThread: true,
+                  providerId: target.providerId ?? targetSession.provider,
+                });
+              } else {
+                info = await backend.openProjectChat({
+                  root: target.root,
+                  threadId: targetSession.threadId,
+                });
+                if (info.threadId !== targetSession.threadId) throw new Error("The chat changed. Open it again before sending.");
+              }
+              applySession(info);
+              // The command lasts for the entire turn. Release the activation lock
+              // once the user event confirms that the worker owns this chat.
+              await new Promise<void>((resolve, reject) => {
+                let acknowledged = false;
+                splitSendAcks.current.set(info.threadId, () => {
+                  acknowledged = true;
+                  splitSendAcks.current.delete(info.threadId);
+                  resolve();
+                });
+                void backend.sendMessage(text).then(() => {
+                  splitSendAcks.current.delete(info.threadId);
+                  resolve();
+                }, (error: unknown) => {
+                  splitSendAcks.current.delete(info.threadId);
+                  if (acknowledged) toast.add({ type: "error", title: "Chat response failed", description: formatInvokeError(error) });
+                  reject(error);
+                });
+              });
+              return info;
+            })}
+            onClose={(targetSession, nextDraft, target) => splitActions.current(async () => {
+              const current = sessionRef.current;
+              let activeThreadId = targetSession.threadId;
+              if (current?.threadId === targetSession.threadId) {
+                // The active session may be a never-saved split draft. It is
+                // already the session we want to reveal, so do not reopen it.
+                applySession(current);
+              } else if (target.newThread) {
+                const info = await backend.openProjectChat({
+                  root: target.root,
+                  newThread: true,
+                  providerId: target.providerId ?? targetSession.provider,
+                });
+                activeThreadId = info.threadId;
+                applySession(info, { clearDraft: true });
+              } else {
+                const opened = await onOpenProjectChat({ root: target.root, threadId: targetSession.threadId });
+                if (!opened) throw new Error("Reconnect this chat's provider before continuing in single view.");
+              }
+              setDraft(nextDraft);
+              draftRef.current = nextDraft;
+              saveDraft(activeThreadId, nextDraft);
+              splitVisibleRef.current = false;
+              setSplitVisible(false);
+              setSplitStartNewGroup(false);
+            })}
+          /> : <ChatScreen
+            onOpenSplit={() => {
+              if (compacting) return;
+              setSplitStartNewGroup(true);
+              splitVisibleRef.current = true;
+              setSplitVisible(true);
+            }}
+            wallpaper={wallpaper}
             session={session}
             messages={messages}
             hasOlderMessages={hasOlderMessages}
             hasNewerMessages={hasNewerMessages}
             hiddenUserTurns={hiddenUserTurns}
+            transcriptNotices={transcriptNotices[session.threadId]}
             loadingOlder={loadingOlder}
             loadingNewer={loadingNewer}
             onLoadOlder={onLoadOlder}
@@ -2983,6 +3538,7 @@ export default function App() {
             onApprovalModeChange={onApprovalModeChange}
             onBuildPlan={onBuildPlan}
             onOpenProfile={() => navigateTo({ kind: "profile" })}
+            onOpenPullRequests={() => navigateTo({ kind: "pullRequests" })}
             onOpenUsage={() => navigateTo({ kind: "usage" })}
             onOpenCustomize={() =>
               navigateTo({
@@ -3011,7 +3567,14 @@ export default function App() {
             settingsRequest={settingsRequest}
             sessionWarning={sessionWarning}
             onDismissWarning={() => setSessionWarning(null)}
-          />
+            splitGroups={splitSidebarGroups(
+              splitSnapshot,
+              splitVisible ? splitSnapshot?.activeGroupId ?? null : null
+            )}
+            activeSplitGroupId={splitVisible ? splitSnapshot?.activeGroupId ?? null : null}
+            onOpenSplitGroup={(groupId) => activateSplitLocation(groupId)}
+            onFocusSplitPane={(groupId, paneId) => activateSplitLocation(groupId, paneId)}
+          />}
           </Suspense>
         ) : null}
 
@@ -3024,6 +3587,7 @@ export default function App() {
           if (!conversationRecoveryBusy) setPendingConversationRecovery(null);
         }}
         onConfigure={() => void configureConversationProvider()}
+        configureOpensProjectFile={configureOpensProjectFile(pendingConversationRecovery)}
         onChooseProvider={(providerId) => void chooseConversationProvider(providerId)}
       />
     </Toaster>

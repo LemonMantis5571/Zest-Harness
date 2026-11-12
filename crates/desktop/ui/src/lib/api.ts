@@ -1,7 +1,31 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { HtmlDocument, PreparedHtmlView } from "./htmlArtifacts";
+
+export function prepareHtmlView(document: HtmlDocument): Promise<PreparedHtmlView> {
+  return invoke("prepare_html_view", { document });
+}
+
+export function releaseHtmlView(token: string): Promise<void> {
+  return invoke("release_html_view", { token });
+}
+
+export function saveHtmlDocument(document: HtmlDocument): Promise<boolean> {
+  return invoke("save_html_document", { document });
+}
+
+export const startBtw = (sessionId: string): Promise<string> => invoke("start_btw", { sessionId });
+export const closeBtw = (id: string): Promise<void> => invoke("close_btw", { id });
+export const cancelBtw = (id: string): Promise<void> => invoke("cancel_btw", { id });
+export function sendBtw(id: string, text: string, onDelta: (text: string) => void): Promise<string> {
+  const channel = new Channel<string>();
+  channel.onmessage = onDelta;
+  return invoke("send_btw", { id, text, onDelta: channel });
+}
 
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
   ApprovalChoice,
   ApprovalMode,
   CommandView,
@@ -48,6 +72,7 @@ import type {
   WorkspacePickResult,
   WorkspaceChange,
   WorkspaceReview,
+  WorktreeChatStatus,
 } from "./types";
 
 export function listProviders() {
@@ -68,6 +93,19 @@ export function setExternalAgentMcp(id: string, enabled: boolean) {
 
 export function setExternalAgentModel(id: string, model: string | null) {
   return invoke<void>("set_external_agent_model", { id, model });
+}
+
+export function advisorSettings() {
+  return invoke<AdvisorSettings>("advisor_settings");
+}
+
+export function setAdvisor(choice: AdvisorChoice | null) {
+  return invoke<AdvisorSettings>("set_advisor", {
+    provider: choice?.provider ?? null,
+    model: choice?.model ?? null,
+    maxUses: choice?.maxUses ?? null,
+    autoReview: choice?.autoReview ?? null,
+  });
 }
 
 export function checkExternalAgent(id: string) {
@@ -139,6 +177,10 @@ export function configureAnthropicProvider(input: {
 
 export function configureClaudeCodeProvider(input: { id: string; model: string }) {
   return invoke<void>("configure_claude_code_provider", input);
+}
+
+export function configureCursorProvider(input: { id: string; model: string }) {
+  return invoke<void>("configure_cursor_provider", input);
 }
 
 export function configureCodexCliProvider(input: { id: string; model: string }) {
@@ -290,6 +332,15 @@ export function forgetWorkspace(projectPath: string) {
 
 export function listChatProjects() {
   return invoke<ProjectChats[]>("list_chat_projects");
+}
+
+export function createWorktreeChat(projectPath: string) {
+  return invoke<string>("create_worktree_chat", { projectPath });
+}
+
+/** `null` when the path is not a worktree chat or Git cannot read it. */
+export function worktreeChatStatus(projectPath: string) {
+  return invoke<WorktreeChatStatus | null>("worktree_chat_status", { projectPath });
 }
 
 export function searchChats(query: string) {

@@ -3,15 +3,18 @@
 //! Deliberately headless — no UI, no terminal assumptions. The CLI crate is one
 //! front-end; a desktop app would be another.
 
+pub mod advisor;
 pub mod agent;
 #[cfg(test)]
 mod alpha_prove;
 pub mod anthropic;
 pub mod auth;
 pub mod bounded;
+pub mod btw;
 pub mod cancel;
 pub mod chat_persistence;
 pub mod codex_oauth;
+pub mod command_receipts;
 pub mod commands;
 pub mod config;
 pub mod config_edit;
@@ -23,6 +26,8 @@ pub mod delegation;
 pub mod error;
 pub mod fsutil;
 pub mod handoff;
+pub mod html;
+pub mod html_preview;
 pub mod inbox;
 pub mod jobs;
 pub mod mcp;
@@ -46,6 +51,7 @@ pub mod tools;
 pub mod transcripts;
 pub mod usage;
 pub mod workspace_changes;
+pub mod worktree_chat;
 
 pub use agent::{Agent, CompactionOutcome, TurnUsageSummary};
 pub use anthropic::client::AnthropicClient;
@@ -55,9 +61,9 @@ pub use anthropic::types::{
 };
 pub use auth::{
     can_start_login, codex_cli_on_path, detect_all, detect_claude_code, detect_codex_cli,
-    detect_codex_oauth, resolve_claude_code_login, resolve_codex_cli_login, resolve_login,
-    start_claude_code_login, start_codex_cli_login, start_codex_oauth_login, start_login,
-    AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
+    detect_codex_oauth, detect_cursor_cli, resolve_claude_code_login, resolve_codex_cli_login,
+    resolve_login, start_claude_code_login, start_codex_cli_login, start_codex_oauth_login,
+    start_login, AuthStatus, LoginPoll, LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -71,13 +77,13 @@ pub use commands::{
     parse_command, Expansion, McpSlash, ParsedCommand, SlashCommand, SlashKind,
 };
 pub use config::{
-    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
+    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config, CursorMode,
     ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, McpServerConfig, ProviderConfig,
     Target, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use delegated_worker::{
     run_acceptance_checks, run_provider_reviewer, run_provider_worker, NativeReviewerResult,
-    NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
+    NativeTaskUsageContext, NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
 };
 pub use delegation::{
     apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
@@ -127,11 +133,11 @@ pub use provider::driver::{
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue, context_window_for_model, descriptor_for_picker_id, descriptor_from_config,
-    normalize_effort, probe, thread_provider_handoff, Completion, EffortPolicy, ModelSpec,
-    Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
+    normalize_effort, probe, thread_provider_handoff, CliRequirement, Completion, EffortPolicy,
+    ModelSpec, Provider, ProviderCommandRequest, ProviderDescriptor, ProviderFileChangeRequest,
     ProviderInteractionHost, ProviderQuestionRequest, ProviderSessionRef, RateLimitSnapshot,
     ResumeHandle, ResumeSupport, StreamEvent, SystemPrompt, ThreadProviderHandoff, TurnRequest,
-    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    CODEX_KNOWN_MODELS, FALLBACK_CONTEXT_WINDOW, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,
@@ -185,7 +191,9 @@ pub use usage::{
     CostQuality, CostSource, DayCostPoint, ExternalCost, ExternalUsageReport,
     ExternalWorkerUsageView, HeadroomView, Ledger, MeasuredUsage, ModelCostRow, PromptCacheShares,
     ProviderCostRow, ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus,
-    TokenCounts, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
+    RequestSourceEstimates, TaskRequestUsage, TaskToolUsage, TaskUsageRecord, TokenCounts,
+    UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, MAX_TASK_USAGE_RECORDS,
+    TASK_USAGE_RETENTION_SECS,
 };
 pub use workspace_changes::{
     inspect_merge_base, snapshot_from_unified_diff, FileChangeSummary, WorkspaceChangeSet,

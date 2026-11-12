@@ -570,18 +570,10 @@ async fn pump_output<R>(
     }
 }
 
-#[cfg(windows)]
+// Background jobs start the same way as foreground commands, including the
+// Windows quoting fix; see `tools::bash::shell_command`.
 fn shell_command(command: &str) -> Command {
-    let mut cmd = Command::new("cmd");
-    cmd.arg("/C").arg(command);
-    cmd
-}
-
-#[cfg(not(windows))]
-fn shell_command(command: &str) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command);
-    cmd
+    crate::tools::bash::shell_command(command)
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ import { rawInvokeError } from "@/lib/invokeErrors";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
+import { useOptionNavigation } from "@/lib/useOptionNavigation";
 import type { ProviderRow } from "@/lib/types";
 
 type Props = {
@@ -44,7 +45,7 @@ const PARENT_CLI_DEFAULTS: Record<
     title: "Use Claude Code subscription",
     body: "Zest will use your Claude Code CLI session as the parent agent, with no delegated worker involved.",
     label: "Enable Claude Code",
-    model: "sonnet",
+    model: "claude-sonnet-5-5",
     configure: (id, model) => getBackend().configureClaudeCodeProvider({ id, model }),
   },
   codex: {
@@ -86,6 +87,8 @@ export function ProviderPicker({
   const [configureParentError, setConfigureParentError] = useState<string | null>(null);
   const [cliAvailable, setCliAvailable] = useState<boolean | null>(null);
   const [confirmChatgpt, setConfirmChatgpt] = useState(false);
+  // Unconfigured rows remain selectable so users can reach their Connect flow.
+  const navigation = useOptionNavigation(providers.map((provider) => provider.id), selectedId ?? "", continuing || connecting);
 
   useEffect(() => {
     let cancelled = false;
@@ -221,28 +224,17 @@ export function ProviderPicker({
               <button
                 type="button"
                 role="option"
+                {...navigation.optionProps(p.id)}
+                disabled={continuing || connecting}
                 aria-selected={selectedRow}
                 onClick={() => onSelect(p.id)}
                 className={cn(
-                  "grid w-full cursor-pointer grid-cols-[10px_1fr_auto] items-center gap-3 px-3.5 py-3 text-left font-inherit outline-none transition-[background-color,color] duration-150",
+                  "grid w-full cursor-pointer grid-cols-[1fr_auto] items-center gap-3 px-3.5 py-3 text-left font-inherit outline-none transition-[background-color,color] duration-150",
                   "border-b border-border/50 last:border-b-0",
                   "hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
                   selectedRow && "bg-accent/70"
                 )}
               >
-                <span
-                  className={cn(
-                    "justify-self-center size-2 rounded-full transition-colors duration-150",
-                    usable && p.statusKind === "ready" && "bg-primary",
-                    verifyFailed && "bg-amber-400",
-                    usable && p.statusKind === "unknown" && "bg-[#c4c4c4]",
-                    !verifyFailed &&
-                      (p.statusKind === "not_logged_in" ||
-                        p.statusKind === "unconfigured") &&
-                      "bg-transparent shadow-[inset_0_0_0_1.5px_var(--muted-foreground)]"
-                  )}
-                  aria-hidden
-                />
                 <span className="min-w-0">
                   <div className="flex items-center gap-2 text-[13px] font-medium tracking-[-0.1px]">
                     {/* Decorative — the name it identifies is right beside it. */}

@@ -23,10 +23,20 @@ model = "gpt-5.6-sol"
 # Must stay above the `[tools.bash]` header below: TOML would otherwise read a
 # bare key here as part of that table.
 max_result_bytes = 32768
+# Offer MCP tools on demand (`mcp_discover_tools` / `mcp_call_tool`) instead of
+# sending every configured server's schemas with each request.
+# mcp_discovery = true
 
 [tools.bash]
 # Read-only commands can run without an extra approval; other commands ask.
 enabled = true
+
+# Zest sends no telemetry. Per-task traces for `zest usage --tasks` (provider
+# rounds, token counts, latency, tool names and outcomes; never prompts, tool
+# bodies or paths) are kept in the local usage.json for 30 days, and only when
+# turned on here.
+# [usage]
+# task_traces = true
 
 # The `gateway` kind was removed with the bundled CLIProxyAPI sidecar. An
 # existing `kind = "gateway"` entry still loads: `codex` and `claude` are
@@ -46,20 +56,35 @@ enabled = true
 # Claude Code can also be the parent provider for the whole Zest session. Run
 # `claude login`, then uncomment this block and set `default.provider = "claude"`.
 # It uses the Claude Code subscription and does not delegate through `[agents]`.
+#
+# Zest narrows Claude Code to the tools that make sense inside a Zest turn, so
+# it cannot schedule cron jobs, open its own git worktrees, or notify anything
+# outside this window. Its own subagents stay available: they run in the same
+# session, the same tool scope, and behind the same approval card.
+#
+# permission_mode decides who approves a tool call. Under `auto`, writing a
+# file raises Zest's approval card and reading one does not.
+#   auto                Routine work runs; the rest reaches the card. Default.
+#   manual              Stricter, so more reaches the card.
+#   plan                Read-only planning.
+#   accept_edits        Apply edits without asking; commands still ask.
+#   bypass_permissions  Never ask, and never tell Zest. A throwaway tree only.
 # [providers.claude]
 # kind = "claude_code"
 # command = "claude"
 # model = "sonnet"
 # models = ["sonnet", "opus"]
 # allow_mcp = false
-# permission_mode = "default"
+# permission_mode = "auto"
+# Optional: take something else away on top of Zest's scope.
+# disallowed_tools = ["Bash"]
 # timeout_secs = 900
 #
 # [providers.deepseek]
 # kind = "openai_compatible"
 # base_url = "https://api.deepseek.com"
-# model = "deepseek-v4-flash"
-# models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# model = "deepseek-flash"
+# models = ["deepseek-flash", "deepseek-v4-pro"]
 # credential = "deepseek"
 # api_key_env = "DEEPSEEK_API_KEY"
 #
@@ -68,6 +93,26 @@ enabled = true
 # base_url = "https://api.openai.com/v1"
 # model = "gpt-5"
 # credential = "openai"
+
+# Optional advisor: a stronger model the chat model can consult mid-turn with
+# the `consult_advisor` tool, before committing to an approach, when an error
+# keeps coming back, or before declaring a task done. It sees the conversation
+# as quoted text and cannot run tools. `provider` must be one Zest drives (an
+# API key, an OpenAI-compatible endpoint, or ChatGPT sign-in), not a CLI.
+# Chats on a CLI provider do not get the tool.
+#
+# When the advisor is on a different provider than the chat, the first
+# consultation asks before the conversation is sent there; "Allow for session"
+# covers the rest of the session. Advisor spend is recorded under its own model.
+#
+# [advisor]
+# provider = "anthropic"
+# model = "claude-opus-5-5"   # the provider's default model when omitted
+# effort = "high"
+# max_uses = 3                # per user request
+# max_tokens = 4096
+# timeout_secs = 120
+# auto_review = true         # Zest also asks before finishing an edit and after repeated failures
 
 # Zest's own MCP servers are optional, and are reached by the chat provider
 # itself. Add them from Customize > MCPs, or here.
@@ -114,6 +159,9 @@ timeout_secs = 120
 #
 # `mode = "headless"` means this worker is an external CLI. It is not
 # `zest serve` and not `zest run --jsonl`.
+#
+# An ACP agent is trusted inside its worktree and never asked on the way, so
+# `workspace = "isolated"` is required: the diff is the review gate.
 #
 # [agents.gemini]
 # mode = "acp"

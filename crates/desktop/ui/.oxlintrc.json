@@ -5,6 +5,10 @@
     {
       "name": "zest",
       "specifier": "./.oxlint-plugins/zest-boundaries.mjs"
+    },
+    {
+      "name": "anti-slop",
+      "specifier": "./.oxlint-plugins/anti-slop.mjs"
     }
   ],
   "rules": {
@@ -18,6 +22,13 @@
     "zest/no-secret-persistence-or-sink": "error",
     "zest/require-safe-html-provenance": "error",
     "zest/no-unowned-background-rejection": "error",
-    "zest/no-object-url-leak": "error"
+    "zest/no-object-url-leak": "error",
+    "anti-slop/no-array-filter-map": "error",
+    "anti-slop/no-reduce-accumulator-copy": "error",
+    "anti-slop/no-chained-type-assertions": "error",
+    "anti-slop/no-conditional-empty-object-spread": "error",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-widen-then-assert": "error",
+    "oxc/no-accumulating-spread": "error"
   }
 }

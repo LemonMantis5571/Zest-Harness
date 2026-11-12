@@ -232,7 +232,7 @@ fn prepare_project(project: &Path, init: bool) -> anyhow::Result<PathBuf> {
                 project.display()
             );
         }
-        std::fs::create_dir_all(project)
+        zest_core::fsutil::create_dir_all_durable(project)
             .with_context(|| format!("could not create project `{}`", project.display()))?;
     }
     let meta = std::fs::metadata(project)
@@ -330,5 +330,33 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = ctrl_c.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_prepares_a_new_project_with_missing_ancestors() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("new-parent").join("project");
+        let root = prepare_project(&project, true).unwrap();
+        assert_eq!(root, std::fs::canonicalize(&project).unwrap());
+        assert!(git_ok(&root, &["rev-parse", "--verify", "HEAD"]));
+        let receipt = root
+            .join(".zest")
+            .join("command-receipts")
+            .join("fixture.json");
+        zest_core::fsutil::atomic_write_json_durable(
+            &receipt,
+            &serde_json::json!("pending"),
+            &root,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(receipt).unwrap()).unwrap(),
+            serde_json::json!("pending")
+        );
     }
 }

@@ -1,90 +1,74 @@
 import { useState } from "react";
-import { ChevronRightIcon } from "lucide-react";
+import { ListChecksIcon } from "lucide-react";
 
-import { ToolCallRow } from "@/components/ToolCallRow";
+import { ToolLine, toolTitleText } from "@/components/ToolCallRow";
+import { TraceHoverTitle } from "@/components/TraceHoverTitle";
+import {
+  Trace,
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceIcon,
+  TraceLine,
+} from "@/components/ui/trace";
 import { countDiffLines, type ToolRunSummary } from "@/lib/toolRuns";
-import type { ApprovalChoice, ToolPart } from "@/lib/types";
+import type { ToolPart } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Props = {
   tools: ToolPart[];
   summary: ToolRunSummary;
-  onResolveApproval: (
-    approvalId: string,
-    decision: ApprovalChoice
-  ) => Promise<void>;
   onOpenDiff?: (path: string, diff: string) => void;
 };
 
 /**
- * One line standing in for a stretch of tool calls.
+ * A stretch of tool calls as one Chain of Thought line.
  *
- * Stays folded until the user opens it. New calls join the same group, so
- * opening it later still shows everything.
+ * The line says what the run did ("Ran 3 commands, edited 2 files") and opens
+ * into the calls. It opens on its own while a call runs and folds when the run
+ * settles; once the user opens or closes it, their choice wins.
  */
-export function ToolRunGroup({
-  tools,
-  summary,
-  onResolveApproval,
-  onOpenDiff,
-}: Props) {
+export function ToolRunGroup({ tools, summary, onOpenDiff }: Props) {
+  const [open, setOpen] = useState<boolean>();
+  const running = tools.find((tool) => tool.status === "running");
+  const failed = tools.filter((tool) => tool.status === "error").length;
   const hasChanges = summary.added > 0 || summary.removed > 0;
-  const [open, setOpen] = useState(false);
-
-  if (open) {
-    return (
-      <div className="flex w-full max-w-full flex-col gap-0.5">
-        <button
-          type="button"
-          aria-expanded
-          onClick={() => setOpen(false)}
-          className="group/run-header flex w-fit max-w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-xs text-muted-foreground outline-none transition-colors hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-ring/40"
-        >
-          <ChevronRightIcon className="size-3 shrink-0 rotate-90 text-muted-foreground/60" />
-          <span className="min-w-0 truncate font-medium">{summary.label}</span>
-        </button>
-        <div className="flex flex-col gap-0.5">
-          {tools.map((tool) => (
-            <ToolCallRow
-              key={tool.id}
-              tool={tool}
-              onResolveApproval={onResolveApproval}
-              onOpenDiff={onOpenDiff}
-            />
-          ))}
-        </div>
-        <DiffChips tools={tools} onOpenDiff={onOpenDiff} />
-      </div>
-    );
-  }
+  // While a call runs, the line names it; the run's tally is for afterwards.
+  const title = running
+    ? toolTitleText(running)
+    : failed > 0
+      ? `${summary.label}, ${failed} failed`
+      : summary.label;
 
   return (
-    <button
-      type="button"
-      aria-expanded={false}
-      onClick={() => setOpen(true)}
-      className={cn(
-        "group/run flex w-fit max-w-full items-center gap-1.5 rounded-md px-1 py-1 text-left outline-none transition-colors",
-        "hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
-      )}
-    >
-      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">
-        {summary.label}
-      </span>
-      {hasChanges ? (
-        <span className="shrink-0 font-mono text-[11px]">
-          {summary.added > 0 ? (
-            <span className="text-primary">+{summary.added}</span>
+    <TraceCollapsible open={open ?? Boolean(running)} onOpenChange={setOpen}>
+      <TraceCollapsibleTrigger>
+        <TraceLine status={running ? "running" : failed > 0 ? "error" : undefined}>
+          <TraceIcon>
+            <ListChecksIcon />
+          </TraceIcon>
+          <TraceHoverTitle text={title} />
+          {hasChanges ? (
+            <TraceDescription className="font-mono text-[11px]">
+              {summary.added > 0 ? <span className="text-primary">+{summary.added}</span> : null}
+              {summary.added > 0 && summary.removed > 0 ? " " : null}
+              {summary.removed > 0 ? (
+                <span className="text-destructive">-{summary.removed}</span>
+              ) : null}
+            </TraceDescription>
           ) : null}
-          {summary.added > 0 && summary.removed > 0 ? " " : null}
-          {summary.removed > 0 ? (
-            <span className="text-destructive">-{summary.removed}</span>
-          ) : null}
-        </span>
-      ) : null}
-      <span className="min-w-0 flex-1" />
-      <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/50" />
-    </button>
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent keepMounted className="flex flex-col gap-2">
+        <Trace>
+          {tools.map((tool) => (
+            <ToolLine key={tool.id} tool={tool} onOpenDiff={onOpenDiff} />
+          ))}
+        </Trace>
+        <DiffChips tools={tools} onOpenDiff={onOpenDiff} />
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
   );
 }
 
@@ -112,7 +96,7 @@ function DiffChips({
   if (diffs.length === 0) return null;
 
   return (
-    <div className="mt-1.5 flex max-w-full flex-wrap gap-1.5 border-t border-border/60 px-1 pt-2">
+    <div className="flex max-w-full flex-wrap gap-1.5 border-t border-border/60 pt-2">
       {diffs.map((item) => (
         <button
           key={item.id}

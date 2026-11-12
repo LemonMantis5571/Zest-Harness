@@ -972,6 +972,77 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    /// Opt-in workload measurement; all files live in a disposable repository.
+    #[tokio::test]
+    #[ignore = "creates 100 MiB fixtures and measures repeated Git inspection"]
+    async fn benchmark_repeated_inspection() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::time::Instant;
+
+        for mib in [0, 10, 100] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let git = |args: &[&str]| {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success());
+            };
+            git(&["init", "--quiet"]);
+            std::fs::write(root.join("source.txt"), b"initial\n").unwrap();
+            git(&["add", "--", "source.txt"]);
+            git(&[
+                "-c",
+                "user.name=Zest Benchmark",
+                "-c",
+                "user.email=benchmark@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ]);
+            // Binary content bounds diff construction while still measuring full hashing.
+            if mib > 0 {
+                let mut file = std::fs::File::create(root.join("untracked.bin")).unwrap();
+                let block = vec![0_u8; 1024 * 1024];
+                for _ in 0..mib {
+                    file.write_all(&block).unwrap();
+                }
+            }
+            let cold = Instant::now();
+            inspect(root, None, None).await.unwrap();
+            println!(
+                "inspection mib={mib} cold_ms={:.3}",
+                cold.elapsed().as_secs_f64() * 1000.0
+            );
+            for iteration in 0..5 {
+                let start = Instant::now();
+                inspect(root, None, None).await.unwrap();
+                let unchanged = start.elapsed().as_secs_f64() * 1000.0;
+                if mib > 0 {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(root.join("untracked.bin"))
+                        .unwrap();
+                    file.seek(SeekFrom::Start(1024)).unwrap();
+                    file.write_all(&[iteration + 1]).unwrap();
+                } else {
+                    std::fs::write(root.join("source.txt"), format!("edit {iteration}\n")).unwrap();
+                }
+                let start = Instant::now();
+                inspect(root, None, None).await.unwrap();
+                println!("inspection mib={mib} iteration={iteration} unchanged_ms={unchanged:.3} edited_ms={:.3}", start.elapsed().as_secs_f64() * 1000.0);
+                if mib == 0 {
+                    std::fs::write(root.join("source.txt"), b"initial\n").unwrap();
+                    inspect(root, None, None).await.unwrap();
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn inspection_cache_invalidates_after_a_worktree_edit() {
         let directory = tempfile::tempdir().unwrap();

@@ -11,6 +11,11 @@ type Props = {
   busy?: boolean;
   onClose: () => void;
   onConfigure: () => void;
+  /**
+   * Configure opens the project's zest.toml in another app and closes this
+   * dialog, so the next step has to be said here, before the click.
+   */
+  configureOpensProjectFile?: boolean;
   onChooseProvider: (providerId: string) => void;
 };
 
@@ -19,6 +24,7 @@ export function ConversationRecoveryDialog({
   busy = false,
   onClose,
   onConfigure,
+  configureOpensProjectFile = false,
   onChooseProvider,
 }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -167,6 +173,15 @@ export function ConversationRecoveryDialog({
                     ? "Choose provider or API key"
                     : `Configure ${recovery.providerLabel}`}
               </Button>
+              {configureOpensProjectFile ? (
+                <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  {unknownOwner
+                    ? "Opens this project's zest.toml. Add a provider there, then open the chat again."
+                    : newChat
+                      ? `Opens this project's zest.toml. Configure ${recovery.providerLabel} or another provider there, then open the chat again.`
+                      : `Opens this project's zest.toml. Add ${recovery.providerLabel} there, then open the chat again.`}
+                </p>
+              ) : null}
             </>
           ) : null}
         </div>

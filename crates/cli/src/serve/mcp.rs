@@ -7,11 +7,13 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zest_coordinator::{
     CreateDelegationJobRequest, DelegationCoordinator, DelegationStatus,
     UpdateDelegationJobRequest, ALLOWED_ARTIFACTS, INBOUND_MCP_ORIGIN,
 };
+use zest_core::command_receipts::{CommandReceiptError, CommandReceiptStore};
 use zest_core::{LEGACY_MCP_PROTOCOL_VERSION, MODERN_MCP_PROTOCOL_VERSION};
 
 use super::ServePolicy;
@@ -166,6 +168,81 @@ fn origin_allowed(origin: &str) -> bool {
 }
 
 fn call_tool(state: &AppState, params: &Value) -> Result<Value, (i64, String, StatusCode)> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(command_id) = params
+        .get("arguments")
+        .and_then(|args| args.get("commandId"))
+    else {
+        return call_tool_inner(state, params);
+    };
+    if !is_mutating_tool(name) {
+        return Err((
+            -32602,
+            "commandId is only supported by mutating delegation tools".into(),
+            StatusCode::OK,
+        ));
+    }
+    let command_id =
+        command_id
+            .as_str()
+            .ok_or((-32602, "commandId must be a string".into(), StatusCode::OK))?;
+    let mut params = params.clone();
+    params["arguments"]
+        .as_object_mut()
+        .expect("commandId belongs to an object")
+        .remove("commandId");
+    state
+        .coordinator
+        .ensure_lock(&state.root)
+        .map_err(tool_err)?;
+    let outcome = CommandReceiptStore::new(&state.root)
+        .execute(
+            command_id,
+            name,
+            &params["arguments"],
+            || match call_tool_inner(state, &params) {
+                Ok(value) => StoredToolOutcome::Success { value },
+                Err((code, message, _)) => StoredToolOutcome::Error { code, message },
+            },
+        )
+        .map_err(|error| {
+            let code = match &error {
+                CommandReceiptError::InvalidId => -32602,
+                CommandReceiptError::Conflict => -32010,
+                CommandReceiptError::Incomplete => -32011,
+                CommandReceiptError::Storage(_) => -32603,
+            };
+            (code, error.to_string(), StatusCode::OK)
+        })?;
+    match outcome {
+        StoredToolOutcome::Success { value } => Ok(value),
+        StoredToolOutcome::Error { code, message } => Err((code, message, StatusCode::OK)),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StoredToolOutcome {
+    Success { value: Value },
+    Error { code: i64, message: String },
+}
+
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "delegation_create"
+            | "delegation_update"
+            | "delegation_approve"
+            | "delegation_retry"
+            | "delegation_cancel"
+            | "delegation_apply"
+    )
+}
+
+fn call_tool_inner(state: &AppState, params: &Value) -> Result<Value, (i64, String, StatusCode)> {
     let name = params.get("name").and_then(Value::as_str).ok_or((
         -32602,
         "tools/call requires name".into(),
@@ -291,13 +368,22 @@ fn call_tool(state: &AppState, params: &Value) -> Result<Value, (i64, String, St
 
 fn tool_content(payload: Value) -> Value {
     let text = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
-    let text = if text.len() > MAX_RESPONSE_BYTES {
-        format!("{}\n…truncated", &text[..MAX_RESPONSE_BYTES])
-    } else {
-        text
-    };
+    if text.len() <= MAX_RESPONSE_BYTES {
+        return json!({
+            "content": [{ "type": "text", "text": text }]
+        });
+    }
+    // Cutting serialized JSON leaves text no host can parse. Say how large the
+    // answer was, as JSON, and point at the calls that return less.
+    let error = json!({
+        "error": "response_too_large",
+        "bytes": text.len(),
+        "limitBytes": MAX_RESPONSE_BYTES,
+        "hint": "Read cards one at a time with delegation_get; page artifacts with delegation_artifact.",
+    });
     json!({
-        "content": [{ "type": "text", "text": text }]
+        "content": [{ "type": "text", "text": error.to_string() }],
+        "isError": true
     })
 }
 
@@ -307,7 +393,7 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
     } else {
         "Create a feature card. Stays awaiting_approval until delegation_approve."
     };
-    vec![
+    let mut definitions = vec![
         tool("delegation_targets", "List worker and reviewer targets for this project.", json!({"type":"object"})),
         tool(
             "delegation_create",
@@ -394,7 +480,17 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
             "Apply a ready_to_apply worker.diff after scope validation and git apply --check.",
             object_with(&["jobId"]),
         ),
-    ]
+    ];
+    for definition in &mut definitions {
+        if is_mutating_tool(definition["name"].as_str().unwrap_or_default()) {
+            definition["inputSchema"]["properties"]["commandId"] = json!({
+                "type": "string", "minLength": 1, "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "description": "Stable ID for this command. Retry with the same ID and arguments to receive the saved outcome without executing again."
+            });
+        }
+    }
+    definitions
 }
 
 fn object_with(required: &[&str]) -> Value {
@@ -476,4 +572,50 @@ fn json_response(status: StatusCode, body: Value) -> Response {
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn content_text(result: &Value) -> &str {
+        result["content"][0]["text"].as_str().unwrap()
+    }
+
+    #[test]
+    fn tool_content_passes_a_small_payload_through() {
+        let result = tool_content(json!({ "jobs": [] }));
+
+        assert_eq!(content_text(&result), r#"{"jobs":[]}"#);
+        assert!(result.get("isError").is_none());
+    }
+
+    #[test]
+    fn an_oversized_tool_response_is_still_valid_json() {
+        let result = tool_content(json!({ "diff": "€".repeat(MAX_RESPONSE_BYTES) }));
+        let text = content_text(&result);
+
+        assert!(text.len() <= MAX_RESPONSE_BYTES);
+        let parsed: Value = serde_json::from_str(text).expect("oversized response must parse");
+        assert_eq!(parsed["error"], "response_too_large");
+        assert_eq!(parsed["limitBytes"], MAX_RESPONSE_BYTES);
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn command_ids_are_optional_and_only_advertised_for_mutations() {
+        for policy in [ServePolicy::Gated, ServePolicy::Trusted] {
+            for definition in tool_defs(policy) {
+                let name = definition["name"].as_str().unwrap();
+                let schema = &definition["inputSchema"];
+                assert_eq!(
+                    schema["properties"].get("commandId").is_some(),
+                    is_mutating_tool(name)
+                );
+                assert!(!schema["required"]
+                    .as_array()
+                    .is_some_and(|fields| fields.contains(&json!("commandId"))));
+            }
+        }
+    }
 }

@@ -3,6 +3,220 @@ import { describe, it } from "node:test";
 
 import { createFixtureBackend, type FixtureScenario } from "./fixtureBackend.ts";
 import type { ChatEvent, DelegationEvent } from "./types.ts";
+import { FIXTURE_HTML_DOCUMENT } from "./fixtureBackend.ts";
+import { htmlDocumentFromFence, htmlDocumentFromMetadata } from "./htmlArtifacts.ts";
+
+it("exposes the instance the page uses, so specs never import a second copy", () => {
+  const backend = createFixtureBackend();
+  assert.equal((globalThis as { __zestFixtureBackend?: unknown }).__zestFixtureBackend, backend);
+});
+
+it("clears a saved advisor whose provider is no longer available", async () => {
+  const backend = createFixtureBackend({ scenario: "advisor-unavailable" });
+  const configured = await backend.advisorSettings();
+  assert.equal(configured.provider, "fixture-removed");
+  assert.equal(configured.issue, "[advisor] provider `fixture-removed` is not configured.");
+  assert.ok(!configured.options.some((option) => option.id === configured.provider));
+
+  await backend.setAdvisor(null);
+  await backend.startSession();
+  const cleared = await backend.advisorSettings();
+  assert.equal(cleared.provider, "");
+  assert.equal(cleared.model, "");
+  assert.equal(cleared.issue, undefined);
+});
+
+it("exposes a newly resolved alias only in metadata read after a completed turn", async () => {
+  const backend = createFixtureBackend({ scenario: "claude-alias-resolution" });
+  const initial = await backend.startSession();
+  assert.equal(initial.model, "opus");
+  assert.equal(initial.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+
+  let duringTurn: ReturnType<typeof backend.sessionInfo> | undefined;
+  const events: ChatEvent[] = [];
+  await backend.onChatEvent((event) => {
+    events.push(event);
+    if (event.kind === "text_delta" && !duringTurn) duringTurn = backend.sessionInfo();
+  });
+  await backend.sendMessage("Resolve this alias");
+  const during = await duringTurn;
+  assert.ok(during);
+  assert.equal(during.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+  assert.equal(events.at(-1)?.kind, "done");
+
+  const completed = await backend.sessionInfo();
+  assert.ok(completed);
+  assert.equal(completed.models.find((model) => model.id === "opus")?.resolvesTo, "claude-opus-5");
+  assert.equal(completed.threadId, initial.threadId);
+  assert.equal(initial.models.find((model) => model.id === "opus")?.resolvesTo, undefined);
+});
+
+it("UI stress fixture exposes long labels and a consistent high-context reading", async () => {
+  const backend = createFixtureBackend({ scenario: "ui-stress" });
+  const session = await backend.startSession();
+  assert.equal(session.root, "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks");
+  assert.equal(await backend.getWorkspaceFolder(), "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks");
+  assert.equal((await backend.gitContext()).branch, "feature/a-deliberately-long-branch-name-for-layout-checks");
+  const usage = await backend.contextUsage();
+  assert.equal(usage.usedTokens, 109000);
+  assert.equal(usage.remainingTokens, 19000);
+  assert.equal(usage.windowTokens, 128000);
+  assert.equal(usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens, 109000);
+  assert.equal(usage.shouldAutoCompact, true);
+  assert.equal(usage.canCompact, true);
+  assert.equal(usage.messageCount, 6);
+});
+
+it("context recovery fixture fails measurements until explicitly recovered", async () => {
+  let recover = () => {};
+  let fail = () => {};
+  const contextFailureReady = new Promise<void>((resolve) => { fail = resolve; });
+  const contextRecoveryReady = new Promise<void>((resolve) => { recover = resolve; });
+  const backend = createFixtureBackend({ scenario: "context-recovery", contextRecoveryReady, contextFailureReady });
+  assert.equal((await backend.contextUsage()).usedTokens, 12000);
+  fail();
+  await contextFailureReady;
+  await assert.rejects(backend.contextUsage(), /temporarily unavailable/);
+  recover();
+  await contextRecoveryReady;
+  assert.equal((await backend.contextUsage()).usedTokens, 12000);
+});
+
+describe("fixture status sidebar", () => {
+  const scenarioThreads = ["fixture-approval", "fixture-question", "fixture-working", "fixture-finished"];
+
+  it("leaves a background chat in every state the status view groups by", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    await backend.startSession();
+    const events: ChatEvent[] = [];
+    await backend.boot?.((event) => events.push(event));
+    const lastKind = (threadId: string) =>
+      events.filter((event) => event.thread_id === threadId).at(-1)?.kind;
+    assert.equal(lastKind("fixture-approval"), "approval_needed");
+    assert.equal(lastKind("fixture-question"), "question_needed");
+    assert.equal(lastKind("fixture-working"), "tool_call_start");
+    assert.equal(lastKind("fixture-finished"), "done");
+    assert.ok(!events.some((event) => event.thread_id === "fixture"), "the open chat stays idle");
+
+    const [project] = await backend.listChatProjects();
+    assert.equal(project.name, "zest-app");
+    const listed = project.threads.map((thread) => thread.id);
+    for (const id of ["fixture", ...scenarioThreads]) assert.ok(listed.includes(id), id);
+  });
+
+  it("gives the open chat more jobs than the sidebar shows, and another chat one", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    const session = await backend.startSession();
+    const jobs = await backend.listDelegationJobs();
+    const parents = jobs.map((job) => job.parentThreadId);
+    assert.equal(parents.filter((parent) => parent === "fixture").length, 4);
+    assert.deepEqual(parents.filter((parent) => parent === "fixture-question"), ["fixture-question"]);
+    assert.ok(jobs.every((job) => job.projectRoot === session.root));
+    assert.equal(new Set(jobs.map((job) => job.jobId)).size, jobs.length, "job ids are unique");
+  });
+
+  it("pins a background chat without pinning the open one", async () => {
+    const backend = createFixtureBackend({ scenario: "sidebar-status" });
+    await backend.startSession();
+    await backend.openProjectChat({ root: "/fixture/zest-app", threadId: "fixture-finished" });
+    await backend.setThreadPinned("fixture", "/fixture/zest-app", true);
+    const [project] = await backend.listChatProjects();
+    const pinned = project.threads.filter((thread) => thread.pinned).map((thread) => thread.id);
+    assert.deepEqual(pinned, ["fixture"]);
+  });
+});
+
+describe("restored HTML artifact fixture", () => {
+  it("seeds durable inline source and explicit fences with no execution tokens", async () => {
+    const backend = createFixtureBackend({ scenario: "html-artifacts" });
+    const initial = await backend.startSession("fixture");
+    const assistant = initial.messages.find((message) => message.id === "html-assistant-restored");
+    assert.ok(assistant?.role === "assistant");
+    assert.deepEqual(htmlDocumentFromMetadata(assistant.tools[2].metadata), FIXTURE_HTML_DOCUMENT);
+    const fence = initial.messages.find((message) => message.id === "html-fence-assistant-restored");
+    assert.ok(fence);
+    assert.equal(htmlDocumentFromFence(fence.text)?.html, FIXTURE_HTML_DOCUMENT.html);
+    assert.equal(JSON.stringify(initial.messages).includes("/__zest_html/"), false);
+    await backend.newThread();
+    assert.ok((await backend.listThreads()).some((thread) => thread.id === "fixture"));
+    const reopened = await backend.openProjectChat({ root: ".", threadId: "fixture" });
+    assert.deepEqual(reopened.messages, initial.messages);
+    const reloaded = await createFixtureBackend({ scenario: "html-artifacts" }).startSession("fixture");
+    assert.deepEqual(reloaded.messages, initial.messages);
+  });
+
+  it("rejects invalid HTML before contacting the viewer", async () => {
+    const backend = createFixtureBackend({ scenario: "html-artifacts" });
+    await assert.rejects(backend.prepareHtmlView({ title: "x", html: "" }), /nonempty/);
+    await assert.rejects(backend.saveHtmlDocument({ title: "x", html: "x\0" }), /NUL/);
+  });
+
+  it("publishes HTML through native events and retains the new chat after switching", async () => {
+    const backend = createFixtureBackend({ scenario: "html-artifacts" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const created = await backend.newThread();
+    await backend.sendMessage("Publish an HTML artifact");
+    const result = events.find((event) => event.kind === "tool_call_result");
+    assert.ok(result?.kind === "tool_call_result");
+    assert.equal(htmlDocumentFromMetadata(result.metadata)?.title, "Published counter");
+    await backend.openProjectChat({ root: ".", threadId: "fixture" });
+    assert.equal((await backend.listThreads()).find((thread) => thread.id === created.threadId)?.title, "Publish an HTML artifact");
+    const reopened = await backend.openProjectChat({ root: ".", threadId: created.threadId });
+    const assistant = reopened.messages.find((message) => message.role === "assistant");
+    assert.ok(assistant?.role === "assistant");
+    assert.equal(htmlDocumentFromMetadata(assistant.tools[0].metadata)?.html, FIXTURE_HTML_DOCUMENT.html);
+  });
+});
+
+describe("current GPT catalogue fixture", () => {
+  it("keeps the selected model and its published capabilities", async () => {
+    const backend = createFixtureBackend();
+    for (const model of ["gpt-6.1-sol", "gpt-6-astra"]) {
+      await backend.updateSessionOptions({ model, effort: "high" });
+      const session = await backend.sessionInfo();
+      assert.equal(session?.model, model);
+      const capability = session?.models.find((item) => item.id === model);
+      assert.equal(capability?.contextWindow, 1_050_000);
+      assert.equal(capability?.supportsVision, true);
+      assert.deepEqual(capability?.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+  });
+});
+
+describe("temporary side conversations", () => {
+  it("keeps side followups out of the main transcript, queue, and thread list", async () => {
+    const backend = createFixtureBackend();
+    const before = await backend.sessionInfo();
+    assert.ok(before);
+    const threads = await backend.listThreads();
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const id = await backend.startBtw(before.sessionId);
+    let streamed = "";
+    const answer = await backend.sendBtw(id, "Why this approach?", (delta) => { streamed += delta; });
+    assert.equal(streamed, answer);
+    const followup = await backend.sendBtw(id, "What about alternatives?", () => {});
+    assert.match(followup, /Why this approach/);
+    await backend.closeBtw(id);
+    assert.deepEqual(await backend.sessionInfo(), before);
+    assert.deepEqual(await backend.listThreads(), threads);
+    assert.deepEqual(events, []);
+    await assert.rejects(backend.sendBtw(id, "closed", () => {}), /closed/);
+  });
+  it("cancels a side answer and can retry without keeping the cancelled question", async () => {
+    const backend = createFixtureBackend();
+    const session = await backend.sessionInfo();
+    assert.ok(session);
+    const id = await backend.startBtw(session.sessionId);
+    const pending = backend.sendBtw(id, "Cancelled question", () => {});
+    await backend.cancelBtw(id);
+    await assert.rejects(pending, /Cancelled/);
+    const answer = await backend.sendBtw(id, "Retry question", () => {});
+    assert.doesNotMatch(answer, /Following up|Cancelled question/);
+    await backend.closeBtw(id);
+  });
+});
 
 describe("fixture chat rename", () => {
   it("persists a trimmed title through the sidebar listing", async () => {
@@ -113,6 +327,14 @@ describe("fixture delegation lifecycle", () => {
     );
     assert.deepEqual(ready.changedFiles, ["src/fixture.ts"]);
     assert.equal(ready.acceptanceChecks[0]?.status, "passed");
+    // The chat's subagent line lists who worked and reviewed, and for how long.
+    assert.deepEqual(
+      ready.attempts.map((attempt) => [attempt.role, attempt.finishedAt != null]),
+      [
+        ["worker", true],
+        ["reviewer", true],
+      ]
+    );
 
     const applied = await backend.applyDelegationJob(initial.jobId);
     assert.equal(applied.status, "accepted");
@@ -177,7 +399,7 @@ describe("fixture plugins and workspace files", () => {
     assert.equal(paper.filter, "none");
     assert.equal(paper.imageDataUrl?.startsWith("data:image/"), true);
     // Each look is its own preview, so switching is visible in the fixture UI.
-    for (const filter of ["print", "frosted", "noir"] as const) {
+    for (const filter of ["print", "frosted", "noir", "sepia", "warm", "cool", "muted"] as const) {
       const filtered = await backend.setWallpaperFilter(filter);
       assert.equal(filtered.filter, filter);
       assert.notEqual(filtered.imageDataUrl, paper.imageDataUrl);
@@ -193,6 +415,46 @@ describe("fixture plugins and workspace files", () => {
     const preview = await backend.readWorkspaceFile("src/main.ts");
     assert.equal(preview.content, "[fixture preview]");
     assert.equal(preview.byteCount, preview.content.length);
+  });
+});
+
+describe("fixture subagents scenario", () => {
+  it("restores a chat with all three kinds of subagent, in step order", async () => {
+    const backend = createFixtureBackend({ scenario: "subagents" });
+    const session = await backend.startSession("fixture");
+    const [first, second] = session.messages.filter((message) => message.role === "assistant");
+    assert.ok(first?.role === "assistant" && second?.role === "assistant");
+    assert.deepEqual(
+      first.tools.map((tool) => tool.name),
+      ["read_file", "read_file", "delegate_external", "delegate_feature"]
+    );
+    const card = first.tools.find((tool) => tool.name === "delegate_feature");
+    const jobs = await backend.listDelegationJobs();
+    assert.equal(
+      card?.metadata?.kind === "delegation" ? card.metadata.job_id : undefined,
+      jobs[0]?.jobId
+    );
+    assert.deepEqual(
+      first.steps?.map((step) => step.kind),
+      ["thinking", "tool", "tool", "tool", "thinking", "tool"]
+    );
+    assert.deepEqual(
+      second.providerActivity?.filter((activity) => activity.parentId === "sub-agent").length,
+      3
+    );
+  });
+
+  it("streams a live agent whose steps name it as their parent", async () => {
+    const backend = createFixtureBackend({ scenario: "subagents" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("map the callers");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const children = events.filter(
+      (event) => event.kind === "provider_activity" && event.parent_id === "live-agent"
+    );
+    assert.ok(children.length >= 2);
+    assert.equal(events.at(-1)?.kind, "done");
   });
 });
 
@@ -269,6 +531,45 @@ describe("fixture safety scenarios", () => {
   });
 });
 
+describe("fixture background-approval scenario", () => {
+  it("can cancel the background approval without cancelling the open chat", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    await backend.sendMessage("show a background approval");
+    await backend.cancelTurn("fixture-free");
+    assert.deepEqual(
+      events.flatMap((event) => event.thread_id === "fixture-free" ? [event.kind] : []),
+      ["assistant_start", "tool_call_start", "approval_needed", "cancelled"]
+    );
+    assert.equal((await backend.sessionInfo())?.threadId, "fixture");
+  });
+
+  it("renames a free chat while a project chat is open", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const renamed = await backend.renameThread("fixture-free", null, "Same title", true);
+    assert.equal(renamed.id, "fixture-free");
+    assert.equal(renamed.title, "Same title");
+    const freeChats = (await backend.listChatProjects()).find((project) => project.path === null);
+    assert.equal(freeChats?.threads.find((thread) => thread.id === "fixture-free")?.title, "Same title");
+  });
+
+  it("echoes the open chat's turn, then stops the Free chat for approval", async () => {
+    const backend = createFixtureBackend({ scenario: "background-approval" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const session = await backend.startSession();
+    await backend.sendMessage("hello");
+
+    const done = events.findIndex((event) => event.kind === "done");
+    const approval = events.findIndex((event) => event.kind === "approval_needed");
+    assert.ok(done >= 0 && approval > done);
+    assert.equal(events[done]?.thread_id, session.threadId);
+    assert.equal(events[approval]?.thread_id, "fixture-free");
+    assert.notEqual(session.threadId, "fixture-free");
+  });
+});
+
 describe("fixture windowed open", () => {
   it("opens a long chat on the last ten user turns and pages older ones", async () => {
     const backend = createFixtureBackend();
@@ -337,6 +638,45 @@ describe("fixture windowed open", () => {
 });
 
 describe("fixture pull request review", () => {
+  it("holds the delayed diff until its response is released", async () => {
+    const gate = new EventTarget();
+    const pullRequestDiffReady = new Promise<void>((resolve) => {
+      gate.addEventListener("release", () => resolve(), { once: true });
+    });
+    const backend = createFixtureBackend({ scenario: "pull-request-delayed", pullRequestDiffReady });
+    let completed = false;
+    const pending = backend.pullRequestDiff(13).then((change) => {
+      completed = true;
+      return change;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(completed, false);
+    gate.dispatchEvent(new Event("release"));
+    const change = await pending;
+    assert.equal(completed, true);
+    assert.equal(change.unavailable, false);
+    assert.equal(change.changedFiles[0]?.path, "src/example.ts");
+    assert.match(change.diff, /hello from pull request 13/);
+  });
+
+  it("keeps the normal delay when no response hold is requested", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const backend = createFixtureBackend({ scenario: "pull-request-delayed" });
+    let completed = false;
+    const pending = backend.pullRequestDiff(13).then((change) => {
+      completed = true;
+      return change;
+    });
+    t.mock.timers.tick(799);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(completed, false);
+    t.mock.timers.tick(1);
+    const change = await pending;
+    assert.equal(completed, true);
+    assert.equal(change.changedFiles[0]?.path, "src/example.ts");
+    assert.match(change.diff, /hello from pull request 13/);
+  });
+
   it("returns a local patch for the linked pull request", async () => {
     const backend = createFixtureBackend();
     const context = await backend.gitContext();
@@ -374,5 +714,43 @@ describe("fixture queued-message recovery", () => {
     const info = await backend.sessionInfo();
     assert.equal(info?.pendingInputs.length, 1);
     assert.equal(info?.pendingInputs[0]?.text, "second");
+  });
+});
+
+describe("fixture split-streaming scenario", () => {
+  it("queues a send made during a live turn, answers busy, and still stops that turn", async () => {
+    const backend = createFixtureBackend({ scenario: "split-streaming" });
+    const events: ChatEvent[] = [];
+    await backend.onChatEvent((event) => events.push(event));
+    const live = backend.sendMessage("keep running");
+    // Like the desktop: a queued send never starts a second stream on the chat.
+    await backend.sendMessage("second", undefined, "followup");
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ["user", "assistant_start", "input_queued"]
+    );
+    await assert.rejects(backend.contextUsage(), (error: Error) => JSON.parse(error.message).code === "busy");
+
+    await backend.cancelTurn();
+    await live;
+    assert.equal(events.at(-1)?.kind, "cancelled");
+    assert.equal((await backend.contextUsage()).percentFull, 4.7);
+  });
+});
+
+describe("fixture btw-streaming scenario", () => {
+  it("keeps a side answer live until it is stopped", async () => {
+    const backend = createFixtureBackend({ scenario: "btw-streaming" });
+    const session = await backend.sessionInfo();
+    assert.ok(session);
+    const id = await backend.startBtw(session.sessionId);
+    const deltas: string[] = [];
+    const pending = backend.sendBtw(id, "Stop this side answer", (delta) => deltas.push(delta));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Far longer than the ordinary stream takes; still only the first chunk.
+    assert.equal(deltas.length, 1);
+    await backend.cancelBtw(id);
+    await assert.rejects(pending, /Cancelled/);
+    await backend.closeBtw(id);
   });
 });

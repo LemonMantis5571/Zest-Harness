@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use rig_core::completion::message::{DocumentSourceKind, ToolResultContent};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -23,6 +24,12 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a hosted endpoint may take to start answering.
+const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
+/// The same for a server on this machine or the local network. Ollama, LM
+/// Studio and llama.cpp send headers only once the model is loaded and the
+/// prompt processed, which on a CPU or a cold start can take minutes.
+const LOCAL_RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(600);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -121,7 +128,7 @@ impl Provider for OpenAiCompatibleProvider {
             messages: convert_messages(
                 req.system.as_ref().map(SystemPrompt::text).as_deref(),
                 &req.messages,
-            ),
+            )?,
             // This provider has no cached prefix to protect, so a maintenance
             // turn simply withholds the tools rather than sending them with a
             // `none` choice these endpoints do not all agree on.
@@ -146,6 +153,43 @@ pub struct OpenAiCompatibleClient {
     http: reqwest::Client,
     api_key: String,
     base_url: String,
+    headers_timeout: Duration,
+    /// A server on this machine or network. Its header timeout is not retried:
+    /// a second attempt re-sends the whole prompt and starts the wait over.
+    local_server: bool,
+}
+
+/// Loopback, private-network and link-local hosts are "local" for timeouts.
+fn is_local_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let local_v4 = |ip: std::net::Ipv4Addr| {
+        let [a, b, ..] = ip.octets();
+        // 100.64.0.0/10 is carrier-grade NAT, which is also where Tailscale
+        // puts the machines on a tailnet.
+        ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || (a == 100 && (64..128).contains(&b))
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => local_v4(ip),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.to_ipv4_mapped().is_some_and(local_v4)
+        }
+        Err(_) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost"
+                || host == "host.docker.internal"
+                || host.ends_with(".localhost")
+                || host.ends_with(".local")
+        }
+    }
 }
 
 impl OpenAiCompatibleClient {
@@ -158,12 +202,20 @@ impl OpenAiCompatibleClient {
                 "OpenAI-compatible base URL must be an http(s) URL with a host".into(),
             ));
         }
+        let local_server = is_local_host(&parsed);
+        let headers_timeout = if local_server {
+            LOCAL_RESPONSE_HEADERS_TIMEOUT
+        } else {
+            RESPONSE_HEADERS_TIMEOUT
+        };
         Ok(Self {
             http: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()?,
             api_key,
             base_url,
+            headers_timeout,
+            local_server,
         })
     }
 
@@ -182,7 +234,12 @@ impl OpenAiCompatibleClient {
             attempt += 1;
             match self.send_once(req, cancel).await {
                 Ok(response) => break response,
-                Err((error, retry_after)) if attempt < MAX_ATTEMPTS && error.is_transient() => {
+                Err((error, retry_after))
+                    if attempt < MAX_ATTEMPTS
+                        && error.is_transient()
+                        && !(self.local_server
+                            && matches!(error, HarnessError::ResponseTimeout { .. })) =>
+                {
                     let delay = retry_after.unwrap_or_else(|| {
                         Duration::from_secs(1 << attempt.min(4).saturating_sub(1))
                     });
@@ -209,8 +266,10 @@ impl OpenAiCompatibleClient {
         let mut parser = SseParser::default();
         let mut body = response.bytes_stream();
         let mut accumulator = OpenAiAccumulator::default();
+        let mut last_progress = tokio::time::Instant::now();
 
         loop {
+            let idle_deadline = last_progress + STREAM_IDLE_TIMEOUT;
             tokio::select! {
                 biased;
                 _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
@@ -222,14 +281,16 @@ impl OpenAiCompatibleClient {
                                 break;
                             }
                             let event: Value = serde_json::from_str(&payload)?;
-                            accumulator.push(&event, on_event)?;
+                            if accumulator.push(&event, on_event)? {
+                                last_progress = tokio::time::Instant::now();
+                            }
                         }
                         if accumulator.done { break; }
                     }
                     Some(Err(error)) => return Err(error.into()),
                     None => break,
                 },
-                _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                _ = tokio::time::sleep_until(idle_deadline) => {
                     return Err(HarnessError::StreamIdleTimeout);
                 }
             }
@@ -238,7 +299,7 @@ impl OpenAiCompatibleClient {
         if !accumulator.done {
             return Err(HarnessError::PrematureEof);
         }
-        Ok(accumulator.finish(limits))
+        accumulator.finish(limits)
     }
 
     async fn send_once(
@@ -249,22 +310,41 @@ impl OpenAiCompatibleClient {
         let response = tokio::select! {
             biased;
             _ = wait_cancel(cancel) => return Err((HarnessError::Cancelled, None)),
-            response = self.http.post(self.endpoint())
-                .header("authorization", format!("Bearer {}", self.api_key))
-                .header("content-type", "application/json")
-                .json(req)
-                .send() => match response {
+            response = wait_for_response_headers(
+                self.http.post(self.endpoint())
+                    .header("authorization", format!("Bearer {}", self.api_key))
+                    .header("content-type", "application/json")
+                    .json(req)
+                    .send(),
+                self.headers_timeout,
+            ) => match response {
                     Ok(response) => response,
-                    Err(error) => return Err((HarnessError::Http(error), None)),
+                    Err(error) => return Err((error, None)),
                 },
         };
         if response.status().is_success() {
             return Ok(response);
         }
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
+        let body = tokio::time::timeout(STREAM_IDLE_TIMEOUT, response.text())
+            .await
+            .ok()
+            .and_then(|body| body.ok())
+            .unwrap_or_default();
         Err((HarnessError::Api { status, body }, None))
     }
+}
+
+async fn wait_for_response_headers<F>(request: F, timeout: Duration) -> Result<reqwest::Response>
+where
+    F: std::future::Future<Output = std::result::Result<reqwest::Response, reqwest::Error>>,
+{
+    tokio::time::timeout(timeout, request)
+        .await
+        .map_err(|_| HarnessError::ResponseTimeout {
+            seconds: timeout.as_secs(),
+        })?
+        .map_err(HarnessError::Http)
 }
 
 #[derive(Default)]
@@ -284,6 +364,7 @@ struct ToolAccum {
     id: String,
     name: String,
     arguments: String,
+    saw_arguments: bool,
     emitted: bool,
 }
 
@@ -292,7 +373,7 @@ impl OpenAiAccumulator {
         &mut self,
         event: &Value,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if let Some(error) = event.get("error") {
             let message = error
                 .get("message")
@@ -362,7 +443,7 @@ impl OpenAiAccumulator {
             .and_then(Value::as_array)
             .and_then(|c| c.first())
         else {
-            return Ok(());
+            return Ok(false);
         };
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.stop_reason = Some(
@@ -375,25 +456,45 @@ impl OpenAiAccumulator {
             );
         }
         let Some(delta) = choice.get("delta") else {
-            return Ok(());
+            return Ok(false);
         };
+        let mut progressed = false;
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
             self.text.push_str(text);
-            on_event(StreamEvent::Text(text));
+            if !text.is_empty() {
+                progressed = true;
+                on_event(StreamEvent::Text(text));
+            }
         }
+        progressed |= ["reasoning", "reasoning_content", "analysis"]
+            .iter()
+            .filter_map(|field| delta.get(*field).and_then(Value::as_str))
+            .any(|text| !text.is_empty());
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let tool = self.tools.entry(index).or_default();
                 if let Some(id) = call.get("id").and_then(Value::as_str) {
                     tool.id.push_str(id);
+                    progressed |= !id.is_empty();
                 }
                 if let Some(function) = call.get("function") {
                     if let Some(name) = function.get("name").and_then(Value::as_str) {
                         tool.name.push_str(name);
+                        progressed |= !name.is_empty();
                     }
-                    if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                    if let Some(raw_arguments) = function.get("arguments") {
+                        let Some(arguments) = raw_arguments.as_str() else {
+                            return Err(HarnessError::Stream {
+                                kind: "malformed_tool_input".into(),
+                                message:
+                                    "OpenAI-compatible tool arguments must arrive as JSON text"
+                                        .into(),
+                            });
+                        };
+                        tool.saw_arguments = true;
                         tool.arguments.push_str(arguments);
+                        progressed |= !arguments.is_empty();
                     }
                 }
                 if !tool.emitted && !tool.id.is_empty() && !tool.name.is_empty() {
@@ -405,19 +506,41 @@ impl OpenAiAccumulator {
                 }
             }
         }
-        Ok(())
+        Ok(progressed)
     }
 
-    fn finish(self, limits: Option<RateLimitSnapshot>) -> Completion {
+    fn finish(self, limits: Option<RateLimitSnapshot>) -> Result<Completion> {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(json!({"type":"text", "text": self.text}));
         }
         for tool in self.tools.into_values() {
-            let input = serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}));
+            if tool.id.trim().is_empty() || tool.name.trim().is_empty() {
+                return Err(HarnessError::Stream {
+                    kind: "incomplete_tool_call".into(),
+                    message: "OpenAI-compatible stream ended with an incomplete tool call".into(),
+                });
+            }
+            if !tool.saw_arguments || tool.arguments.trim().is_empty() {
+                return Err(HarnessError::Stream {
+                    kind: "incomplete_tool_call".into(),
+                    message: "OpenAI-compatible stream ended before tool arguments arrived".into(),
+                });
+            }
+            let input: Value =
+                serde_json::from_str(&tool.arguments).map_err(|error| HarnessError::Stream {
+                    kind: "malformed_tool_input".into(),
+                    message: format!("OpenAI-compatible tool arguments are invalid JSON: {error}"),
+                })?;
+            if !input.is_object() {
+                return Err(HarnessError::Stream {
+                    kind: "malformed_tool_input".into(),
+                    message: "OpenAI-compatible tool arguments must be a JSON object".into(),
+                });
+            }
             content.push(json!({"type":"tool_use", "id":tool.id, "name":tool.name, "input":input}));
         }
-        Completion {
+        Ok(Completion {
             content,
             stop_reason: self.stop_reason,
             usage: self.usage,
@@ -425,7 +548,7 @@ impl OpenAiAccumulator {
             limits,
             served_model: self.served_model,
             provider_session: None,
-        }
+        })
     }
 }
 
@@ -471,8 +594,10 @@ fn convert_tool(tool: &ToolDef) -> Value {
     })
 }
 
-fn convert_messages(system: Option<&str>, messages: &[Message]) -> Vec<Value> {
+fn convert_messages(system: Option<&str>, messages: &[Message]) -> Result<Vec<Value>> {
     let mut output = Vec::new();
+    let mut result_batch = Vec::new();
+    let mut screenshots = Vec::new();
     if let Some(system) = system.filter(|text| !text.is_empty()) {
         output.push(json!({"role": "system", "content": system}));
     }
@@ -491,28 +616,94 @@ fn convert_messages(system: Option<&str>, messages: &[Message]) -> Vec<Value> {
                         "arguments": serde_json::to_string(block.get("input").unwrap_or(&json!({}))).unwrap_or_else(|_| "{}".to_string()),
                     }
                 })),
-                Some("tool_result") => tool_results.push(json!({
-                    "role": "tool",
-                    "tool_call_id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
-                    "content": block.get("content").and_then(Value::as_str).unwrap_or(""),
-                })),
-                _ => {}
+                Some("tool_result") => {
+                    let result = super::rig_convert::tool_result(block).map_err(|error| {
+                        HarnessError::Other(format!("OpenAI-compatible history: {error}"))
+                    })?;
+                    let id = result.wire_call_id().to_string();
+                    let mut body = String::new();
+                    for content in result.content {
+                        match content {
+                            ToolResultContent::Text(text) => body.push_str(&text.text),
+                            ToolResultContent::Image(image) => {
+                                let DocumentSourceKind::Base64(data) = image.data else {
+                                    return Err(HarnessError::Other(
+                                        "unsupported OpenAI-compatible tool-result image source".into(),
+                                    ));
+                                };
+                                screenshots.push(json!({
+                                    "type":"text", "text":format!("Screenshot from tool call {id}:")
+                                }));
+                                screenshots.push(json!({
+                                    "type":"image_url",
+                                    "image_url":{"url":format!("data:image/png;base64,{data}")}
+                                }));
+                            }
+                            ToolResultContent::Json { .. } => {
+                                return Err(HarnessError::Other(
+                                    "unsupported OpenAI-compatible structured tool result".into(),
+                                ));
+                            }
+                        }
+                    }
+                    tool_results.push(json!({
+                        "role":"tool", "tool_call_id":id, "content":body
+                    }));
+                }
+                Some("thinking" | "redacted_thinking" | "reasoning_encrypted") => {}
+                other => {
+                    return Err(HarnessError::Other(format!(
+                        "unsupported OpenAI-compatible content block `{}`",
+                        other.unwrap_or("")
+                    )));
+                }
             }
         }
         if !tool_results.is_empty() {
-            if !text.is_empty() {
-                output.push(json!({"role":"user", "content":text}));
+            if message.role != "user" || !tool_calls.is_empty() {
+                return Err(HarnessError::Other(
+                    "OpenAI-compatible tool results must be in a user turn without tool calls"
+                        .into(),
+                ));
             }
-            output.extend(tool_results);
+            if !text.is_empty() {
+                result_batch.push(json!({"role":"user", "content":text}));
+            }
+            result_batch.extend(tool_results);
             continue;
         }
+        append_tool_results(&mut output, &mut result_batch, &mut screenshots);
         let mut message_json = json!({"role": message.role, "content": if text.is_empty() { Value::Null } else { Value::String(text) }});
         if !tool_calls.is_empty() {
             message_json["tool_calls"] = Value::Array(tool_calls);
         }
         output.push(message_json);
     }
-    output
+    append_tool_results(&mut output, &mut result_batch, &mut screenshots);
+    Ok(output)
+}
+
+fn append_tool_results(
+    output: &mut Vec<Value>,
+    batch: &mut Vec<Value>,
+    screenshots: &mut Vec<Value>,
+) {
+    if screenshots.is_empty() {
+        output.append(batch);
+        return;
+    }
+    // Chat Completions tool messages carry text. Every parallel call must be
+    // answered before a user message can supply their labeled screenshots.
+    let mut content = Vec::new();
+    for message in batch.drain(..) {
+        if message["role"] == "tool" {
+            output.push(message);
+        } else {
+            content.push(json!({"type":"text", "text":message["content"]}));
+        }
+    }
+    content.append(screenshots);
+    output.push(json!({"role":"user", "content":content}));
 }
 
 /// Saturate rather than wrap. A provider that reports a nonsense token count
@@ -524,6 +715,52 @@ fn bounded_u32(value: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZpVYAAAAASUVORK5CYII=";
+
+    fn screenshot() -> Value {
+        json!({"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":PNG}})
+    }
+
+    #[tokio::test]
+    async fn request_waiting_for_response_headers_has_a_deadline() {
+        let request =
+            std::future::pending::<std::result::Result<reqwest::Response, reqwest::Error>>();
+        let error = wait_for_response_headers(request, Duration::from_millis(1))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, HarnessError::ResponseTimeout { .. }));
+        assert!(
+            error.is_transient(),
+            "nothing streamed yet, so a retry is safe"
+        );
+    }
+
+    #[test]
+    fn local_servers_get_a_longer_header_deadline() {
+        let timeout = |url: &str| {
+            OpenAiCompatibleClient::new("k".into(), url)
+                .unwrap()
+                .headers_timeout
+        };
+        for local in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://192.168.1.20:8080/v1",
+            "http://[::1]:8080/v1",
+            "http://gpu-box.local/v1",
+            "http://100.101.102.103:11434/v1",
+            "http://host.docker.internal:11434/v1",
+            "http://[::ffff:127.0.0.1]:8080/v1",
+        ] {
+            assert_eq!(timeout(local), LOCAL_RESPONSE_HEADERS_TIMEOUT, "{local}");
+        }
+        assert_eq!(
+            timeout("https://openrouter.ai/api/v1"),
+            RESPONSE_HEADERS_TIMEOUT
+        );
+    }
 
     fn usage_of(usage: Value) -> Usage {
         let mut accumulator = OpenAiAccumulator::default();
@@ -623,11 +860,131 @@ mod tests {
                 json!({"type":"tool_result","tool_use_id":"b","content":"B"}),
             ]),
         ];
-        let converted = convert_messages(Some("system"), &messages);
+        let converted = convert_messages(Some("system"), &messages).unwrap();
         assert_eq!(converted[0]["role"], "system");
         assert_eq!(converted[1]["tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(converted[2]["role"], "tool");
         assert_eq!(converted[3]["tool_call_id"], "b");
+    }
+
+    #[test]
+    fn png_results_follow_all_parallel_tool_replies_including_split_turns() {
+        for split in [false, true] {
+            let results = vec![
+                json!({"type":"text", "text":"review these"}),
+                json!({"type":"tool_result", "tool_use_id":"a", "content":"A\n"}),
+                json!({"type":"tool_result", "tool_use_id":"b", "content":[
+                    {"type":"text", "text":"before\n"}, screenshot(), {"type":"text", "text":"after"}
+                ]}),
+                json!({"type":"tool_result", "tool_use_id":"c", "content":[screenshot()]}),
+            ];
+            let mut messages = vec![Message::assistant(vec![
+                json!({"type":"text", "text":"previewing"}),
+                json!({"type":"tool_use", "id":"a", "name":"read", "input":{}}),
+                json!({"type":"tool_use", "id":"b", "name":"html_preview", "input":{}}),
+                json!({"type":"tool_use", "id":"c", "name":"html_preview", "input":{}}),
+            ])];
+            if split {
+                messages.push(Message::user_blocks(results[..3].to_vec()));
+                messages.push(Message::user_blocks(results[3..].to_vec()));
+            } else {
+                messages.push(Message::user_blocks(results));
+            }
+            messages.push(Message::assistant(vec![
+                json!({"type":"text", "text":"reviewed"}),
+            ]));
+
+            let wire = convert_messages(None, &messages).unwrap();
+            assert_eq!(wire.len(), 6, "split={split}");
+            assert_eq!(wire[0]["tool_calls"].as_array().unwrap().len(), 3);
+            assert_eq!(
+                &wire[1..4],
+                &[
+                    json!({"role":"tool", "tool_call_id":"a", "content":"A\n"}),
+                    json!({"role":"tool", "tool_call_id":"b", "content":"before\nafter"}),
+                    json!({"role":"tool", "tool_call_id":"c", "content":""}),
+                ]
+            );
+            assert_eq!(
+                wire[4],
+                json!({"role":"user", "content":[
+                    {"type":"text", "text":"review these"},
+                    {"type":"text", "text":"Screenshot from tool call b:"},
+                    {"type":"image_url", "image_url":{"url":format!("data:image/png;base64,{PNG}")}},
+                    {"type":"text", "text":"Screenshot from tool call c:"},
+                    {"type":"image_url", "image_url":{"url":format!("data:image/png;base64,{PNG}")}}
+                ]})
+            );
+            assert_eq!(wire[5], json!({"role":"assistant", "content":"reviewed"}));
+        }
+    }
+
+    #[test]
+    fn text_only_history_keeps_its_exact_chat_completions_wire_shape() {
+        let messages = vec![
+            Message::user_blocks(vec![json!({"type":"text", "text":"hello\n"})]),
+            Message::assistant(vec![
+                json!({"type":"thinking", "thinking":"private", "signature":"sig"}),
+                json!({"type":"text", "text":"reading"}),
+                json!({"type":"tool_use", "id":"a", "name":"read", "input":{"path":"a"}}),
+                json!({"type":"tool_use", "id":"b", "name":"read", "input":{"path":"b"}}),
+            ]),
+            Message::user_blocks(vec![
+                json!({"type":"text", "text":"context"}),
+                json!({"type":"tool_result", "tool_use_id":"a", "content":"{\"ok\":true}\n"}),
+            ]),
+            Message::user_blocks(vec![
+                json!({"type":"tool_result", "tool_use_id":"b", "content":""}),
+            ]),
+            Message::assistant(vec![json!({"type":"text", "text":"done"})]),
+        ];
+        let expected = json!([
+            {"role":"system", "content":"system"},
+            {"role":"user", "content":"hello\n"},
+            {"role":"assistant", "content":"reading", "tool_calls":[
+                {"id":"a", "type":"function", "function":{"name":"read", "arguments":"{\"path\":\"a\"}"}},
+                {"id":"b", "type":"function", "function":{"name":"read", "arguments":"{\"path\":\"b\"}"}}
+            ]},
+            {"role":"user", "content":"context"},
+            {"role":"tool", "tool_call_id":"a", "content":"{\"ok\":true}\n"},
+            {"role":"tool", "tool_call_id":"b", "content":""},
+            {"role":"assistant", "content":"done"}
+        ]);
+        let wire = convert_messages(Some("system"), &messages).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&wire).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn nested_text_tool_results_concatenate_without_stringifying_the_array() {
+        let messages = vec![Message::user_blocks(vec![json!({
+            "type":"tool_result", "tool_use_id":"a", "content":[
+                {"type":"text", "text":"first\n"}, {"type":"text", "text":""}, {"type":"text", "text":"last"}
+            ]
+        })])];
+        assert_eq!(
+            convert_messages(None, &messages).unwrap(),
+            vec![json!({"role":"tool", "tool_call_id":"a", "content":"first\nlast"})]
+        );
+    }
+
+    #[test]
+    fn unsupported_or_malformed_screenshots_fail_before_a_request() {
+        for block in [
+            json!({"type":"tool_result", "tool_use_id":"", "content":[screenshot()]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"document"}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"text", "text":42}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"url"}}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"base64", "media_type":"image/jpeg", "data":PNG}}]}),
+            json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"invalid"}}]}),
+            screenshot(),
+        ] {
+            let error = convert_messages(None, &[Message::user_blocks(vec![block])]).unwrap_err();
+            assert!(matches!(error, HarnessError::Other(_)));
+            assert!(error.to_string().contains("OpenAI-compatible"), "{error}");
+        }
     }
 
     #[test]
@@ -641,7 +998,7 @@ mod tests {
         };
         accumulator.push(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}), &mut sink).unwrap();
         accumulator.push(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"README.md\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}), &mut sink).unwrap();
-        let completion = accumulator.finish(None);
+        let completion = accumulator.finish(None).unwrap();
         assert_eq!(events, vec!["read"]);
         assert_eq!(completion.stop_reason.as_deref(), Some("tool_use"));
         assert!(completion.usage_available);
@@ -671,7 +1028,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            accumulator.finish(None).served_model.as_deref(),
+            accumulator.finish(None).unwrap().served_model.as_deref(),
             Some("deepseek-v4-flash")
         );
     }
@@ -684,13 +1041,89 @@ mod tests {
         accumulator
             .push(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut sink)
             .unwrap();
-        assert_eq!(accumulator.finish(None).served_model, None);
+        assert_eq!(accumulator.finish(None).unwrap().served_model, None);
 
         // An empty string is silence too, not a model named "".
         let mut blank = OpenAiAccumulator::default();
         blank
             .push(&json!({"model":"  ","choices":[{"delta":{}}]}), &mut sink)
             .unwrap();
-        assert_eq!(blank.finish(None).served_model, None);
+        assert_eq!(blank.finish(None).unwrap().served_model, None);
+    }
+
+    #[test]
+    fn malformed_tool_arguments_fail_instead_of_becoming_an_empty_object() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        accumulator
+            .push(
+                &json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{"}}]}}]}),
+                &mut sink,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            accumulator.finish(None),
+            Err(HarnessError::Stream { kind, .. }) if kind == "malformed_tool_input"
+        ));
+    }
+
+    #[test]
+    fn null_tool_arguments_are_rejected() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        let result = accumulator.push(
+            &json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":null}}]}}]}),
+            &mut sink,
+        );
+
+        assert!(matches!(
+            result,
+            Err(HarnessError::Stream { kind, .. }) if kind == "malformed_tool_input"
+        ));
+    }
+
+    #[test]
+    fn keepalive_events_do_not_count_as_stream_progress() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+
+        assert!(!accumulator
+            .push(&json!({"choices": []}), &mut sink)
+            .unwrap());
+        assert!(!accumulator
+            .push(&json!({"choices": [{"delta": {"content": ""}}]}), &mut sink)
+            .unwrap());
+        assert!(accumulator
+            .push(
+                &json!({"choices": [{"delta": {"content": "hello"}}]}),
+                &mut sink
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn empty_or_missing_tool_arguments_are_incomplete() {
+        for arguments in [None, Some("")] {
+            let mut accumulator = OpenAiAccumulator::default();
+            let mut sink = |_: StreamEvent<'_>| {};
+            let mut function = serde_json::Map::new();
+            function.insert("name".into(), json!("read_file"));
+            if let Some(arguments) = arguments {
+                function.insert("arguments".into(), json!(arguments));
+            }
+            accumulator
+                .push(
+                    &json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":function}]}}]}),
+                    &mut sink,
+                )
+                .unwrap();
+
+            assert!(matches!(
+                accumulator.finish(None),
+                Err(HarnessError::Stream { kind, .. }) if kind == "incomplete_tool_call"
+            ));
+        }
     }
 }

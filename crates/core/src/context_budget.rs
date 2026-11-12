@@ -13,13 +13,11 @@
 //! under-counts code and JSON — decisions built on it should be arranged to err
 //! toward doing the more expensive, more correct thing.
 //!
-//! Two known inconsistencies, preserved verbatim from the desktop meter this
-//! moved out of so that a regression stays bisectable: system length is counted
-//! in *characters* while conversation length is counted in serialized-JSON
-//! *bytes*, and tool schemas are not counted at all. Both make the estimate a
-//! floor rather than a bound.
+//! System and conversation counts use different character/byte bases, and tool
+//! schemas are estimated from their serialized definitions. The char/4
+//! approximation still makes the result a floor rather than a bound.
 
-use crate::anthropic::types::Message;
+use crate::anthropic::types::{Message, ToolDef};
 use crate::provider::SystemPrompt;
 
 /// Window occupancy at which the front-end starts compacting on its own.
@@ -70,6 +68,19 @@ pub fn conversation_tokens(messages: &[Message]) -> u64 {
             )
         })
         .sum()
+}
+
+/// Estimated tokens held by the serialized tool definitions in the prompt.
+///
+/// Provider wrappers add a small amount of wire-format overhead, but counting
+/// the definitions themselves avoids treating a large tool catalogue as free.
+pub fn tool_schema_tokens(tools: &[ToolDef]) -> u64 {
+    if tools.is_empty() {
+        return 0;
+    }
+    serde_json::to_vec(tools)
+        .map(|encoded| chars_to_tok(encoded.len() as u64))
+        .unwrap_or(0)
 }
 
 /// The occupancy, in tokens, at which auto-compaction becomes due. Rounds up so
@@ -143,6 +154,20 @@ mod tests {
             "the estimate is a per-message sum, so slicing must not change it"
         );
         assert!(total > 0, "{total}");
+    }
+
+    #[test]
+    fn tool_schema_estimate_counts_serialized_definitions() {
+        let tools = vec![ToolDef {
+            name: "read_file".into(),
+            description: "Read a file from the project".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            cache_control: None,
+        }];
+        let encoded_len = serde_json::to_vec(&tools).unwrap().len() as u64;
+
+        assert_eq!(tool_schema_tokens(&tools), chars_to_tok(encoded_len));
+        assert_eq!(tool_schema_tokens(&[]), 0);
     }
 
     #[test]

@@ -43,6 +43,10 @@ pub struct Session {
 
 #[derive(Clone)]
 pub struct ActiveTurn {
+    /// Read-only context snapshots published by the worker as it reaches
+    /// completed provider/tool steps. Side questions never borrow the running
+    /// agent or fork its changing provider cursor.
+    pub(crate) side_context: Arc<Mutex<zest_core::btw::SideConversation>>,
     pub turn_id: String,
     pub session_id: String,
     pub thread_id: String,
@@ -81,6 +85,7 @@ struct Inner {
 
 pub struct SessionController {
     inner: Mutex<Inner>,
+    pub(crate) side_conversations: super::btw::SideConversations,
 }
 
 #[derive(Debug)]
@@ -113,6 +118,7 @@ impl SessionError {
 impl SessionController {
     pub fn new() -> Self {
         Self {
+            side_conversations: super::btw::SideConversations::default(),
             inner: Mutex::new(Inner {
                 next_seq: 1,
                 active_session_id: None,
@@ -124,6 +130,39 @@ impl SessionController {
     pub fn is_busy(&self) -> Result<bool, SessionError> {
         let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
         Ok(g.sessions.values().any(|slot| slot.turn.is_some()))
+    }
+
+    pub(crate) fn side_context(
+        &self,
+        session_id: &str,
+    ) -> Result<zest_core::btw::SideConversation, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        if g.active_session_id.as_deref() != Some(session_id) {
+            return Err(SessionError::NoSession);
+        }
+        let slot = Self::active_slot(&g)?;
+        if let Some(session) = &slot.session {
+            if let Some(turn) = g
+                .sessions
+                .values()
+                .filter_map(|slot| slot.turn.as_ref())
+                .find(|turn| turn.thread_id == session.thread_id)
+            {
+                turn.side_context
+                    .lock()
+                    .map(|context| context.fork_snapshot())
+                    .map_err(|_| SessionError::Poisoned)
+            } else {
+                Ok(session.agent.side_conversation())
+            }
+        } else if let Some(turn) = &slot.turn {
+            turn.side_context
+                .lock()
+                .map(|context| context.fork_snapshot())
+                .map_err(|_| SessionError::Poisoned)
+        } else {
+            Err(SessionError::NoSession)
+        }
     }
 
     pub fn require_idle(&self) -> Result<(), SessionError> {
@@ -147,6 +186,7 @@ impl SessionController {
         // An idle route no longer needs to stay resident once another chat is
         // opened. In-flight routes are retained until their worker finishes.
         if let Some(previous_id) = g.active_session_id.take() {
+            self.side_conversations.close_owner(&previous_id);
             let remove_previous = g
                 .sessions
                 .get(&previous_id)
@@ -362,6 +402,9 @@ impl SessionController {
         }
         let session = slot.session.take().ok_or(SessionError::NoSession)?;
         let turn = ActiveTurn {
+            side_context: Arc::new(Mutex::new(
+                session.agent.side_conversation().without_provider_session(),
+            )),
             turn_id: new_id("turn"),
             session_id: session.session_id.clone(),
             thread_id: session.thread_id.clone(),
@@ -584,6 +627,7 @@ impl SessionController {
         let Some(id) = g.active_session_id.take() else {
             return Ok(());
         };
+        self.side_conversations.close_owner(&id);
         let remove = if let Some(slot) = g.sessions.get_mut(&id) {
             if let Some(turn) = &slot.turn {
                 turn.cancel.cancel();

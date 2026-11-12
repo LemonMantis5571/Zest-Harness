@@ -7,7 +7,12 @@
   ],
   "engines": {
     "node": "24.16.0",
-    "npm": "11.13.0"
+    "npm": "11.21.0"
+  },
+  "overrides": {
+    "mermaid": {
+      "katex": "0.18.2"
+    }
   },
   "scripts": {
     "dev": "npm run desktop:dev",
@@ -17,10 +22,21 @@
     "ui:lint": "npm run lint -w ui",
     "ui:lint:plugins": "npm run lint:plugins -w ui",
     "ui:test": "npm run test -w ui",
+    "ui:e2e": "npm run test:e2e -w ui",
     "desktop:dev": "npm run dev -w zest-desktop",
     "desktop:build": "npm run build -w zest-desktop",
     "desktop:smoke": "node ./scripts/desktop-smoke.mjs",
     "verify": "node ./scripts/dev-verify.mjs",
+    "output-policy:check": "node ./scripts/check-output-artifacts.mjs",
+    "output-policy:test": "node --test ./scripts/check-output-artifacts.test.mjs",
+    "features": "node ./scripts/feature-map.mjs",
+    "features:check": "node ./scripts/feature-map.mjs check",
+    "features:test": "node --test ./scripts/feature-map.test.mjs",
+    "control": "node ./scripts/zest-control.mjs",
+    "control:check": "node ./scripts/zest-control.mjs check",
+    "control:test": "node --test ./scripts/zest-control.test.mjs",
+    "hooks:install": "node ./scripts/install-git-hooks.mjs",
+    "acp:probe": "node ./scripts/acp-probe.mjs",
     "plugin:install": "node ./scripts/install-plugin.mjs",
     "release:version": "node ./scripts/check-release-version.mjs",
     "release:checksums": "node ./scripts/release-checksums.mjs"

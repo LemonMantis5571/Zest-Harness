@@ -26,6 +26,7 @@ import {
 
 import { ApprovalModePicker } from "@/components/ApprovalModePicker";
 import { ContextUsageButton } from "@/components/ContextUsageButton";
+import { ModelIcon } from "@/components/ModelIcon";
 import { ModelEffortPicker } from "@/components/ModelEffortPicker";
 import {
   Attachment,
@@ -43,9 +44,9 @@ import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { IconSwap } from "@/components/ui/icon-swap";
 import { ImageLightbox } from "@/components/ZoomableImage";
 import {
-  chipLabel,
+  catalogueModelLabel,
+  effortShort,
   effortsForModel,
-  modelLabel,
   type EffortId,
   type ModelCapability,
 } from "@/lib/models";
@@ -61,6 +62,7 @@ import { hasResumableThreadTurn, type QueuedTurn } from "@/lib/threadQueue";
 import {
   filterSlashCommands,
   isModelCommandName,
+  slashTokenAt,
   splitSlashMatch,
 } from "@/lib/slashCommands";
 import { cn } from "@/lib/utils";
@@ -80,6 +82,8 @@ type Props = {
   gitContext: GitContext | null;
   approvalMode: ApprovalMode;
   contextRefreshKey: string | number;
+  /** The chat the context meter measures. */
+  contextScope: string;
   sending: boolean;
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
@@ -97,6 +101,7 @@ type Props = {
   attachments: PreparedAttachment[];
   onChange: (value: string) => void;
   onSubmit: (currentDraft?: string) => void;
+  onBtw?: () => void;
   onStop?: () => void;
   onApprovalModeChange: (mode: ApprovalMode) => void;
   onModelChange: (model: string) => void;
@@ -129,6 +134,7 @@ export const Composer = memo(function Composer({
   gitContext,
   approvalMode,
   contextRefreshKey,
+  contextScope,
   sending,
   queuedMessages,
   onUpdateQueuedMessage,
@@ -146,6 +152,7 @@ export const Composer = memo(function Composer({
   attachments,
   onChange,
   onSubmit,
+  onBtw,
   onStop,
   onApprovalModeChange,
   onModelChange,
@@ -162,9 +169,17 @@ export const Composer = memo(function Composer({
   const supportsEffort = effortsForModel(models, model).length > 0;
   const canResumeQueued = hasResumableThreadTurn(queuedMessages);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const caretPositionRef = useRef(0);
+  const [caretPosition, setCaretPosition] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuId = useId();
+
+  const updateCaretPosition = useCallback(() => {
+    const position = ref.current?.selectionStart ?? 0;
+    caretPositionRef.current = position;
+    setCaretPosition(position);
+  }, []);
 
   const [text, setText] = useState(value);
   const textRef = useRef(text);
@@ -197,7 +212,9 @@ export const Composer = memo(function Composer({
     };
   }, []);
 
-  const handleTextChange = (newText: string) => {
+  const handleTextChange = (newText: string, nextCaretPosition: number) => {
+    caretPositionRef.current = nextCaretPosition;
+    setCaretPosition(nextCaretPosition);
     setText(newText);
     if (debounceTimerRef.current !== null) {
       window.clearTimeout(debounceTimerRef.current);
@@ -230,21 +247,17 @@ export const Composer = memo(function Composer({
     };
   }, []);
 
-  // Only a token being typed at the very start opens the palette — the same
-  // rule the Rust parser uses, so what you see matches what will run.
-  const typedCommand = /^\/([a-z0-9-_]*)$/i.exec(text.trimStart())?.[1];
-  const slashOpen = typedCommand !== undefined && !commandsDismissed;
+  const slashToken = slashTokenAt(text, caretPosition);
+  const typedCommand = slashToken?.query;
+  const slashOpen = slashToken !== null && !commandsDismissed;
   const commandMatches = slashOpen
-    ? filterSlashCommands(commands, typedCommand)
+    ? filterSlashCommands(commands, slashToken?.query ?? "")
     : [];
 
   useEffect(() => {
     setCommandIndex(0);
-  }, [typedCommand]);
-
-  useEffect(() => {
-    if (typedCommand === undefined) setCommandsDismissed(false);
-  }, [typedCommand]);
+    setCommandsDismissed(false);
+  }, [slashToken?.start, slashToken?.end, typedCommand]);
 
   // Reload when the palette opens so an MCP added in Customize is in the list.
   useEffect(() => {
@@ -263,20 +276,35 @@ export const Composer = memo(function Composer({
     };
   }, [slashOpen]);
 
+  function focusComposerAt(position: number) {
+    caretPositionRef.current = position;
+    setCaretPosition(position);
+    window.requestAnimationFrame(() => {
+      const element = ref.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(position, position);
+    });
+  }
+
   function applyCommand(command: CommandView) {
-    if (command.kind === "builtin" && isModelCommandName(command.name)) {
-      setText("");
-      flushChange("");
-      setCommandsDismissed(true);
-      onModelPickerOpenChange?.(true);
-      ref.current?.focus();
-      return;
-    }
-    const next = `/${command.name} `;
+    const current = textRef.current;
+    const token = slashTokenAt(current, caretPositionRef.current);
+    if (!token) return;
+
+    const isModelCommand =
+      command.kind === "builtin" && isModelCommandName(command.name);
+    const isBtwCommand = command.kind === "builtin" && command.name.toLowerCase() === "btw" && Boolean(onBtw);
+    const replacement = isModelCommand || isBtwCommand ? "" : `/${command.name} `;
+    const next =
+      current.slice(0, token.start) + replacement + current.slice(token.end);
+    const nextCaretPosition = token.start + replacement.length;
     setText(next);
     flushChange(next);
     setCommandsDismissed(true);
-    ref.current?.focus();
+    if (isBtwCommand) { onBtw?.(); return; }
+    if (isModelCommand) onModelPickerOpenChange?.(true);
+    focusComposerAt(nextCaretPosition);
   }
 
   useEffect(() => {
@@ -317,8 +345,15 @@ export const Composer = memo(function Composer({
 
   const handleSend = () => {
     if (!canSend) return;
-    flushChange(textRef.current);
-    onSubmit(textRef.current);
+    const sent = textRef.current;
+    // Empty the box now. Parent `value` often never changes on type-then-enter:
+    // the draft is still "" because of the 200ms debounce, so flushing `sent`
+    // and App's setDraft("") batch back to "" and the value-sync effect does
+    // not run. Waiting on that effect is how a sent message stayed visible.
+    setText("");
+    textRef.current = "";
+    flushChange("");
+    onSubmit(sent);
   };
 
   useEffect(() => {
@@ -546,7 +581,7 @@ export const Composer = memo(function Composer({
             >
               {commandMatches.map((cmd, index) => {
                 const selected = index === commandIndex;
-                const parts = splitSlashMatch(cmd.name, typedCommand ?? "");
+                const parts = splitSlashMatch(cmd.name, slashToken?.query ?? "");
                 return (
                   <button
                     key={`${cmd.kind}:${cmd.name}`}
@@ -592,7 +627,11 @@ export const Composer = memo(function Composer({
             placeholder="Ask about this project — / for commands, paste or attach files"
             autoComplete="off"
             className="block max-h-[180px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm text-foreground caret-foreground outline-none placeholder:text-muted-foreground"
-            onChange={(e) => handleTextChange(e.target.value)}
+            onChange={(e) => handleTextChange(e.target.value, e.target.selectionStart)}
+            onClick={updateCaretPosition}
+            onFocus={updateCaretPosition}
+            onKeyUp={updateCaretPosition}
+            onSelect={updateCaretPosition}
             onBlur={() => flushChange(textRef.current)}
             onPaste={(e) => {
               const items = Array.from(e.clipboardData?.items ?? []);
@@ -629,7 +668,11 @@ export const Composer = memo(function Composer({
                   return;
                 }
               }
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (
+                e.key === "Enter" &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing
+              ) {
                 e.preventDefault();
                 handleSend();
               }
@@ -699,14 +742,20 @@ export const Composer = memo(function Composer({
                   open={modelPickerOpen}
                   onOpenChange={onModelPickerOpenChange}
                   disabled={sending || compacting || optionsDisabled}
+                  pending={optionsDisabled}
                   onModelChange={onModelChange}
                   onEffortChange={onEffortChange}
                   onSwitchProvider={onSwitchProvider}
                   onReset={onResetOptions}
                 />
               ) : (
-                <span className="truncate px-2 py-1 text-xs text-muted-foreground">
-                  {supportsEffort ? chipLabel(model, effort) : modelLabel(model)}
+                <span className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
+                  <ModelIcon modelId={model} providerId={currentProviderId} />
+                  <span className="min-w-0 truncate">
+                    {supportsEffort
+                      ? `${catalogueModelLabel(models, model)} · ${effortShort(effort)}`
+                      : catalogueModelLabel(models, model)}
+                  </span>
                 </span>
               )}
             </div>
@@ -746,7 +795,7 @@ export const Composer = memo(function Composer({
               type="button"
               title={folderLabel}
               onClick={onOpenFolder}
-              className="inline-flex max-w-[28ch] cursor-pointer items-center gap-1 truncate rounded-md px-1 py-0.5 hover:bg-secondary hover:text-foreground"
+              className="inline-flex min-h-6 min-w-6 max-w-[28ch] cursor-pointer items-center gap-1 truncate rounded-md px-1 py-0.5 hover:bg-secondary hover:text-foreground"
             >
               <FolderOpenIcon className="size-3 shrink-0 opacity-70" />
               <span className="truncate">{folderLabel}</span>
@@ -768,7 +817,7 @@ export const Composer = memo(function Composer({
               <a
                 {...pullRequestAnchorProps(gitContext.pullRequest.url)}
                 title={`${gitContext.pullRequest.title} · +${gitContext.additions} −${gitContext.deletions} · ${gitContext.changedFiles} files`}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                className="inline-flex min-h-6 min-w-6 shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
                 onClick={(event) => handlePullRequestClick(event, onOpenPullRequest)}
               >
                 <GitPullRequestIcon className="size-3 opacity-80" />
@@ -782,7 +831,7 @@ export const Composer = memo(function Composer({
               </a>
             ) : null}
             {showModelPicker ? (
-              <span className="hidden truncate sm:inline">· {modelLabel(model)}</span>
+              <span className="hidden truncate sm:inline">· {catalogueModelLabel(models, model)}</span>
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -793,6 +842,7 @@ export const Composer = memo(function Composer({
             />
             <ContextUsageButton
               refreshKey={contextRefreshKey}
+              scope={contextScope}
               className="shrink-0"
             />
           </div>

@@ -222,6 +222,7 @@ async fn run_with_sink_internal<S: EventSink>(
     // from a previous process. The durable run record remains available for
     // diagnostics, but the session no longer advertises the stale action.
     session.recovery = None;
+    session.agent.set_next_run_id(turn.turn_id.clone());
     turn.approval_hub.begin_turn(&turn.turn_id);
     turn.question_hub.begin_turn(&turn.turn_id);
 
@@ -283,7 +284,7 @@ async fn run_with_sink_internal<S: EventSink>(
         .unwrap_or(false);
 
     // Slash commands resolve against the session's skills and the workspace
-    // MCP list. An unknown command expands to itself.
+    // MCP list. Every recognised token expands; unknown slash text stays typed.
     let (prompt, command) = match session.skills.read() {
         Ok(skills) => {
             let config = load_workspace_config(state);
@@ -302,6 +303,18 @@ async fn run_with_sink_internal<S: EventSink>(
         Err(_) => (text.clone(), None),
     };
     let user_blocks = build_user_content(&prompt, &attachments);
+    // Publish the submitted prompt before the persistence awaits below. A
+    // side panel opened while this turn is being prepared must see what the
+    // main agent was asked, even though Agent keeps its live wire history
+    // transactional until completion.
+    if let Ok(mut side) = turn.side_context.lock() {
+        let mut side_messages = session.agent.messages.clone();
+        side_messages.push(zest_core::Message::user_blocks(user_blocks.clone()));
+        *side = session
+            .agent
+            .side_conversation_with_messages(side_messages, &[])
+            .without_provider_session();
+    }
     let worker = match ensure_persist(state, &session.root) {
         Ok(w) => w,
         Err(e) => {
@@ -341,6 +354,7 @@ async fn run_with_sink_internal<S: EventSink>(
                 message: format!(
                     "Turn lifecycle could not be saved; chat will continue without recovery metadata: {error}"
                 ),
+                title: None,
             });
             false
         }
@@ -382,6 +396,7 @@ async fn run_with_sink_internal<S: EventSink>(
             thread_id: thread_id.clone(),
             turn_id: Some(turn_id.clone()),
             message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
+            title: None,
         });
     }
     sink.emit(&user_event);
@@ -438,6 +453,12 @@ async fn run_with_sink_internal<S: EventSink>(
             system.volatile.push_str(&context);
             session.agent.system = Some(system);
         }
+        let side_context = turn.side_context.clone();
+        let mut publish_side_snapshot = move |snapshot: zest_core::btw::SideConversation| {
+            if let Ok(mut current) = side_context.lock() {
+                *current = snapshot;
+            }
+        };
         let assistant_message_id = assistant_message_id.clone();
         let session_id = session_id.clone();
         let thread_id = thread_id.clone();
@@ -504,6 +525,7 @@ async fn run_with_sink_internal<S: EventSink>(
                         id: id.to_string(),
                         title: title.to_string(),
                         status: provider_activity_status(status).into(),
+                        parent_id: None,
                     }
                 }
                 StreamEvent::ToolCallStart { name, id } => ChatEvent::ToolCallStart {
@@ -535,6 +557,7 @@ async fn run_with_sink_internal<S: EventSink>(
                 } => {
                     let delegation_job_id = metadata.as_ref().and_then(|metadata| match metadata {
                         ToolMetadata::Delegation { job_id, .. } => job_id.clone(),
+                        ToolMetadata::HtmlDocument { .. } => None,
                     });
                     // Whatever the model says next belongs to a new round.
                     round_break_pending = true;
@@ -603,12 +626,13 @@ async fn run_with_sink_internal<S: EventSink>(
                 // Surfaced as a warning rather than swallowed: the model chip
                 // shows what was *requested*, so without this the transcript
                 // would silently attribute a turn to the wrong model.
-                StreamEvent::ModelSubstituted { served, .. } => ChatEvent::Warning {
+                StreamEvent::ModelSubstituted { requested, served } => ChatEvent::Warning {
                     session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
                     turn_id: Some(turn_id.clone()),
+                    title: Some("Model changed".into()),
                     message: format!(
-                        "The selected model was unavailable, so this response used `{served}` instead."
+                        "Selected model `{requested}` was unavailable; this response used `{served}` instead."
                     ),
                 },
                 StreamEvent::ResumeHandle(_) => {
@@ -680,17 +704,13 @@ async fn run_with_sink_internal<S: EventSink>(
 
             // The lock is released before the worker is told anything, so the
             // deferred read below can never wait on this event's own guard.
-            let priority = if matches!(&event, ChatEvent::ProviderActivity { .. }) {
-                None
-            } else {
-                match live_thread.lock() {
-                    Ok(mut thread) => {
-                        record_ledger_event(&mut thread, &event);
-                        apply_event_to_thread(&mut thread, &event);
-                        event_mutates_thread(&event).then(|| event_priority(&event))
-                    }
-                    Err(_) => None,
+            let priority = match live_thread.lock() {
+                Ok(mut thread) => {
+                    record_ledger_event(&mut thread, &event);
+                    apply_event_to_thread(&mut thread, &event);
+                    event_mutates_thread(&event).then(|| event_priority(&event))
                 }
+                Err(_) => None,
             };
 
             if let Some(priority) = priority {
@@ -707,6 +727,7 @@ async fn run_with_sink_internal<S: EventSink>(
                         thread_id: thread_id.clone(),
                         turn_id: Some(turn_id.clone()),
                         message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
+                        title: None,
                     });
                 }
             }
@@ -716,11 +737,12 @@ async fn run_with_sink_internal<S: EventSink>(
         let result = if multimodal {
             session
                 .agent
-                .send_blocks_cancellable_with_inbox(
+                .send_blocks_cancellable_with_inbox_and_side_context(
                     user_blocks,
                     &mut on_event,
                     Some(&cancel),
                     Some(&turn.input_inbox),
+                    &mut publish_side_snapshot,
                 )
                 .await
         } else {
@@ -739,11 +761,12 @@ async fn run_with_sink_internal<S: EventSink>(
                 .unwrap_or_default();
             session
                 .agent
-                .send_cancellable_with_inbox(
+                .send_cancellable_with_inbox_and_side_context(
                     &agent_text,
                     &mut on_event,
                     Some(&cancel),
                     Some(&turn.input_inbox),
+                    &mut publish_side_snapshot,
                 )
                 .await
         };
@@ -835,6 +858,7 @@ async fn run_with_sink_internal<S: EventSink>(
             thread_id: thread_id.clone(),
             turn_id: Some(turn_id.clone()),
             message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
+            title: None,
         });
     }
     let final_history_saved = !history_save_failed;
@@ -870,6 +894,7 @@ async fn run_with_sink_internal<S: EventSink>(
                 thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 message: format!("Turn lifecycle could not be finalized: {error}"),
+                title: None,
             });
         }
     }
@@ -980,6 +1005,119 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn idle_compaction_joins_the_last_successful_desktop_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zest_core::{Agent, Completion, Provider, ToolRegistry, TurnRequest};
+
+        struct FixtureProvider(AtomicUsize);
+        #[async_trait]
+        impl Provider for FixtureProvider {
+            fn id(&self) -> &str {
+                "fixture"
+            }
+            fn default_model(&self) -> &str {
+                "fixture-model"
+            }
+            fn auth_status(&self) -> AuthStatus {
+                AuthStatus::Ready { account: None }
+            }
+            async fn stream_turn(
+                &self,
+                _: &TurnRequest,
+                on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+            ) -> zest_core::Result<Completion> {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 2 {
+                    return Err(HarnessError::Other("fixture failure".into()));
+                }
+                on_event(StreamEvent::Text("fixture answer"));
+                Ok(Completion {
+                    content: vec![json!({"type":"text", "text":"fixture answer"})],
+                    stop_reason: Some("end_turn".into()),
+                    usage: Default::default(),
+                    usage_available: true,
+                    limits: None,
+                    served_model: None,
+                    provider_session: None,
+                })
+            }
+        }
+
+        let root = ScratchDir::new("zest-idle-compaction-");
+        let mut usage = Ledger::load_from(root.join("fixture-usage.json"));
+        usage.set_task_traces(true);
+        let ledger = Arc::new(Mutex::new(usage));
+        let mut session = crate::session::test_session("fixture-thread", root.to_path_buf());
+        session.provider_id = "fixture".into();
+        session.model = "fixture-model".into();
+        session.thread = Thread::new().with_provider("fixture");
+        session.thread_id = session.thread.id.clone();
+        let thread_id = session.thread_id.clone();
+        session.agent = Agent::new(
+            Arc::new(FixtureProvider(AtomicUsize::new(0))),
+            ToolRegistry::new(),
+        )
+        .with_ledger(ledger.clone());
+        let sessions = Arc::new(SessionController::new());
+        sessions.set_session(session).unwrap();
+        let state = AppState {
+            sessions,
+            browser: Arc::new(BrowserHost::new()),
+            login: Mutex::new(None),
+            persist: Mutex::new(HashMap::new()),
+            workspace_root: Mutex::new(Some(root.to_path_buf())),
+            workspace_config: Mutex::new(Some(Config::default())),
+            policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
+            jobs: Arc::new(JobRegistry::new()),
+            ledger: ledger.clone(),
+            config_edit: Mutex::new(()),
+            chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
+            delegations: Arc::new(DelegationCoordinator::with_ledger(ledger.clone())),
+        };
+        let sink = RecordingSink::default();
+        for text in ["first", "second", "failed turn"] {
+            run_with_sink_internal(&sink, &state, text.into(), None, None)
+                .await
+                .unwrap();
+        }
+        let completed_run = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ChatEvent::Done { turn_id, .. } => Some(turn_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            sink.events.lock().unwrap().last(),
+            Some(ChatEvent::Error { .. })
+        ));
+        assert!(!state.sessions.is_busy().unwrap());
+        let outcome = crate::compact_context_inner(&state).await.unwrap();
+        assert!(!outcome.pruned_only);
+        let saved = ThreadStore::open(&root).unwrap().load(&thread_id).unwrap();
+        assert_eq!(saved.agent_messages.len(), 2);
+        assert!(saved
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.kind == ThreadCheckpointKind::Compaction));
+        let usage = ledger.lock().unwrap();
+        let maintenance = usage.tasks().last().unwrap();
+        assert_eq!(maintenance.kind, "compaction");
+        assert_eq!(maintenance.status, "completed");
+        assert_eq!(maintenance.requests.len(), 1);
+        assert_eq!(maintenance.run_id.as_deref(), Some(completed_run.as_str()));
+        let parent = usage
+            .tasks()
+            .iter()
+            .find(|task| task.run_id.as_ref() == Some(&completed_run) && task.kind == "turn")
+            .unwrap();
+        assert_eq!(maintenance.parent_task_id.as_ref(), Some(&parent.task_id));
+    }
+
     #[test]
     fn event_sink_preserves_event_order_without_tauri() {
         let sink = RecordingSink::default();
@@ -988,12 +1126,14 @@ mod tests {
             thread_id: "thread-1".to_string(),
             turn_id: Some("turn-1".to_string()),
             message: "first".to_string(),
+            title: None,
         };
         let second = ChatEvent::Warning {
             session_id: "session-1".to_string(),
             thread_id: "thread-1".to_string(),
             turn_id: Some("turn-1".to_string()),
             message: "second".to_string(),
+            title: None,
         };
 
         sink.emit(&first);

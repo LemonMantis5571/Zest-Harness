@@ -14,6 +14,10 @@ const WALLPAPER_FILTERS: {
   hint: string;
 }[] = [
   { id: "none", label: "Original", hint: "Your photo, unchanged." },
+  { id: "sepia", label: "Sepia", hint: "Warm brown tones, like an old photograph." },
+  { id: "warm", label: "Warm", hint: "A gentle amber tint for a warmer photo." },
+  { id: "cool", label: "Cool", hint: "A soft blue tint for a cooler photo." },
+  { id: "muted", label: "Muted", hint: "Softer colors and lower contrast for a quiet background." },
   {
     id: "print",
     label: "Print",

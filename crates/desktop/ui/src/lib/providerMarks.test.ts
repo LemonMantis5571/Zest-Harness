@@ -8,6 +8,8 @@ describe("provider marks", () => {
     assert.equal(providerMark("codex"), "codex");
     assert.equal(providerMark("claude"), "claude");
     assert.equal(providerMark("antigravity"), "gemini");
+    assert.equal(providerMark("cursor"), "cursor");
+    assert.equal(providerMark("cursor-work"), "cursor");
   });
 
   it("recognises providers people configure by hand", () => {

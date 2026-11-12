@@ -20,6 +20,7 @@ import type {
   ReactNode,
 } from "react"
 import {
+  createStreamingHighlighter,
   highlightCode,
   markdownCodeProps,
   markdownFences,
@@ -773,9 +774,8 @@ function CodeBlock({
   const source = code ?? ""
   const resolvedLanguage = resolveCodeBlockLanguage(language)
 
-  /* The deferred copy is what a fast stream tokenises against. React keeps the
-     previous render on screen while the new one is prepared, so the block never
-     blanks and the main thread is never blocked by a chunk. */
+  /* Deferring keeps urgent input ahead of rendering; tokenization itself is
+     synchronous, so the effect below also coalesces growing stream chunks. */
   const deferredSource = useDeferredValue(source)
 
   const plainLines = useMemo(
@@ -849,6 +849,21 @@ function CodeBlock({
     previousTransformersRef.current = transformers
   }, [transformers, streaming])
 
+  /* One per streaming block, holding the lines it has already settled. Null
+     when the options need a whole-document pass, or once the stream ends. */
+  const streamingHighlighter = useMemo(
+    () =>
+      streaming && shouldHighlight
+        ? createStreamingHighlighter({
+            language,
+            instanceKey: contentId,
+            ...highlightOptions,
+            transformers,
+          })
+        : null,
+    [contentId, highlightOptions, language, shouldHighlight, streaming, transformers]
+  )
+
   useEffect(() => {
     if (!shouldHighlight) {
       setHighlighted(null)
@@ -856,21 +871,38 @@ function CodeBlock({
     }
 
     let active = true
-    void highlightCode(deferredSource, {
-      language,
-      instanceKey: contentId,
-      ...highlightOptions,
-      transformers,
-    }).then((next) => {
-      if (active) {
-        setHighlighted({ source: deferredSource, spec: specKey, lines: next })
-      }
-    }).catch((error: unknown) => {
-      ignoreExpectedFailure(error, "highlight code block")
-    })
+    const run = () => {
+      if (!active) return
+      const pass = streamingHighlighter
+        ? streamingHighlighter(deferredSource)
+        : highlightCode(deferredSource, {
+            language,
+            instanceKey: contentId,
+            ...highlightOptions,
+            transformers,
+          })
+      void pass.then((next) => {
+        if (active) {
+          setHighlighted({ source: deferredSource, spec: specKey, lines: next })
+        }
+      }).catch((error: unknown) => {
+        ignoreExpectedFailure(error, "highlight code block")
+      })
+    }
+    // A resumable stream tokenizes only its new lines, so it can colour every
+    // frame; a chunk arriving before the frame replaces the pending one. A
+    // block that needs a whole-document pass waits for a pause instead, and
+    // completion always gives the final text one full grammar pass.
+    const frame =
+      streaming && streamingHighlighter ? requestAnimationFrame(run) : undefined
+    const timer =
+      streaming && !streamingHighlighter ? setTimeout(run, 150) : undefined
+    if (!streaming) run()
 
     return () => {
       active = false
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      clearTimeout(timer)
     }
   }, [
     contentId,
@@ -879,6 +911,8 @@ function CodeBlock({
     language,
     shouldHighlight,
     specKey,
+    streaming,
+    streamingHighlighter,
     transformers,
   ])
 
@@ -898,8 +932,11 @@ function CodeBlock({
     ) {
       return plainLines
     }
-    if (highlighted.lines.length >= plainLines.length) return highlighted.lines
-    return [...highlighted.lines, ...plainLines.slice(highlighted.lines.length)]
+    if (highlighted.source === deferredSource) return highlighted.lines
+    // The last highlighted line may still be growing. Always render that tail
+    // from current text while waiting, even when no new newline has arrived.
+    const settledLines = Math.max(0, highlighted.lines.length - 1)
+    return [...highlighted.lines.slice(0, settledLines), ...plainLines.slice(settledLines)]
   }, [
     linesProp,
     shouldHighlight,

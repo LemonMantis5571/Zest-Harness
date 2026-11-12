@@ -19,7 +19,8 @@ use serde::Deserialize;
 use crate::error::{HarnessError, Result};
 
 pub const CONFIG_FILE: &str = "zest.toml";
-pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "sonnet";
+/// Explicit, not the CLI's `sonnet` alias, which runs an older Sonnet.
+pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "claude-sonnet-5-5";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 
 /// Safe starter config embedded in every build. It contains provider metadata,
@@ -63,6 +64,13 @@ pub struct Config {
     legacy_routing: Option<LegacyRouting>,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub usage: UsageConfig,
+    /// A stronger model the working model may consult mid-turn. Absent means
+    /// no advisor: nothing is registered and nothing leaves for a second
+    /// provider.
+    #[serde(default)]
+    pub advisor: Option<AdvisorConfig>,
     /// Set by [`Config::parse`] when it had to rewrite a legacy document.
     /// Never read from or written to TOML — the file on disk is left alone.
     #[serde(skip)]
@@ -70,6 +78,18 @@ pub struct Config {
     /// Providers a migration could not map onto a surviving kind.
     #[serde(skip)]
     unsupported: Vec<(String, String)>,
+}
+
+/// Local usage records. Nothing configured here is ever sent anywhere.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// Keep content-free per-task traces in the local `usage.json` for 30 days,
+    /// for `zest usage --tasks`. Off unless asked for: Zest records diagnostics
+    /// only when they are needed. Turning it off drops stored traces on the
+    /// next write. Spend totals per provider are recorded either way.
+    #[serde(default)]
+    pub task_traces: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -99,6 +119,11 @@ pub struct ToolsConfig {
     /// bytes past a tool's own cap were simply gone.
     #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: usize,
+    /// Offer MCP tools through `mcp_discover_tools` and `mcp_call_tool`
+    /// instead of sending every server's schemas with each request. Smaller
+    /// requests, one extra round when a tool is first needed. Off by default.
+    #[serde(default)]
+    pub mcp_discovery: bool,
 }
 
 /// Hand-written rather than derived: a derived `usize` default is `0`, which this
@@ -109,6 +134,7 @@ impl Default for ToolsConfig {
         Self {
             bash: BashConfig::default(),
             max_result_bytes: default_max_result_bytes(),
+            mcp_discovery: false,
         }
     }
 }
@@ -173,7 +199,7 @@ fn default_bash_timeout_ms() -> u64 {
 ///
 /// `kind` discriminates, and it is the only thing that does: transport,
 /// credentials, and capabilities are all decided from this variant and never
-/// inferred from a provider id. Two of the five kinds spawn a vendor runtime
+/// inferred from a provider id. Three of the six kinds spawn a vendor runtime
 /// that owns its own agent loop; `codex_oauth` uses Zest's loop. See
 /// `Provider::owns_agent_loop`.
 #[derive(Debug, Clone, Deserialize)]
@@ -199,7 +225,7 @@ pub enum ProviderConfig {
         /// Executable name or absolute path. No shell is involved.
         #[serde(default = "default_claude_code_command")]
         command: String,
-        /// Optional CLI-owned model alias or model id. Omitted uses 'sonnet'.
+        /// Optional CLI-owned model alias or model id. Omitted uses Sonnet 5.5.
         #[serde(default)]
         model: Option<String>,
         /// Optional allow-list for the Claude Code model picker.
@@ -211,6 +237,13 @@ pub enum ProviderConfig {
         /// Permission mode passed to Claude Code's non-interactive runtime.
         #[serde(default)]
         permission_mode: ClaudeCodePermissionMode,
+        /// Tools to deny on top of Zest's own scope, by built-in tool name.
+        ///
+        /// An escape hatch, not the policy: the scope Claude Code runs in is
+        /// already narrowed to what makes sense inside Zest. This exists for a
+        /// project that wants one more thing off, such as `Bash`.
+        #[serde(default)]
+        disallowed_tools: Vec<String>,
         /// Parent process limit, capped at the same bound as delegated workers.
         #[serde(default = "default_external_timeout_secs")]
         timeout_secs: u64,
@@ -255,6 +288,32 @@ pub enum ProviderConfig {
         #[serde(default)]
         credential: Option<String>,
     },
+    /// Cursor CLI over ACP. Cursor owns the authenticated subscription
+    /// (`cursor-agent login`) and its own tool loop; zest.toml holds no key.
+    #[serde(rename = "cursor_acp")]
+    CursorAcp {
+        /// Executable name or absolute path. No shell is involved.
+        #[serde(default = "default_cursor_command")]
+        command: String,
+        /// Model passed to `--model`. Short names are resolved by Cursor into
+        /// its own parameterized ids.
+        #[serde(default)]
+        model: Option<String>,
+        /// Optional allow-list for the model picker.
+        #[serde(default)]
+        models: Vec<String>,
+        /// Cursor reads `.cursor/mcp.json` itself. This records the choice; it
+        /// cannot enforce it, because the CLI has no flag that narrows them.
+        #[serde(default)]
+        allow_mcp: bool,
+        /// Session mode. This is the only thing that stops Cursor editing:
+        /// it never asks permission for a file change, only for shell commands
+        /// outside its own allowlist.
+        #[serde(default)]
+        mode: CursorMode,
+        #[serde(default = "default_external_timeout_secs")]
+        timeout_secs: u64,
+    },
     OpenaiCompatible {
         /// API root, for example `https://api.openai.com/v1` or
         /// `https://api.deepseek.com`. The client appends `/chat/completions`.
@@ -279,27 +338,97 @@ pub enum ProviderConfig {
     },
 }
 
+/// Which Cursor session mode a chat runs in.
+///
+/// Not a convenience: Cursor never sends `session/request_permission` for a
+/// file edit, so `Plan` and `Ask` are the only mechanism that prevents one.
+/// `Agent` is full access, and on the real checkout that means unreviewed edits.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorMode {
+    /// Full tool access, including edits Zest is never asked about.
+    #[default]
+    Agent,
+    /// Read-only planning.
+    Plan,
+    /// Q&A. Cursor still runs allowlisted shell commands in this mode.
+    Ask,
+}
+
+impl CursorMode {
+    /// The `modeId` accepted by `session/set_mode`.
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Plan => "plan",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+/// Who decides whether a Claude Code tool call may run.
+///
+/// The values track the CLI's own `--permission-mode`, which as of 2.1.220
+/// documents `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeCodePermissionMode {
-    /// Let Claude Code apply its own interactive/default permission policy.
+    /// Claude Code's classifier approves routine work and refers the rest to
+    /// Zest's approval card.
+    ///
+    /// The default. Measured against CLI 2.1.220: a `Write` inside the project
+    /// reaches the approval card, and an ordinary `Read` or a read-only shell
+    /// command does not. See `claude auto-mode defaults` for the rule set the
+    /// classifier applies.
     #[default]
-    Default,
+    Auto,
+    /// Claude Code's stricter classifier, which refers more to the card.
+    ///
+    /// Not "ask about everything": reads and read-only shell commands inside the
+    /// project are allowed here too, the same as under `Auto`.
+    Manual,
     /// Allow file edits while retaining Claude Code's command safeguards.
     AcceptEdits,
     /// Keep the parent session read-only and plan-oriented.
     Plan,
+    /// Run tools without asking, and without telling Zest.
+    DontAsk,
     /// Disable Claude Code permission prompts. Use only in a throwaway tree.
     BypassPermissions,
+    /// Accepted for configs written before `auto` existed.
+    ///
+    /// `default` is not among the CLI's documented choices. It is still taken
+    /// today, but it stands for the behaviour `auto` now names, so the provider
+    /// resolves it there rather than passing on an undocumented value.
+    Default,
 }
 
 impl ClaudeCodePermissionMode {
     pub fn cli_value(self) -> &'static str {
         match self {
-            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::Manual => "manual",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
+            Self::DontAsk => "dontAsk",
             Self::BypassPermissions => "bypassPermissions",
+            Self::Default => "auto",
+        }
+    }
+
+    /// The `permission_mode` value in `zest.toml`, matching what serde reads.
+    ///
+    /// The desktop's config writer used to invert the `snake_case` derive by
+    /// hand, so adding a variant here silently required a matching edit there.
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+            Self::AcceptEdits => "accept_edits",
+            Self::Plan => "plan",
+            Self::DontAsk => "dont_ask",
+            Self::BypassPermissions => "bypass_permissions",
+            Self::Default => "default",
         }
     }
 }
@@ -552,7 +681,8 @@ impl ProviderConfig {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
             ProviderConfig::ClaudeCode { .. }
             | ProviderConfig::CodexCli { .. }
-            | ProviderConfig::CodexOAuth { .. } => None,
+            | ProviderConfig::CodexOAuth { .. }
+            | ProviderConfig::CursorAcp { .. } => None,
             ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
         }
     }
@@ -565,6 +695,7 @@ impl ProviderConfig {
             ProviderConfig::ClaudeCode { .. } => "claude_code",
             ProviderConfig::CodexCli { .. } => "codex_cli",
             ProviderConfig::CodexOAuth { .. } => "codex_oauth",
+            ProviderConfig::CursorAcp { .. } => "cursor_acp",
             ProviderConfig::OpenaiCompatible { .. } => "openai_compatible",
         }
     }
@@ -572,8 +703,98 @@ impl ProviderConfig {
     /// Whether this kind runs its own agent loop. ChatGPT sign-in and API
     /// keys use Zest's loop; vendor CLIs do not.
     pub fn owns_agent_loop(&self) -> bool {
-        matches!(self, Self::CodexCli { .. } | Self::ClaudeCode { .. })
+        matches!(
+            self,
+            Self::CodexCli { .. } | Self::ClaudeCode { .. } | Self::CursorAcp { .. }
+        )
     }
+}
+
+/// `[advisor]`: the model `consult_advisor` asks. See `docs/plans/advisor.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisorConfig {
+    /// A provider id from `[providers]`. Must be one whose agent loop Zest
+    /// drives; a CLI provider runs its own tools and cannot simply answer.
+    pub provider: String,
+    /// The provider's default model when omitted.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Consultations allowed per user request.
+    #[serde(default = "default_advisor_max_uses")]
+    pub max_uses: u32,
+    /// Reply budget per consultation, reasoning included on providers that think.
+    #[serde(default = "default_advisor_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_advisor_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Let Zest consult on its own: before a turn that changed files finishes,
+    /// and after two failed tool calls in a row. Only when that needs no new
+    /// approval; it counts against `max_uses`.
+    #[serde(default = "default_true")]
+    pub auto_review: bool,
+}
+
+impl AdvisorConfig {
+    /// Validate the complete selection without loading credentials or calling
+    /// a provider. Settings and lint use the same catalogue as the runtime.
+    pub(crate) fn validate_selection(
+        &self,
+        provider: &ProviderConfig,
+    ) -> std::result::Result<(), String> {
+        if provider.owns_agent_loop() {
+            return Err(format!("[advisor] provider `{}` runs its own agent loop and cannot advise; choose an API provider", self.provider));
+        }
+        let descriptor = crate::provider::descriptor_from_config(&self.provider, provider);
+        let model = self.model.as_deref().unwrap_or(&descriptor.default_model);
+        let spec = descriptor
+            .models
+            .iter()
+            .find(|spec| spec.id == model)
+            .ok_or_else(|| {
+                format!(
+                    "[advisor] model `{model}` is not offered by provider `{}`",
+                    self.provider
+                )
+            })?;
+        let effort = crate::provider::normalize_effort(self.effort.as_deref().unwrap_or("high"));
+        if !spec.efforts.is_empty() && !spec.efforts.contains(&effort) {
+            return Err(format!(
+                "[advisor] effort `{effort}` is not offered for model `{model}` on provider `{}`",
+                self.provider
+            ));
+        }
+        Ok(())
+    }
+
+    /// Limits checked both by `Config::lint` and before the tool is registered,
+    /// so a bad value is reported once and never reaches a request.
+    pub fn validate_limits(&self) -> std::result::Result<(), String> {
+        if self.max_uses == 0 || self.max_uses > 20 {
+            return Err("[advisor] max_uses must be between 1 and 20".into());
+        }
+        if !(1_024..=64_000).contains(&self.max_tokens) {
+            return Err("[advisor] max_tokens must be between 1024 and 64000".into());
+        }
+        if self.timeout_secs == 0 || self.timeout_secs > 600 {
+            return Err("[advisor] timeout_secs must be between 1 and 600".into());
+        }
+        Ok(())
+    }
+}
+
+fn default_advisor_max_uses() -> u32 {
+    3
+}
+
+fn default_advisor_max_tokens() -> u32 {
+    4_096
+}
+
+fn default_advisor_timeout_secs() -> u64 {
+    120
 }
 
 fn default_anthropic_key_env() -> String {
@@ -586,6 +807,10 @@ fn default_claude_code_command() -> String {
 
 fn default_codex_command() -> String {
     "codex".to_string()
+}
+
+fn default_cursor_command() -> String {
+    "cursor-agent".to_string()
 }
 
 fn default_codex_model() -> String {
@@ -801,6 +1026,8 @@ impl Config {
             }),
             legacy_routing: None,
             tools: ToolsConfig::default(),
+            usage: UsageConfig::default(),
+            advisor: None,
             migrations: Vec::new(),
             unsupported: Vec::new(),
         }
@@ -870,6 +1097,22 @@ impl Config {
         }
         for (id, server) in &self.mcp {
             if let Err(error) = server.validate(id) {
+                issues.push(error);
+            }
+        }
+        if let Some(advisor) = &self.advisor {
+            match self.providers.get(&advisor.provider) {
+                None => issues.push(format!(
+                    "[advisor] provider points at unknown provider `{}`",
+                    advisor.provider
+                )),
+                Some(provider) => {
+                    if let Err(error) = advisor.validate_selection(provider) {
+                        issues.push(error);
+                    }
+                }
+            }
+            if let Err(error) = advisor.validate_limits() {
                 issues.push(error);
             }
         }
@@ -1047,6 +1290,7 @@ permission_mode = "accept_edits"
                 models,
                 allow_mcp,
                 permission_mode,
+                disallowed_tools,
                 timeout_secs,
             } => {
                 assert_eq!(command, "claude");
@@ -1054,6 +1298,7 @@ permission_mode = "accept_edits"
                 assert!(models.is_empty());
                 assert!(!allow_mcp);
                 assert_eq!(*permission_mode, ClaudeCodePermissionMode::AcceptEdits);
+                assert!(disallowed_tools.is_empty());
                 assert_eq!(*timeout_secs, 900);
             }
             other => panic!("expected Claude Code provider, got {other:?}"),
@@ -1247,6 +1492,82 @@ provider = "typo"
         let issues = config.lint();
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].contains("typo"));
+    }
+
+    #[test]
+    fn an_advisor_section_parses_with_defaults_and_lints_clean() {
+        let config = Config::parse(
+            r#"
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[advisor]
+provider = "anthropic"
+model = "claude-opus-5-5"
+"#,
+        )
+        .expect("parses");
+        let advisor = config.advisor.as_ref().expect("advisor");
+        assert_eq!(advisor.provider, "anthropic");
+        assert_eq!(advisor.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            (advisor.max_uses, advisor.max_tokens, advisor.timeout_secs),
+            (3, 4_096, 120)
+        );
+        assert!(config.lint().is_empty(), "{:?}", config.lint());
+        assert!(Config::default().advisor.is_none());
+    }
+
+    #[test]
+    fn lint_rejects_an_advisor_that_cannot_answer() {
+        let config = Config::parse(
+            r#"
+[providers.claude]
+kind = "claude_code"
+
+[advisor]
+provider = "claude"
+max_uses = 0
+"#,
+        )
+        .expect("parses");
+        let issues = config.lint();
+        assert!(
+            issues.iter().any(|i| i.contains("runs its own agent loop")),
+            "{issues:?}"
+        );
+        assert!(issues.iter().any(|i| i.contains("max_uses")), "{issues:?}");
+
+        let config = Config::parse("[advisor]\nprovider = \"typo\"\n").expect("parses");
+        assert!(
+            config
+                .lint()
+                .iter()
+                .any(|i| i.contains("unknown provider `typo`")),
+            "{:?}",
+            config.lint()
+        );
+        assert!(Config::parse("[advisor]\nprovider = \"a\"\nmodle = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn advisor_lint_reports_model_and_effort_issues_for_settings() {
+        let mut config = Config::parse(
+            "[providers.strong]\nkind = \"codex_oauth\"\nmodel = \"gpt-6-sol\"\n\n[advisor]\nprovider = \"strong\"\nmodel = \"gpt-6-astra\"\neffort = \"none\"\n",
+        ).unwrap();
+        let issues = config.lint();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].starts_with("[advisor] effort `none` is not offered"));
+        config.advisor.as_mut().unwrap().effort = Some("high".into());
+        assert!(config.lint().is_empty());
+        config.advisor.as_mut().unwrap().model = Some("not-offered".into());
+        assert!(config.lint()[0].starts_with("[advisor] model `not-offered` is not offered"));
     }
 
     #[test]
@@ -1659,6 +1980,15 @@ url = "https://example.com/mcp"
         .expect("the document is syntactically valid");
         let error = config.mcp["mixed"].validate("mixed").unwrap_err();
         assert!(error.contains("both"), "{error}");
+    }
+
+    #[test]
+    fn task_traces_are_off_unless_turned_on() {
+        assert!(!Config::env_fallback().usage.task_traces);
+        assert!(!Config::parse("").unwrap().usage.task_traces);
+        let on = Config::parse("[usage]\ntask_traces = true\n").unwrap();
+        assert!(on.usage.task_traces);
+        assert!(Config::parse("[usage]\nupload = true\n").is_err());
     }
 
     #[test]

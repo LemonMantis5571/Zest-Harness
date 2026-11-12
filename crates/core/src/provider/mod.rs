@@ -11,14 +11,23 @@
 //! anything above noticing.
 
 pub mod anthropic;
+pub mod claude_aliases;
+pub mod claude_cli_version;
 pub mod claude_code;
 pub(crate) mod claude_control;
+pub mod claude_stream;
 pub mod codex_app_server;
 pub mod codex_oauth;
+pub mod codex_rig;
+pub mod cursor_acp;
+pub mod cursor_models;
 pub mod driver;
 pub mod openai_compatible;
 pub mod registry;
+pub mod rig_convert;
 pub mod session;
+pub mod stream_contract;
+pub mod turn_spec;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -29,6 +38,52 @@ use crate::anthropic::types::{Message, ToolDef, Usage, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
 use crate::config::ProviderConfig;
 use crate::error::Result;
+use crate::tools::approval::{ApprovalDecision, ApprovalPolicy};
+
+#[cfg(test)]
+static CODEX_SESSION_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct CodexSessionEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl CodexSessionEnvGuard {
+    fn capture() -> Self {
+        let lock = CODEX_SESSION_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(crate::codex_oauth::SESSION_ENV);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+
+    pub(crate) fn set(value: &str) -> Self {
+        let guard = Self::capture();
+        std::env::set_var(crate::codex_oauth::SESSION_ENV, value);
+        guard
+    }
+
+    pub(crate) fn unset() -> Self {
+        let guard = Self::capture();
+        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
+        guard
+    }
+}
+
+#[cfg(test)]
+impl Drop for CodexSessionEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(crate::codex_oauth::SESSION_ENV, value),
+            None => std::env::remove_var(crate::codex_oauth::SESSION_ENV),
+        }
+    }
+}
 
 /// Build a picker/validation catalogue from config without loading credentials.
 ///
@@ -48,8 +103,13 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
 pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
     let (default_model, builtin) = match provider_id {
         "codex" | "codex-chatgpt" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
-        "claude" | "anthropic" => (DEFAULT_MODEL.to_string(), &[][..]),
+        "anthropic" => (DEFAULT_MODEL.to_string(), ANTHROPIC_KNOWN_MODELS),
+        "claude" => (DEFAULT_MODEL.to_string(), &[][..]),
         "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
+        "cursor" => (
+            cursor_acp::DEFAULT_CURSOR_MODEL.to_string(),
+            cursor_models::BUILTIN_MODELS,
+        ),
         _ => (DEFAULT_MODEL.to_string(), &[][..]),
     };
     ProviderDescriptor {
@@ -79,34 +139,128 @@ pub struct ModelSpec {
     /// Whether the catalogue explicitly opts into image input.
     #[serde(default)]
     pub supports_vision: bool,
+    /// For an alias whose meaning the provider decides, such as Claude Code's
+    /// `opus`: the model it last ran as, once a turn has shown it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves_to: Option<String>,
+    /// Set when the vendor CLI that runs this model is known to be too old for
+    /// it. The model stays selectable: the version check can be wrong, and the
+    /// API's own refusal still reaches the user if it is right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_cli: Option<CliRequirement>,
+}
+
+/// A newer vendor CLI a model needs than the one installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliRequirement {
+    /// The CLI's display name, such as "Claude Code".
+    pub cli: String,
+    /// The oldest version that runs the model.
+    pub minimum: String,
+    /// The version installed now.
+    pub installed: String,
+    /// The command that updates the CLI, such as `claude update`.
+    pub update: String,
 }
 
 fn default_true() -> bool {
     true
 }
 
+/// Window used when no family is recognised and the published table has no row.
+pub const FALLBACK_CONTEXT_WINDOW: u64 = 128_000;
+
+const CLAUDE_WINDOW: u64 = 1_000_000;
+const CLAUDE_HAIKU_WINDOW: u64 = 200_000;
+const GEMINI_WINDOW: u64 = 1_048_576;
+const GPT_LONG_WINDOW: u64 = 1_050_000;
+const GPT_STANDARD_WINDOW: u64 = 272_000;
+const COMPOSER_WINDOW: u64 = 200_000;
+const GROK_WINDOW: u64 = 256_000;
+const OPEN_WEIGHT_LONG_WINDOW: u64 = 1_000_000;
+
 /// Conservative built-in capacities for the models Zest knows without model
 /// discovery. Explicit provider catalogues remain authoritative for model ids;
 /// these values only keep the UI honest when no capacity was configured.
+///
+/// Recognised families use published API (or Cursor-product) windows. An
+/// unrecognised id stays at [`FALLBACK_CONTEXT_WINDOW`] unless the LiteLLM
+/// cache, loaded at rate refresh, has a larger `max_input_tokens`.
 pub fn context_window_for_model(model: &str) -> u64 {
-    let model = model.to_ascii_lowercase();
-    if model.contains("gpt-5.6") || model.contains("luna") || model.contains("codex") {
-        256_000
-    } else if model.contains("claude") {
-        200_000
-    } else {
-        128_000
+    let heuristic = heuristic_context_window(model);
+    if heuristic > FALLBACK_CONTEXT_WINDOW {
+        return heuristic;
     }
+    crate::rates::published_context_window(model)
+        .filter(|window| *window > heuristic)
+        .unwrap_or(heuristic)
+}
+
+fn heuristic_context_window(model: &str) -> u64 {
+    let raw = model.to_ascii_lowercase();
+    let model = raw.strip_prefix("cursor-").unwrap_or(raw.as_str());
+
+    if model.contains("haiku-5-5") {
+        return CLAUDE_WINDOW;
+    }
+    if model.contains("haiku") {
+        return CLAUDE_HAIKU_WINDOW;
+    }
+    if model.contains("claude") || model == "sonnet" || model == "opus" {
+        return CLAUDE_WINDOW;
+    }
+    if model.contains("gemini") {
+        return GEMINI_WINDOW;
+    }
+    if model.contains("composer") {
+        return COMPOSER_WINDOW;
+    }
+    if model.contains("grok") {
+        // Cursor serves 256K; the xAI API is 500K. Overflowing the host is
+        // worse than compacting a little early on a direct Grok endpoint.
+        return GROK_WINDOW;
+    }
+    if model.contains("gpt-6")
+        || model.contains("gpt-5.6")
+        || model.contains("gpt-5.5")
+        || (model.contains("gpt-5.4") && !model.contains("mini") && !model.contains("nano"))
+    {
+        return GPT_LONG_WINDOW;
+    }
+    if model.contains("gpt-5.4-mini")
+        || model.contains("gpt-5.4-nano")
+        || model.contains("gpt-5.3")
+        || model.contains("gpt-5.2")
+        || model.contains("gpt-5.1")
+        || model.contains("gpt-5-mini")
+        || model.contains("codex")
+    {
+        return GPT_STANDARD_WINDOW;
+    }
+    if model.contains("kimi") || model.contains("glm") || model.contains("deepseek") {
+        return OPEN_WEIGHT_LONG_WINDOW;
+    }
+    FALLBACK_CONTEXT_WINDOW
 }
 
 fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
+    let supports_vision = model_supports_vision(&id);
     ModelSpec {
         context_window: context_window_for_model(&id),
         id,
         efforts,
         supports_tools: true,
-        supports_vision: false,
+        supports_vision,
+        resolves_to: None,
+        needs_cli: None,
     }
+}
+
+pub(super) fn model_supports_vision(model_id: &str) -> bool {
+    matches!(
+        model_id.to_ascii_lowercase().as_str(),
+        "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna"
+    )
 }
 
 /// Static catalogue a provider exposes for pickers and session validation.
@@ -152,23 +306,39 @@ pub fn thread_provider_handoff(
 /// Normalize UI / env effort aliases to the wire form.
 pub fn normalize_effort(effort: &str) -> String {
     match effort.trim().to_ascii_lowercase().as_str() {
-        "low" | "medium" | "high" | "xhigh" | "max" => effort.trim().to_ascii_lowercase(),
+        "none" | "low" | "medium" | "high" | "xhigh" | "max" => effort.trim().to_ascii_lowercase(),
         "extra" | "extra high" | "extra_high" => "xhigh".into(),
         "med" => "medium".into(),
         _ => "high".into(),
     }
 }
 
+/// Built-in catalogue for the native Anthropic API, default first.
+///
+/// Only models that take adaptive thinking and `output_config.effort`, because
+/// every Zest turn sends both. Claude Haiku 4.5 takes neither and would reject
+/// its first request, so it is reachable only by naming it in `zest.toml`.
+pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
+    DEFAULT_MODEL,
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-sonnet-5",
+];
+
 /// Built-in Codex catalogue used when `zest.toml` omits `models` for provider `codex`.
 ///
 /// Mirrors the desktop picker (`CODEX_MODELS` in the UI). Keep these in sync.
 pub const CODEX_KNOWN_MODELS: &[&str] = &[
     "gpt-5.6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
 ];
 
 /// Whether a provider exposes a reasoning-effort selector, and which levels.
@@ -186,13 +356,26 @@ pub enum EffortPolicy<'a> {
 }
 
 impl EffortPolicy<'_> {
-    fn levels(self) -> Vec<String> {
+    fn levels(self, model_id: &str) -> Vec<String> {
         match self {
             Self::Unsupported => Vec::new(),
-            Self::Standard([]) => STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect(),
+            Self::Standard([]) => default_efforts_for_model(model_id),
             Self::Standard(allowed) => allowed.to_vec(),
         }
     }
+}
+
+/// Standard reasoning levels, including `none` only for models that publish it.
+pub(super) fn default_efforts_for_model(model_id: &str) -> Vec<String> {
+    let mut levels = Vec::with_capacity(STANDARD_EFFORTS.len() + 1);
+    if matches!(
+        model_id.to_ascii_lowercase().as_str(),
+        "gpt-6-sol" | "gpt-6-luna"
+    ) {
+        levels.push("none".to_string());
+    }
+    levels.extend(STANDARD_EFFORTS.iter().map(|level| (*level).to_string()));
+    levels
 }
 
 /// The one catalogue builder.
@@ -212,7 +395,6 @@ pub fn catalogue(
     builtin: &[&str],
     efforts: EffortPolicy<'_>,
 ) -> Vec<ModelSpec> {
-    let levels = efforts.levels();
     let mut ids: Vec<String> = if !models.is_empty() {
         models.to_vec()
     } else if !builtin.is_empty() {
@@ -224,7 +406,10 @@ pub fn catalogue(
         ids.insert(0, default_model.to_string());
     }
     ids.into_iter()
-        .map(|id| model_spec(id, levels.clone()))
+        .map(|id| {
+            let levels = efforts.levels(&id);
+            model_spec(id, levels)
+        })
         .collect()
 }
 
@@ -328,6 +513,7 @@ impl From<&str> for SystemPrompt {
 /// `effort` and `thinking` are *requests*, not commands. A provider maps them
 /// onto its own controls or ignores them — which is why the agent loop no longer
 /// carries a flag for whether the backend understands Anthropic's extensions.
+#[derive(Clone)]
 pub struct TurnRequest {
     pub model: String,
     pub system: Option<SystemPrompt>,
@@ -360,7 +546,46 @@ pub struct TurnRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderSessionRef {
-    CodexAppServer { thread_id: String },
+    /// One-shot fork requests. Completions return a normal child cursor.
+    CodexAppServerFork {
+        thread_id: String,
+    },
+    ClaudeCodeFork {
+        session_id: String,
+        model: String,
+    },
+    CodexAppServer {
+        thread_id: String,
+    },
+    CursorAcp {
+        session_id: String,
+    },
+    /// A Claude Code session, plus the model it was opened under.
+    ///
+    /// The model is part of the reference rather than checked elsewhere because
+    /// a session holds a history *and* the model that produced it. Resuming one
+    /// under a different model would answer from a conversation that model
+    /// never had, and the CLI would do it without complaining.
+    ClaudeCode {
+        session_id: String,
+        model: String,
+    },
+}
+
+impl ProviderSessionRef {
+    /// Never resume the parent's mutable session for a side conversation.
+    pub fn for_side_conversation(&self) -> Option<Self> {
+        match self {
+            Self::CodexAppServer { thread_id } => Some(Self::CodexAppServerFork {
+                thread_id: thread_id.clone(),
+            }),
+            Self::ClaudeCode { session_id, model } => Some(Self::ClaudeCodeFork {
+                session_id: session_id.clone(),
+                model: model.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,16 +617,38 @@ pub struct ProviderQuestionRequest {
 /// represented safely; providers must never guess an approval.
 #[async_trait]
 pub trait ProviderInteractionHost: Send + Sync {
+    /// Shared session policy, when the front-end has one. Claude Code consults
+    /// this before drawing a card so "Allow for session" and Auto actually stick.
+    fn approval_policy(&self) -> Option<Arc<std::sync::Mutex<ApprovalPolicy>>> {
+        None
+    }
+
     async fn prepare_command_approval(&self, _approval_id: &str) {}
 
     async fn approve_command(&self, _request: ProviderCommandRequest) -> bool {
         false
     }
 
+    async fn decide_command(&self, request: ProviderCommandRequest) -> ApprovalDecision {
+        if self.approve_command(request).await {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
+    }
+
     async fn prepare_file_change_approval(&self, _approval_id: &str) {}
 
     async fn approve_file_change(&self, _request: ProviderFileChangeRequest) -> bool {
         false
+    }
+
+    async fn decide_file_change(&self, request: ProviderFileChangeRequest) -> ApprovalDecision {
+        if self.approve_file_change(request).await {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
     }
 
     async fn prepare_question(&self, _question_id: &str) {}
@@ -653,6 +900,12 @@ pub async fn probe(provider: &dyn Provider, model: &str) -> Result<()> {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Providers with a mutable live connection need a separate transport for
+    /// side conversations. Stateless adapters can share their client.
+    fn side_conversation_provider(&self) -> Option<Arc<dyn Provider>> {
+        None
+    }
+
     /// Stable identifier used by configuration and the usage ledger.
     fn id(&self) -> &str;
 
@@ -677,6 +930,15 @@ pub trait Provider: Send + Sync {
     /// Reject unknown model / effort pairs before a turn spends quota.
     fn validate_selection(&self, model: &str, effort: &str) -> std::result::Result<(), String> {
         validate_against(&self.models(), self.id(), model, effort)
+    }
+
+    /// The model this provider offers in place of one it no longer lists.
+    ///
+    /// Consulted only for a *remembered* choice, so a model dropped from the
+    /// catalogue moves to its successor instead of to the provider default,
+    /// which may be a different family. Default: none.
+    fn successor_model(&self, _model: &str) -> Option<String> {
+        None
     }
 
     /// Whether this provider can be used right now. Rendered by the launch
@@ -893,8 +1155,7 @@ model = "deepseek-v4-flash"
             ),
         ];
 
-        std::env::set_var(
-            crate::codex_oauth::SESSION_ENV,
+        let _session_env = crate::provider::CodexSessionEnvGuard::set(
             r#"{"access_token":"t","refresh_token":"r","account_id":"acct","expires_at":9999999999}"#,
         );
         for (id, toml) in cases {
@@ -926,7 +1187,6 @@ model = "deepseek-v4-flash"
             );
         }
         std::env::remove_var("ZEST_TEST_DRIFT_KEY");
-        std::env::remove_var(crate::codex_oauth::SESSION_ENV);
     }
 
     #[test]
@@ -941,5 +1201,119 @@ model = "deepseek-v4-flash"
             serde_json::from_value::<ResumeHandle>(encoded).unwrap(),
             handle
         );
+    }
+
+    #[test]
+    fn the_anthropic_picker_offers_the_current_claude_line_up() {
+        let ids: Vec<String> = descriptor_for_picker_id("anthropic")
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(ids, ANTHROPIC_KNOWN_MODELS);
+        assert_eq!(ids[0], DEFAULT_MODEL, "the default leads the list");
+        for id in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+            let spec = descriptor_for_picker_id("anthropic")
+                .models
+                .into_iter()
+                .find(|model| model.id == id)
+                .expect(id);
+            assert_eq!(spec.context_window, 1_000_000);
+            assert_eq!(spec.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        }
+        assert!(!ids.iter().any(|id| id == "claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn context_windows_follow_published_family_capacities() {
+        for (id, window) in [
+            ("claude-opus-5-thinking", CLAUDE_WINDOW),
+            ("claude-sonnet-5", CLAUDE_WINDOW),
+            ("opus", CLAUDE_WINDOW),
+            ("sonnet", CLAUDE_WINDOW),
+            ("haiku", CLAUDE_HAIKU_WINDOW),
+            ("claude-haiku-5", CLAUDE_HAIKU_WINDOW),
+            ("claude-haiku-5-5", CLAUDE_WINDOW),
+            ("claude-haiku-5-5-thinking", CLAUDE_WINDOW),
+            ("claude-sonnet-5-5", CLAUDE_WINDOW),
+            ("claude-fable-5-1", CLAUDE_WINDOW),
+            ("gemini-3.1-pro", GEMINI_WINDOW),
+            ("gemini-3.8-flash", GEMINI_WINDOW),
+            ("composer-2.5", COMPOSER_WINDOW),
+            ("composer-2.5-fast", COMPOSER_WINDOW),
+            ("cursor-grok-4.6", GROK_WINDOW),
+            ("cursor-grok-4.6-fast", GROK_WINDOW),
+            ("gpt-5.6-sol", GPT_LONG_WINDOW),
+            ("gpt-6.1-sol", GPT_LONG_WINDOW),
+            ("gpt-6-astra", GPT_LONG_WINDOW),
+            ("gpt-5.6-luna-fast", GPT_LONG_WINDOW),
+            ("gpt-5.5", GPT_LONG_WINDOW),
+            ("gpt-5.4", GPT_LONG_WINDOW),
+            ("gpt-5.4-fast", GPT_LONG_WINDOW),
+            ("gpt-5.4-mini", GPT_STANDARD_WINDOW),
+            ("gpt-5.4-nano", GPT_STANDARD_WINDOW),
+            ("gpt-5.3-codex", GPT_STANDARD_WINDOW),
+            ("gpt-5.2", GPT_STANDARD_WINDOW),
+            ("gpt-5.1", GPT_STANDARD_WINDOW),
+            ("gpt-5-mini", GPT_STANDARD_WINDOW),
+            ("kimi-k3", OPEN_WEIGHT_LONG_WINDOW),
+            ("glm-5.2", OPEN_WEIGHT_LONG_WINDOW),
+            ("deepseek-v4-flash", OPEN_WEIGHT_LONG_WINDOW),
+            ("auto", FALLBACK_CONTEXT_WINDOW),
+            ("local", FALLBACK_CONTEXT_WINDOW),
+        ] {
+            assert_eq!(context_window_for_model(id), window, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_codex_catalogue_carries_the_long_windows() {
+        let cat = catalogue(
+            "gpt-5.6-sol",
+            &[],
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(&[]),
+        );
+        let window = |id: &str| {
+            cat.iter()
+                .find(|model| model.id == id)
+                .map(|model| model.context_window)
+                .expect(id)
+        };
+        assert_eq!(window("gpt-5.6-sol"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.6-terra"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.6-luna"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-5.5"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-6.1-sol"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-6-astra"), GPT_LONG_WINDOW);
+    }
+
+    #[test]
+    fn current_gpt_choices_validate_on_both_codex_transports() {
+        for kind in ["codex_cli", "codex_oauth"] {
+            let config =
+                crate::config::Config::parse(&format!("[providers.openai]\nkind = \"{kind}\"\n"))
+                    .unwrap();
+            let descriptor = descriptor_from_config("openai", &config.providers["openai"]);
+            for id in ["gpt-6.1-sol", "gpt-6-astra"] {
+                assert_eq!(
+                    validate_against(&descriptor.models, "openai", id, "high"),
+                    Ok(())
+                );
+                assert!(validate_against(&descriptor.models, "openai", id, "none").is_err());
+                let spec = descriptor
+                    .models
+                    .iter()
+                    .find(|model| model.id == id)
+                    .unwrap();
+                assert!(spec.supports_tools && spec.supports_vision);
+                assert_eq!(spec.context_window, 1_050_000);
+            }
+            assert_eq!(
+                validate_against(&descriptor.models, "openai", "gpt-6-luna", "none"),
+                Ok(())
+            );
+            assert!(validate_against(&descriptor.models, "openai", "gpt-5.4", "high").is_err());
+        }
     }
 }

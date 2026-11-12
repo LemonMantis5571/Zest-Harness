@@ -24,17 +24,19 @@ use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::inbox::InputInbox;
 use crate::provider::{
-    Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt, TurnRequest,
+    Completion, Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, SystemPrompt,
+    TurnRequest,
 };
 use crate::thread::{new_id, ThreadInput, ThreadInputTarget};
 use crate::tools::approval::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
     ToolRisk,
 };
+use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::prepared::PreparedToolCall;
 use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
-use crate::usage::Ledger;
+use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
 
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
@@ -112,6 +114,16 @@ pub struct Agent {
     tools: ToolRegistry,
     /// Shared so delegated sub-agents on other providers bill into the same book.
     ledger: Option<Arc<Mutex<Ledger>>>,
+    /// How this agent's own tasks are labelled in the usage trace: `turn`, or
+    /// `worker`/`reviewer` for a native delegated run.
+    usage_task_kind: &'static str,
+    /// Delegation job a native worker or reviewer runs for. Matched against the
+    /// initiating turn's tool record; it is not a task id.
+    usage_task_correlation_id: Option<String>,
+    /// Set for the duration of one user or maintenance task.
+    active_usage_task_id: Option<String>,
+    next_run_id: Option<String>,
+    active_run_id: Option<String>,
     /// Gate for write/exec tools. Defaults to deny-all when unset.
     approver: Arc<dyn Approver>,
     /// Mode + session grants, consulted before the approver is ever called.
@@ -139,6 +151,9 @@ pub struct Agent {
     pub turn_usage: Option<TurnUsageSummary>,
     /// Tool-use ids whose results must be redacted when persisting wire history.
     sensitive_tool_ids: Vec<String>,
+    /// The same advisor registered as `consult_advisor`, kept here so Zest can
+    /// also consult it on its own (`docs/plans/advisor.md`, step 2).
+    advisor: Option<Arc<ConsultAdvisor>>,
 }
 
 impl Agent {
@@ -148,6 +163,11 @@ impl Agent {
             provider,
             tools,
             ledger: None,
+            usage_task_kind: "turn",
+            usage_task_correlation_id: None,
+            active_usage_task_id: None,
+            next_run_id: None,
+            active_run_id: None,
             approver: Arc::new(DenyApprover),
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             questioner: Arc::new(DenyQuestioner),
@@ -161,7 +181,15 @@ impl Agent {
             last_usage: None,
             turn_usage: None,
             sensitive_tool_ids: Vec::new(),
+            advisor: None,
         }
+    }
+
+    /// Let Zest consult this advisor on its own. Register the same instance as
+    /// a tool so both paths share one per-request budget.
+    pub fn with_advisor(mut self, advisor: Arc<ConsultAdvisor>) -> Self {
+        self.advisor = Some(advisor);
+        self
     }
 
     /// Accepts a bare string for the common case where the whole prompt is
@@ -182,6 +210,29 @@ impl Agent {
 
     pub fn with_ledger(mut self, ledger: Arc<Mutex<Ledger>>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Associate the next submission with its host's non-secret lifecycle ID.
+    /// Consumed once; a later submission receives a fresh identity.
+    pub fn set_next_run_id(&mut self, run_id: impl Into<String>) {
+        // A dropped send future can leave its active fields behind. This
+        // exclusive borrow means no send is live; do not snapshot its old ID
+        // into a side question while the new submission is preparing.
+        self.active_usage_task_id = None;
+        self.active_run_id = None;
+        self.next_run_id = Some(run_id.into());
+    }
+
+    /// Label this agent's task traces, e.g. `worker` for delegation job
+    /// `job-1`.
+    pub fn with_usage_task_label(
+        mut self,
+        kind: &'static str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        self.usage_task_kind = kind;
+        self.usage_task_correlation_id = correlation_id;
         self
     }
 
@@ -252,6 +303,53 @@ impl Agent {
         self.provider.clone()
     }
 
+    /// Freeze the completed context without changing the live agent, its
+    /// usage meter, or its provider cursor. The side chat has no local tools.
+    pub fn side_conversation(&self) -> crate::btw::SideConversation {
+        self.side_conversation_with_messages(self.messages.clone(), &[])
+    }
+
+    /// Build a side conversation from a caller-supplied wire snapshot.
+    ///
+    /// The desktop uses this while a turn is still running: `self.messages`
+    /// intentionally remains transactional until the turn reaches a terminal
+    /// state, but a side question should be able to see the user prompt and
+    /// completed provider rounds that existed when it was opened.
+    pub fn side_conversation_with_messages(
+        &self,
+        messages: Vec<Message>,
+        extra_sensitive_ids: &[String],
+    ) -> crate::btw::SideConversation {
+        let mut sensitive_ids = self.sensitive_tool_ids.clone();
+        sensitive_ids.extend(extra_sensitive_ids.iter().cloned());
+        crate::btw::SideConversation::new(
+            self.provider
+                .side_conversation_provider()
+                .unwrap_or_else(|| self.provider.clone()),
+            self.ledger.clone(),
+            self.active_usage_task_id.clone(),
+            self.active_run_id
+                .clone()
+                .or_else(|| self.next_run_id.clone()),
+            TurnRequest {
+                model: self.model.clone(),
+                system: self.system.clone(),
+                messages: redact_sensitive_staged(messages, &sensitive_ids),
+                tools: self.tools_for_model(),
+                allow_tool_use: false,
+                max_tokens: self.max_tokens,
+                effort: self.effort_for_model(),
+                thinking: true,
+                provider_session: self
+                    .provider_session
+                    .as_ref()
+                    .and_then(ProviderSessionRef::for_side_conversation),
+                interaction: None,
+                cancel: None,
+            },
+        )
+    }
+
     pub fn turn_usage(&self) -> Option<TurnUsageSummary> {
         self.turn_usage.clone()
     }
@@ -309,6 +407,53 @@ impl Agent {
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
+        self.compact_context_for_run(self.active_run_id.clone())
+            .await
+    }
+
+    /// Attribute maintenance after an idle host turn to that turn's durable ID.
+    pub async fn compact_context_for_run(
+        &mut self,
+        run_id: Option<String>,
+    ) -> Result<CompactionOutcome> {
+        let task_id = new_id("task");
+        let parent_task_id = self.active_usage_task_id.clone();
+        let prior_task = self.active_usage_task_id.replace(task_id.clone());
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                let parent_task_id = parent_task_id.or_else(|| {
+                    let run_id = run_id.as_ref()?;
+                    ledger
+                        .tasks()
+                        .iter()
+                        .rev()
+                        .find(|task| {
+                            task.kind == self.usage_task_kind
+                                && task.run_id.as_ref() == Some(run_id)
+                        })
+                        .map(|task| task.task_id.clone())
+                });
+                ledger.begin_run_task(
+                    task_id.clone(),
+                    "compaction",
+                    parent_task_id,
+                    self.usage_task_correlation_id.clone(),
+                    run_id,
+                );
+            }
+        }
+        let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id);
+        let result = self.compact_context_inner().await;
+        trace.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        });
+        self.active_usage_task_id = prior_task;
+        result
+    }
+
+    async fn compact_context_inner(&mut self) -> Result<CompactionOutcome> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
                 "there is not enough conversation to compact yet".into(),
@@ -367,9 +512,30 @@ impl Agent {
             cancel: None,
         };
         let mut sink = |_event: StreamEvent<'_>| {};
+        let request_started = tokio::time::Instant::now();
         let completion = match self.provider.stream_turn(&request, &mut sink).await {
             Ok(completion) => completion,
             Err(error) => {
+                if let (Some(ledger), Some(task_id)) =
+                    (&self.ledger, self.active_usage_task_id.as_deref())
+                {
+                    if let Ok(mut ledger) = ledger.lock() {
+                        ledger.record_task_request(
+                            task_id,
+                            task_request_usage(
+                                "compaction",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                None,
+                            ),
+                        );
+                    }
+                }
                 self.provider_session = None;
                 return Err(error);
             }
@@ -377,6 +543,22 @@ impl Agent {
         self.provider_session = None;
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
+                // The trace first: the spend record's save then persists both.
+                if let Some(task_id) = self.active_usage_task_id.as_deref() {
+                    ledger.record_task_request(
+                        task_id,
+                        task_request_usage(
+                            "compaction",
+                            self.provider.id(),
+                            &request,
+                            request_started
+                                .elapsed()
+                                .as_millis()
+                                .min(u128::from(u64::MAX)) as u64,
+                            Some(&completion),
+                        ),
+                    );
+                }
                 ledger.record(
                     self.provider.id(),
                     billed_model(&request.model, completion.served_model.as_deref()),
@@ -429,9 +611,8 @@ impl Agent {
     /// Anchored on the provider's own count of the last prompt where there is
     /// one; the estimate supplies only the *delta*. char/4 is far better at "how
     /// much did this shrink" than at "how big is this", and subtracting an
-    /// absolute saving from a measured total is also what handles the estimator's
-    /// blind spot for tool schemas correctly — scaling by a ratio would credit
-    /// the saving against schema bytes that pruning cannot touch.
+    /// absolute saving from a measured total keeps the unchanged system and tool
+    /// schema tokens from being scaled down with the pruned conversation.
     ///
     /// The estimate under-counts tokens in code and JSON, so the projection
     /// over-states what remains and this errs toward still summarizing.
@@ -444,6 +625,7 @@ impl Agent {
             .unwrap_or_else(|| {
                 crate::context_budget::system_tokens(self.system.as_ref())
                     + crate::context_budget::conversation_tokens(&self.messages)
+                    + crate::context_budget::tool_schema_tokens(&self.tools_for_model())
             });
         anchor.saturating_sub(report.tokens_saved_estimate())
             < crate::context_budget::auto_compact_threshold(self.context_window())
@@ -467,7 +649,7 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<()> {
-        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, None)
+        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, None, None)
             .await
     }
 
@@ -481,8 +663,35 @@ impl Agent {
         cancel: Option<&CancelToken>,
         inbox: Option<&InputInbox>,
     ) -> Result<()> {
-        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel, inbox)
-            .await
+        self.send_user_cancellable(
+            Message::user_text(user_input),
+            on_event,
+            cancel,
+            inbox,
+            None,
+        )
+        .await
+    }
+
+    /// Desktop variant that publishes a read-only snapshot after each
+    /// completed provider/tool step. The callback is never part of the main
+    /// turn's commit path: it only feeds a possible ephemeral `/btw` opener.
+    pub async fn send_cancellable_with_inbox_and_side_context(
+        &mut self,
+        user_input: &str,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        on_side_context: &mut (dyn FnMut(crate::btw::SideConversation) + Send),
+    ) -> Result<()> {
+        self.send_user_cancellable(
+            Message::user_text(user_input),
+            on_event,
+            cancel,
+            inbox,
+            Some(on_side_context),
+        )
+        .await
     }
 
     /// Multimodal / structured user turn (text + image blocks, etc.).
@@ -495,7 +704,7 @@ impl Agent {
         if content.is_empty() {
             return Err(HarnessError::Other("empty user content".into()));
         }
-        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, None)
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, None, None)
             .await
     }
 
@@ -509,8 +718,31 @@ impl Agent {
         if content.is_empty() {
             return Err(HarnessError::Other("empty user content".into()));
         }
-        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, inbox)
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel, inbox, None)
             .await
+    }
+
+    /// Multimodal desktop variant with the same in-flight side snapshot hook
+    /// as [`Self::send_cancellable_with_inbox_and_side_context`].
+    pub async fn send_blocks_cancellable_with_inbox_and_side_context(
+        &mut self,
+        content: Vec<serde_json::Value>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        on_side_context: &mut (dyn FnMut(crate::btw::SideConversation) + Send),
+    ) -> Result<()> {
+        if content.is_empty() {
+            return Err(HarnessError::Other("empty user content".into()));
+        }
+        self.send_user_cancellable(
+            Message::user_blocks(content),
+            on_event,
+            cancel,
+            inbox,
+            Some(on_side_context),
+        )
+        .await
     }
 
     async fn send_user_cancellable(
@@ -519,9 +751,53 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
         inbox: Option<&InputInbox>,
+        on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+    ) -> Result<()> {
+        let task_id = new_id("task");
+        self.active_run_id = Some(self.next_run_id.take().unwrap_or_else(|| task_id.clone()));
+        self.active_usage_task_id = Some(task_id.clone());
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.begin_run_task(
+                    task_id.clone(),
+                    self.usage_task_kind,
+                    None,
+                    self.usage_task_correlation_id.clone(),
+                    self.active_run_id.clone(),
+                );
+            }
+        }
+        // Finishes the trace even if this future is dropped mid-turn, as an
+        // aborted delegation worker is.
+        let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id);
+        let result = self
+            .send_user_cancellable_inner(user_message, on_event, cancel, inbox, on_side_context)
+            .await;
+        trace.finish(if result.is_ok() {
+            "completed"
+        } else if matches!(&result, Err(HarnessError::Cancelled)) {
+            "cancelled"
+        } else {
+            "failed"
+        });
+        self.active_usage_task_id = None;
+        self.active_run_id = None;
+        result
+    }
+
+    async fn send_user_cancellable_inner(
+        &mut self,
+        user_message: Message,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        mut on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
         self.turn_usage = None;
+        if let Some(advisor) = &self.advisor {
+            advisor.begin_request();
+        }
         staged.push(user_message);
         // Track which tool_use ids were sensitive so tool_result redaction can
         // strip them from durable history while live memory keeps the body.
@@ -529,6 +805,14 @@ impl Agent {
         // Overwritten each provider round; only the final end_turn value is kept.
         #[allow(unused_assignments)]
         let mut last_usage: Option<Usage> = None;
+        // Zest's own advisor consultations: at most one before a turn that
+        // changed files ends, and one after two failed tool calls in a row.
+        let mut wrote_files = false;
+        let mut failure_streak = 0u32;
+        let mut reviewed_before_finish = false;
+        let mut consulted_on_failures = false;
+
+        publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
 
         loop {
             Self::check_cancel(cancel)?;
@@ -537,8 +821,16 @@ impl Agent {
             // their delivery point is explicit and durable rather than an
             // implicit UI-state append.
             if let Some(inbox) = inbox {
-                for input in inbox.claim_next_step() {
+                let inputs = inbox.claim_next_step();
+                let had_inputs = !inputs.is_empty();
+                for input in inputs {
                     staged.push(Message::user_text(runtime_input_text(&input)));
+                }
+                if had_inputs {
+                    // A side panel opened while this provider call is running
+                    // should see injected context that has already been sent,
+                    // even though its response is not complete yet.
+                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
                 }
             }
 
@@ -560,9 +852,30 @@ impl Agent {
                 cancel: cancel.cloned(),
             };
 
+            let request_started = tokio::time::Instant::now();
             let completion = match self.provider.stream_turn(&request, &mut *on_event).await {
                 Ok(c) => c,
                 Err(e) => {
+                    if let (Some(ledger), Some(task_id)) =
+                        (&self.ledger, self.active_usage_task_id.as_deref())
+                    {
+                        if let Ok(mut ledger) = ledger.lock() {
+                            ledger.record_task_request(
+                                task_id,
+                                task_request_usage(
+                                    "agent",
+                                    self.provider.id(),
+                                    &request,
+                                    request_started
+                                        .elapsed()
+                                        .as_millis()
+                                        .min(u128::from(u64::MAX))
+                                        as u64,
+                                    None,
+                                ),
+                            );
+                        }
+                    }
                     // Do not commit staged history — keep prior wire messages intact.
                     self.provider_session = None;
                     return Err(e);
@@ -587,6 +900,23 @@ impl Agent {
             // staged wire history. Accounting must never abort a paid-for turn.
             if let Some(ledger) = &self.ledger {
                 if let Ok(mut ledger) = ledger.lock() {
+                    // The trace first: the spend record's save then persists both.
+                    if let Some(task_id) = self.active_usage_task_id.as_deref() {
+                        ledger.record_task_request(
+                            task_id,
+                            task_request_usage(
+                                "agent",
+                                self.provider.id(),
+                                &request,
+                                request_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Some(&completion),
+                            ),
+                        );
+                    }
                     ledger.record(
                         self.provider.id(),
                         billed_model(&request.model, completion.served_model.as_deref()),
@@ -601,12 +931,50 @@ impl Agent {
 
             Self::check_cancel(cancel)?;
 
+            if matches!(completion.stop_reason.as_deref(), Some("end_turn") | None)
+                && !Self::has_assistant_output(&completion.content)
+            {
+                return Err(HarnessError::Other(
+                    "provider returned an empty assistant response".into(),
+                ));
+            }
+
             // Echo the assistant turn back verbatim — thinking signatures and
             // tool_use blocks both have to survive intact.
             staged.push(Message::assistant(completion.content.clone()));
+            publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
 
             match completion.stop_reason.as_deref() {
                 Some("end_turn") | None => {
+                    if wrote_files && !reviewed_before_finish {
+                        reviewed_before_finish = true;
+                        let review = self
+                            .harness_consult(
+                                &staged,
+                                &turn_sensitive,
+                                crate::advisor::FINISH_REVIEW_QUESTION,
+                                on_event,
+                                cancel,
+                            )
+                            .await;
+                        Self::check_cancel(cancel)?;
+                        if let Some(advice) =
+                            review.filter(|advice| !crate::advisor::approves(advice))
+                        {
+                            // One more round to act on it; the review does not
+                            // run again this turn.
+                            staged.push(Message::user_text(crate::advisor::finish_review_note(
+                                &advice,
+                            )));
+                            publish_side_context(
+                                self,
+                                &staged,
+                                &turn_sensitive,
+                                &mut on_side_context,
+                            );
+                            continue;
+                        }
+                    }
                     self.sensitive_tool_ids.extend(turn_sensitive);
                     // Live memory keeps real tool bodies; persist path redacts.
                     self.messages = staged;
@@ -615,6 +983,11 @@ impl Agent {
                 }
 
                 Some("tool_use") => {
+                    if Self::has_malformed_tool_input(&completion.content) {
+                        return Err(HarnessError::Other(
+                            "provider returned non-object arguments for a tool call".into(),
+                        ));
+                    }
                     let calls = tool_uses(&completion.content);
                     if calls.is_empty() {
                         return Err(HarnessError::Other(
@@ -646,8 +1019,52 @@ impl Agent {
                     // asked in, never completion order.
                     let mut results = Vec::with_capacity(calls.len());
                     for (call, outcome) in calls.iter().zip(outcomes) {
+                        if let (Some(ledger), Some(task_id)) =
+                            (&self.ledger, self.active_usage_task_id.as_deref())
+                        {
+                            if let Ok(mut ledger) = ledger.lock() {
+                                let correlation_id =
+                                    outcome
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|metadata| match metadata {
+                                            crate::tools::ToolMetadata::Delegation {
+                                                job_id,
+                                                ..
+                                            } => job_id.clone(),
+                                            crate::tools::ToolMetadata::HtmlDocument { .. } => None,
+                                        });
+                                // A name the registry does not know is model
+                                // output, not tool metadata; do not keep it.
+                                let name = if self.tools.risk(&call.name).is_some() {
+                                    call.name.as_str()
+                                } else {
+                                    crate::usage::UNKNOWN_TOOL_NAME
+                                };
+                                ledger.record_task_tool(
+                                    task_id,
+                                    name,
+                                    outcome.body.len(),
+                                    outcome.is_error,
+                                    correlation_id,
+                                );
+                            }
+                        }
                         if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
+                        }
+                        if outcome.risk == ToolRisk::Write && !outcome.is_error {
+                            wrote_files = true;
+                        }
+                        // The advisor's own failures (a spent budget, a timeout)
+                        // say nothing about the work, so they neither count nor
+                        // break a streak.
+                        if call.name != crate::advisor::ADVISOR_TOOL {
+                            if outcome.is_error || outcome.failed {
+                                failure_streak += 1;
+                            } else {
+                                failure_streak = 0;
+                            }
                         }
                         if let Some(crate::tools::ToolMetadata::Delegation {
                             provider_id,
@@ -657,17 +1074,21 @@ impl Agent {
                         {
                             if let Some(ledger) = &self.ledger {
                                 if let Ok(mut ledger) = ledger.lock() {
-                                    ledger.record_external(provider_id, usage.as_ref());
+                                    ledger.record_external(provider_id, usage.as_deref());
                                 }
                             }
                         }
                         let summary = if outcome.risk == ToolRisk::Sensitive {
                             "sensitive content (hidden)".to_string()
-                        } else if let Some(label) =
-                            outcome.metadata.as_ref().and_then(|m| m.delegation_label())
+                        } else if let Some(report) = outcome
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.delegation_summary(&outcome.body))
                         {
-                            // Prefer the short provenance label; full body stays on wire.
-                            label
+                            // The worker's report, bounded; the full body stays on the wire.
+                            report
+                        } else if let Some(summary) = outcome.summary.clone() {
+                            summary
                         } else {
                             summarize_tool_body(&outcome.body)
                         };
@@ -686,11 +1107,42 @@ impl Agent {
                             metadata: outcome.metadata,
                         });
                         // Live staged history keeps the real body for the model.
-                        results.push(tool_result(&call.id, &outcome.body, outcome.is_error));
+                        let supports_vision = self
+                            .provider
+                            .models()
+                            .iter()
+                            .any(|model| model.id == self.model && model.supports_vision);
+                        results.push(tool_result_with_images(
+                            &call.id,
+                            &outcome.body,
+                            outcome.is_error,
+                            &outcome.images,
+                            supports_vision,
+                        ));
                     }
 
                     // One user message carrying every result.
                     staged.push(Message::user_blocks(results));
+                    if failure_streak >= 2 && !consulted_on_failures {
+                        consulted_on_failures = true;
+                        let advice = self
+                            .harness_consult(
+                                &staged,
+                                &turn_sensitive,
+                                crate::advisor::FAILURE_QUESTION,
+                                on_event,
+                                cancel,
+                            )
+                            .await;
+                        Self::check_cancel(cancel)?;
+                        // Its own message, after the results: OpenAI-format
+                        // endpoints need tool results to follow their calls
+                        // directly, so text cannot ride in the results message.
+                        if let Some(advice) = advice {
+                            staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
+                        }
+                    }
+                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
                 }
 
                 // A server-side tool hit its iteration cap. Resend as-is; the
@@ -718,12 +1170,32 @@ impl Agent {
         }
     }
 
+    fn has_assistant_output(content: &[serde_json::Value]) -> bool {
+        content.iter().any(
+            |block| match block.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty()),
+                Some("thinking" | "redacted_thinking") | None => false,
+                Some(_) => true,
+            },
+        )
+    }
+
+    fn has_malformed_tool_input(content: &[serde_json::Value]) -> bool {
+        content.iter().any(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                && !block.get("input").is_some_and(|input| input.is_object())
+        })
+    }
+
     /// Return only the tools the selected model advertises support for.
     ///
     /// Provider implementations still own the final wire conversion. This
     /// small gate keeps the agent loop from asking a text-only model to reason
     /// about a function schema it cannot use.
-    fn tools_for_model(&self) -> Vec<crate::anthropic::types::ToolDef> {
+    pub fn tools_for_model(&self) -> Vec<crate::anthropic::types::ToolDef> {
         let supports_tools = self
             .provider
             .models()
@@ -744,6 +1216,64 @@ impl Agent {
     /// UI, but providers without an effort control must receive `None` rather
     /// than a plausible-looking `high` field that a vendor may reject or
     /// interpret differently.
+    /// A consultation Zest starts itself, shown as an ordinary "Ask advisor"
+    /// row. Only when it needs no approval right now: the advisor shares the
+    /// chat's provider, the user allowed it for the session, or the mode allows
+    /// everything. Otherwise it is skipped, and the model can still ask through
+    /// the tool, which shows the card.
+    async fn harness_consult(
+        &self,
+        staged: &[Message],
+        turn_sensitive: &[String],
+        question: &str,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Option<String> {
+        let advisor = self
+            .advisor
+            .as_ref()
+            .filter(|advisor| advisor.auto_review())?;
+        let target = advisor.approval_target();
+        if advisor.needs_approval() {
+            let allowed = self.policy.lock().is_ok_and(|policy| {
+                matches!(
+                    policy.decide(crate::advisor::ADVISOR_TOOL, &target, ToolRisk::Exec, false),
+                    PolicyOutcome::Allow
+                )
+            });
+            if !allowed {
+                return None;
+            }
+        }
+        let mut sensitive_ids = self.sensitive_tool_ids.clone();
+        sensitive_ids.extend(turn_sensitive.iter().cloned());
+        let messages = redact_sensitive_staged(staged.to_vec(), &sensitive_ids);
+        let id = new_id("advisor");
+        on_event(StreamEvent::ToolCallStart {
+            name: crate::advisor::ADVISOR_TOOL,
+            id: &id,
+        });
+        let result = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err("turn cancelled before the advisor answered".to_string()),
+            result = advisor.review(&messages, question) => result,
+        };
+        let summary = match &result {
+            Ok(advice) => advice.trim().chars().take(4_000).collect(),
+            Err(error) => error.clone(),
+        };
+        on_event(StreamEvent::ToolCallResult {
+            name: crate::advisor::ADVISOR_TOOL,
+            id: &id,
+            summary: &summary,
+            is_error: result.is_err(),
+            path: Some(&target),
+            diff: None,
+            metadata: None,
+        });
+        result.ok()
+    }
+
     fn effort_for_model(&self) -> Option<String> {
         let supports_effort = self
             .provider
@@ -876,6 +1406,9 @@ impl Agent {
                                 path,
                                 diff,
                                 metadata: outcome.metadata,
+                                images: outcome.images,
+                                summary: outcome.summary,
+                                failed: outcome.failed,
                             },
                             Err(message) => {
                                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1010,6 +1543,9 @@ impl Agent {
                 path: None,
                 diff: None,
                 metadata: None,
+                images: Vec::new(),
+                summary: None,
+                failed: false,
             },
             Ok(_) => ToolCallOutcome::failed("the user submitted an empty answer", ToolRisk::Read),
             Err(message) => ToolCallOutcome::failed(message, ToolRisk::Read),
@@ -1138,6 +1674,9 @@ impl Agent {
                 path,
                 diff,
                 metadata: outcome.metadata,
+                images: outcome.images,
+                summary: outcome.summary,
+                failed: outcome.failed,
             },
             Err(message) => {
                 let mut failed = ToolCallOutcome::failed(message, risk);
@@ -1158,6 +1697,11 @@ struct ToolCallOutcome {
     path: Option<String>,
     diff: Option<String>,
     metadata: Option<crate::tools::ToolMetadata>,
+    images: Vec<crate::tools::outcome::ToolImage>,
+    /// Replaces the one-line digest of `body` in the UI when the tool set one.
+    summary: Option<String>,
+    /// The tool ran, but what it ran failed (a non-zero exit).
+    failed: bool,
 }
 
 fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
@@ -1173,8 +1717,33 @@ impl ToolCallOutcome {
             path: None,
             diff: None,
             metadata: None,
+            images: Vec::new(),
+            summary: None,
+            failed: false,
         }
     }
+}
+
+fn tool_result_with_images(
+    id: &str,
+    body: &str,
+    is_error: bool,
+    images: &[crate::tools::outcome::ToolImage],
+    supports_vision: bool,
+) -> serde_json::Value {
+    if images.is_empty() {
+        return tool_result(id, body, is_error);
+    }
+    if !supports_vision {
+        return tool_result(id, &format!("{body}\nScreenshot captured, but this selected model is not declared vision-capable; pixels were not sent."), is_error);
+    }
+    let mut content = vec![serde_json::json!({"type":"text","text":body})];
+    content.extend(
+        images
+            .iter()
+            .map(crate::tools::outcome::ToolImage::content_block),
+    );
+    serde_json::json!({"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error})
 }
 
 /// Short one-line preview for UI / CLI tool result markers.
@@ -1188,7 +1757,7 @@ impl ToolCallOutcome {
 /// already draws that line for the substitution warning, so accounting draws it
 /// the same way — one rule, one place. A real substitution does bill to what ran,
 /// because that is what spent the money.
-fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
+pub(crate) fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
     match served {
         Some(served) if !models_agree(requested, served) => served,
         _ => requested,
@@ -1204,12 +1773,28 @@ fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
 /// one that matters. So one name containing the other counts as agreement, and
 /// only a genuinely different family is reported.
 fn models_agree(requested: &str, served: &str) -> bool {
-    let requested = requested.trim().to_ascii_lowercase();
-    let served = served.trim().to_ascii_lowercase();
+    let requested = comparable_model_name(requested);
+    let served = comparable_model_name(served);
     if requested.is_empty() || served.is_empty() {
         return true;
     }
     requested == served || served.starts_with(&requested) || requested.starts_with(&served)
+}
+
+/// Some OpenAI-compatible endpoints report a stable short alias in the
+/// response even when the request used the vendor's versioned id. Keep those
+/// aliases together for substitution warnings and billing; otherwise every
+/// successful DeepSeek Flash turn looks like a silent model downgrade.
+///
+/// DeepSeek retired V4 Flash and routes its name to V4.1 Flash, which the API
+/// calls `deepseek-flash`; configs written before that still request
+/// `deepseek-v4-flash`, and a gateway may report the versioned name.
+fn comparable_model_name(model: &str) -> String {
+    let normalized = model.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "deepseek-v4-flash" | "deepseek-v4.1-flash" => "deepseek-flash".into(),
+        _ => normalized,
+    }
 }
 
 fn summarize_tool_body(body: &str) -> String {
@@ -1228,26 +1813,177 @@ fn summarize_tool_body(body: &str) -> String {
     format!("{truncated}…")
 }
 
+/// Character-based section estimates are diagnostic only. Provider usage is
+/// retained separately, and no cached billing tokens are allocated to a
+/// section when the provider does not expose that mapping.
+pub(crate) fn request_source_estimates(request: &TurnRequest) -> RequestSourceEstimates {
+    use crate::context_budget::{chars_to_tok, system_tokens, tool_schema_tokens};
+
+    let system_text = request
+        .system
+        .as_ref()
+        .map(|system| system.cacheable.as_str())
+        .unwrap_or_default();
+    // Only the headings `prompt::compose_system_with_docs` itself writes, and
+    // only in the order it writes them, move the boundary. Project docs and
+    // skill bodies are pasted verbatim and full of their own `# ` lines.
+    const SECTIONS: [(&str, &str); 5] = [
+        ("Project instructions", "project"),
+        ("Operating rules", "system"),
+        ("Project documentation", "project"),
+        ("Available skills", "skills"),
+        ("Skill details", "skills"),
+    ];
+    let mut section = "system";
+    let mut next_section = 0usize;
+    let mut project_chars = 0u64;
+    let mut skill_chars = 0u64;
+    for line in system_text.split_inclusive('\n') {
+        if let Some(heading) = line.strip_prefix("# ") {
+            let heading = heading.trim();
+            if let Some(offset) = SECTIONS[next_section..]
+                .iter()
+                .position(|(name, _)| *name == heading)
+            {
+                section = SECTIONS[next_section + offset].1;
+                next_section += offset + 1;
+            }
+        }
+        match section {
+            "project" => project_chars = project_chars.saturating_add(line.chars().count() as u64),
+            "skills" => skill_chars = skill_chars.saturating_add(line.chars().count() as u64),
+            _ => {}
+        }
+    }
+    let project_context_tokens = chars_to_tok(project_chars);
+    let skill_context_tokens = chars_to_tok(skill_chars);
+    let full_system_tokens = system_tokens(request.system.as_ref());
+    let mut estimates = RequestSourceEstimates {
+        system_tokens: full_system_tokens
+            .saturating_sub(project_context_tokens)
+            .saturating_sub(skill_context_tokens),
+        project_context_tokens,
+        skill_context_tokens,
+        tools_tokens: tool_schema_tokens(&request.tools),
+        ..Default::default()
+    };
+    for message in &request.messages {
+        let mut user_chars = 0u64;
+        let mut history_chars = 0u64;
+        let mut tool_output_chars = 0u64;
+        for block in &message.content {
+            let chars = block.to_string().chars().count() as u64;
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
+                tool_output_chars = tool_output_chars.saturating_add(chars);
+            } else if message.role == "user" {
+                user_chars = user_chars.saturating_add(chars);
+            } else {
+                history_chars = history_chars.saturating_add(chars);
+            }
+        }
+        estimates.user_tokens = estimates
+            .user_tokens
+            .saturating_add(chars_to_tok(user_chars));
+        estimates.history_tokens = estimates
+            .history_tokens
+            .saturating_add(chars_to_tok(history_chars));
+        estimates.tool_output_tokens = estimates
+            .tool_output_tokens
+            .saturating_add(chars_to_tok(tool_output_chars));
+    }
+    estimates
+}
+
+pub(crate) fn task_request_usage(
+    kind: &str,
+    provider_id: &str,
+    request: &TurnRequest,
+    elapsed_ms: u64,
+    completion: Option<&Completion>,
+) -> TaskRequestUsage {
+    let available = completion.is_some_and(|completion| completion.usage_available);
+    let usage = completion.map(|completion| &completion.usage);
+    TaskRequestUsage {
+        kind: kind.into(),
+        provider_id: provider_id.into(),
+        requested_model: request.model.clone(),
+        served_model: completion.and_then(|completion| completion.served_model.clone()),
+        elapsed_ms,
+        usage_available: available,
+        failed: completion.is_none(),
+        input_tokens: if available {
+            usage.map_or(0, |usage| usage.input_tokens as u64)
+        } else {
+            0
+        },
+        output_tokens: if available {
+            usage.map_or(0, |usage| usage.output_tokens as u64)
+        } else {
+            0
+        },
+        cache_write_tokens: if available {
+            usage.map_or(0, |usage| usage.cache_creation_input_tokens as u64)
+        } else {
+            0
+        },
+        cache_read_tokens: if available {
+            usage.map_or(0, |usage| usage.cache_read_input_tokens as u64)
+        } else {
+            0
+        },
+        source_estimates: request_source_estimates(request),
+    }
+}
+
+fn publish_side_context(
+    agent: &Agent,
+    messages: &[Message],
+    extra_sensitive_ids: &[String],
+    callback: &mut Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+) {
+    let Some(callback) = callback.as_deref_mut() else {
+        return;
+    };
+    callback(
+        agent
+            .side_conversation_with_messages(messages.to_vec(), extra_sensitive_ids)
+            .without_provider_session(),
+    );
+}
+
 fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> Vec<Message> {
+    let mut sensitive_ids: HashSet<String> = sensitive_ids.iter().cloned().collect();
+    // Older saved chats redacted results but retained the original arguments.
+    // Their result marker preserves the sensitivity even after live IDs are lost.
+    for block in messages.iter().flat_map(|message| &message.content) {
+        if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            && block.get("content").and_then(serde_json::Value::as_str)
+                == Some(REDACTED_SENSITIVE_RESULT)
+        {
+            if let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) {
+                sensitive_ids.insert(id.to_owned());
+            }
+        }
+    }
     if sensitive_ids.is_empty() {
         return messages;
     }
     let mut out = messages;
     for msg in &mut out {
-        if msg.role != "user" {
-            continue;
-        }
         for block in &mut msg.content {
-            let is_result = block.get("type").and_then(|t| t.as_str()) == Some("tool_result");
-            if !is_result {
-                continue;
-            }
-            let id = block
-                .get("tool_use_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if sensitive_ids.iter().any(|s| s == id) {
-                block["content"] = serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into());
+            let (id_field, content_field) =
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("tool_use") => ("id", "input"),
+                    Some("tool_result") => ("tool_use_id", "content"),
+                    _ => continue,
+                };
+            let id = block.get(id_field).and_then(|v| v.as_str()).unwrap_or("");
+            if sensitive_ids.contains(id) {
+                block[content_field] = if content_field == "input" {
+                    serde_json::json!({"redacted": "sensitive tool arguments omitted from shared history"})
+                } else {
+                    serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into())
+                };
             }
         }
     }
@@ -1297,10 +2033,307 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    #[test]
+    fn empty_provider_responses_are_not_assistant_output() {
+        assert!(!Agent::has_assistant_output(&[]));
+        assert!(!Agent::has_assistant_output(&[json!({
+            "type": "text",
+            "text": "  "
+        })]));
+        assert!(Agent::has_assistant_output(&[json!({
+            "type": "text",
+            "text": "answer"
+        })]));
+        assert!(Agent::has_assistant_output(&[json!({"type":"tool_use"})]));
+        assert!(Agent::has_assistant_output(&[
+            json!({"type":"server_tool_use"})
+        ]));
+    }
+
+    #[test]
+    fn tool_calls_require_object_arguments() {
+        assert!(Agent::has_malformed_tool_input(&[json!({
+            "type": "tool_use",
+            "input": null
+        })]));
+        assert!(Agent::has_malformed_tool_input(&[
+            json!({"type":"tool_use"})
+        ]));
+        assert!(!Agent::has_malformed_tool_input(&[json!({
+            "type": "tool_use",
+            "input": {}
+        })]));
+    }
+
     struct FakeProvider {
         calls: AtomicUsize,
         fail_after: Option<usize>,
         stop: &'static str,
+    }
+
+    struct HtmlFixtureProvider(AtomicUsize);
+
+    #[async_trait]
+    impl Provider for HtmlFixtureProvider {
+        fn id(&self) -> &str {
+            "html-fixture"
+        }
+        fn default_model(&self) -> &str {
+            "vision-fixture"
+        }
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+        fn models(&self) -> Vec<ModelSpec> {
+            vec![ModelSpec {
+                id: self.default_model().into(),
+                efforts: Vec::new(),
+                context_window: 200_000,
+                supports_tools: true,
+                supports_vision: true,
+                resolves_to: None,
+                needs_cli: None,
+            }]
+        }
+        async fn stream_turn(
+            &self,
+            req: &TurnRequest,
+            _: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            let round = self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            let content = match round {
+                0 => vec![
+                    json!({"type":"tool_use","id":"preview","name":"html_preview","input":{"title":"Counter","html":"<button>Broken</button><script>throw new Error('fixture-preview-error')</script>"}}),
+                ],
+                1 => {
+                    let result = req
+                        .messages
+                        .last()
+                        .unwrap()
+                        .content
+                        .iter()
+                        .find(|b| b["tool_use_id"] == "preview")
+                        .unwrap();
+                    assert_eq!(result["is_error"], false, "preview failed: {result}");
+                    assert!(result["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("fixture-preview-error"));
+                    let pixels = &result["content"][1];
+                    assert_eq!(pixels["type"], "image");
+                    assert_eq!(pixels["source"]["media_type"], "image/png");
+                    assert!(pixels["source"]["data"].as_str().unwrap().len() > 1000);
+                    vec![
+                        json!({"type":"tool_use","id":"render","name":"html_render","input":{"title":"Fixed counter","html":"<button onclick=\"this.textContent=Number(this.textContent)+1\">0</button>"}}),
+                    ]
+                }
+                2 => {
+                    assert_eq!(
+                        req.messages.last().unwrap().content[0]["tool_use_id"],
+                        "render"
+                    );
+                    vec![
+                        json!({"type":"text","text":"Published the corrected interactive counter."}),
+                    ]
+                }
+                _ => panic!("unexpected fixture round"),
+            };
+            Ok(Completion {
+                content,
+                stop_reason: Some(if round < 2 { "tool_use" } else { "end_turn" }.into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Chromium/Edge; no provider credentials or paid calls"]
+    async fn html_agent_preview_receives_pixels_corrects_and_publishes_end_to_end() {
+        let provider = Arc::new(HtmlFixtureProvider(AtomicUsize::new(0)));
+        let mut tools = ToolRegistry::new();
+        crate::tools::html::register_html_tools(&mut tools, true);
+        let policy = Arc::new(Mutex::new(ApprovalPolicy::new(
+            crate::tools::approval::ApprovalMode::Bypass,
+        )));
+        let mut agent = Agent::new(provider.clone(), tools).with_policy(policy);
+        let mut published = None;
+        agent
+            .send(
+                "Build an interactive counter; preview it, correct errors, and publish",
+                &mut |event| {
+                    if let StreamEvent::ToolCallResult {
+                        metadata: Some(crate::tools::ToolMetadata::HtmlDocument { title, html }),
+                        ..
+                    } = event
+                    {
+                        published = Some((title, html));
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.0.load(AtomicOrdering::SeqCst), 3);
+        let (title, html) = published.unwrap();
+        assert_eq!(title, "Fixed counter");
+        assert!(html.contains("onclick"));
+        assert!(agent
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| b["tool_use_id"] == "preview" && b["content"][1]["type"] == "image"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Chromium/Edge; no provider credentials or paid calls"]
+    async fn html_agent_preview_session_grant_does_not_execute_a_changed_document() {
+        struct SessionApprover(AtomicUsize);
+        #[async_trait]
+        impl Approver for SessionApprover {
+            async fn decide(&self, _: &ApprovalRequest) -> ApprovalDecision {
+                if self.0.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    ApprovalDecision::AllowSession
+                } else {
+                    ApprovalDecision::Deny
+                }
+            }
+        }
+
+        let provider = Arc::new(RefusingProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let approver = Arc::new(SessionApprover(AtomicUsize::new(0)));
+        let mut tools = ToolRegistry::new();
+        crate::tools::html::register_html_tools(&mut tools, true);
+        let agent = Agent::new(provider, tools).with_approver(approver.clone());
+        let mut cards = Vec::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::ApprovalNeeded { path, .. } = event {
+                cards.push(path);
+            }
+        };
+        for (index, source) in [
+            "<button>1</button>",
+            "<button>1</button>",
+            "<button>2</button>",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = crate::anthropic::types::ToolUse {
+                id: format!("preview-{index}"),
+                name: "html_preview".into(),
+                input: json!({"title":"Counter","html":source}),
+            };
+            let prepared = agent.tools.prepare(&call.name, call.input.clone()).unwrap();
+            let result = agent.run_gated_call(&call, prepared, &mut sink, None).await;
+            if index < 2 {
+                assert!(!result.is_error, "{}", result.body);
+                assert_eq!(result.images.len(), 1);
+            } else {
+                assert!(result.is_error);
+                assert_eq!(result.body, "user denied permission to run `html_preview` (html_preview: Counter (18 bytes; offline))");
+                assert_eq!(result.images.len(), 0);
+            }
+        }
+        assert_eq!(approver.0.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(cards.len(), 2);
+        assert_ne!(cards[0], cards[1]);
+    }
+
+    #[test]
+    fn screenshot_feedback_preserves_text_shape_and_reports_nonvision_models() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZpVYAAAAASUVORK5CYII=";
+        let image = crate::tools::outcome::ToolImage::png(png.into()).unwrap();
+        assert_eq!(
+            tool_result_with_images("c", "text", false, &[], true),
+            tool_result("c", "text", false)
+        );
+        let result =
+            tool_result_with_images("c", "text", false, std::slice::from_ref(&image), false);
+        assert!(result["content"]
+            .as_str()
+            .unwrap()
+            .contains("pixels were not sent"));
+        let result = tool_result_with_images("c", "text", false, &[image], true);
+        assert_eq!(result["content"][1]["source"]["data"], png);
+    }
+
+    #[tokio::test]
+    async fn host_run_identity_is_consumed_by_only_one_submission() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: None,
+            stop: "end_turn",
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
+        agent.set_next_run_id("run-host");
+        agent.send("first", &mut |_| {}).await.unwrap();
+        agent.send("second", &mut |_| {}).await.unwrap();
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks()[0].run_id.as_deref(), Some("run-host"));
+        assert_ne!(ledger.tasks()[1].run_id.as_deref(), Some("run-host"));
+        assert_ne!(ledger.tasks()[0].task_id, ledger.tasks()[1].task_id);
+    }
+
+    struct PendingFirstProvider(FakeProvider);
+
+    #[async_trait]
+    impl Provider for PendingFirstProvider {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn default_model(&self) -> &str {
+            self.0.default_model()
+        }
+        fn auth_status(&self) -> AuthStatus {
+            self.0.auth_status()
+        }
+
+        async fn stream_turn(
+            &self,
+            req: &TurnRequest,
+            on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            if self.0.calls.load(AtomicOrdering::SeqCst) == 0 {
+                self.0.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+            self.0.stream_turn(req, on_event).await
+        }
+    }
+
+    #[tokio::test]
+    async fn preparing_side_question_does_not_inherit_a_dropped_turn() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider = Arc::new(PendingFirstProvider(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: None,
+            stop: "end_turn",
+        }));
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
+        let mut sink = |_event: StreamEvent<'_>| {};
+        agent.set_next_run_id("run-aborted");
+        {
+            let mut turn = Box::pin(agent.send("interrupted", &mut sink));
+            assert!(futures_util::poll!(turn.as_mut()).is_pending());
+        }
+        assert_eq!(ledger.lock().unwrap().tasks()[0].status, "cancelled");
+        agent.set_next_run_id("run-next");
+        let mut side = agent.side_conversation();
+        side.send("question while preparing", &CancelToken::new(), &mut sink)
+            .await
+            .unwrap();
+        agent.send("next submission", &mut sink).await.unwrap();
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks()[1].run_id.as_deref(), Some("run-next"));
+        assert_eq!(ledger.tasks()[1].parent_task_id, None);
+        assert_eq!(ledger.tasks()[2].run_id.as_deref(), Some("run-next"));
+        assert_ne!(ledger.tasks()[0].run_id, ledger.tasks()[1].run_id);
     }
 
     #[async_trait]
@@ -1362,6 +2395,8 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: false,
                 supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
 
@@ -1415,6 +2450,8 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: true,
                 supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
 
@@ -1463,6 +2500,8 @@ mod tests {
                 context_window: 16_000,
                 supports_tools: true,
                 supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
             }]
         }
 
@@ -1531,6 +2570,32 @@ mod tests {
         }
     }
 
+    struct TraceBodyTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for TraceBodyTool {
+        fn name(&self) -> &str {
+            "trace_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test tool with a private result body"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object", "properties": {} })
+        }
+
+        async fn run(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::result::Result<crate::tools::ToolOutcome, String> {
+            Ok(crate::tools::ToolOutcome::text(
+                "private-tool-result-must-not-be-traced",
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn model_capabilities_gate_effort_and_tool_definitions() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1560,6 +2625,134 @@ mod tests {
         let mut sink = |_ev: StreamEvent<'_>| {};
         agent.send("hello", &mut sink).await.unwrap();
         assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn task_trace_covers_tool_rounds_without_recording_prompt_or_result_content() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["trace_tool", "invented_tool_named_after_a_secret"],
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(TraceBodyTool));
+        let mut agent = Agent::new(provider, tools).with_ledger(ledger.clone());
+        let mut sink = |_event: StreamEvent<'_>| {};
+
+        agent.set_next_run_id("run-host");
+        agent
+            .send("private-prompt-must-not-be-traced", &mut sink)
+            .await
+            .unwrap();
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.run_id.as_deref(), Some("run-host"));
+        assert_eq!(task.kind, "turn");
+        assert_eq!(task.status, "completed");
+        assert!(task.finished_at.is_some());
+        assert_eq!(
+            task.requests.len(),
+            2,
+            "both provider rounds are correlated"
+        );
+        assert!(task.requests.iter().all(|request| {
+            request.kind == "agent"
+                && request.provider_id == "fake"
+                && request.requested_model == "fake-model"
+                && request.usage_available
+                && !request.failed
+        }));
+        assert_eq!(task.tools.len(), 2);
+        assert_eq!(task.tools[0].name, "trace_tool");
+        assert!(!task.tools[0].is_error);
+        // A call to a tool that does not exist keeps its outcome, not its name.
+        assert_eq!(task.tools[1].name, crate::usage::UNKNOWN_TOOL_NAME);
+        assert!(task.tools[1].is_error);
+        assert!(task.requests[1].source_estimates.tool_output_tokens > 0);
+
+        let serialized = serde_json::to_string(task).unwrap();
+        assert!(!serialized.contains("private-prompt-must-not-be-traced"));
+        assert!(!serialized.contains("private-tool-result-must-not-be-traced"));
+        assert!(!serialized.contains("invented_tool_named_after_a_secret"));
+    }
+
+    fn request_with_system(system: String) -> TurnRequest {
+        TurnRequest {
+            model: "m".into(),
+            system: Some(SystemPrompt {
+                cacheable: system,
+                volatile: String::new(),
+            }),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            allow_tool_use: true,
+            max_tokens: 16,
+            effort: None,
+            thinking: false,
+            provider_session: None,
+            interaction: None,
+            cancel: None,
+        }
+    }
+
+    #[test]
+    fn project_docs_headings_do_not_flip_estimates_back_to_system() {
+        let docs = format!(
+            "# Build\n\n```sh\n# install first\ncargo build\n```\n\n# Style\n\n{}\n",
+            "Keep functions small. ".repeat(200)
+        );
+        let composed = crate::prompt::compose_system_with_docs(
+            "Base rules.",
+            "",
+            &docs,
+            &crate::skills::SkillSet::default(),
+        );
+        let estimates = request_source_estimates(&request_with_system(composed));
+        let docs_tokens = crate::context_budget::chars_to_tok(docs.chars().count() as u64);
+        assert!(
+            estimates.project_context_tokens >= docs_tokens,
+            "{estimates:?} vs {docs_tokens}"
+        );
+        assert!(
+            estimates.system_tokens < docs_tokens / 4,
+            "project text counted as system: {estimates:?}"
+        );
+
+        // The harness's own headings still move the boundary, in order.
+        let custom = crate::prompt::compose_system_with_docs(
+            "Base rules.",
+            "Use tabs.",
+            "",
+            &crate::skills::SkillSet::default(),
+        );
+        let estimates = request_source_estimates(&request_with_system(custom));
+        assert!(estimates.project_context_tokens > 0);
+        assert!(estimates.system_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn task_trace_marks_provider_failures_and_failed_turns() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: Some(0),
+            stop: "end_turn",
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
+        let mut sink = |_event: StreamEvent<'_>| {};
+
+        assert!(agent.send("hello", &mut sink).await.is_err());
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.status, "failed");
+        assert!(task.finished_at.is_some());
+        assert_eq!(task.requests.len(), 1);
+        assert!(task.requests[0].failed);
+        assert!(!task.requests[0].usage_available);
     }
 
     #[tokio::test]
@@ -1612,12 +2805,13 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_replaces_history_and_clears_stale_usage() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
             calls: AtomicUsize::new(0),
             fail_after: None,
             stop: "end_turn",
         });
-        let mut agent = Agent::new(provider, ToolRegistry::new());
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
         agent.messages = (0..4)
             .map(|index| Message::user_text(format!("old message {index}")))
             .collect();
@@ -1631,6 +2825,16 @@ mod tests {
         assert_eq!(summary_of(&outcome), Some("hi"));
         assert_eq!(agent.messages.len(), 2);
         assert!(agent.last_usage.is_none());
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        let task = &ledger.tasks()[0];
+        assert_eq!(task.kind, "compaction");
+        assert_eq!(task.status, "completed");
+        assert!(task.finished_at.is_some());
+        assert_eq!(task.requests.len(), 1);
+        assert_eq!(task.requests[0].kind, "compaction");
+        assert!(task.requests[0].usage_available);
     }
 
     /// The summarizer must never read the untrimmed bodies: whatever survives the
@@ -1662,10 +2866,11 @@ mod tests {
     #[tokio::test]
     async fn pruning_alone_ends_compaction_without_a_model_call() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
         let provider: Arc<dyn Provider> = Arc::new(RefusingProvider {
             calls: calls.clone(),
         });
-        let mut agent = Agent::new(provider, ToolRegistry::new());
+        let mut agent = Agent::new(provider, ToolRegistry::new()).with_ledger(ledger.clone());
         agent.model = "small-window-model".into();
         agent.messages = history_with_a_huge_tool_result("call-1");
         // Over the 80% mark of a 16k window, but only just: dropping ~45k
@@ -1696,6 +2901,13 @@ mod tests {
         assert_eq!(agent.messages.len(), 6);
         assert!(agent.last_usage.is_none());
         assert!(agent.provider_session.is_none());
+
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.tasks().len(), 1);
+        assert_eq!(ledger.tasks()[0].kind, "compaction");
+        assert_eq!(ledger.tasks()[0].status, "completed");
+        assert!(ledger.tasks()[0].finished_at.is_some());
+        assert!(ledger.tasks()[0].requests.is_empty());
     }
 
     /// Idempotence is what bounds the loop: the second attempt finds nothing to
@@ -2106,6 +3318,47 @@ mod tests {
         assert!(!json.contains("top-secret"));
     }
 
+    #[test]
+    fn regression_sensitive_arguments_are_redacted_from_shared_history() {
+        let messages = vec![
+            Message::assistant(vec![json!({
+                "type": "tool_use", "id": "secret-edit", "name": "edit_file",
+                "input": { "path": ".env", "old_string": "TOKEN=old-secret", "new_string": "TOKEN=new-secret" }
+            })]),
+            Message::user_blocks(vec![tool_result("secret-edit", "edited .env", false)]),
+            Message::assistant(vec![json!({"type":"text","text":"Checking the result."})]),
+        ];
+        let redacted = redact_sensitive_staged(messages.clone(), &["secret-edit".into()]);
+        let transcript = crate::advisor::render_transcript(&redacted, 100_000);
+        assert!(!transcript.contains("old-secret"), "{transcript}");
+        assert!(!transcript.contains("new-secret"), "{transcript}");
+        assert_eq!(redacted[0].content[0]["id"], "secret-edit");
+        assert_eq!(
+            messages[0].content[0]["input"]["new_string"],
+            "TOKEN=new-secret"
+        );
+    }
+
+    #[test]
+    fn regression_reopened_sensitive_history_redacts_arguments_without_live_ids() {
+        let messages = vec![
+            Message::assistant(vec![json!({
+                "type":"tool_use", "id":"old-edit", "name":"edit_file",
+                "input":{"path":".env","old_string":"TOKEN=old-secret","new_string":"TOKEN=new-secret"}
+            })]),
+            Message::user_blocks(vec![tool_result(
+                "old-edit",
+                REDACTED_SENSITIVE_RESULT,
+                false,
+            )]),
+        ];
+        let redacted = redact_sensitive_staged(messages, &[]);
+        let serialized = serde_json::to_string(&redacted).unwrap();
+        assert!(!serialized.contains("old-secret"));
+        assert!(!serialized.contains("new-secret"));
+        assert_eq!(redacted[0].content[0]["id"], "old-edit");
+    }
+
     /// The invariant that makes concurrency safe: tools may finish in any
     /// order, but `tool_result` blocks must come back in the order the model
     /// asked for them.
@@ -2398,6 +3651,10 @@ mod tests {
         // Providers routinely answer an alias with a dated build.
         assert!(models_agree("claude-opus-5", "claude-opus-5-20260514"));
         assert!(models_agree("deepseek-v4-flash", "deepseek-v4-flash"));
+        assert!(models_agree("deepseek-v4-flash", "deepseek-flash"));
+        assert!(models_agree("deepseek-flash", "deepseek-v4-flash"));
+        // V4.1 Flash is requested as `deepseek-flash`; a gateway may name it.
+        assert!(models_agree("deepseek-flash", "deepseek-v4.1-flash"));
         assert!(models_agree("gpt-5.6-sol", "gpt-5.6-sol-high"));
         // Order does not matter — some endpoints answer with the shorter name.
         assert!(models_agree("claude-opus-5-20260514", "claude-opus-5"));
@@ -2446,5 +3703,441 @@ mod tests {
         assert_eq!(summary.usage.cache_creation_input_tokens, 42);
         assert_eq!(summary.usage.cache_read_input_tokens, 48);
         assert!(summary.usage_available);
+    }
+
+    mod advisor_reviews {
+        use super::*;
+        use crate::advisor::Advisor;
+        use crate::tools::approval::{AllowApprover, ApprovalMode};
+        use crate::tools::{Tool, ToolOutcome};
+        use std::collections::VecDeque;
+        use std::time::Duration;
+
+        /// Replays fixed completions in order, then answers "done".
+        struct Replay {
+            id: &'static str,
+            rounds: Mutex<VecDeque<Completion>>,
+            requests: Mutex<Vec<TurnRequest>>,
+        }
+
+        impl Replay {
+            fn new(id: &'static str, rounds: Vec<Completion>) -> Arc<Self> {
+                Arc::new(Self {
+                    id,
+                    rounds: Mutex::new(rounds.into()),
+                    requests: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn requests(&self) -> Vec<TurnRequest> {
+                self.requests.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl Provider for Replay {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn default_model(&self) -> &str {
+                "replay-model"
+            }
+            fn auth_status(&self) -> AuthStatus {
+                AuthStatus::Ready { account: None }
+            }
+            async fn stream_turn(
+                &self,
+                request: &TurnRequest,
+                _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+            ) -> Result<Completion> {
+                self.requests.lock().unwrap().push(request.clone());
+                Ok(self
+                    .rounds
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| text("done")))
+            }
+        }
+
+        fn text(body: &str) -> Completion {
+            Completion {
+                content: vec![json!({ "type": "text", "text": body })],
+                stop_reason: Some("end_turn".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            }
+        }
+
+        fn calls(names: &[&str]) -> Completion {
+            Completion {
+                content: names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        json!({"type":"tool_use","id":format!("c{index}"),"name":name,"input":{}})
+                    })
+                    .collect(),
+                stop_reason: Some("tool_use".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+                provider_session: None,
+            }
+        }
+
+        /// A write that succeeds once approved.
+        struct WriteNote;
+
+        #[async_trait]
+        impl Tool for WriteNote {
+            fn name(&self) -> &str {
+                "write_note"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::Write
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("written"))
+            }
+        }
+
+        /// A command that runs and exits non-zero.
+        struct FailingCommand;
+
+        #[async_trait]
+        impl Tool for FailingCommand {
+            fn name(&self) -> &str {
+                "failing_command"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("$ make\nexit 2").with_failed(true))
+            }
+        }
+
+        fn advisor(
+            provider: Arc<Replay>,
+            chat_provider_id: &str,
+            auto_review: bool,
+        ) -> Arc<ConsultAdvisor> {
+            Arc::new(ConsultAdvisor::new(
+                Advisor {
+                    provider_id: provider.id.to_string(),
+                    model: "replay-model".into(),
+                    effort: None,
+                    provider,
+                    max_uses: 3,
+                    max_tokens: 4_096,
+                    timeout: Duration::from_secs(5),
+                    auto_review,
+                },
+                chat_provider_id,
+                None,
+            ))
+        }
+
+        fn agent(chat: Arc<Replay>, advisor: Arc<ConsultAdvisor>, mode: ApprovalMode) -> Agent {
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(WriteNote));
+            tools.register(Arc::new(FailingCommand));
+            tools.register(advisor.clone());
+            Agent::new(chat, tools)
+                .with_approver(Arc::new(AllowApprover))
+                .with_policy(Arc::new(Mutex::new(ApprovalPolicy::new(mode))))
+                .with_advisor(advisor)
+        }
+
+        fn last_text(request: &TurnRequest) -> String {
+            request.messages.last().unwrap().content[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        #[test]
+        fn regression_advisor_grants_are_bound_to_destination_and_workspace() {
+            let root_a = tempfile::tempdir().unwrap();
+            let root_b = tempfile::tempdir().unwrap();
+            let target = |root: &std::path::Path, endpoint: &str| {
+                let config = crate::Config::parse(&format!(
+                    "[providers.chat]\nkind = \"openai_compatible\"\nbase_url = \"http://localhost:9\"\nmodel = \"chat-model\"\n\n[providers.strong]\nkind = \"openai_compatible\"\nbase_url = \"{endpoint}\"\nmodel = \"strong-model\"\n\n[advisor]\nprovider = \"strong\"\n"
+                )).unwrap();
+                let runtime = crate::runtime::RuntimeBuilder::new(root)
+                    .with_config(config)
+                    .with_provider("chat")
+                    .enable_external_agents(false)
+                    .register_exec_tools(false)
+                    .build()
+                    .unwrap();
+                runtime.agent.advisor.unwrap().approval_target()
+            };
+            let first = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let same = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let moved = target(
+                root_b.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            let changed = target(root_a.path(), "https://other.example/v1?key=private-token");
+            let changed_secret =
+                target(root_a.path(), "https://trusted.example/v1?key=other-token");
+            std::fs::write(root_a.path().join("zest.toml"), "# Project config scope").unwrap();
+            let changed_scope = target(
+                root_a.path(),
+                "https://trusted.example/v1?key=private-token",
+            );
+            assert_eq!(first, same);
+            let mut policy = ApprovalPolicy::new(ApprovalMode::Manual);
+            policy.trust(crate::advisor::ADVISOR_TOOL, &first);
+            for target in [moved, changed, changed_secret, changed_scope] {
+                assert_eq!(
+                    policy.decide(crate::advisor::ADVISOR_TOOL, &target, ToolRisk::Exec, false),
+                    PolicyOutcome::Ask
+                );
+                assert!(!target.contains("private-token") && !target.contains("other-token"));
+            }
+        }
+
+        #[tokio::test]
+        async fn regression_advisor_budget_resets_after_a_cancelled_request() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["consult_advisor", "consult_advisor", "consult_advisor"]),
+                    calls(&["consult_advisor"]),
+                    text("Done."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("Advice.")]);
+            let mut agent = agent(
+                chat,
+                advisor(strong.clone(), "chat", false),
+                ApprovalMode::Manual,
+            );
+            let cancel = CancelToken::new();
+            let mut sink = |event: StreamEvent<'_>| {
+                if matches!(
+                    event,
+                    StreamEvent::ToolCallResult {
+                        name: "consult_advisor",
+                        ..
+                    }
+                ) {
+                    cancel.cancel();
+                }
+            };
+            assert!(matches!(
+                agent
+                    .send_cancellable("First request", &mut sink, Some(&cancel))
+                    .await,
+                Err(HarnessError::Cancelled)
+            ));
+            assert!(agent.messages.is_empty());
+            agent
+                .send("A different request", &mut |_| {})
+                .await
+                .unwrap();
+            assert_eq!(
+                strong.requests().len(),
+                4,
+                "the new request has its own allowance"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_turn_that_changed_files_is_reviewed_once_before_it_ends() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["write_note"]),
+                    text("Done."),
+                    text("Ran the tests."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("Run the tests before finishing.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut rows = Vec::new();
+            let mut sink = |event: StreamEvent<'_>| {
+                if let StreamEvent::ToolCallResult { name, summary, .. } = event {
+                    rows.push((name.to_string(), summary.to_string()));
+                }
+            };
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+
+            let requests = chat.requests();
+            assert_eq!(requests.len(), 3, "one extra round to act on the advice");
+            let note = last_text(&requests[2]);
+            assert!(note.starts_with("[Zest: before you finish"), "{note}");
+            assert!(note.contains("Run the tests before finishing."), "{note}");
+            assert!(rows.contains(&(
+                "consult_advisor".to_string(),
+                "Run the tests before finishing.".to_string()
+            )));
+            let asked = strong.requests();
+            assert_eq!(
+                asked.len(),
+                1,
+                "reviewed once, not again after the extra round"
+            );
+            assert!(last_text(&asked[0]).contains("Zest, the harness running the agent"));
+        }
+
+        #[tokio::test]
+        async fn an_approving_review_lets_the_turn_end() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("chat", vec![text("APPROVE")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(chat.requests().len(), 2);
+            assert_eq!(strong.requests().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_second_provider_is_only_consulted_once_it_is_allowed() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("strong", vec![text("Run the tests.")]);
+            let mut asking = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            asking
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert!(
+                strong.requests().is_empty(),
+                "no card can be shown, so no consultation"
+            );
+            assert_eq!(chat.requests().len(), 2);
+
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let mut bypass = agent(
+                chat,
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Bypass,
+            );
+            bypass
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(strong.requests().len(), 1);
+
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let granted = agent(
+                chat,
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            granted.policy().lock().unwrap().trust(
+                crate::advisor::ADVISOR_TOOL,
+                &granted.advisor.as_ref().unwrap().approval_target(),
+            );
+            let mut granted = granted;
+            granted
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert_eq!(strong.requests().len(), 2, "allowed for the session");
+        }
+
+        #[tokio::test]
+        async fn two_failures_in_a_row_bring_in_the_advisor_after_the_results() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["failing_command", "failing_command"]),
+                    text("Fixed the path."),
+                ],
+            );
+            let strong = Replay::new("chat", vec![text("The build runs from the wrong folder.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", true),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Build it", &mut sink, None)
+                .await
+                .unwrap();
+
+            let requests = chat.requests();
+            assert_eq!(requests.len(), 2);
+            let messages = &requests[1].messages;
+            let results = &messages[messages.len() - 2];
+            assert!(
+                results
+                    .content
+                    .iter()
+                    .all(|block| block["type"] == "tool_result"),
+                "the results message stays pure: {results:?}"
+            );
+            let note = last_text(&requests[1]);
+            assert!(note.starts_with("[Zest: after repeated failures"), "{note}");
+            assert!(note.contains("wrong folder"), "{note}");
+            assert_eq!(strong.requests().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn automatic_reviews_can_be_turned_off() {
+            let chat = Replay::new("chat", vec![calls(&["write_note"]), text("Done.")]);
+            let strong = Replay::new("chat", vec![text("Run the tests.")]);
+            let mut agent = agent(
+                chat.clone(),
+                advisor(strong.clone(), "chat", false),
+                ApprovalMode::Manual,
+            );
+            let mut sink = |_event: StreamEvent<'_>| {};
+            agent
+                .send_cancellable("Write the note", &mut sink, None)
+                .await
+                .unwrap();
+            assert!(strong.requests().is_empty());
+            assert_eq!(chat.requests().len(), 2);
+        }
     }
 }

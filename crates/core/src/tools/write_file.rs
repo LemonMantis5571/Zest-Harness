@@ -652,4 +652,39 @@ mod tests {
         assert_eq!(prepared.risk, ToolRisk::Write);
         assert!(!prepared.preview.path.is_empty());
     }
+
+    #[tokio::test]
+    async fn writing_a_secret_file_asks_every_time() {
+        use crate::tools::approval::{ApprovalMode, ApprovalPolicy, PolicyOutcome};
+        let dir = scratch("secret");
+        let mut reg = ToolRegistry::new();
+        register_write_tools(&mut reg, &dir).unwrap();
+        let secret = reg
+            .prepare(
+                "write_file",
+                json!({ "path": ".env", "content": "TOKEN=x" }),
+            )
+            .unwrap();
+        assert_eq!(secret.risk, ToolRisk::Sensitive);
+        let template = reg
+            .prepare(
+                "write_file",
+                json!({ "path": ".env.example", "content": "TOKEN=" }),
+            )
+            .unwrap();
+        assert_eq!(template.risk, ToolRisk::Write);
+
+        // Auto and Accept edits approve ordinary writes on their own, never a secret file.
+        for mode in [ApprovalMode::Auto, ApprovalMode::AcceptEdits] {
+            let policy = ApprovalPolicy::new(mode);
+            assert_eq!(
+                policy.decide("write_file", ".env", secret.risk, false),
+                PolicyOutcome::Ask
+            );
+            assert_eq!(
+                policy.decide("write_file", ".env.example", template.risk, false),
+                PolicyOutcome::Allow
+            );
+        }
+    }
 }

@@ -1,5 +1,14 @@
 /** Which Customize panel a destination opens. */
-export type CustomizeTab = "mcp" | "skills" | "plugins" | "rules" | "shortcuts";
+export type CustomizeTab =
+  | "appearance"
+  | "typography"
+  | "chat"
+  | "models"
+  | "mcp"
+  | "skills"
+  | "plugins"
+  | "rules"
+  | "shortcuts";
 
 /**
  * Destinations that render inside the chat shell, taking the transcript's place
@@ -9,6 +18,7 @@ export type CustomizeTab = "mcp" | "skills" | "plugins" | "rules" | "shortcuts";
  * from that nav belongs here rather than replacing the window.
  */
 export type ShellPanel =
+  | { kind: "pullRequests" }
   | { kind: "customize"; tab: CustomizeTab }
   | { kind: "profile" }
   | { kind: "usage" };

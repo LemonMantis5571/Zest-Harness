@@ -1,3 +1,5 @@
+import type { AdvisorProviderOption } from "./generated/AdvisorProviderOption.ts";
+import type { AdvisorSettingsView } from "./generated/AdvisorSettingsView.ts";
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
 import type { ModelCapability } from "./generated/ModelCapability.ts";
 import type { CommandView as GeneratedCommandView } from "./generated/CommandView.ts";
@@ -16,6 +18,7 @@ import type { PendingInputAttachmentView } from "./generated/PendingInputAttachm
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 import type { GitContextView as GeneratedGitContext } from "./generated/GitContext.ts";
 import type { PullRequestView } from "./generated/PullRequestView.ts";
+import type { WorktreeChatStatusView } from "./generated/WorktreeChatStatus.ts";
 import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
 import type { WorkspaceChange as GeneratedWorkspaceChange } from "./generated/WorkspaceChange.ts";
 import type { DelegationEvent as GeneratedDelegationEvent } from "./generated/DelegationEvent.ts";
@@ -84,6 +87,17 @@ export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
 };
 
 export type ExternalAgentRow = ExternalAgentView;
+
+/** `[advisor]` as Settings shows it, with the providers it may choose from. */
+export type AdvisorSettings = AdvisorSettingsView;
+export type AdvisorOption = AdvisorProviderOption;
+/** What Settings saves. `null` turns the advisor off. */
+export type AdvisorChoice = {
+  provider: string;
+  model: string | null;
+  maxUses: number;
+  autoReview: boolean;
+};
 export type ExternalAgentCheck = ExternalAgentCheckView;
 
 /** Zest's own MCP servers — not the CLI-owned ones behind `mcpAllowed`. */
@@ -96,12 +110,14 @@ export type LoginStarted = {
 };
 
 export type LoginStatus = {
-  state: "idle" | "running" | "exited";
+  state: "idle" | "running" | "succeeded" | "exited";
   detail: string | null;
 };
 
 export type { ModelCapability };
 export type WorkspaceReview = GeneratedWorkspaceReview;
+/** Commits ahead/behind the source branch and uncommitted entries of one worktree chat. */
+export type WorktreeChatStatus = WorktreeChatStatusView;
 export type WorkspaceChange = GeneratedWorkspaceChange;
 export type DelegationEvent = GeneratedDelegationEvent;
 export type DelegationJob = DelegationJobView;
@@ -123,6 +139,9 @@ export type ToolPart = {
   path?: string;
   diff?: string;
   metadata?: ToolMetadata;
+  /** Unix ms. A subagent line shows the difference as its duration. */
+  startedAt?: number;
+  finishedAt?: number;
 };
 
 /** Filename chips shown on a sent user bubble (UI-only; may be absent on reload). */
@@ -131,11 +150,27 @@ export type UserAttachmentChip = {
   kind: string;
 };
 
+/** A step a provider-owned loop (Claude Code, Codex, Cursor) reported. */
 export type ProviderActivityPart = {
   id: string;
   title: string;
   status: "running" | "done" | "error";
+  /** The activity this one ran inside, such as a subagent's own tool call. */
+  parentId?: string;
+  startedAt?: number;
+  finishedAt?: number;
 };
+
+/**
+ * One entry in the order an assistant turn did things. Mirrors Rust
+ * `AssistantStep`. Tools and activities point into `tools` and
+ * `providerActivity`; each thinking block carries its own text so reasoning
+ * that came between tool calls stays between them.
+ */
+export type AssistantStep =
+  | { kind: "thinking"; text: string }
+  | { kind: "tool"; id: string }
+  | { kind: "activity"; id: string };
 
 export type ChatMessage =
   | {
@@ -161,8 +196,10 @@ export type ChatMessage =
       command?: string;
       /** Live question requested by the model; not persisted in thread history. */
       question?: PlanningQuestion;
-      /** Ephemeral activity from a provider-owned model/tool loop. */
+      /** Activity from a provider-owned model/tool loop. Saved since steps were. */
       providerActivity?: ProviderActivityPart[];
+      /** Arrival order of thinking, tools and activity. Absent on older threads. */
+      steps?: AssistantStep[];
       streaming: boolean;
     };
 
@@ -251,6 +288,8 @@ export type ProjectChats = {
   /** `null` marks the user-local free-chat bucket shown under RECENT. */
   path: string | null;
   active: boolean;
+  /** A `zest/chat-*` checkout; its row shows `WorktreeChatStatus`. */
+  worktree?: boolean;
   threads: ThreadSummary[];
 };
 
@@ -304,7 +343,7 @@ export type NowPlayingView = {
 };
 
 /** Background looks the wallpaper add-on can render. Mirrors WALLPAPER_FILTERS. */
-export type WallpaperFilterId = "none" | "print" | "frosted" | "noir";
+export type WallpaperFilterId = "none" | "print" | "frosted" | "noir" | "sepia" | "warm" | "cool" | "muted";
 
 export type WallpaperView = {
   status: "disabled" | "unavailable" | "empty" | "ready";
@@ -348,6 +387,7 @@ export type ContextUsage = {
   source: string;
   systemTokens: number;
   conversationTokens: number;
+  toolSchemaTokens: number;
   /** Fresh input on the last measured turn. Zero when `source` is `estimate`. */
   inputTokens: number;
   cacheReadTokens: number;

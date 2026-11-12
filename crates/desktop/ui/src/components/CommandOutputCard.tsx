@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 type Props = {
-  /** Slash command that produced this answer, e.g. `plan`. */
+  /** Slash command(s) that produced this answer, e.g. `plan + review`. */
   command: string;
   /** Raw markdown source, for copy and save. */
   text: string;

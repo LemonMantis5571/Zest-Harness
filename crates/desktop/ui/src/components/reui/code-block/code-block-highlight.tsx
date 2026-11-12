@@ -1,5 +1,15 @@
 import type { ReactNode } from "react"
 import type { ShikiTransformer } from "shiki"
+import type {
+  CodeToHastOptions,
+  GrammarState,
+  HighlighterCore,
+  LanguageInput,
+  ThemeInput,
+} from "shiki/core"
+
+import { toOneByteIfLatin1 } from "@/lib/oneByteString"
+import { createResumableHighlight } from "@/lib/resumableHighlight"
 
 /**
  * One themed slice of a line. `color`/`colorDark` emit as `--cb-c`/`--cb-cd`
@@ -121,7 +131,7 @@ export type CodeBlockLineActionsRender = (
  * lazy chunk. To add a language, add a line: that is the intended extension
  * point of this file.
  */
-export const codeBlockLanguages: Record<string, () => Promise<unknown>> = {
+export const codeBlockLanguages: Record<string, () => Promise<LanguageInput>> = {
   bash: () => import("shiki/langs/bash.mjs"),
   c: () => import("shiki/langs/c.mjs"),
   cpp: () => import("shiki/langs/cpp.mjs"),
@@ -139,6 +149,7 @@ export const codeBlockLanguages: Record<string, () => Promise<unknown>> = {
   kotlin: () => import("shiki/langs/kotlin.mjs"),
   markdown: () => import("shiki/langs/markdown.mjs"),
   php: () => import("shiki/langs/php.mjs"),
+  powershell: () => import("shiki/langs/powershell.mjs"),
   python: () => import("shiki/langs/python.mjs"),
   ruby: () => import("shiki/langs/ruby.mjs"),
   rust: () => import("shiki/langs/rust.mjs"),
@@ -164,6 +175,8 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   jsonc: "json",
   md: "markdown",
   mdx: "markdown",
+  ps1: "powershell",
+  pwsh: "powershell",
   py: "python",
   rb: "ruby",
   rs: "rust",
@@ -174,7 +187,7 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   zsh: "shell",
 }
 
-export const codeBlockThemes: Record<string, () => Promise<unknown>> = {
+export const codeBlockThemes: Record<string, () => Promise<ThemeInput>> = {
   "github-light": () => import("shiki/themes/github-light.mjs"),
   "github-dark": () => import("shiki/themes/github-dark.mjs"),
   /**
@@ -480,12 +493,11 @@ export function markdownFences(markdown: string): CodeBlockMarkdownPart[] {
 /*                                   Engine                                    */
 /* -------------------------------------------------------------------------- */
 
-type HighlighterLike = {
-  codeToHast: (code: string, options: Record<string, unknown>) => unknown
-  getLoadedLanguages: () => string[]
-  loadLanguage: (lang: unknown) => Promise<void>
-  loadTheme: (theme: unknown) => Promise<void>
-}
+/** The part of shiki's highlighter this file calls, with its real signatures. */
+type HighlighterLike = Pick<
+  HighlighterCore,
+  "codeToHast" | "getLastGrammarState" | "getLoadedLanguages" | "loadLanguage" | "loadTheme"
+>
 
 let highlighterPromise: Promise<HighlighterLike> | null = null
 const loadedLanguages = new Set<string>()
@@ -506,11 +518,11 @@ async function loadHighlighter() {
           import("shiki/engine/javascript"),
         ])
 
-      return (await createHighlighterCore({
+      return createHighlighterCore({
         themes: [],
         langs: [],
         engine: createJavaScriptRegexEngine({ forgiving: true }),
-      })) as unknown as HighlighterLike
+      })
     })()
   }
 
@@ -660,11 +672,9 @@ function collectTokens(
     if (hasStyle && onlyText) {
       const content = (child.children ?? []).map((c) => c.value ?? "").join("")
       if (!content) continue
-      out.push({
-        content,
-        ...style,
-        ...(childInWord ? { word: true } : {}),
-      })
+      const token: CodeBlockToken = { content, ...style }
+      if (childInWord) token.word = true
+      out.push(token)
       continue
     }
 
@@ -801,14 +811,57 @@ export async function highlightCode(
   code: string,
   options: CodeBlockHighlightOptions = {}
 ): Promise<CodeBlockLine[]> {
-  const source = normalizeCode(code)
+  // One em dash anywhere in the reply leaves this slice two-byte, which runs
+  // every grammar regex on V8's slower path; see `toOneByteIfLatin1`.
+  const source = toOneByteIfLatin1(normalizeCode(code))
   const startLine = options.startLine ?? 1
   const language = resolveCodeBlockLanguage(options.language)
 
   if (!language) return toPlainLines(source, startLine)
 
   const themes = options.themes ?? DEFAULT_CODE_BLOCK_THEMES
-  const signature = JSON.stringify([
+  const signature = documentSignature(options, language, themes, startLine)
+
+  let root: HastNode
+  try {
+    const { highlighter, light, dark } = await prepareHighlighter(themes, language)
+
+    const hastOptions: CodeToHastOptions = {
+      lang: language,
+      themes: { light, dark },
+      defaultColor: "light",
+      cssVariablePrefix: "--shiki-",
+      decorations: buildWordDecorations(source, options.highlightedWords),
+    }
+    if (options.transformers?.length) hastOptions.transformers = options.transformers
+    root = highlighter.codeToHast(source, hastOptions) as HastNode
+  } catch {
+    /* A missing grammar, an unloadable theme or a transformer throwing must not
+       take the surface down. Plain text is always readable. */
+    return toPlainLines(source, startLine)
+  }
+
+  const codeElement = findCodeElement(root)
+  if (!codeElement) return toPlainLines(source, startLine)
+
+  const lines = linesOf(codeElement, startLine)
+  if (!lines.length) return toPlainLines(source, startLine)
+
+  applyPropState(lines, options)
+  return reuseUnchangedLines(signature, lines)
+}
+
+/**
+ * The line-reuse cache key. A streamed block and its final full pass share it,
+ * so the pass that follows a stream finds every row already built.
+ */
+function documentSignature(
+  options: CodeBlockHighlightOptions,
+  language: string,
+  themes: CodeBlockThemes,
+  startLine: number
+): string {
+  return JSON.stringify([
     options.instanceKey ?? null,
     language,
     themes,
@@ -820,35 +873,19 @@ export async function highlightCode(
     options.lineLevels ?? null,
     (options.transformers ?? []).length,
   ])
+}
 
-  let root: HastNode
-  try {
-    const highlighter = await loadHighlighter()
-    const [light, dark] = await Promise.all([
-      ensureTheme(highlighter, themes.light),
-      ensureTheme(highlighter, themes.dark),
-    ])
-    await ensureLanguage(highlighter, language)
+async function prepareHighlighter(themes: CodeBlockThemes, language: string) {
+  const highlighter = await loadHighlighter()
+  const [light, dark] = await Promise.all([
+    ensureTheme(highlighter, themes.light),
+    ensureTheme(highlighter, themes.dark),
+  ])
+  await ensureLanguage(highlighter, language)
+  return { highlighter, light, dark }
+}
 
-    root = highlighter.codeToHast(source, {
-      lang: language,
-      themes: { light, dark },
-      defaultColor: "light",
-      cssVariablePrefix: "--shiki-",
-      decorations: buildWordDecorations(source, options.highlightedWords),
-      ...(options.transformers?.length
-        ? { transformers: options.transformers }
-        : {}),
-    }) as HastNode
-  } catch {
-    /* A missing grammar, an unloadable theme or a transformer throwing must not
-       take the surface down. Plain text is always readable. */
-    return toPlainLines(source, startLine)
-  }
-
-  const codeElement = findCodeElement(root)
-  if (!codeElement) return toPlainLines(source, startLine)
-
+function linesOf(codeElement: HastNode, startLine: number): CodeBlockLine[] {
   const lines: CodeBlockLine[] = []
   for (const child of codeElement.children ?? []) {
     if (child.type !== "element") continue
@@ -861,11 +898,70 @@ export async function highlightCode(
       state: stateFromClasses(classListOf(child)),
     })
   }
+  return lines
+}
 
-  if (!lines.length) return toPlainLines(source, startLine)
+/**
+ * `highlightCode` for a block that is still streaming. It resumes the grammar
+ * after the last complete line (see `createResumableHighlight`), so each chunk
+ * tokenizes only its new lines and the line still being written, and a growing
+ * fence can be coloured as it arrives instead of after the stream pauses.
+ *
+ * `null` when the options need the whole document in one pass: transformers
+ * and highlighted words see the full source, and a block without a grammar has
+ * nothing to resume. One instance per streaming block; it keeps that block's
+ * settled lines.
+ */
+export function createStreamingHighlighter(
+  options: CodeBlockHighlightOptions = {}
+): ((code: string) => Promise<CodeBlockLine[]>) | null {
+  const language = resolveCodeBlockLanguage(options.language)
+  if (
+    !language ||
+    options.transformers?.length ||
+    options.highlightedWords?.length
+  ) {
+    return null
+  }
+  const themes = options.themes ?? DEFAULT_CODE_BLOCK_THEMES
+  const startLine = options.startLine ?? 1
+  const signature = documentSignature(options, language, themes, startLine)
+  let resume: ((code: string) => CodeBlockLine[] | null) | undefined
 
-  applyPropState(lines, options)
-  return reuseUnchangedLines(signature, lines)
+  return async (code) => {
+    const source = toOneByteIfLatin1(normalizeCode(code))
+    try {
+      const { highlighter, light, dark } = await prepareHighlighter(themes, language)
+      resume ??= createResumableHighlight((text, state: GrammarState | undefined) => {
+        const result = highlighter.codeToHast(text, {
+          lang: language,
+          themes: { light, dark },
+          defaultColor: "light",
+          cssVariablePrefix: "--shiki-",
+          grammarState: state,
+        })
+        const next = highlighter.getLastGrammarState(result)
+        const codeElement = findCodeElement(result as HastNode)
+        if (!next || !codeElement) return null
+        return { lines: linesOf(codeElement, 1), state: next }
+      })
+      const settled = resume(source)
+      // Not resumable (a grammar without state): plain text until the stream
+      // ends and the block takes its one full pass, as before this existed.
+      if (!settled?.length) return toPlainLines(source, startLine)
+      // Fresh objects, numbered for this pass: the settled lines are kept for
+      // the next chunk and must not pick up prop state or a new number.
+      const lines = settled.map((line, index) => ({
+        ...line,
+        number: startLine + index,
+      }))
+      applyPropState(lines, options)
+      return reuseUnchangedLines(signature, lines)
+    } catch {
+      resume = undefined
+      return toPlainLines(source, startLine)
+    }
+  }
 }
 
 /** Test seam: drops the singleton and every cached document. */

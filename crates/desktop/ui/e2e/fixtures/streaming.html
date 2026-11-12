@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Code block performance fixture</title></head>
+  <body>
+    <label>Typing probe <input id="typing" /></label>
+    <div id="root"></div>
+    <script type="module">
+      import React from "react";
+      import { createRoot } from "react-dom/client";
+      import { flushSync } from "react-dom";
+      import { CodeBlock } from "/src/components/CodeBlock.tsx";
+      import { highlightCode } from "/src/components/reui/code-block/code-block-highlight.tsx";
+      import "/src/index.css";
+
+      const root = createRoot(document.getElementById("root"));
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      window.renderCode = (code, streaming = false, language = "typescript") => {
+        flushSync(() => root.render(React.createElement(CodeBlock, { code, language, streaming })));
+      };
+      window.removeCode = () => flushSync(() => root.render(null));
+      window.warmGrammar = () => highlightCode("const warm = 1;", { language: "typescript" });
+      window.measureStream = async (kib) => {
+        const line = "export const value = { enabled: true, count: 123, label: 'benchmark' };\n";
+        const source = line.repeat(Math.ceil(kib * 1024 / line.length)).slice(0, kib * 1024);
+        const durations = [];
+        const observer = new PerformanceObserver((entries) => {
+          for (const entry of entries.getEntries()) durations.push(entry.duration);
+        });
+        observer.observe({ type: "longtask" });
+        const lags = [];
+        let previous = performance.now();
+        const heartbeat = setInterval(() => {
+          const now = performance.now();
+          lags.push(Math.max(0, now - previous - 16));
+          previous = now;
+        }, 16);
+        const start = performance.now();
+        for (let step = 1; step <= 40; step++) {
+          window.renderCode(source.slice(0, Math.ceil(source.length * step / 40)), true);
+          await sleep(25);
+        }
+        window.renderCode(source, false);
+        // Include the final highlighting pass, without hiding it from the measurement.
+        await sleep(300);
+        const elapsed = performance.now() - start;
+        clearInterval(heartbeat);
+        durations.push(...observer.takeRecords().map((entry) => entry.duration));
+        observer.disconnect();
+        return {
+          kib, elapsed, longTasks: durations.length,
+          longTaskMs: durations.reduce((a, b) => a + b, 0),
+          maxEventLoopLagMs: Math.max(0, ...lags),
+          source,
+        };
+      };
+      window.fixtureReady = true;
+    </script>
+  </body>
+</html>

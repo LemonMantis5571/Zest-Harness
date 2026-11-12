@@ -5,11 +5,28 @@ on:
     branches: [main, master]
   pull_request:
 
+# A newer push to a PR supersedes its in-flight run. Pushes to the default
+# branch get a group of their own (the run id), so they are never cancelled and
+# never collapse into a queue; they are the runs that seed the Rust cache.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
+    name: Linux full verify
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check PR output artifacts across commits
+        if: github.event_name == 'pull_request'
+        env:
+          OUTPUT_POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          OUTPUT_POLICY_HEAD_SHA: ${{ github.sha }}
+        run: node ./scripts/check-output-artifacts.mjs --range "$OUTPUT_POLICY_BASE_SHA" "$OUTPUT_POLICY_HEAD_SHA"
 
       # Tauri v2 needs WebKitGTK and friends; keyring needs the Secret Service
       # (D-Bus) headers; aws-lc-rs needs cmake; AppImage bundling needs patchelf.
@@ -34,16 +51,39 @@ jobs:
           node-version: 24.16.0
           cache: npm
 
+      - name: Use repository npm version
+        run: npm install --global $(node -p "'npm@' + require('./package.json').engines.npm")
+
+      # Only the default branch saves the Rust cache; PRs restore it. A cache
+      # saved by a PR is visible to that PR alone, is over a gigabyte, and the
+      # copies from a burst of PR runs evict the default branch's seed from the
+      # 10 GB repository quota.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref_name == github.event.repository.default_branch }}
 
+      # A checksum-verified prebuilt binary. Compiling it from source took 2 to
+      # 3 minutes on every run that started with a cold cache.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
       - name: Verify
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          ZEST_CONTROL_ARTIFACTS: ${{ github.workspace }}/crates/desktop/ui/test-results/zest-control
         run: bash scripts/release-verify.sh
+
+      - name: Upload Playwright traces and control screenshots
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces-linux
+          path: crates/desktop/ui/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
 
   cli-headless:
     name: zest serve without WebKit
@@ -64,6 +104,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref_name == github.event.repository.default_branch }}
 
       - name: Build and test the CLI daemon
         env:
@@ -77,6 +119,7 @@ jobs:
           cargo build -p zest
           cargo test -p zest-coordinator
           cargo test -p zest --test serve_e2e
+          cargo test -p zest --test run_e2e
           if cargo tree -p zest --edges normal | grep -Eiq 'webkit|zest-desktop'; then
             echo "zest must not depend on the desktop or WebKit" >&2
             cargo tree -p zest --edges normal >&2

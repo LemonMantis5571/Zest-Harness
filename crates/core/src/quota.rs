@@ -181,6 +181,13 @@ async fn fetch_provider_quota(
         ProviderConfig::CodexCli { .. } | ProviderConfig::CodexOAuth { .. } => {
             unreachable!("Codex quota is dispatched by kind before this match")
         }
+        // Cursor reports plan usage on its dashboard, behind an authenticated
+        // web session Zest does not hold. ACP carries no token accounting
+        // either, so there is nothing here to read without inventing it.
+        ProviderConfig::CursorAcp { .. } => unavailable_view(
+            provider_id,
+            "Cursor reports plan usage on its own dashboard, not over ACP.",
+        ),
         ProviderConfig::OpenaiCompatible { .. } => {
             unavailable_view(provider_id, "This API has no standard balance endpoint.")
         }

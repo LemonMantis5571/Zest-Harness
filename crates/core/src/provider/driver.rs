@@ -27,6 +27,7 @@ use super::anthropic::AnthropicProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::codex_app_server::CodexAppServerProvider;
 use super::codex_oauth::CodexOAuthProvider;
+use super::cursor_acp::CursorAcpProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
 use super::{catalogue, EffortPolicy, ModelSpec, Provider, ProviderDescriptor, CODEX_KNOWN_MODELS};
 use crate::anthropic::types::DEFAULT_MODEL;
@@ -204,7 +205,12 @@ impl AnthropicDriver {
             unreachable!("driver_for routes only Anthropic entries here");
         };
         let default_model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let models = catalogue(&default_model, &[], &[], EffortPolicy::Standard(&[]));
+        let models = catalogue(
+            &default_model,
+            &[],
+            super::ANTHROPIC_KNOWN_MODELS,
+            EffortPolicy::Standard(&[]),
+        );
         (default_model, models)
     }
 }
@@ -266,19 +272,20 @@ struct ClaudeCodeDriver;
 
 impl ClaudeCodeDriver {
     fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
-        let ProviderConfig::ClaudeCode { model, models, .. } = config else {
+        let ProviderConfig::ClaudeCode {
+            command,
+            model,
+            models,
+            ..
+        } = config
+        else {
             unreachable!("driver_for routes only ClaudeCode entries here");
         };
         let default_model = model
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_CODE_MODEL.to_string());
-        let catalogue = catalogue(
-            &default_model,
-            models,
-            super::claude_code::BUILTIN_MODELS,
-            EffortPolicy::Unsupported,
-        );
+        let catalogue = super::claude_code::picker_catalogue(&default_model, models, command);
         (default_model, catalogue)
     }
 }
@@ -316,6 +323,7 @@ impl ProviderDriver for ClaudeCodeDriver {
             models,
             allow_mcp,
             permission_mode,
+            disallowed_tools,
             timeout_secs,
         } = config
         else {
@@ -329,9 +337,87 @@ impl ProviderDriver for ClaudeCodeDriver {
             models.clone(),
             *allow_mcp,
             *permission_mode,
+            disallowed_tools.clone(),
             *timeout_secs,
         )
         .map_err(|error| format!("could not build Claude Code provider: {error}"))?;
+        Ok(Arc::new(provider))
+    }
+}
+
+// --------------------------------------------------------------- cursor_acp
+
+struct CursorAcpDriver;
+
+impl CursorAcpDriver {
+    fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
+        let ProviderConfig::CursorAcp {
+            command,
+            model,
+            models,
+            ..
+        } = config
+        else {
+            unreachable!("driver_for routes only CursorAcp entries here");
+        };
+        let default_model = model
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| super::cursor_acp::DEFAULT_CURSOR_MODEL.to_string());
+        let catalogue = super::cursor_acp::model_catalogue(command, &default_model, models);
+        (default_model, catalogue)
+    }
+}
+
+impl ProviderDriver for CursorAcpDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind("cursor_acp")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Cursor CLI"
+    }
+
+    fn credentials<'a>(&self, _config: &'a ProviderConfig) -> CredentialRequest<'a> {
+        CredentialRequest::VENDOR_OWNED
+    }
+
+    fn descriptor(&self, id: &str, config: &ProviderConfig) -> ProviderDescriptor {
+        let (default_model, models) = Self::catalogue(config);
+        ProviderDescriptor {
+            id: id.to_string(),
+            default_model,
+            models,
+        }
+    }
+
+    fn create(
+        &self,
+        ctx: DriverContext<'_>,
+        config: &ProviderConfig,
+    ) -> std::result::Result<Arc<dyn Provider>, String> {
+        let ProviderConfig::CursorAcp {
+            command,
+            model,
+            models,
+            allow_mcp,
+            mode,
+            timeout_secs,
+        } = config
+        else {
+            unreachable!("driver_for routes only CursorAcp entries here");
+        };
+        let provider = CursorAcpProvider::new(
+            ctx.id.to_string(),
+            ctx.root,
+            command.clone(),
+            model.clone(),
+            models.clone(),
+            *allow_mcp,
+            *mode,
+            *timeout_secs,
+        )
+        .map_err(|error| format!("could not build Cursor provider: {error}"))?;
         Ok(Arc::new(provider))
     }
 }
@@ -598,6 +684,7 @@ pub fn driver_for(config: &ProviderConfig) -> &'static (dyn ProviderDriver + Syn
         ProviderConfig::ClaudeCode { .. } => &ClaudeCodeDriver,
         ProviderConfig::CodexCli { .. } => &CodexCliDriver,
         ProviderConfig::CodexOAuth { .. } => &CodexOAuthDriver,
+        ProviderConfig::CursorAcp { .. } => &CursorAcpDriver,
         ProviderConfig::OpenaiCompatible { .. } => &OpenAiCompatibleDriver,
     }
 }
@@ -704,25 +791,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_oauth_is_required_to_load_and_does_not_read_vendor_files() {
+    fn codex_oauth_requires_its_session_environment() {
         let config = entry("[providers.p]\nkind = \"codex_oauth\"\n");
         let request = credentials_for("p", &config);
         assert_eq!(request.policy, CredentialPolicy::RequiredToLoad);
         assert_eq!(request.account, Some("p"));
         assert_eq!(request.env, Some(SESSION_ENV));
-        std::env::remove_var(SESSION_ENV);
-        let error = resolve_required(request).expect_err("a missing ChatGPT session must fail");
-        // Headless Linux has no Secret Service, so get() is Err, not Ok(None).
-        // The load still fails; it must not point at the vendor CLI store.
-        assert!(
-            error.contains("p")
-                || error.contains(SESSION_ENV)
-                || error.contains("could not read the saved API key"),
-            "{error}"
-        );
-        assert!(
-            !error.contains("auth.json"),
-            "must not mention the vendor CLI store: {error}"
+
+        let _session_env = crate::provider::CodexSessionEnvGuard::unset();
+        let error = resolve_required(CredentialRequest {
+            account: None,
+            ..request
+        })
+        .expect_err("a missing ChatGPT session must fail");
+        assert_eq!(
+            error,
+            "ZEST_CODEX_OAUTH_SESSION is not set in the environment"
         );
     }
 

@@ -160,6 +160,8 @@ mod tests {
             text: text.into(),
             thinking: String::new(),
             tools: Vec::new(),
+            provider_activity: Vec::new(),
+            steps: Vec::new(),
             error: None,
             provider_selection: None,
             command: None,

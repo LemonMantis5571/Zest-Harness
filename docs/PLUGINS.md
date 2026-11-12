@@ -254,7 +254,7 @@ Wallpaper actions (the `wallpaper` kind only):
 {"action":"clearWallpaper"}
 ```
 
-`filter` is one of `none`, `print`, `frosted`, or `noir`. Zest normalises the
+`filter` is one of `none`, `print`, `frosted`, `noir`, `sepia`, `warm`, `cool`, or `muted`. Zest normalises the
 value before it sends the request, and a plugin should treat anything it does
 not recognise as `none` rather than failing.
 
@@ -346,8 +346,9 @@ plugin call.
 - Zest gives the process up to 3 seconds to finish.
 - Plugin output is limited to 512 KiB.
 - Zest starts the process in its plugin folder with stdin and stdout piped.
-- Zest clears the inherited environment and restores only the small set of
-  Windows runtime variables it needs (`SystemRoot`, `WINDIR`, `TEMP`, `TMP`).
+- Zest clears the inherited environment and restores only the runtime
+  variables a process needs to start: `SystemRoot`, `WINDIR`, `TEMP`, `TMP`,
+  `PATH`, `TMPDIR`, and `LD_LIBRARY_PATH`, when they are set.
 - Zest sends no project files, chat messages, credentials, or API keys through
   the plugin protocol.
 - Zest stores only the user's enabled/disabled choice. It does not save the

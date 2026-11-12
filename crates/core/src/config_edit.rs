@@ -5,7 +5,9 @@ use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::config::{ClaudeCodePermissionMode, Config, ExternalAgentMode, ExternalWorkspace};
+use crate::config::{
+    ClaudeCodePermissionMode, Config, CursorMode, ExternalAgentMode, ExternalWorkspace,
+};
 use crate::fsutil::atomic_write;
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,17 @@ pub struct ClaudeCodeProviderInput {
     pub models: Vec<String>,
     pub allow_mcp: bool,
     pub permission_mode: ClaudeCodePermissionMode,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CursorProviderInput {
+    pub id: String,
+    pub command: String,
+    pub model: String,
+    pub models: Vec<String>,
+    pub allow_mcp: bool,
+    pub mode: CursorMode,
     pub timeout_secs: u64,
 }
 
@@ -84,13 +97,34 @@ pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<Exter
 /// this small catalogue.
 pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
     match id {
-        "claude" => &["sonnet", "opus"],
+        // Explicit ids: the CLI's bare aliases run the previous generation.
+        "claude" => &[
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+        ],
         "gemini" => &[
             "auto",
             "gemini-3-pro-preview",
             "gemini-3-flash-preview",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
+        ],
+        // A worker has no effort axis, so these are Cursor's flat ids with the
+        // effort suffix already on them — what `--model` takes verbatim. It is
+        // a starting shortlist, not the catalogue: `cursor-agent models` prints
+        // over two hundred, and any of them can be written into zest.toml.
+        // The *provider* never uses this list; it discovers instead.
+        "cursor" => &[
+            "composer-2.5",
+            "grok-4.7-high",
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-high",
+            "claude-haiku-5-5-thinking-medium",
+            "claude-fable-5-1-high",
+            "gpt-5.6-sol-high",
+            "gemini-3.1-pro",
         ],
         _ => &[],
     }
@@ -150,6 +184,30 @@ pub fn external_agent_preset_with_model(
                 }
                 args
             },
+            allow_mcp,
+            model,
+            workspace: ExternalWorkspace::Isolated,
+            timeout_secs: 900,
+        }),
+        "cursor" => Some(ExternalAgentInput {
+            id: id.to_string(),
+            mode: ExternalAgentMode::Acp,
+            command: "cursor-agent".into(),
+            args: {
+                // Cursor takes its options before the subcommand, the way its
+                // own docs write `agent --api-key "$KEY" acp`.
+                let mut args = Vec::new();
+                if model.is_some() {
+                    args.extend(["--model".into(), "{model}".into()]);
+                }
+                args.push("acp".into());
+                args
+            },
+            // Unlike Gemini there is no flag that narrows the servers: Cursor's
+            // ACP mode reads `.cursor/mcp.json` itself, and `session/new`
+            // carrying an empty `mcpServers` does not override that. So this
+            // records the user's choice without being able to enforce it, and
+            // the isolated worktree stays the boundary that does.
             allow_mcp,
             model,
             workspace: ExternalWorkspace::Isolated,
@@ -320,11 +378,81 @@ pub fn add_claude_code_provider(
     provider["command"] = toml_edit::value(command);
     provider["model"] = toml_edit::value(model);
     provider["allow_mcp"] = toml_edit::value(input.allow_mcp);
-    provider["permission_mode"] = toml_edit::value(match input.permission_mode {
-        ClaudeCodePermissionMode::Default => "default",
-        ClaudeCodePermissionMode::AcceptEdits => "accept_edits",
-        ClaudeCodePermissionMode::Plan => "plan",
-        ClaudeCodePermissionMode::BypassPermissions => "bypass_permissions",
+    provider["permission_mode"] = toml_edit::value(input.permission_mode.config_value());
+    provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
+
+    let mut models = Array::new();
+    for value in input
+        .models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        models.push(Value::from(value));
+    }
+    if models.is_empty() {
+        provider.remove("models");
+    } else {
+        provider["models"] = toml_edit::value(models);
+    }
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Add or update a Cursor CLI parent provider, preserving comments and
+/// unrelated entries.
+///
+/// `mode` is written every time rather than only when it differs from the
+/// default, because on this provider it is the safety setting: Cursor never
+/// asks before editing a file, so `agent` versus `plan` is the difference
+/// between a chat that can rewrite the checkout and one that cannot.
+pub fn add_cursor_provider(path: &Path, input: &CursorProviderInput) -> Result<(), String> {
+    let id = input.id.trim();
+    let command = input.command.trim();
+    let model = input.model.trim();
+
+    validate_id(id, "provider")?;
+    if command.is_empty() {
+        return Err("Cursor command is required".into());
+    }
+    if model.is_empty() {
+        return Err("a Cursor model is required".into());
+    }
+    if input.timeout_secs == 0 || input.timeout_secs > 3_600 {
+        return Err("Cursor timeout must be between 1 and 3600 seconds".into());
+    }
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("providers") {
+        doc["providers"] = Item::Table(Table::new());
+    }
+    let providers = doc["providers"]
+        .as_table_mut()
+        .ok_or_else(|| "[providers] is not a table".to_string())?;
+    let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
+    let provider = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("provider `{id}` is not a table"))?;
+    if let Some(kind) = provider.get("kind").and_then(Item::as_str) {
+        if kind != "cursor_acp" {
+            return Err(format!("provider `{id}` already has kind `{kind}`"));
+        }
+    }
+
+    provider["kind"] = toml_edit::value("cursor_acp");
+    provider["command"] = toml_edit::value(command);
+    provider["model"] = toml_edit::value(model);
+    provider["allow_mcp"] = toml_edit::value(input.allow_mcp);
+    provider["mode"] = toml_edit::value(match input.mode {
+        CursorMode::Agent => "agent",
+        CursorMode::Plan => "plan",
+        CursorMode::Ask => "ask",
     });
     provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
 
@@ -704,6 +832,76 @@ pub fn remove_external_agent(path: &Path, id: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// The `[advisor]` fields the desktop edits. `effort`, `max_tokens`, and
+/// `timeout_secs` stay as the file has them.
+#[derive(Debug, Clone)]
+pub struct AdvisorInput {
+    pub provider: String,
+    /// `None` means the provider's default model.
+    pub model: Option<String>,
+    pub max_uses: u32,
+    /// Zest may consult on its own before finishing and after failures.
+    pub auto_review: bool,
+}
+
+/// Write `[advisor]`, or remove it with `None`.
+///
+/// Validate the provider, model, retained effort, and limits before writing so
+/// Settings cannot save a selection that the runtime would disable.
+pub fn set_advisor(path: &Path, input: Option<&AdvisorInput>) -> Result<(), String> {
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+
+    match input {
+        None => {
+            doc.remove("advisor");
+        }
+        Some(input) => {
+            let provider = input.provider.trim();
+            validate_id(provider, "provider")?;
+            if !doc.contains_key("advisor") {
+                doc["advisor"] = Item::Table(Table::new());
+            }
+            let advisor = doc["advisor"]
+                .as_table_mut()
+                .ok_or_else(|| "[advisor] is not a table".to_string())?;
+            advisor["provider"] = toml_edit::value(provider);
+            match input
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                Some(model) => advisor["model"] = toml_edit::value(model),
+                None => {
+                    advisor.remove("model");
+                }
+            }
+            advisor["max_uses"] = toml_edit::value(i64::from(input.max_uses));
+            advisor["auto_review"] = toml_edit::value(input.auto_review);
+        }
+    }
+
+    let rendered = doc.to_string();
+    let parsed = Config::parse(&rendered).map_err(|e| e.to_string())?;
+    if let Some(advisor) = &parsed.advisor {
+        match parsed.providers.get(&advisor.provider) {
+            None => {
+                return Err(format!(
+                    "`{}` is not a configured provider. Connect it first.",
+                    advisor.provider
+                ))
+            }
+            Some(provider) => advisor.validate_selection(provider)?,
+        }
+        advisor.validate_limits()?;
+    }
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 fn validate_id(id: &str, noun: &str) -> Result<(), String> {
     if id.is_empty()
         || !id
@@ -728,6 +926,140 @@ fn read_config(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ADVISOR_BASE: &str = r#"# keep me
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.claude]
+kind = "claude_code"
+"#;
+
+    #[test]
+    fn regression_set_advisor_validates_the_model_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("zest.toml");
+        std::fs::write(&path, ADVISOR_BASE).unwrap();
+        let result = set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "deepseek".into(),
+                model: Some("not-offered".into()),
+                max_uses: 3,
+                auto_review: true,
+            }),
+        );
+        assert!(result.is_err(), "an unsupported advisor must be rejected");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ADVISOR_BASE);
+    }
+
+    #[test]
+    fn regression_set_advisor_validates_preserved_effort_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("zest.toml");
+        let original = "[providers.strong]\nkind = \"codex_oauth\"\nmodel = \"gpt-6-sol\"\n\n[advisor]\nprovider = \"strong\"\nmodel = \"gpt-6-sol\"\neffort = \"none\"\n";
+        std::fs::write(&path, original).unwrap();
+        let result = set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "strong".into(),
+                model: Some("gpt-6-astra".into()),
+                max_uses: 3,
+                auto_review: true,
+            }),
+        );
+        assert!(
+            result.is_err(),
+            "an incompatible retained effort must be rejected"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn set_advisor_writes_updates_and_removes_the_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(
+            &path,
+            format!("{ADVISOR_BASE}\n[advisor]\nprovider = \"deepseek\"\ntimeout_secs = 90\n"),
+        )
+        .unwrap();
+
+        set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "anthropic".into(),
+                model: Some("claude-opus-5-5".into()),
+                max_uses: 2,
+                auto_review: false,
+            }),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep me"));
+        let advisor = Config::parse(&raw).unwrap().advisor.unwrap();
+        assert_eq!(advisor.provider, "anthropic");
+        assert_eq!(advisor.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(advisor.max_uses, 2);
+        assert!(!advisor.auto_review);
+        assert_eq!(
+            advisor.timeout_secs, 90,
+            "keys Settings does not edit survive"
+        );
+
+        set_advisor(
+            &path,
+            Some(&AdvisorInput {
+                provider: "anthropic".into(),
+                model: None,
+                max_uses: 3,
+                auto_review: true,
+            }),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(Config::parse(&raw)
+            .unwrap()
+            .advisor
+            .unwrap()
+            .model
+            .is_none());
+
+        set_advisor(&path, None).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(Config::parse(&raw).unwrap().advisor.is_none());
+        assert!(raw.contains("# keep me"));
+    }
+
+    #[test]
+    fn set_advisor_refuses_a_choice_that_would_do_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, ADVISOR_BASE).unwrap();
+        let input = |provider: &str, max_uses| AdvisorInput {
+            provider: provider.into(),
+            model: None,
+            max_uses,
+            auto_review: true,
+        };
+
+        let error = set_advisor(&path, Some(&input("claude", 3))).unwrap_err();
+        assert!(error.contains("runs its own agent loop"), "{error}");
+        let error = set_advisor(&path, Some(&input("missing", 3))).unwrap_err();
+        assert!(error.contains("not a configured provider"), "{error}");
+        let error = set_advisor(&path, Some(&input("deepseek", 0))).unwrap_err();
+        assert!(error.contains("max_uses"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            ADVISOR_BASE,
+            "a refused change must not touch the file"
+        );
+    }
 
     #[test]
     fn adds_provider_without_discarding_existing_config() {
@@ -931,6 +1263,67 @@ mod tests {
     }
 
     #[test]
+    fn enabling_cursor_writes_no_model_allow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        let input = CursorProviderInput {
+            id: "cursor".into(),
+            command: "cursor-agent".into(),
+            model: "composer-2.5".into(),
+            models: Vec::new(),
+            allow_mcp: false,
+            mode: CursorMode::Agent,
+            timeout_secs: 900,
+        };
+        add_cursor_provider(&path, &input).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        // An allow-list is taken literally and suppresses discovery, so writing
+        // one here would pin the picker to whatever was hard-coded that day.
+        assert!(!written.contains("models"), "{written}");
+        assert!(written.contains("mode = \"agent\""), "{written}");
+
+        // A stale list from an older build is cleared rather than preserved.
+        let stale = CursorProviderInput {
+            models: vec!["composer-2.5".into(), "gpt-5.6-sol".into()],
+            ..input.clone()
+        };
+        add_cursor_provider(&path, &stale).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("models"));
+        add_cursor_provider(&path, &input).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("models"));
+    }
+
+    #[test]
+    fn the_cursor_preset_puts_its_options_before_the_subcommand() {
+        let plain = external_agent_preset("cursor").unwrap();
+        assert_eq!(plain.command, "cursor-agent");
+        assert_eq!(plain.mode, ExternalAgentMode::Acp);
+        // Isolation is required for every ACP worker, and Cursor is the reason
+        // why: it edits without sending session/request_permission at all.
+        assert_eq!(plain.workspace, ExternalWorkspace::Isolated);
+        assert_eq!(plain.args, vec!["acp".to_string()]);
+
+        // `acp` is a subcommand, so a pinned model has to precede it — the CLI
+        // reads options before the command, as in `agent --api-key "$KEY" acp`.
+        let pinned =
+            external_agent_preset_with_model("cursor", false, Some("composer-2.5")).unwrap();
+        assert_eq!(pinned.model.as_deref(), Some("composer-2.5"));
+        assert_eq!(
+            pinned.args,
+            vec![
+                "--model".to_string(),
+                "{model}".to_string(),
+                "acp".to_string()
+            ]
+        );
+        assert!(upsert_external_agent(
+            &tempfile::tempdir().unwrap().path().join("zest.toml"),
+            &pinned
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn mcp_enabled_presets_use_the_cli_owned_configuration() {
         let claude = external_agent_preset_with_mcp("claude", true).unwrap();
         assert!(claude.allow_mcp);
@@ -968,7 +1361,21 @@ mod tests {
 
     #[test]
     fn model_options_are_scoped_to_builtin_workers() {
-        assert_eq!(external_agent_model_options("claude"), &["sonnet", "opus"]);
+        for (worker, model) in [
+            ("claude", "claude-haiku-5-5"),
+            ("claude", "claude-fable-5-1"),
+            ("cursor", "claude-sonnet-5-5-high"),
+            ("cursor", "claude-haiku-5-5-thinking-medium"),
+            ("cursor", "grok-4.7-high"),
+        ] {
+            assert!(external_agent_model_options(worker).contains(&model));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("zest.toml");
+            let preset = external_agent_preset_with_model(worker, false, Some(model)).unwrap();
+            upsert_external_agent(&path, &preset).unwrap();
+            let config = Config::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(config.agents[worker].model.as_deref(), Some(model));
+        }
         assert!(external_agent_model_options("custom").is_empty());
     }
 

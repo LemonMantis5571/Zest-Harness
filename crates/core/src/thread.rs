@@ -26,7 +26,11 @@ use crate::fsutil;
 /// v3 adds anchored checkpoint metadata while keeping every new field
 /// optional so older thread files remain readable.
 /// v4 adds durable pending inputs and the thin lifecycle ledger.
-pub const THREAD_FORMAT_VERSION: u32 = 4;
+/// v5 adds interactive HTML document metadata.
+/// Readers must check the version before decoding typed metadata. Already-built
+/// v4 binaries can still rename v5 HTML threads as corrupt; this change cannot
+/// repair those readers, which must be upgraded separately.
+pub const THREAD_FORMAT_VERSION: u32 = 5;
 
 /// Anthropic Messages API content blocks (today's only wire format).
 pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
@@ -116,6 +120,13 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolPart {
@@ -133,6 +144,12 @@ pub struct ToolPart {
     /// Typed side-channel (e.g. delegation provenance). Empty on v1 threads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<crate::tools::ToolMetadata>,
+    /// Unix milliseconds the call first appeared and settled. A subagent line
+    /// shows the difference as its duration; absent on older threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
 }
 
 impl ToolPart {
@@ -146,8 +163,74 @@ impl ToolPart {
             path: None,
             diff: None,
             metadata: None,
+            started_at: Some(now_millis()),
+            finished_at: None,
         }
     }
+}
+
+/// One step a provider-owned loop (Claude Code, Codex, Cursor) reported.
+///
+/// These never run through Zest's tool executor; they are what the provider
+/// said it did. Kept so a reopened chat still shows a subagent the provider
+/// spawned instead of an answer with no visible work behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPart {
+    pub id: String,
+    pub title: String,
+    /// `running`, `done`, or `error`.
+    pub status: String,
+    /// The activity this one ran inside, such as a subagent's own tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+}
+
+/// One entry in the order an assistant turn did things.
+///
+/// Tools and activities are referenced by id; thinking carries its own text
+/// because a turn thinks again between tool calls, and each block belongs
+/// where it happened. The reply text is not a step: it stays the answer
+/// under the steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AssistantStep {
+    Thinking { text: String },
+    Tool { id: String },
+    Activity { id: String },
+}
+
+/// Record that `id` happened now, unless an earlier event already did.
+fn push_step_once(steps: &mut Vec<AssistantStep>, step: AssistantStep) {
+    if !steps.contains(&step) {
+        steps.push(step);
+    }
+}
+
+fn push_thinking_step(steps: &mut Vec<AssistantStep>, text: &str) {
+    if let Some(AssistantStep::Thinking { text: current }) = steps.last_mut() {
+        current.push_str(text);
+    } else {
+        steps.push(AssistantStep::Thinking {
+            text: text.to_string(),
+        });
+    }
+}
+
+/// Settle every activity still running, as `done`/`error` does in the UI.
+fn finish_activities(activities: &mut [ActivityPart], status: &str) -> bool {
+    let mut changed = false;
+    let now = now_millis();
+    for activity in activities.iter_mut().filter(|a| a.status == "running") {
+        activity.status = status.to_string();
+        activity.finished_at.get_or_insert(now);
+        changed = true;
+    }
+    changed
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +248,18 @@ pub enum StoredMessage {
         thinking: String,
         #[serde(default)]
         tools: Vec<ToolPart>,
+        /// What a provider-owned loop reported doing. Empty for Zest's own
+        /// loop and on threads written before it was kept.
+        #[serde(
+            default,
+            rename = "providerActivity",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        provider_activity: Vec<ActivityPart>,
+        /// Thinking, tools, and activities in the order they happened. Empty
+        /// on older threads, which the UI shows in a fixed order instead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        steps: Vec<AssistantStep>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         /// Provider to repair or replace when the error was an auth failure
@@ -238,25 +333,34 @@ pub fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
             .contains(&needle.to_ascii_lowercase())
 }
 
-#[allow(clippy::type_complexity)]
-fn assistant_fields(
-    msg: &mut StoredMessage,
-) -> Option<(
-    &mut String,
-    &mut String,
-    &mut Vec<ToolPart>,
-    &mut Option<String>,
-    &mut bool,
-)> {
+/// The mutable parts of an assistant message the event appliers touch.
+struct AssistantFields<'a> {
+    text: &'a mut String,
+    thinking: &'a mut String,
+    tools: &'a mut Vec<ToolPart>,
+    activity: &'a mut Vec<ActivityPart>,
+    steps: &'a mut Vec<AssistantStep>,
+    streaming: &'a mut bool,
+}
+
+fn assistant_fields(msg: &mut StoredMessage) -> Option<AssistantFields<'_>> {
     match msg {
         StoredMessage::Assistant {
             text,
             thinking,
             tools,
-            error,
+            provider_activity,
+            steps,
             streaming,
             ..
-        } => Some((text, thinking, tools, error, streaming)),
+        } => Some(AssistantFields {
+            text,
+            thinking,
+            tools,
+            activity: provider_activity,
+            steps,
+            streaming,
+        }),
         _ => None,
     }
 }
@@ -909,19 +1013,37 @@ impl Thread {
         true
     }
 
-    /// Convert interrupted approvals / still-running tools into terminal error
-    /// cards so a restart never leaves forever-pending UI state.
+    /// Close interrupted rows when a live turn ends, recording its end time.
     pub fn terminalize_interrupted(&mut self) -> bool {
+        self.terminalize_interrupted_at(Some(now_millis()))
+    }
+
+    /// Recovery cannot know when the old process stopped, so it supplies no end.
+    fn terminalize_interrupted_at(&mut self, finished_at: Option<u64>) -> bool {
         let mut changed = false;
         for msg in &mut self.messages {
-            let Some((_, _, tools, _, streaming)) = assistant_fields(msg) else {
+            let Some(AssistantFields {
+                tools,
+                activity,
+                streaming,
+                ..
+            }) = assistant_fields(msg)
+            else {
                 continue;
             };
             if *streaming {
                 *streaming = false;
                 changed = true;
             }
+            for part in activity.iter_mut().filter(|part| part.status == "running") {
+                part.status = "error".into();
+                part.finished_at = part.finished_at.or(finished_at);
+                changed = true;
+            }
             for tool in tools.iter_mut() {
+                if matches!(tool.status.as_str(), "awaiting_approval" | "running") {
+                    tool.finished_at = tool.finished_at.or(finished_at);
+                }
                 match tool.status.as_str() {
                     "awaiting_approval" => {
                         tool.status = "error".into();
@@ -1156,11 +1278,23 @@ impl Thread {
             text: String::new(),
             thinking: String::new(),
             tools: Vec::new(),
+            provider_activity: Vec::new(),
+            steps: Vec::new(),
             error: None,
             provider_selection: None,
             command: None,
             streaming: true,
         });
+    }
+
+    /// Run `apply` on an assistant row, creating it first, and mark it live.
+    fn with_assistant(&mut self, message_id: &str, apply: impl FnOnce(AssistantFields<'_>)) {
+        self.ensure_assistant(message_id);
+        if let Some(fields) = self.find_mut(message_id).and_then(assistant_fields) {
+            *fields.streaming = true;
+            apply(fields);
+        }
+        self.touch();
     }
 
     /// Upsert UI projection from a chat-event shape (desktop emits these).
@@ -1187,38 +1321,67 @@ impl Thread {
     }
 
     pub fn apply_text_delta(&mut self, message_id: &str, text: &str) {
-        self.ensure_assistant(message_id);
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((body, _, _, _, streaming)) = assistant_fields(msg) {
-                body.push_str(text);
-                *streaming = true;
-            }
-        }
-        self.touch();
+        self.with_assistant(message_id, |fields| fields.text.push_str(text));
     }
 
     pub fn apply_thinking_delta(&mut self, message_id: &str, text: &str) {
-        self.ensure_assistant(message_id);
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((_, thinking, _, _, streaming)) = assistant_fields(msg) {
-                thinking.push_str(text);
-                *streaming = true;
+        self.with_assistant(message_id, |fields| {
+            fields.thinking.push_str(text);
+            push_thinking_step(fields.steps, text);
+        });
+    }
+
+    /// Record a step a provider-owned loop reported, keyed by its id.
+    pub fn apply_provider_activity(
+        &mut self,
+        message_id: &str,
+        id: &str,
+        title: &str,
+        status: &str,
+        parent_id: Option<&str>,
+    ) {
+        self.with_assistant(message_id, |fields| {
+            let now = now_millis();
+            let settled = status != "running";
+            if let Some(activity) = fields.activity.iter_mut().find(|a| a.id == id) {
+                // A bare "External tool" update carries no title of its own;
+                // keep the one the start event named.
+                if title != "External tool" {
+                    activity.title = title.to_string();
+                }
+                activity.status = status.to_string();
+                if settled {
+                    activity.finished_at.get_or_insert(now);
+                }
+                if activity.parent_id.is_none() {
+                    activity.parent_id = parent_id.map(str::to_string);
+                }
+                return;
             }
-        }
-        self.touch();
+            fields.activity.push(ActivityPart {
+                id: id.to_string(),
+                title: title.to_string(),
+                status: status.to_string(),
+                parent_id: parent_id.map(str::to_string),
+                started_at: Some(now),
+                finished_at: settled.then_some(now),
+            });
+            push_step_once(fields.steps, AssistantStep::Activity { id: id.to_string() });
+        });
     }
 
     pub fn apply_tool_start(&mut self, message_id: &str, tool_id: &str, name: &str) {
-        self.ensure_assistant(message_id);
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
-                if !tools.iter().any(|t| t.id == tool_id) {
-                    tools.push(ToolPart::running(tool_id, name));
-                }
-                *streaming = true;
+        self.with_assistant(message_id, |fields| {
+            if !fields.tools.iter().any(|t| t.id == tool_id) {
+                fields.tools.push(ToolPart::running(tool_id, name));
             }
-        }
-        self.touch();
+            push_step_once(
+                fields.steps,
+                AssistantStep::Tool {
+                    id: tool_id.to_string(),
+                },
+            );
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1232,31 +1395,30 @@ impl Thread {
         summary: &str,
         diff: &str,
     ) {
-        self.ensure_assistant(message_id);
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
-                if let Some(tool) = tools.iter_mut().find(|t| t.id == tool_call_id) {
-                    tool.status = "awaiting_approval".into();
-                    tool.approval_id = Some(approval_id.to_string());
-                    tool.path = Some(path.to_string());
-                    tool.summary = Some(summary.to_string());
-                    tool.diff = Some(diff.to_string());
-                } else {
-                    tools.push(ToolPart {
-                        id: tool_call_id.to_string(),
-                        name: tool_name.to_string(),
-                        status: "awaiting_approval".into(),
-                        summary: Some(summary.to_string()),
-                        approval_id: Some(approval_id.to_string()),
-                        path: Some(path.to_string()),
-                        diff: Some(diff.to_string()),
-                        metadata: None,
-                    });
-                }
-                *streaming = true;
+        self.with_assistant(message_id, |fields| {
+            if let Some(tool) = fields.tools.iter_mut().find(|t| t.id == tool_call_id) {
+                tool.status = "awaiting_approval".into();
+                tool.approval_id = Some(approval_id.to_string());
+                tool.path = Some(path.to_string());
+                tool.summary = Some(summary.to_string());
+                tool.diff = Some(diff.to_string());
+            } else {
+                fields.tools.push(ToolPart {
+                    status: "awaiting_approval".into(),
+                    summary: Some(summary.to_string()),
+                    approval_id: Some(approval_id.to_string()),
+                    path: Some(path.to_string()),
+                    diff: Some(diff.to_string()),
+                    ..ToolPart::running(tool_call_id, tool_name)
+                });
             }
-        }
-        self.touch();
+            push_step_once(
+                fields.steps,
+                AssistantStep::Tool {
+                    id: tool_call_id.to_string(),
+                },
+            );
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1271,46 +1433,48 @@ impl Thread {
         diff: Option<&str>,
         metadata: Option<crate::tools::ToolMetadata>,
     ) {
-        self.ensure_assistant(message_id);
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
-                if let Some(tool) = tools.iter_mut().find(|t| t.id == tool_id) {
-                    tool.status = if is_error { "error" } else { "done" }.into();
-                    tool.summary = Some(summary.to_string());
-                    tool.approval_id = None;
-                    if let Some(path) = path {
-                        tool.path = Some(path.to_string());
-                    }
-                    if let Some(diff) = diff {
-                        tool.diff = Some(diff.to_string());
-                    }
-                    if metadata.is_some() {
-                        tool.metadata = metadata;
-                    }
-                    // Keep path/diff on the card for context after allow/deny.
-                } else {
-                    tools.push(ToolPart {
-                        id: tool_id.to_string(),
-                        name: name.to_string(),
-                        status: if is_error { "error" } else { "done" }.into(),
-                        summary: Some(summary.to_string()),
-                        approval_id: None,
-                        path: path.map(str::to_string),
-                        diff: diff.map(str::to_string),
-                        metadata,
-                    });
+        self.with_assistant(message_id, |fields| {
+            let status = if is_error { "error" } else { "done" };
+            if let Some(tool) = fields.tools.iter_mut().find(|t| t.id == tool_id) {
+                tool.status = status.into();
+                tool.summary = Some(summary.to_string());
+                tool.approval_id = None;
+                // Keep path/diff on the card for context after allow/deny.
+                if let Some(path) = path {
+                    tool.path = Some(path.to_string());
                 }
-                *streaming = true;
+                if let Some(diff) = diff {
+                    tool.diff = Some(diff.to_string());
+                }
+                if metadata.is_some() {
+                    tool.metadata = metadata;
+                }
+                tool.finished_at = Some(now_millis());
+            } else {
+                let started = ToolPart::running(tool_id, name);
+                fields.tools.push(ToolPart {
+                    status: status.into(),
+                    summary: Some(summary.to_string()),
+                    path: path.map(str::to_string),
+                    diff: diff.map(str::to_string),
+                    metadata,
+                    finished_at: started.started_at,
+                    ..started
+                });
             }
-        }
-        self.touch();
+            push_step_once(
+                fields.steps,
+                AssistantStep::Tool {
+                    id: tool_id.to_string(),
+                },
+            );
+        });
     }
 
     pub fn apply_done(&mut self, message_id: &str) {
-        if let Some(msg) = self.find_mut(message_id) {
-            if let Some((_, _, _, _, streaming)) = assistant_fields(msg) {
-                *streaming = false;
-            }
+        if let Some(fields) = self.find_mut(message_id).and_then(assistant_fields) {
+            *fields.streaming = false;
+            finish_activities(fields.activity, "done");
         }
         self.touch();
     }
@@ -1329,6 +1493,7 @@ impl Thread {
         if let Some(StoredMessage::Assistant {
             error,
             provider_selection: stored_provider_selection,
+            provider_activity,
             streaming,
             ..
         }) = self.find_mut(message_id)
@@ -1336,6 +1501,7 @@ impl Thread {
             *error = Some(message.to_string());
             *stored_provider_selection = provider_selection.map(str::to_string);
             *streaming = false;
+            finish_activities(provider_activity, "error");
         }
         self.touch();
     }
@@ -1448,6 +1614,7 @@ impl ThreadStore {
                 });
             }
         };
+        preflight_thread_version(&body, &tid)?;
         let mut thread: Thread = match serde_json::from_str(&body) {
             Ok(t) => t,
             Err(e) => {
@@ -1473,7 +1640,7 @@ impl ThreadStore {
             Ok(None) => {}
             Err(e) => return Err(e),
         }
-        if thread.terminalize_interrupted() {
+        if thread.terminalize_interrupted_at(None) {
             warnings.push("interrupted tools/approvals were closed after restart".into());
             // Persist the terminalized projection so reopen stays stable.
             let _ = self.save(&thread);
@@ -1658,6 +1825,7 @@ impl ThreadStore {
             .join(format!("{}.json", checkpoint_id.as_str()));
         let raw = fs::read_to_string(&path)
             .map_err(|e| HarnessError::Other(format!("read checkpoint {}: {e}", path.display())))?;
+        preflight_thread_version(&raw, &thread_id)?;
         let mut snapshot: Thread = serde_json::from_str(&raw).map_err(|e| {
             HarnessError::Other(format!("checkpoint {} is corrupt: {e}", path.display()))
         })?;
@@ -1935,6 +2103,31 @@ impl ThreadStore {
     }
 }
 
+/// Reject newer documents before unknown metadata can be mistaken for corruption.
+fn preflight_thread_version(body: &str, id: &ThreadId) -> std::result::Result<(), ThreadLoadError> {
+    // Parse errors and invalid version fields still go through the typed decoder
+    // below so each loader keeps its existing corrupt-file handling.
+    #[derive(Deserialize)]
+    struct VersionHeader {
+        #[serde(default)]
+        version: u32,
+    }
+    // Unknown fields are skipped by serde without allocating the HTML/images
+    // and full transcript a second time.
+    let Ok(raw) = serde_json::from_str::<VersionHeader>(body) else {
+        return Ok(());
+    };
+    let found = raw.version;
+    if found > THREAD_FORMAT_VERSION {
+        return Err(ThreadLoadError::UnsupportedVersion {
+            id: id.as_str().to_string(),
+            found,
+            supported: THREAD_FORMAT_VERSION,
+        });
+    }
+    Ok(())
+}
+
 /// Rename a corrupt thread file aside so it is not overwritten.
 fn preserve_corrupt(path: &Path) -> Result<PathBuf> {
     let stamp = now_secs();
@@ -1951,6 +2144,50 @@ mod characterization {
 
     fn scratch(name: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::ScratchDir::new(&format!("zest-thread-{name}-"))
+    }
+
+    fn html_document_metadata() -> crate::tools::ToolMetadata {
+        let document = crate::html::HtmlDocument::parse(
+            "Counter é".into(),
+            r#"<!doctype html>
+<meta charset="utf-8">
+<button id="counter">Count é: 0</button>
+<script>
+let count = 0;
+document.getElementById('counter').onclick = event => {
+  event.target.textContent = `Count é: ${++count}`;
+};
+</script>"#
+                .into(),
+        )
+        .unwrap();
+        crate::tools::ToolMetadata::HtmlDocument {
+            title: document.title().to_string(),
+            html: document.source().to_string(),
+        }
+    }
+
+    fn html_thread(tool_started: bool) -> Thread {
+        let mut thread = Thread::new().with_provider("codex");
+        thread.apply_user("u1", "Make an interactive counter");
+        thread.apply_assistant_start("a1", None);
+        thread.apply_text_delta("a1", "Open the counter to interact with it.");
+        if tool_started {
+            thread.apply_tool_start("a1", "html-1", "html_render");
+        }
+        thread.apply_tool_result(
+            "a1",
+            "html-1",
+            "html_render",
+            "HTML document ready",
+            false,
+            None,
+            None,
+            Some(html_document_metadata()),
+        );
+        thread.apply_done("a1");
+        thread.set_agent_messages(vec![Message::user_text("Make an interactive counter")]);
+        thread
     }
 
     /// `exists` is the guard that stops a metadata-only write from creating a
@@ -2025,6 +2262,138 @@ mod characterization {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, thread.id);
         assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn html_metadata_survives_save_reopen_fork_and_source_delete() {
+        for tool_started in [false, true] {
+            let root = scratch("html-roundtrip");
+            let store = ThreadStore::open(&root).unwrap();
+            let source = html_thread(tool_started);
+            let messages = serde_json::to_value(&source.messages).unwrap();
+            let agent_messages = serde_json::to_value(&source.agent_messages).unwrap();
+            store.save(&source).unwrap();
+            let source_path = store.path_for(&ThreadId::parse(&source.id).unwrap());
+            let original = fs::read(&source_path).unwrap();
+            let saved: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            assert_eq!(saved["version"], THREAD_FORMAT_VERSION);
+            assert_eq!(
+                saved["messages"][1]["tools"][0]["metadata"],
+                serde_json::to_value(html_document_metadata()).unwrap()
+            );
+            drop(store);
+
+            let reopened_store = ThreadStore::open(&root).unwrap();
+            let loaded = reopened_store.load_typed(&source.id).unwrap();
+            assert!(loaded.warning.is_none());
+            assert_eq!(
+                serde_json::to_value(&loaded.thread.messages).unwrap(),
+                messages
+            );
+            match &loaded.thread.messages[1] {
+                StoredMessage::Assistant {
+                    tools, streaming, ..
+                } => {
+                    assert!(!streaming);
+                    assert_eq!(tools.len(), 1);
+                    assert_eq!(tools[0].status, "done");
+                    assert_eq!(tools[0].metadata, Some(html_document_metadata()));
+                }
+                other => panic!("expected assistant, got {other:?}"),
+            }
+            let fork = reopened_store
+                .fork(&loaded.thread, Some("Counter copy"))
+                .unwrap();
+            assert_ne!(fork.id, source.id);
+            assert_eq!(fs::read(&source_path).unwrap(), original);
+            reopened_store.delete(&source.id).unwrap();
+            assert!(!source_path.exists());
+            drop(reopened_store);
+
+            let fork_store = ThreadStore::open(&root).unwrap();
+            let fork = fork_store.load_typed(&fork.id).unwrap();
+            assert!(fork.warning.is_none());
+            assert_eq!(
+                serde_json::to_value(&fork.thread.messages).unwrap(),
+                messages
+            );
+            assert_eq!(
+                serde_json::to_value(&fork.thread.agent_messages).unwrap(),
+                agent_messages
+            );
+            assert!(fork.thread.checkpoints.is_empty());
+        }
+    }
+
+    #[test]
+    fn html_metadata_survives_checkpoint_rewind_and_checkpoint_fork() {
+        let root = scratch("html-checkpoint");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut source = html_thread(true);
+        let messages = serde_json::to_value(&source.messages).unwrap();
+        let agent_messages = serde_json::to_value(&source.agent_messages).unwrap();
+        let checkpoint = store
+            .create_checkpoint(&mut source, "Counter ready")
+            .unwrap();
+
+        source.apply_user("u2", "Replace the counter");
+        source.apply_tool_result(
+            "a2",
+            "html-2",
+            "html_render",
+            "Replacement ready",
+            false,
+            None,
+            None,
+            Some(crate::tools::ToolMetadata::HtmlDocument {
+                title: "Replacement".into(),
+                html: "<p>Different document</p>".into(),
+            }),
+        );
+        source.apply_done("a2");
+        source
+            .agent_messages
+            .push(Message::user_text("Replace the counter"));
+        let later_checkpoint = store
+            .create_checkpoint(&mut source, "Replacement ready")
+            .unwrap();
+        drop(store);
+
+        let store = ThreadStore::open(&root).unwrap();
+        let source = store.load(&source.id).unwrap();
+        let snapshot = store.load_checkpoint(&source.id, &checkpoint.id).unwrap();
+        assert_eq!(serde_json::to_value(&snapshot.messages).unwrap(), messages);
+        assert_eq!(
+            serde_json::to_value(&snapshot.agent_messages).unwrap(),
+            agent_messages
+        );
+        let fork = store
+            .fork_from_checkpoint(&source, &checkpoint.id, None)
+            .unwrap();
+        let restored = store.rewind_to_checkpoint(&source, &checkpoint.id).unwrap();
+        assert_eq!(serde_json::to_value(&restored.messages).unwrap(), messages);
+        assert_eq!(restored.checkpoints.len(), 1);
+        assert_eq!(restored.checkpoints[0].id, checkpoint.id);
+        assert!(store
+            .load_checkpoint(&source.id, &later_checkpoint.id)
+            .is_err());
+        let reopened = store.load(&source.id).unwrap();
+        assert_eq!(serde_json::to_value(&reopened.messages).unwrap(), messages);
+        assert_eq!(
+            serde_json::to_value(&reopened.agent_messages).unwrap(),
+            agent_messages
+        );
+
+        store.delete(&source.id).unwrap();
+        assert!(!store
+            .checkpoints_dir_for(&ThreadId::parse(&source.id).unwrap())
+            .exists());
+        let fork = store.load(&fork.id).unwrap();
+        assert_eq!(serde_json::to_value(&fork.messages).unwrap(), messages);
+        assert_eq!(
+            serde_json::to_value(&fork.agent_messages).unwrap(),
+            agent_messages
+        );
     }
 
     #[test]
@@ -2460,6 +2829,135 @@ mod characterization {
         assert_eq!(restored.provider_id.as_deref(), Some("codex"));
     }
 
+    fn assistant_parts(thread: &Thread) -> (&[ToolPart], &[ActivityPart], &[AssistantStep]) {
+        match thread.messages.last() {
+            Some(StoredMessage::Assistant {
+                tools,
+                provider_activity,
+                steps,
+                ..
+            }) => (tools, provider_activity, steps),
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    /// The transcript draws a turn in this order. Thinking that came after a
+    /// tool call has to stay after it, not merge into the first block.
+    #[test]
+    fn assistant_steps_follow_arrival_order() {
+        let mut thread = Thread::new();
+        thread.apply_user("u1", "fix it");
+        thread.apply_thinking_delta("a1", "Look at ");
+        thread.apply_thinking_delta("a1", "the parser.");
+        thread.apply_tool_start("a1", "t1", "read_file");
+        thread.apply_text_delta("a1", "Reading first.");
+        thread.apply_approval_needed("a1", "t1", "read_file", "ap", "src/lib.rs", "read", "");
+        thread.apply_tool_result("a1", "t1", "read_file", "ok", false, None, None, None);
+        thread.apply_thinking_delta("a1", "Now edit.");
+        thread.apply_tool_result("a1", "t2", "edit_file", "edited", false, None, None, None);
+        thread.apply_provider_activity("a1", "act", "Read Cargo.toml", "running", None);
+
+        let (tools, activity, steps) = assistant_parts(&thread);
+        assert_eq!(
+            steps,
+            [
+                AssistantStep::Thinking {
+                    text: "Look at the parser.".into()
+                },
+                AssistantStep::Tool { id: "t1".into() },
+                AssistantStep::Thinking {
+                    text: "Now edit.".into()
+                },
+                AssistantStep::Tool { id: "t2".into() },
+                AssistantStep::Activity { id: "act".into() },
+            ]
+        );
+        assert!(tools.iter().all(|tool| tool.started_at.is_some()));
+        assert!(tools.iter().all(|tool| tool.finished_at.is_some()));
+        assert_eq!(activity[0].status, "running");
+        assert!(activity[0].finished_at.is_none());
+    }
+
+    #[test]
+    fn interrupted_provider_activity_settles_as_error() {
+        let mut thread = Thread::new();
+        thread.apply_provider_activity("a1", "agent", "Agent Map the code", "running", None);
+        assert!(thread.terminalize_interrupted());
+        let (_, activity, _) = assistant_parts(&thread);
+        assert_eq!(activity[0].status, "error");
+        assert!(activity[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn terminalize_interrupted_records_live_tool_end_times_once() {
+        let mut thread = Thread::new();
+        thread.apply_tool_start("a1", "worker", "delegate_external");
+        thread.apply_approval_needed(
+            "a1",
+            "approval",
+            "delegate_external",
+            "ap",
+            "agent/codex",
+            "run",
+            "",
+        );
+        let before = now_millis();
+        assert!(thread.terminalize_interrupted());
+        let after = now_millis();
+        let (tools, _, _) = assistant_parts(&thread);
+        for tool in tools {
+            assert_eq!(tool.status, "error");
+            assert!(tool
+                .finished_at
+                .is_some_and(|end| end >= before && end <= after));
+        }
+        let ends: Vec<_> = tools.iter().map(|tool| tool.finished_at).collect();
+        assert!(!thread.terminalize_interrupted());
+        let (tools, _, _) = assistant_parts(&thread);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.finished_at)
+                .collect::<Vec<_>>(),
+            ends
+        );
+    }
+
+    #[test]
+    fn restart_terminalization_keeps_unknown_end_times_unknown() {
+        let root = scratch("unknown-interrupted-end");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = Thread::new();
+        thread.apply_tool_start("a1", "worker", "delegate_external");
+        thread.apply_provider_activity("a1", "agent", "Agent Audit", "running", None);
+        store.save(&thread).unwrap();
+
+        for _ in 0..2 {
+            let restored = store.load_with_recovery(&thread.id).unwrap().thread;
+            let (tools, activities, _) = assistant_parts(&restored);
+            assert_eq!(tools[0].status, "error");
+            assert_eq!(tools[0].finished_at, None);
+            assert_eq!(activities[0].status, "error");
+            assert_eq!(activities[0].finished_at, None);
+        }
+    }
+
+    /// Threads written before steps existed carry neither field. They must
+    /// load, and save again without gaining empty ones.
+    #[test]
+    fn assistant_messages_without_steps_round_trip_unchanged() {
+        let old = serde_json::json!({
+            "role": "assistant",
+            "id": "a1",
+            "text": "done",
+            "thinking": "plan",
+            "tools": [{ "id": "t1", "name": "bash", "status": "done" }],
+            "streaming": false
+        });
+        let message: StoredMessage = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&message).unwrap(), old);
+    }
+
     #[test]
     fn apply_chat_event_upserts_preserve_tool_and_approval_fields() {
         let mut thread = Thread::new();
@@ -2787,6 +3285,130 @@ mod characterization {
         );
         // Original file must remain (no rewrite).
         assert!(path.exists());
+    }
+
+    #[test]
+    fn newer_thread_with_unknown_metadata_is_left_untouched() {
+        let root = scratch("future-metadata");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = html_thread(true);
+        let path = store.path_for(&ThreadId::parse(&thread.id).unwrap());
+        let mut future = serde_json::to_value(&thread).unwrap();
+        future["version"] = serde_json::json!(THREAD_FORMAT_VERSION + 1);
+        future["messages"][1]["tools"][0]["metadata"]["kind"] =
+            serde_json::json!("future_html_document");
+        let original = serde_json::to_vec_pretty(&future).unwrap();
+        assert!(serde_json::from_slice::<Thread>(&original).is_err());
+        fs::write(&path, &original).unwrap();
+
+        for _ in 0..2 {
+            let err = store.load_typed(&thread.id).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ThreadLoadError::UnsupportedVersion { ref id, found, supported }
+                        if id == &thread.id
+                            && found == THREAD_FORMAT_VERSION + 1
+                            && supported == THREAD_FORMAT_VERSION
+                ),
+                "{err}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let files = fs::read_dir(store.dir()).unwrap().collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].as_ref().unwrap().path(), path);
+        }
+    }
+
+    #[test]
+    fn newer_checkpoint_with_unknown_metadata_is_left_untouched() {
+        let root = scratch("future-checkpoint-metadata");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = html_thread(true);
+        let checkpoint = store
+            .create_checkpoint(&mut thread, "Counter ready")
+            .unwrap();
+        let dir = store.checkpoints_dir_for(&ThreadId::parse(&thread.id).unwrap());
+        let path = dir.join(format!("{}.json", checkpoint.id));
+        let main_path = store.path_for(&ThreadId::parse(&thread.id).unwrap());
+        let main_original = fs::read(&main_path).unwrap();
+        let mut future: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        future["version"] = serde_json::json!(THREAD_FORMAT_VERSION + 1);
+        future["messages"][1]["tools"][0]["metadata"]["kind"] =
+            serde_json::json!("future_html_document");
+        let original = serde_json::to_vec_pretty(&future).unwrap();
+        assert!(serde_json::from_slice::<Thread>(&original).is_err());
+        fs::write(&path, &original).unwrap();
+        let expected = ThreadLoadError::UnsupportedVersion {
+            id: thread.id.clone(),
+            found: THREAD_FORMAT_VERSION + 1,
+            supported: THREAD_FORMAT_VERSION,
+        }
+        .to_string();
+
+        assert_eq!(
+            store
+                .load_checkpoint(&thread.id, &checkpoint.id)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(
+            store
+                .rewind_to_checkpoint(&thread, &checkpoint.id)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(
+            store
+                .fork_from_checkpoint(&thread, &checkpoint.id, None)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(&main_path).unwrap(), main_original);
+        let files = fs::read_dir(&dir).unwrap().collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].as_ref().unwrap().path(), path);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn version_preflight_keeps_existing_corrupt_thread_handling() {
+        for version in [
+            serde_json::json!(THREAD_FORMAT_VERSION),
+            serde_json::Value::Null,
+            serde_json::json!("future"),
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            let root = scratch("version-corruption");
+            let store = ThreadStore::open(&root).unwrap();
+            let thread = html_thread(true);
+            let path = store.path_for(&ThreadId::parse(&thread.id).unwrap());
+            let mut invalid = serde_json::to_value(&thread).unwrap();
+            invalid["version"] = version;
+            invalid["messages"][1]["tools"][0]["metadata"]["kind"] =
+                serde_json::json!("future_html_document");
+            let original = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &original).unwrap();
+
+            let err = store.load_typed(&thread.id).unwrap_err();
+            assert!(matches!(err, ThreadLoadError::Corrupt { .. }), "{err}");
+            assert!(!path.exists());
+            let files = fs::read_dir(store.dir()).unwrap().collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            let preserved = files[0].as_ref().unwrap().path();
+            assert!(preserved
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".json.corrupt-"));
+            assert_eq!(fs::read(&preserved).unwrap(), original);
+        }
     }
 
     #[test]

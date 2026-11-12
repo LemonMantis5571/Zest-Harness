@@ -108,12 +108,17 @@ pub fn walk_files(root: &ProjectRoot, start: &Path, mut visit: impl FnMut(PathBu
 
 /// Immediate children of `dir` (confined), skip hard-skip dirs and sensitive files.
 /// Applies gitignore for entries under the project.
-pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>, String> {
+pub fn list_children(
+    root: &ProjectRoot,
+    dir: &Path,
+    max_entries: usize,
+) -> Result<(Vec<ListedEntry>, bool), String> {
     let mut builder = WalkBuilder::new(dir);
     configure_walk_builder(&mut builder, root.as_path());
     builder.max_depth(Some(1));
 
     let mut entries = Vec::new();
+    let mut truncated = false;
     for entry in builder.build().flatten() {
         if entry.depth() == 0 {
             continue;
@@ -135,6 +140,10 @@ pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>,
             if root.confine(path).is_err() {
                 continue;
             }
+            if entries.len() == max_entries {
+                truncated = true;
+                break;
+            }
             entries.push(ListedEntry { name, is_dir: true });
             continue;
         }
@@ -151,6 +160,10 @@ pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>,
             continue;
         }
         if resolved.is_file() || path.is_symlink() {
+            if entries.len() == max_entries {
+                truncated = true;
+                break;
+            }
             entries.push(ListedEntry {
                 name,
                 is_dir: false,
@@ -159,7 +172,7 @@ pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>,
     }
 
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(entries)
+    Ok((entries, truncated))
 }
 
 #[derive(Debug, Clone)]
@@ -213,11 +226,27 @@ mod tests {
         fs::create_dir(dir.join("node_modules")).unwrap();
 
         let root = ProjectRoot::new(&dir).unwrap();
-        let kids = list_children(&root, root.as_path()).unwrap();
+        let (kids, truncated) = list_children(&root, root.as_path(), usize::MAX).unwrap();
+        assert!(!truncated);
         let names: Vec<&str> = kids.iter().map(|k| k.name.as_str()).collect();
         assert!(names.contains(&"ok.txt"), "{names:?}");
         assert!(!names.contains(&".env"), "{names:?}");
         assert!(!names.contains(&"node_modules"), "{names:?}");
+    }
+
+    #[test]
+    fn list_children_stops_after_the_requested_number_of_entries() {
+        let dir = scratch("bounded-list");
+        for index in 0..8 {
+            fs::write(dir.join(format!("file-{index}.txt")), "x").unwrap();
+        }
+
+        let root = ProjectRoot::new(&dir).unwrap();
+        let (entries, truncated) = list_children(&root, root.as_path(), 3).unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert!(truncated);
+        assert!(entries.windows(2).all(|pair| pair[0].name <= pair[1].name));
     }
 
     #[test]

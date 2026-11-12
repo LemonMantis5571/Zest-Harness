@@ -14,6 +14,7 @@ import { runFixtureStream } from "./fixture.ts";
 import { safeMarkdownFilename } from "./markdownExport.ts";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT } from "./models.ts";
 import { matchExcerpt } from "./commandPaletteSearch.ts";
+import { htmlFilename, isolatedHtml, parseHtmlDocument, type HtmlDocument, type PreparedHtmlView } from "./htmlArtifacts.ts";
 import {
   THREAD_OLDER_USER_TURNS,
   THREAD_WINDOW_USER_TURNS,
@@ -24,10 +25,14 @@ import {
 } from "./threadWindow.ts";
 import type { DesktopBackend } from "./backend";
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
+  ApprovalChoice,
   ApprovalMode,
   AttachmentInput,
   ChatEvent,
   ChatMessage,
+  DayPoint,
   DelegationEvent,
   DelegationCreateInput,
   DelegationJob,
@@ -39,24 +44,58 @@ import type {
   JobSnapshot,
   McpServerRow,
   OlderThreadMessages,
+  PendingInputAttachment,
   SessionInfo,
+  ToolPart,
   ThreadSummary,
   ChatSearchHit,
   WallpaperFilterId,
   WorkspaceChange,
+  WorktreeChatStatus,
 } from "./types";
 
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
   id: m.id,
   efforts: ["low", "medium", "high", "xhigh", "max"],
-  contextWindow: 256000,
+  contextWindow: m.id.startsWith("gpt-6") ? 1_050_000 : 256000,
+  supportsTools: true,
+  supportsVision: m.id.startsWith("gpt-6"),
+}));
+const CATALOGUE_MODELS = [
+  ...FIXTURE_MODELS,
+  ...Array.from({ length: 54 }, (_, index) => ({
+    id: `research-model-${String(index + 1).padStart(2, "0")}-with-a-long-descriptive-name`,
+    efforts: index === 0 ? [] : ["low", "high"],
+    contextWindow: index === 0 ? 0 : 128_000,
+    supportsTools: index !== 0,
+    supportsVision: index === 1,
+  })),
+];
+/**
+ * Claude Code's built-in catalogue as an old CLI (2.1.220) reports it: Opus 5.5
+ * and Fable 5.1 are marked because the API refuses them from that client.
+ */
+const OLD_CLAUDE_CODE = { cli: "Claude Code", installed: "2.1.220", update: "claude update" };
+const CLAUDE_CODE_MODELS = [
+  { id: "claude-opus-5-5", needsCli: { ...OLD_CLAUDE_CODE, minimum: "2.1.280" } },
+  { id: "claude-sonnet-5-5" },
+  { id: "claude-haiku-5-5" },
+  { id: "claude-fable-5-1", needsCli: { ...OLD_CLAUDE_CODE, minimum: "2.1.251" } },
+].map((model) => ({
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  contextWindow: 1_000_000,
   supportsTools: true,
   supportsVision: false,
+  ...model,
 }));
 const FIXTURE_ARTWORK_DATA_URL =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%235e6ad2'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='96' height='96' rx='16' fill='url(%23g)'/%3E%3Ccircle cx='48' cy='48' r='22' fill='%23010102' opacity='.8'/%3E%3Ccircle cx='48' cy='48' r='7' fill='%23f4f4f5'/%3E%3C/svg%3E";
 /** One stand-in per look, so the fixture UI shows a real difference. */
 const FIXTURE_WALLPAPER_PREVIEWS: Record<WallpaperFilterId, string> = {
+  sepia: "data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2064%2064%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27g%27%20x2%3D%271%27%20y2%3D%271%27%3E%3Cstop%20stop-color%3D%27%23302619%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%23cfb58b%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2764%27%20height%3D%2764%27%20fill%3D%27url%28%23g%29%27%2F%3E%3C%2Fsvg%3E",
+  warm: "data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2064%2064%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27g%27%20x2%3D%271%27%20y2%3D%271%27%3E%3Cstop%20stop-color%3D%27%2330251c%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%23ca9864%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2764%27%20height%3D%2764%27%20fill%3D%27url%28%23g%29%27%2F%3E%3C%2Fsvg%3E",
+  cool: "data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2064%2064%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27g%27%20x2%3D%271%27%20y2%3D%271%27%3E%3Cstop%20stop-color%3D%27%231c2530%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%236498ca%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2764%27%20height%3D%2764%27%20fill%3D%27url%28%23g%29%27%2F%3E%3C%2Fsvg%3E",
+  muted: "data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2064%2064%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27g%27%20x2%3D%271%27%20y2%3D%271%27%3E%3Cstop%20stop-color%3D%27%2338393c%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%23898ba3%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2764%27%20height%3D%2764%27%20fill%3D%27url%28%23g%29%27%2F%3E%3C%2Fsvg%3E",
   none: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='w' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%231c1d20'/%3E%3Cstop offset='1' stop-color='%235e6ad2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' fill='url(%23w)'/%3E%3C/svg%3E",
   print:
     "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Crect width='8' height='8' fill='%231c1d20'/%3E%3Cpath fill='%235e6ad2' d='M0 0h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 1h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7zM0 2h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 3h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7z'/%3E%3Cpath fill='%23c4b5e0' d='M0 4h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 5h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7zM0 6h1v1H0zm2 0h1v1H2zm4 0h1v1H4zm6 0h1v1H6zM1 7h1v1H1zm3 0h1v1H3zm5 0h1v1H5zm7 0h1v1H7z'/%3E%3C/svg%3E",
@@ -84,6 +123,15 @@ const FIXTURE_SESSION: SessionInfo = {
   hasOlderMessages: false,
   hasNewerMessages: false,
   hiddenUserTurns: 0,
+};
+const CLAUDE_CODE_SESSION: SessionInfo = {
+  ...FIXTURE_SESSION,
+  provider: "claude-code",
+  label: "Claude Code",
+  model: "claude-sonnet-5-5",
+  defaultModel: "claude-sonnet-5-5",
+  ownsAgentLoop: true,
+  models: CLAUDE_CODE_MODELS,
 };
 
 function notAvailable(op: string): never {
@@ -137,10 +185,139 @@ function longThreadMessages(): ChatMessage[] {
 
 const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
-export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error";
+export const FIXTURE_HTML_DOCUMENT: HtmlDocument = {
+  title: "Offline counter",
+  html: `<style>body{font:18px system-ui;padding:24px;color:#20212a}button{font:inherit;padding:8px 16px}input{font:inherit;width:64px;margin:0 12px 16px}output{margin-left:12px}</style><h1>Offline counter</h1><label for="step">Step</label><input id="step" type="number" value="1"><br><button id="increment">Increment</button><output id="count">0</output><script>document.getElementById('increment').onclick=()=>{const count=document.getElementById('count');count.textContent=String(Number(count.textContent)+Number(document.getElementById('step').value));};</script>`,
+};
+
+function htmlArtifactMessages(): ChatMessage[] {
+  const artifact: ToolPart = {
+    id: "html-render-restored", name: "html_render", status: "done", summary: "Stored an offline HTML document.",
+    metadata: { kind: "html_document", ...parseHtmlDocument(FIXTURE_HTML_DOCUMENT) },
+  };
+  return [
+    { id: "html-user-restored", role: "user", text: "Make an offline counter." },
+    { id: "html-assistant-restored", role: "assistant", thinking: "", streaming: false,
+      text: "The document is restored from this chat. Open it when you want to run it.",
+      tools: [
+        { id: "html-read-1", name: "read_file", path: "README.md", status: "done" },
+        { id: "html-read-2", name: "read_file", path: "package.json", status: "done" },
+        artifact,
+        { id: "html-read-3", name: "read_file", path: "src/main.tsx", status: "done" },
+        { id: "html-read-4", name: "read_file", path: "src/App.tsx", status: "done" },
+      ],
+    },
+    { id: "html-fence-user-restored", role: "user", text: "Also show the explicit CLI fence." },
+    { id: "html-fence-assistant-restored", role: "assistant", thinking: "", streaming: false, tools: [],
+      text: `\`\`\`zest-html Fence counter\n${FIXTURE_HTML_DOCUMENT.html}\n\`\`\``,
+    },
+  ];
+}
+
+/** The board job the restored `delegate_feature` call created. */
+const FIXTURE_DELEGATION_JOB_ID = "fixture-delegation-1";
+
+/**
+ * A chat that handed work to three kinds of subagent: a CLI worker
+ * (`delegate_external`), a board feature card (`delegate_feature`), and a
+ * Claude Code `Agent` whose own steps arrive nested under it.
+ */
+function subagentMessages(): ChatMessage[] {
+  const at = 1_700_000_000_000;
+  const tools: ToolPart[] = [
+    { id: "sub-read-1", name: "read_file", path: "src/cache.ts", status: "done", summary: "export function cacheKey(…)" },
+    { id: "sub-read-2", name: "read_file", path: "src/cache.test.ts", status: "done", summary: "describe(\"cache\", …)" },
+    {
+      id: "sub-worker", name: "delegate_external", status: "done", path: "codex",
+      summary: "[codex · gpt-5.1-codex] The cache key ignores the locale, so the two flaky tests share one entry. Keying on the locale fixes both.",
+      diff: "--- a/src/cache.ts\n+++ b/src/cache.ts\n@@ -1 +1 @@\n-export const cacheKey = (path) => path;\n+export const cacheKey = (path, locale) => `${locale}:${path}`;\n",
+      metadata: { kind: "delegation", provider_id: "codex", model: "gpt-5.1-codex", stage: "direct" },
+      startedAt: at, finishedAt: at + 48_000,
+    },
+    {
+      id: "sub-card", name: "delegate_feature", status: "done", path: "claude",
+      summary: `Feature card \`${FIXTURE_DELEGATION_JOB_ID}\` created in lane \`product\`.`,
+      metadata: {
+        kind: "delegation", provider_id: "claude", model: "sonnet",
+        job_id: FIXTURE_DELEGATION_JOB_ID, stage: "card_created", attempt: 0, review_status: "pending",
+      },
+      startedAt: at + 50_000, finishedAt: at + 51_000,
+    },
+  ];
+  const agentAt = at + 120_000;
+  return [
+    { id: "sub-user-1", role: "user", text: "Why are the cache tests flaky?" },
+    {
+      id: "sub-assistant-1", role: "assistant", streaming: false,
+      thinking: "**Reading the cache**\nThe flaky tests both touch cacheKey.**Handing off**\nCodex can confirm the cause; the fix belongs on the board.",
+      text: "Codex found the cause: the cache key ignores the locale. The fix is on the board as a feature card.",
+      tools,
+      steps: [
+        { kind: "thinking", text: "**Reading the cache**\nThe flaky tests both touch cacheKey." },
+        { kind: "tool", id: "sub-read-1" },
+        { kind: "tool", id: "sub-read-2" },
+        { kind: "tool", id: "sub-worker" },
+        { kind: "thinking", text: "**Handing off**\nCodex can confirm the cause; the fix belongs on the board." },
+        { kind: "tool", id: "sub-card" },
+      ],
+    },
+    { id: "sub-user-2", role: "user", text: "Map every caller of cacheKey." },
+    {
+      id: "sub-assistant-2", role: "assistant", streaming: false, thinking: "", tools: [],
+      text: "Three modules call cacheKey; only the image loader passes a locale.",
+      providerActivity: [
+        { id: "sub-agent", title: "Agent Map the cacheKey callers: Read src/images.ts", status: "done", startedAt: agentAt, finishedAt: agentAt + 34_000 },
+        { id: "sub-agent-grep", title: "Grep cacheKey in src", status: "done", parentId: "sub-agent", startedAt: agentAt + 2_000, finishedAt: agentAt + 3_000 },
+        { id: "sub-agent-read", title: "Read src/images.ts", status: "done", parentId: "sub-agent", startedAt: agentAt + 4_000, finishedAt: agentAt + 5_000 },
+        { id: "sub-agent-test", title: "Bash npm test -- cache", status: "error", parentId: "sub-agent", startedAt: agentAt + 6_000, finishedAt: agentAt + 30_000 },
+      ],
+      steps: [
+        { kind: "activity", id: "sub-agent" },
+        { kind: "activity", id: "sub-agent-grep" },
+        { kind: "activity", id: "sub-agent-read" },
+        { kind: "activity", id: "sub-agent-test" },
+      ],
+    },
+  ];
+}
+
+export type FixtureScenario = "approval" | "question" | "cancel" | "tool-error" |
+  "options-delayed" | "options-failing" | "provider-picker" | "model-catalogue" | "split-streaming" | "pull-request-delayed" | "btw-streaming" | "html-artifacts" | "ui-stress" | "context-recovery" | "sidebar-status" | "subagents" | "background-approval" | "claude-cli-outdated" | "advisor-unavailable" | "claude-alias-resolution";
+
+/**
+ * `?scenario=sidebar-status`: a chat in every state the status-grouped sidebar
+ * shows. boot() starts a background turn in each and leaves it there, except
+ * "Draft release notes", which ends at once and so reads as unread. Dispatch
+ * `zest:fixture-finish-working` to end "Run the test suite" and watch its row
+ * move from Working to Recent.
+ */
+const STATUS_SCENARIO_THREADS = [
+  { id: "fixture-approval", title: "Review the auth flow", ageSecs: 600, prompt: "Tighten the session checks." },
+  { id: "fixture-question", title: "Pick a migration path", ageSecs: 900, prompt: "Plan the database migration." },
+  { id: "fixture-working", title: "Run the test suite", ageSecs: 1200, prompt: "Run the whole test suite." },
+  { id: "fixture-finished", title: "Draft release notes", ageSecs: 60, prompt: "Draft the release notes." },
+] as const;
+export const FIXTURE_FINISH_WORKING_EVENT = "zest:fixture-finish-working";
+
+/**
+ * `?scenario=split-streaming` keeps every sent turn live until it is stopped.
+ * Dispatch this event with `detail: { prompt, action }`, where `prompt` is the
+ * text that started the turn, to move that turn along without a timer:
+ * `delta` streams more `text`, `done` ends it, `approval` stops it on a tool
+ * approval, and `question` stops it on a question.
+ */
+export const FIXTURE_SPLIT_TURN_EVENT = "zest:fixture-split-turn";
+export type FixtureSplitTurnDetail = {
+  prompt: string;
+  action: "delta" | "done" | "approval" | "question";
+  text?: string;
+};
 
 type FixtureBackendOptions = {
   scenario?: FixtureScenario;
+  pullRequestDiffReady?: Promise<void>;
+  contextRecoveryReady?: Promise<void>;
+  contextFailureReady?: Promise<void>;
 };
 
 function scenarioFromLocation(): FixtureScenario | undefined {
@@ -149,7 +326,11 @@ function scenarioFromLocation(): FixtureScenario | undefined {
   return value === "approval" ||
     value === "question" ||
     value === "cancel" ||
-    value === "tool-error"
+    value === "tool-error" || value === "options-delayed" ||
+    value === "options-failing" || value === "provider-picker" || value === "model-catalogue" || value === "split-streaming" || value === "pull-request-delayed" ||
+    value === "btw-streaming" || value === "html-artifacts" || value === "ui-stress" || value === "context-recovery" ||
+    value === "sidebar-status" || value === "subagents" || value === "background-approval" ||
+    value === "claude-cli-outdated" || value === "advisor-unavailable" || value === "claude-alias-resolution"
     ? value
     : undefined;
 }
@@ -164,11 +345,54 @@ type FixturePendingScenario = {
 };
 
 export function createFixtureBackend(options: FixtureBackendOptions = {}): DesktopBackend {
+  const sideConversations = new Map<string, { questions: string[]; cancelled: boolean; busy: boolean }>();
+  const fixtureEpochSeconds = Math.floor(Date.now() / 1000);
   const scenario = options.scenario ?? scenarioFromLocation();
-  let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
+  const safetyScenario = scenario === "approval" || scenario === "question" ||
+    scenario === "cancel" || scenario === "tool-error";
+  let optionAttempts = 0;
+  let sessionAttempts = 0;
+  let contextUnavailable = false;
+  let contextRecovered = false;
+  if (scenario === "context-recovery") {
+    if (options.contextFailureReady) void options.contextFailureReady.then(() => { contextUnavailable = true; });
+    else if (typeof window !== "undefined") window.addEventListener("zest:fixture-fail-context", () => { contextUnavailable = true; }, { once: true });
+    if (options.contextRecoveryReady) void options.contextRecoveryReady.then(() => { contextRecovered = true; });
+    else if (typeof window !== "undefined") window.addEventListener("zest:fixture-recover-context", () => { contextRecovered = true; }, { once: true });
+  }
+  const sessionModels: SessionInfo["models"] = scenario === "model-catalogue"
+    ? CATALOGUE_MODELS
+    : scenario === "claude-alias-resolution"
+      ? [{ ...CLAUDE_CODE_MODELS[1], id: "opus" }, ...CLAUDE_CODE_MODELS]
+      : scenario === "claude-cli-outdated" ? CLAUDE_CODE_MODELS : FIXTURE_MODELS;
+  const scenarioSession = scenario === "claude-alias-resolution"
+    ? { ...CLAUDE_CODE_SESSION, model: "opus", defaultModel: "opus" }
+    : scenario === "claude-cli-outdated" ? CLAUDE_CODE_SESSION : FIXTURE_SESSION;
+  async function saveFixtureOptions() {
+    if (scenario === "options-delayed" || scenario === "options-failing") {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      if (scenario === "options-failing" && optionAttempts++ === 0) {
+        throw new Error("Fixture could not save selection. Try again.");
+      }
+    }
+  }
+  let session: SessionInfo = { ...scenarioSession, models: sessionModels, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let chatHandlerGeneration = 0;
-  let workspace = ".";
+  let workspace = scenario === "ui-stress"
+    ? "/fixture/a-project-with-a-deliberately-long-name-for-layout-checks"
+    : scenario === "sidebar-status"
+      ? "/fixture/zest-app"
+      : ".";
+  const initialWorkspace = workspace;
+  const fixtureWorktrees = new Map<string, string>();
+  // The first worktree chat starts diverged and dirty so tests can read counts
+  // off its row; later ones start clean. A turn in a worktree chat edits a
+  // file, which `?worktreeStatus=fail` turns into a Git failure instead.
+  const fixtureWorktreeStatus = new Map<string, WorktreeChatStatus>();
+  const worktreeStatusFails =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("worktreeStatus") === "fail";
   let fixturePinned = false;
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
@@ -186,6 +410,53 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const fixtureTranscripts = new Map<string, ChatMessage[]>([
     [LONG_THREAD_ID, longThreadMessages()],
   ]);
+  if (scenario === "html-artifacts") fixtureTranscripts.set("fixture", htmlArtifactMessages());
+  if (scenario === "ui-stress") fixtureTranscripts.set("fixture", longThreadMessages().slice(0, 6));
+  if (scenario === "subagents") fixtureTranscripts.set("fixture", subagentMessages());
+  const statusScenarioPinned = new Set<string>();
+  if (scenario === "sidebar-status") {
+    for (const thread of STATUS_SCENARIO_THREADS) {
+      fixtureThreadTitles.set(thread.id, thread.title);
+      fixtureTranscripts.set(thread.id, [
+        { id: `user-${thread.id}`, role: "user", text: thread.prompt },
+      ]);
+    }
+  }
+  const isStatusScenarioThread = (id: string) =>
+    scenario === "sidebar-status" &&
+    (id === "fixture" || STATUS_SCENARIO_THREADS.some((thread) => thread.id === id));
+  const deletedFixtureThreads = new Set<string>();
+  const splitStreams = new Map<string, () => void>();
+  /** Live `split-streaming` turns by their prompt, for `FIXTURE_SPLIT_TURN_EVENT`. */
+  const splitTurns = new Map<string, {
+    id: { session_id: string; thread_id: string; turn_id: string };
+    assistantId: string;
+    finish: () => void;
+  }>();
+  const splitQuestions = new Map<string, () => void>();
+  const backgroundApprovals = new Map<string, (decision: ApprovalChoice) => void>();
+  const failBackgroundApprovalOnce = scenario === "background-approval" && typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("failBackgroundApprovalOnce");
+  let backgroundApprovalFailed = false;
+  const holdInteractionResults = (scenario === "background-approval" || scenario === "sidebar-status") &&
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).has("holdInteractionResults");
+  const interactionResults = new Map<string, () => void>();
+  let statusQuestionPending = scenario === "sidebar-status";
+
+  function finishInteraction(threadId: string, finish: () => void) {
+    if (holdInteractionResults) interactionResults.set(threadId, finish);
+    else finish();
+  }
+
+  if (holdInteractionResults) {
+    window.addEventListener("zest:fixture-release-interaction-result", (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail !== "fixture-free" && event.detail !== "fixture-local" && event.detail !== "fixture-question") return;
+      const finish = interactionResults.get(event.detail);
+      interactionResults.delete(event.detail);
+      finish?.();
+    });
+  }
 
   function windowSessionFor(
     threadId: string,
@@ -210,6 +481,45 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
+  let fixtureAdvisor: AdvisorChoice | null = scenario === "advisor-unavailable"
+    ? { provider: "fixture-removed", model: "removed-large", maxUses: 3, autoReview: true }
+    : null;
+  const fixtureAdvisorSettings = (): AdvisorSettings => ({
+    provider: fixtureAdvisor?.provider ?? "",
+    model: fixtureAdvisor?.model ?? "",
+    maxUses: fixtureAdvisor?.maxUses ?? 3,
+    autoReview: fixtureAdvisor?.autoReview ?? true,
+    scope: "User zest.toml",
+    issue: fixtureAdvisor?.provider === "fixture-removed"
+      ? "[advisor] provider `fixture-removed` is not configured."
+      : undefined,
+    options: [
+      {
+        id: "fixture",
+        label: "Fixture",
+        statusLabel: "Ready",
+        ready: true,
+        defaultModel: DEFAULT_CODEX_MODEL,
+        models: sessionModels.map((model) => model.id),
+      },
+      {
+        id: "fixture-strong",
+        label: "Strong fixture",
+        statusLabel: "Ready",
+        ready: true,
+        defaultModel: "strong-large",
+        models: ["strong-large", "strong-medium"],
+      },
+      {
+        id: "fixture-keyless",
+        label: "Keyless fixture",
+        statusLabel: "Add a key",
+        ready: false,
+        defaultModel: "keyless-model",
+        models: ["keyless-model"],
+      },
+    ],
+  });
   /** Zest-owned MCP servers. One row so the Customize screen has something to
    *  render offline, including the never-checked state. */
   const fixtureMcpServers = new Map<string, McpServerRow>([
@@ -266,7 +576,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   }
 
   const fixtureExternalModelOptions: Record<string, string[]> = {
-    claude: ["sonnet", "opus"],
+    claude: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
     gemini: [
       "auto",
       "gemini-3-pro-preview",
@@ -279,7 +589,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
   let delegationHandler: ((event: DelegationEvent) => void) | null = null;
   let delegationHandlerGeneration = 0;
   let fixtureDelegationJob: DelegationJob = {
-    jobId: "fixture-delegation-1",
+    jobId: FIXTURE_DELEGATION_JOB_ID,
     parentThreadId: session.threadId,
     projectRoot: workspace,
     cardId: "fixture-card-1",
@@ -324,6 +634,37 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     };
   }
 
+  /**
+   * Extra jobs for `sidebar-status`, so one chat has more than the sidebar
+   * shows and another chat has a job of its own. They are read-only: the
+   * lifecycle actions still drive only `fixtureDelegationJob`.
+   */
+  function statusScenarioJobs(): DelegationJob[] {
+    const job = (
+      jobId: string,
+      parentThreadId: string,
+      title: string,
+      status: DelegationJob["status"],
+      minutesAgo: number
+    ): DelegationJob => ({
+      ...delegationSnapshot(),
+      jobId,
+      cardId: `card-${jobId}`,
+      parentThreadId,
+      title,
+      status,
+      approved: true,
+      origin: { coordinator: "fixture", chatId: null, threadId: parentThreadId },
+      updatedAt: fixtureEpochSeconds * 1000 - minutesAgo * 60_000,
+    });
+    return [
+      job("fixture-delegation-worker", "fixture", "Port the session cache", "worker_running", 2),
+      job("fixture-delegation-ready", "fixture", "Write migration tests", "ready_to_apply", 5),
+      job("fixture-delegation-applied", "fixture", "Bump the lockfile", "accepted", 30),
+      job("fixture-delegation-survey", "fixture-question", "Survey table sizes", "queued", 1),
+    ];
+  }
+
   function emitDelegation(kind: DelegationEvent["kind"]) {
     delegationHandler?.({ kind, job: delegationSnapshot() } as DelegationEvent);
   }
@@ -353,11 +694,33 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     ) {
       return delegationSnapshot();
     }
+    const attempt = fixtureDelegationJob.attempt + 1;
+    const started = BigInt(fixtureDelegationJob.updatedAt);
+    const worker = {
+      attemptId: `fixture-worker-${attempt}`,
+      role: "worker",
+      agent: fixtureDelegationJob.agent,
+      target: null,
+      usage: null,
+      resolvedTarget: null,
+      startedAt: started,
+      finishedAt: null,
+    };
+    const reviewer = {
+      ...worker,
+      attemptId: `fixture-reviewer-${attempt}`,
+      role: "reviewer",
+      agent: fixtureDelegationJob.reviewerAgent,
+      startedAt: started + 42_000n,
+    };
     updateDelegation("worker_running", "worker_started", {
-      attempt: fixtureDelegationJob.attempt + 1,
-      workerAttemptId: `fixture-worker-${fixtureDelegationJob.attempt + 1}`,
+      approved: true,
+      attempt,
+      workerAttemptId: worker.attemptId,
+      attempts: [...fixtureDelegationJob.attempts, worker],
       error: undefined,
     });
+    const workerDone = { ...worker, finishedAt: started + 42_000n };
     updateDelegation("worker_running", "worker_completed", {
       changedFiles: ["src/fixture.ts"],
       changedFileCount: 1,
@@ -365,13 +728,141 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       acceptanceChecks: [
         { command: "npm test", status: "passed", output: "fixture tests passed" },
       ],
+      attempts: fixtureDelegationJob.attempts.map((item) =>
+        item.attemptId === worker.attemptId ? workerDone : item
+      ),
     });
     updateDelegation("review_running", "reviewer_started", {
-      reviewerAttemptId: `fixture-reviewer-${fixtureDelegationJob.attempt}`,
+      reviewerAttemptId: reviewer.attemptId,
+      attempts: [...fixtureDelegationJob.attempts, reviewer],
     });
-    updateDelegation("review_running", "reviewer_completed");
+    updateDelegation("review_running", "reviewer_completed", {
+      attempts: fixtureDelegationJob.attempts.map((item) =>
+        item.attemptId === reviewer.attemptId
+          ? { ...reviewer, finishedAt: started + 60_000n }
+          : item
+      ),
+    });
     updateDelegation("ready_to_apply", "ready_to_apply");
     return delegationSnapshot();
+  }
+
+  function statusScenarioTurn(threadId: string) {
+    return { session_id: session.sessionId, thread_id: threadId, turn_id: `turn-${threadId}` };
+  }
+
+  function startStatusScenario(handler: (event: ChatEvent) => void) {
+    for (const thread of STATUS_SCENARIO_THREADS) {
+      handler({ kind: "user", ...statusScenarioTurn(thread.id), message_id: `user-${thread.id}`, text: thread.prompt });
+      handler({ kind: "assistant_start", ...statusScenarioTurn(thread.id), message_id: `assistant-${thread.id}` });
+    }
+    handler({
+      kind: "approval_needed",
+      ...statusScenarioTurn("fixture-approval"),
+      message_id: "assistant-fixture-approval",
+      approval_id: "approval-status-fixture",
+      tool_name: "write_file",
+      tool_call_id: "tool-status-approval",
+      risk: "write",
+      path: "src/auth.ts",
+      summary: "Write src/auth.ts",
+      diff: "",
+    });
+    handler({
+      kind: "tool_call_start",
+      ...statusScenarioTurn("fixture-question"),
+      message_id: "assistant-fixture-question",
+      name: "ask_user",
+      id: "tool-status-question",
+    });
+    splitStreams.set("fixture-question", () => {
+      statusQuestionPending = false;
+      interactionResults.delete("fixture-question");
+      splitStreams.delete("fixture-question");
+      chatHandler?.({ kind: "cancelled", ...statusScenarioTurn("fixture-question"), message_id: "assistant-fixture-question" });
+    });
+    handler({
+      kind: "question_needed",
+      ...statusScenarioTurn("fixture-question"),
+      message_id: "assistant-fixture-question",
+      question_id: "question-status-fixture",
+      tool_call_id: "tool-status-question",
+      prompt: "Migrate in place or copy to a new table?",
+      choices: ["In place", "New table"],
+      multiple: false,
+    });
+    handler({
+      kind: "tool_call_start",
+      ...statusScenarioTurn("fixture-working"),
+      message_id: "assistant-fixture-working",
+      name: "bash",
+      id: "tool-status-working",
+    });
+    handler({ kind: "done", ...statusScenarioTurn("fixture-finished"), message_id: "assistant-fixture-finished" });
+  }
+
+  if (scenario === "split-streaming" && typeof window !== "undefined") {
+    window.addEventListener(FIXTURE_SPLIT_TURN_EVENT, (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail as FixtureSplitTurnDetail;
+      const turn = splitTurns.get(detail.prompt);
+      if (!turn) return;
+      const { id, assistantId } = turn;
+      const toolId = `tool-${crypto.randomUUID()}`;
+      if (detail.action === "delta") {
+        chatHandler?.({ kind: "text_delta", ...id, message_id: assistantId, text: detail.text ?? "" });
+      } else if (detail.action === "done") {
+        turn.finish();
+      } else if (detail.action === "approval") {
+        const approvalId = `approval-${crypto.randomUUID()}`;
+        backgroundApprovals.set(approvalId, (decision) => {
+          backgroundApprovals.delete(approvalId);
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "fixture_tool", id: toolId,
+            summary: decision === "deny" ? "The fixture tool was denied." : "The fixture tool ran.",
+            isError: decision === "deny",
+          });
+        });
+        chatHandler?.({ kind: "tool_call_start", ...id, message_id: assistantId, name: "fixture_tool", id: toolId });
+        chatHandler?.({
+          kind: "approval_needed",
+          ...id,
+          message_id: assistantId,
+          approval_id: approvalId,
+          tool_name: "fixture_tool",
+          tool_call_id: toolId,
+          risk: "exec",
+          path: "fixture_tool",
+          summary: "Run the fixture tool in this split pane",
+          diff: "{}",
+        });
+      } else if (detail.action === "question") {
+        const questionId = `question-${crypto.randomUUID()}`;
+        splitQuestions.set(questionId, () => {
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "ask_user", id: toolId,
+            summary: "The fixture answer was accepted.", isError: false,
+          });
+        });
+        chatHandler?.({ kind: "tool_call_start", ...id, message_id: assistantId, name: "ask_user", id: toolId });
+        chatHandler?.({
+          kind: "question_needed",
+          ...id,
+          message_id: assistantId,
+          question_id: questionId,
+          tool_call_id: toolId,
+          prompt: "Which branch should this split pane use?",
+          choices: ["main", "a new branch"],
+          multiple: false,
+        });
+      }
+    });
+  }
+
+  if (scenario === "sidebar-status" && typeof window !== "undefined") {
+    window.addEventListener(FIXTURE_FINISH_WORKING_EVENT, () => {
+      chatHandler?.({ kind: "done", ...statusScenarioTurn("fixture-working"), message_id: "assistant-fixture-working" });
+    });
   }
 
   function fixtureIds() {
@@ -391,7 +882,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     return display;
   }
 
-  function emitFixtureEcho(text: string, attachments?: AttachmentInput[]) {
+  function emitFixtureEcho(text: string, attachments?: AttachmentInput[], document?: HtmlDocument) {
     if (!chatHandler) return;
     const { turnId, userId, assistantId } = fixtureIds();
     const id = {
@@ -400,7 +891,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       turn_id: turnId,
     };
     const display = displayFixtureText(text, attachments);
-    const fixtureAssistantText = `Fixture echo: ${text.trim() || "(attachment)"}`;
+    const fixtureAssistantText = document ? `Published ${document.title} in chat.` : `Fixture echo: ${text.trim() || "(attachment)"}`;
+    const htmlTool = document ? {
+      id: `html-${crypto.randomUUID()}`, name: "html_render", status: "done" as const,
+      summary: fixtureAssistantText, metadata: { kind: "html_document" as const, ...document },
+    } : null;
     session = {
       ...session,
       messages: [
@@ -421,13 +916,26 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           role: "assistant",
           text: fixtureAssistantText,
           thinking: "",
-          tools: [],
+          tools: htmlTool ? [htmlTool] : [],
           streaming: false,
         },
       ],
     };
+    if (document) {
+      fixtureTranscripts.set(session.threadId, [...session.messages]);
+      if (!fixtureThreadTitles.has(session.threadId)) {
+        fixtureThreadTitles.set(session.threadId, [...text.trim()].slice(0, MAX_FIXTURE_THREAD_TITLE_CHARS).join(""));
+      }
+    }
     chatHandler({ kind: "user", ...id, message_id: userId, text: display });
     chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    if (htmlTool) {
+      chatHandler({ kind: "tool_call_start", ...id, message_id: assistantId, name: htmlTool.name, id: htmlTool.id });
+      chatHandler({ kind: "tool_call_result", ...id, message_id: assistantId, name: htmlTool.name, id: htmlTool.id, summary: htmlTool.summary, isError: false, metadata: htmlTool.metadata });
+      chatHandler({ kind: "text_delta", ...id, message_id: assistantId, text: fixtureAssistantText });
+      chatHandler({ kind: "done", ...id, message_id: assistantId });
+      return;
+    }
     chatHandler({
       kind: "text_delta",
       ...id,
@@ -441,6 +949,126 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       text: text.trim() || "(attachment)",
     });
     chatHandler({ kind: "done", ...id, message_id: assistantId });
+    // Native alias resolutions reach session metadata after the turn finishes.
+    // Replace the catalogue so an earlier SessionInfo stays an unresolved snapshot.
+    if (scenario === "claude-alias-resolution") {
+      session = {
+        ...session,
+        models: session.models.map((model) => model.id === "opus"
+          ? { ...model, resolvesTo: "claude-opus-5" }
+          : model),
+      };
+    }
+    if (scenario === "background-approval") emitBackgroundApproval();
+  }
+
+  /** A turn in a seeded background chat stops for approval. */
+  function emitBackgroundApproval(threadId = "fixture-free") {
+    if (!chatHandler) return;
+    const { turnId, assistantId } = fixtureIds();
+    const id = {
+      session_id: `${threadId}-session`,
+      thread_id: threadId,
+      turn_id: turnId,
+    };
+    const toolId = `tool-${crypto.randomUUID()}`;
+    const approvalId = `approval-${crypto.randomUUID()}`;
+    splitStreams.set(threadId, () => {
+      backgroundApprovals.delete(approvalId);
+      interactionResults.delete(threadId);
+      splitStreams.delete(threadId);
+      chatHandler?.({ kind: "cancelled", ...id, message_id: assistantId });
+    });
+    backgroundApprovals.set(approvalId, (decision) => {
+      backgroundApprovals.delete(approvalId);
+      if (decision === "deny") {
+        finishInteraction(threadId, () => {
+          splitStreams.delete(threadId);
+          chatHandler?.({
+            kind: "tool_call_result", ...id, message_id: assistantId, name: "fixture_tool", id: toolId,
+            summary: "The fixture tool was denied.", isError: true,
+          });
+          chatHandler?.({ kind: "done", ...id, message_id: assistantId });
+        });
+      }
+      // An allowed command stays running until cancelTurn, with no result yet.
+    });
+    chatHandler({ kind: "assistant_start", ...id, message_id: assistantId });
+    chatHandler({ kind: "tool_call_start", ...id, message_id: assistantId, name: "fixture_tool", id: toolId });
+    chatHandler({
+      kind: "approval_needed",
+      ...id,
+      message_id: assistantId,
+      approval_id: approvalId,
+      tool_name: "fixture_tool",
+      tool_call_id: toolId,
+      risk: "exec",
+      path: "fixture_tool",
+      summary: "Run the fixture tool in the background chat",
+      diff: "{}",
+    });
+  }
+
+  if (scenario === "background-approval" && typeof window !== "undefined") {
+    window.addEventListener("zest:fixture-background-approval", (event) => {
+      if (!(event instanceof CustomEvent)) return;
+      if (event.detail === "fixture-free" || event.detail === "fixture-local") {
+        emitBackgroundApproval(event.detail);
+      }
+    });
+  }
+
+  /**
+   * A live turn in which a Claude Code style `Agent` runs and reports its own
+   * steps under it. "slow" in the message spaces the steps out for watching.
+   */
+  function streamSubagentTurn(text: string) {
+    if (!chatHandler) return;
+    const { turnId, userId, assistantId } = fixtureIds();
+    const id = {
+      session_id: session.sessionId,
+      thread_id: session.threadId,
+      turn_id: turnId,
+      message_id: assistantId,
+    };
+    const gap = /slow/i.test(text) ? 1500 : 150;
+    const agent = (title: string, status: string) => ({
+      kind: "provider_activity" as const, ...id, id: "live-agent", title, status,
+    });
+    const child = (childId: string, title: string, status: string) => ({
+      kind: "provider_activity" as const, ...id, id: childId, title, status, parent_id: "live-agent",
+    });
+    const steps: ChatEvent[] = [
+      { kind: "thinking_delta", ...id, text: "**Splitting the work**\nOne agent maps the callers while I wait." },
+      agent("Agent Map the callers", "running"),
+      child("live-grep", "Grep cacheKey in src", "running"),
+      child("live-grep", "Grep cacheKey in src", "done"),
+      agent("Agent Map the callers: Grep cacheKey in src", "running"),
+      child("live-read", "Read src/images.ts", "running"),
+      child("live-read", "Read src/images.ts", "done"),
+      agent("Agent Map the callers: Read src/images.ts", "done"),
+      { kind: "text_delta", ...id, text: "The agent mapped three callers of cacheKey." },
+      { kind: "done", ...id },
+    ];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const finish = () => {
+      timers.forEach(clearTimeout);
+      splitStreams.delete(id.thread_id);
+    };
+    splitStreams.set(id.thread_id, () => {
+      finish();
+      chatHandler?.({ kind: "cancelled", ...id });
+    });
+    chatHandler({ kind: "user", ...id, message_id: userId, text });
+    chatHandler({ kind: "assistant_start", ...id });
+    steps.forEach((event, index) => {
+      timers.push(
+        setTimeout(() => {
+          chatHandler?.(event);
+          if (event.kind === "done") finish();
+        }, gap * (index + 1))
+      );
+    });
   }
 
   function finishScenario(kind: "allow" | "deny" | "answer" | "cancel") {
@@ -583,8 +1211,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     }, 5_000);
   }
 
-  return {
-    mode: "fixture",
+  const backend: DesktopBackend = {
+    // Exercise normal onboarding with entirely synthetic I/O in this dev-only module.
+    mode: scenario === "provider-picker" || scenario === "model-catalogue" ? "tauri" : "fixture",
     async listExternalAgents() {
       return [
         {
@@ -636,6 +1265,13 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async setExternalAgentModel(id, model) {
       if (model?.trim()) fixtureExternalModels.set(id, model.trim());
       else fixtureExternalModels.delete(id);
+    },
+    async advisorSettings() {
+      return fixtureAdvisorSettings();
+    },
+    async setAdvisor(choice) {
+      fixtureAdvisor = choice;
+      return fixtureAdvisorSettings();
     },
     async checkExternalAgent() {
       return {
@@ -705,8 +1341,54 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           configured: true,
           ownsAgentLoop: false,
           defaultModel: DEFAULT_CODEX_MODEL,
-          models: FIXTURE_MODELS,
+          models: sessionModels,
         },
+        ...(scenario === "claude-cli-outdated" || scenario === "claude-alias-resolution" ? [
+          {
+            id: "claude-code",
+            label: "Claude Code",
+            method: "Claude Code subscription",
+            statusKind: "ready" as const,
+            statusLabel: "Ready",
+            detail: "Claude Code CLI 2.1.220",
+            selectable: true,
+            canConnect: false,
+            configured: true,
+            ownsAgentLoop: true,
+            defaultModel: scenarioSession.defaultModel,
+            models: session.models,
+          },
+        ] : []),
+        ...(scenario === "provider-picker" || scenario === "model-catalogue" ? [
+          {
+            id: "fixture-research",
+            label: "Research provider with a long descriptive organization name",
+            method: "offline",
+            statusKind: "ready" as const,
+            statusLabel: "Ready",
+            detail: "Synthetic research catalogue",
+            selectable: true,
+            canConnect: false,
+            configured: true,
+            ownsAgentLoop: false,
+            defaultModel: "research-vision",
+            models: [{ id: "research-vision", efforts: [], contextWindow: 1_000_000, supportsTools: true, supportsVision: true }],
+          },
+          {
+            id: "fixture-unconfigured",
+            label: "Unconfigured fixture",
+            method: "offline",
+            statusKind: "unconfigured" as const,
+            statusLabel: "Configure",
+            detail: "Synthetic unavailable provider",
+            selectable: false,
+            canConnect: false,
+            configured: false,
+            ownsAgentLoop: false,
+            defaultModel: "",
+            models: [],
+          },
+        ] : []),
       ];
     },
     async usageSnapshot() {
@@ -1086,6 +1768,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async configureClaudeCodeProvider() {
       notAvailable("configureClaudeCodeProvider");
     },
+    async configureCursorProvider() {
+      notAvailable("configureCursorProvider");
+    },
     async configureCodexCliProvider() {
       notAvailable("configureCodexCliProvider");
     },
@@ -1107,22 +1792,24 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       const iso = (offsetDays: number) =>
         new Date((today - offsetDays * day) * 1000).toISOString().slice(0, 10);
 
-      const days = [];
+      const days: DayPoint[] = [];
       for (let back = 180; back >= 0; back--) {
         // A believable rhythm rather than noise: quiet weekends, busy weekdays.
         const weekday = new Date((today - back * day) * 1000).getDay();
         const busy = weekday !== 0 && weekday !== 6;
         const chats = busy ? (back % 5 === 0 ? 0 : 1 + (back % 4)) : back % 3 === 0 ? 1 : 0;
         if (chats === 0 && back % 7 !== 0) continue;
-        days.push({
+        const entry: DayPoint = {
           date: iso(back),
           chats,
           messages: chats * (4 + (back % 9)),
-          // Metering began 90 days ago; earlier cells carry no token figure.
-          ...(back <= 90
-            ? { tokens: chats * 12_000 + (back % 11) * 900, requests: chats * 3 }
-            : {}),
-        });
+        };
+        // Metering began 90 days ago; earlier cells carry no token figure.
+        if (back <= 90) {
+          entry.tokens = chats * 12_000 + (back % 11) * 900;
+          entry.requests = chats * 3;
+        }
+        days.push(entry);
       }
 
       return {
@@ -1155,9 +1842,12 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       /* fixture: no child process to stop */
     },
     async startSession() {
+      if (scenario === "provider-picker" && sessionAttempts++ === 0) {
+        throw new Error("Fixture session requires provider selection.");
+      }
       clearFixtureScenario();
       fixturePinned = false;
-      session = { ...FIXTURE_SESSION, messages: [] };
+      session = { ...scenarioSession, root: workspace, models: sessionModels, messages: fixtureTranscripts.get("fixture") ?? [] };
       return { ...session };
     },
     async switchSessionProvider(providerId, model) {
@@ -1171,6 +1861,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return { ...session };
     },
     async updateSessionOptions(options) {
+      await saveFixtureOptions();
       session = {
         ...session,
         model: options.model ?? session.model,
@@ -1182,6 +1873,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return meta;
     },
     async resetSessionOptions() {
+      await saveFixtureOptions();
       session = {
         ...session,
         model: session.defaultModel ?? DEFAULT_CODEX_MODEL,
@@ -1192,33 +1884,69 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async listThreads() {
       const threads: ThreadSummary[] = [];
+      if (scenario === "html-artifacts" && session.threadId !== "fixture" && !deletedFixtureThreads.has("fixture")) {
+        threads.push({
+          id: "fixture", createdAt: 0, updatedAt: fixtureEpochSeconds,
+          title: fixtureThreadTitles.get("fixture"), pinned: false, providerId: "codex",
+          messageCount: fixtureTranscripts.get("fixture")?.length ?? 0, gitContext: FIXTURE_THREAD_GIT,
+        });
+      }
+      if (scenario === "html-artifacts") {
+        for (const [id, messages] of fixtureTranscripts) {
+          if (id === session.threadId || id === "fixture" || id === "fixture-local" || id === LONG_THREAD_ID || deletedFixtureThreads.has(id) || messages.length === 0) continue;
+          threads.push({
+            id, createdAt: 0, updatedAt: fixtureEpochSeconds,
+            title: fixtureThreadTitles.get(id) || "Fixture", pinned: false,
+            providerId: "codex", messageCount: messages.length, gitContext: FIXTURE_THREAD_GIT,
+          });
+        }
+      }
       // Seeded rows stay visible. A freshly opened empty draft does not — the
       // desktop store also waits for the first user message before writing one.
       if (
-        session.messages.length > 0 ||
-        fixtureThreadTitles.has(session.threadId)
+        !deletedFixtureThreads.has(session.threadId) &&
+        (session.messages.length > 0 || fixtureThreadTitles.has(session.threadId))
       ) {
         threads.push({
           id: session.threadId,
           createdAt: 0,
-          updatedAt: Math.floor(Date.now() / 1000),
+          updatedAt: fixtureEpochSeconds,
           title: fixtureThreadTitles.get(session.threadId) || "Fixture",
           pinned: fixturePinned,
-          providerId: "codex",
+          // The open chat runs on the session's provider, as in the real store.
+          providerId: session.provider,
           messageCount:
             fixtureTranscripts.get(session.threadId)?.length ??
             session.messages.length,
           gitContext: FIXTURE_THREAD_GIT,
         });
       }
+      if (scenario === "sidebar-status") {
+        const others = [
+          { id: "fixture", title: "Fixture", ageSecs: 0 },
+          ...STATUS_SCENARIO_THREADS,
+        ];
+        for (const thread of others) {
+          if (thread.id === session.threadId || deletedFixtureThreads.has(thread.id)) continue;
+          threads.push({
+            id: thread.id,
+            createdAt: fixtureEpochSeconds - thread.ageSecs,
+            updatedAt: fixtureEpochSeconds - thread.ageSecs,
+            title: fixtureThreadTitles.get(thread.id) || thread.title,
+            pinned: statusScenarioPinned.has(thread.id),
+            providerId: session.provider,
+            messageCount: fixtureTranscripts.get(thread.id)?.length ?? 1,
+          });
+        }
+      }
       // A provider Zest has no mark for, so the generic fallback is visible
       // offline. This is the ordinary case for a local model, and it is the
       // half of the mapping most likely to regress unnoticed.
-      if (session.threadId !== "fixture-local") {
+      if (session.threadId !== "fixture-local" && !deletedFixtureThreads.has("fixture-local")) {
         threads.push({
           id: "fixture-local",
-          createdAt: Math.floor(Date.now() / 1000) - 3600,
-          updatedAt: Math.floor(Date.now() / 1000) - 3600,
+          createdAt: fixtureEpochSeconds - 3600,
+          updatedAt: fixtureEpochSeconds - 3600,
           title: fixtureThreadTitles.get("fixture-local") || "Local model chat",
           pinned: false,
           providerId: "ollama",
@@ -1226,11 +1954,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           gitContext: FIXTURE_THREAD_GIT,
         });
       }
-      if (session.threadId !== LONG_THREAD_ID) {
+      if (session.threadId !== LONG_THREAD_ID && !deletedFixtureThreads.has(LONG_THREAD_ID)) {
         threads.push({
           id: LONG_THREAD_ID,
-          createdAt: Math.floor(Date.now() / 1000) - 7200,
-          updatedAt: Math.floor(Date.now() / 1000) - 7200,
+          createdAt: fixtureEpochSeconds - 7200,
+          updatedAt: fixtureEpochSeconds - 7200,
           title: fixtureThreadTitles.get(LONG_THREAD_ID) || "Fifteen turns",
           pinned: false,
           providerId: "codex",
@@ -1247,11 +1975,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       const threads = await this.listThreads();
       return [
         {
-          name: workspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
-          path: workspace,
-          active: !session.isFreeChat,
-          threads: session.isFreeChat ? [] : threads,
+          name: initialWorkspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
+          path: initialWorkspace,
+          active: !session.isFreeChat && workspace === initialWorkspace,
+          threads: session.isFreeChat || workspace !== initialWorkspace ? [] : threads,
         },
+        ...Array.from(fixtureWorktrees, ([path, branch]) => ({
+          name: `${initialWorkspace.split(/[/\\]/).filter(Boolean).pop() || "fixture"} · ${branch}`,
+          path,
+          active: !session.isFreeChat && workspace === path,
+          worktree: true,
+          threads: session.isFreeChat || workspace !== path ? [] : threads,
+        })),
         {
           name: "Free chats",
           path: null,
@@ -1261,16 +1996,36 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
             : [
                 {
                   id: "fixture-free",
-                  createdAt: Math.floor(Date.now() / 1000) - 1800,
-                  updatedAt: Math.floor(Date.now() / 1000) - 1800,
+                  createdAt: fixtureEpochSeconds - 1800,
+                  updatedAt: fixtureEpochSeconds - 1800,
                   title: fixtureThreadTitles.get("fixture-free") || "Free chat",
                   pinned: false,
                   providerId: "codex",
                   messageCount: 1,
                 },
-              ],
+              ].filter((thread) => !deletedFixtureThreads.has(thread.id)),
         },
       ];
+    },
+    async createWorktreeChat(projectPath) {
+      if (projectPath !== initialWorkspace && !fixtureWorktrees.has(projectPath)) {
+        throw new Error("fixture: unknown Git project");
+      }
+      const id = crypto.randomUUID().slice(0, 8);
+      const root = `${initialWorkspace}/worktrees/${id}`;
+      fixtureWorktrees.set(root, `zest/chat-${id}`);
+      fixtureWorktreeStatus.set(
+        root,
+        fixtureWorktrees.size === 1
+          ? { ahead: 2, behind: 1, dirty: 3 }
+          : { ahead: 0, behind: 0, dirty: 0 },
+      );
+      return root;
+    },
+    async worktreeChatStatus(projectPath) {
+      if (worktreeStatusFails) throw new Error("fixture: Git is unavailable");
+      const status = fixtureWorktreeStatus.get(projectPath);
+      return status ? { ...status } : null;
     },
     async searchChats(query) {
       const needle = query.trim();
@@ -1317,6 +2072,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return hits.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 24);
     },
     async openProjectChat(options) {
+      if (!session.hasOlderMessages && !session.hasNewerMessages) {
+        fixtureTranscripts.set(session.threadId, [...session.messages]);
+      }
       const targetRoot = options.root;
       const openingFreeChat = targetRoot === null;
       if (targetRoot !== null) {
@@ -1337,6 +2095,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         return { ...session };
       }
       const nextId = options.threadId || session.threadId;
+      const knownThread = !deletedFixtureThreads.has(nextId) && (fixtureTranscripts.has(nextId) ||
+        nextId === "fixture-local" || nextId === "fixture-free");
+      if (options.threadId && !knownThread && nextId !== session.threadId) {
+        throw new Error(`thread '${nextId}' not found`);
+      }
       if (fixtureTranscripts.has(nextId)) {
         session = windowSessionFor(
           nextId,
@@ -1424,6 +2187,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       return { ...session };
     },
     async forkThread() {
+      if (!session.hasOlderMessages && !session.hasNewerMessages) {
+        fixtureTranscripts.set(session.threadId, [...session.messages]);
+      }
       fixturePinned = false;
       session = {
         ...session,
@@ -1478,12 +2244,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async deleteThread(id: string) {
+      deletedFixtureThreads.add(id);
       if (id === session.threadId) {
         return this.newThread();
       }
       return { ...session };
     },
-    async setThreadPinned(_id, _projectPath, pinned) {
+    async setThreadPinned(id, _projectPath, pinned) {
+      if (isStatusScenarioThread(id) && id !== session.threadId) {
+        if (pinned) statusScenarioPinned.add(id);
+        else statusScenarioPinned.delete(id);
+        return;
+      }
       fixturePinned = pinned;
     },
     async renameThread(id, _projectPath, title) {
@@ -1495,12 +2267,16 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       if (
         id !== session.threadId &&
         id !== "fixture-local" &&
-        id !== LONG_THREAD_ID
+        id !== "fixture-free" &&
+        id !== LONG_THREAD_ID &&
+        !isStatusScenarioThread(id)
       ) {
         throw new Error(`fixture: unknown thread ${id}`);
       }
       fixtureThreadTitles.set(id, normalized);
-      const summary = (await this.listThreads()).find((thread) => thread.id === id);
+      const summary = (await this.listChatProjects())
+        .flatMap((project) => project.threads)
+        .find((thread) => thread.id === id);
       if (!summary) throw new Error(`fixture: unknown thread ${id}`);
       return summary;
     },
@@ -1509,21 +2285,57 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       attachments?: AttachmentInput[],
       target?: InputTarget,
     ) {
+      // Queue targets first, as the desktop does: a send during a live
+      // split-streaming turn must queue, not start a second stream on the chat.
+      if (scenario === "split-streaming" && !(target === "followup" || target === "steer" || target === "inject")) {
+        const { turnId, userId, assistantId } = fixtureIds();
+        const id = { session_id: session.sessionId, thread_id: session.threadId, turn_id: turnId };
+        session = { ...session, messages: [...session.messages, { id: userId, role: "user", text }] };
+        fixtureTranscripts.set(session.threadId, [...session.messages]);
+        return new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            chatHandler?.({ kind: "text_delta", ...id, message_id: assistantId, text: `Live response to ${text}` });
+          }, 100);
+          splitStreams.set(id.thread_id, () => {
+            clearTimeout(timer);
+            chatHandler?.({ kind: "cancelled", ...id, message_id: assistantId });
+            splitStreams.delete(id.thread_id);
+            splitTurns.delete(text);
+            resolve();
+          });
+          splitTurns.set(text, {
+            id,
+            assistantId,
+            finish: () => {
+              clearTimeout(timer);
+              chatHandler?.({ kind: "done", ...id, message_id: assistantId });
+              splitStreams.delete(id.thread_id);
+              splitTurns.delete(text);
+              resolve();
+            },
+          });
+          chatHandler?.({ kind: "user", ...id, message_id: userId, text });
+          chatHandler?.({ kind: "assistant_start", ...id, message_id: assistantId });
+        });
+      }
       if (target === "followup" || target === "steer" || target === "inject") {
         const input = {
           id: `input-${crypto.randomUUID()}`,
           target,
           text,
           createdAt: Date.now(),
-          attachments: (attachments ?? []).map((attachment) => ({
-            name: attachment.name,
-            detail: attachment.detail,
-            content: attachment.content ?? null,
-            status: attachment.status,
-            ...(attachment.kind ? { kind: attachment.kind } : {}),
-            ...(attachment.mediaType ? { mediaType: attachment.mediaType } : {}),
-            ...(attachment.dataBase64 ? { dataBase64: attachment.dataBase64 } : {}),
-          })),
+          attachments: (attachments ?? []).map((attachment) => {
+            const queued: PendingInputAttachment = {
+              name: attachment.name,
+              detail: attachment.detail,
+              content: attachment.content ?? null,
+              status: attachment.status,
+            };
+            if (attachment.kind) queued.kind = attachment.kind;
+            if (attachment.mediaType) queued.mediaType = attachment.mediaType;
+            if (attachment.dataBase64) queued.dataBase64 = attachment.dataBase64;
+            return queued;
+          }),
         };
         session = {
           ...session,
@@ -1537,9 +2349,25 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         });
         return;
       }
-      if (scenario) {
+      if (safetyScenario) {
         startFixtureScenario(text, attachments);
         return;
+      }
+      if (scenario === "html-artifacts" && text.trim() === "Publish an HTML artifact") {
+        emitFixtureEcho(text, attachments, { ...FIXTURE_HTML_DOCUMENT, title: "Published counter" });
+        return;
+      }
+      if (scenario === "subagents") {
+        streamSubagentTurn(text);
+        return;
+      }
+      const worktreeStatus = fixtureWorktreeStatus.get(workspace);
+      if (worktreeStatus) {
+        fixtureWorktreeStatus.set(workspace, { ...worktreeStatus, dirty: worktreeStatus.dirty + 1 });
+        // The echo starts and ends in one synchronous burst, which React
+        // batches into a turn the sidebar never sees begin. Hold it briefly so
+        // it ends the way a real turn does.
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
       emitFixtureEcho(text, attachments);
     },
@@ -1591,7 +2419,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         thread_id: session.threadId,
         input_id: input.id,
       });
-      if (scenario) {
+      if (safetyScenario) {
         startFixtureScenario(input.text, input.attachments);
       } else {
         emitFixtureEcho(input.text, input.attachments);
@@ -1617,12 +2445,50 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       URL.revokeObjectURL(url);
       return filename;
     },
-    async cancelTurn() {
+    async prepareHtmlView(document) {
+      const valid = parseHtmlDocument(document);
+      const response = await fetch("/__zest_html", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(valid),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const value: unknown = await response.json();
+      if (!value || typeof value !== "object" || !("token" in value) || !("url" in value) ||
+          typeof value.token !== "string" || typeof value.url !== "string") throw new Error("Invalid HTML view response.");
+      const prepared: PreparedHtmlView = { token: value.token, url: value.url };
+      const expected = new URL(`/__zest_html/${encodeURIComponent(prepared.token)}`, window.location.origin);
+      if (prepared.url !== expected.href) throw new Error("HTML view returned an unexpected URL.");
+      return prepared;
+    },
+    async releaseHtmlView(token) {
+      const response = await fetch(`/__zest_html/${encodeURIComponent(token)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error("Could not release HTML view.");
+    },
+    async saveHtmlDocument(document) {
+      const valid = parseHtmlDocument(document);
+      const url = URL.createObjectURL(new Blob([isolatedHtml(valid)], { type: "text/html;charset=utf-8" }));
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = htmlFilename(valid.title);
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    },
+    async cancelTurn(threadId?: string) {
+      splitStreams.get(threadId ?? session.threadId)?.();
       if (pendingScenario?.kind === "cancel") {
         finishScenario("cancel");
       }
     },
     async resolveApproval(approvalId: string, decision) {
+      const background = backgroundApprovals.get(approvalId);
+      if (background) {
+        if (failBackgroundApprovalOnce && !backgroundApprovalFailed) {
+          backgroundApprovalFailed = true;
+          throw new Error("Fixture could not allow the tool. Try again.");
+        }
+        background(decision);
+        return;
+      }
       if (
         !pendingScenario ||
         pendingScenario.kind !== "approval" ||
@@ -1637,6 +2503,25 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       }
     },
     async resolveQuestion(questionId: string) {
+      const splitAnswer = splitQuestions.get(questionId);
+      if (splitAnswer) {
+        splitQuestions.delete(questionId);
+        splitAnswer();
+        return;
+      }
+      if (scenario === "sidebar-status" && questionId === "question-status-fixture" && statusQuestionPending) {
+        statusQuestionPending = false;
+        finishInteraction("fixture-question", () => {
+          splitStreams.delete("fixture-question");
+          chatHandler?.({
+            kind: "tool_call_result", ...statusScenarioTurn("fixture-question"),
+            message_id: "assistant-fixture-question", name: "ask_user", id: "tool-status-question",
+            summary: "The fixture answer was accepted.", isError: false,
+          });
+          chatHandler?.({ kind: "done", ...statusScenarioTurn("fixture-question"), message_id: "assistant-fixture-question" });
+        });
+        return;
+      }
       if (
         !pendingScenario ||
         pendingScenario.kind !== "question" ||
@@ -1657,22 +2542,71 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async listCommands() {
       return [
+        { name: "btw", description: "Ask in a temporary side conversation", kind: "builtin" as const },
         {
           name: "model",
           description: "Switch model or provider",
           kind: "builtin" as const,
         },
-        ...[...fixtureMcpServers.values()]
-          .filter((server) => server.enabled)
-          .map((server) => ({
+        {
+          name: "browse-x",
+          description: "Browse and verify sources",
+          kind: "skill" as const,
+        },
+        {
+          name: "plan",
+          description: "Write an implementation plan",
+          kind: "skill" as const,
+        },
+        ...[...fixtureMcpServers.values()].flatMap((server) => !server.enabled ? [] : [{
             name: server.id,
             description: `Use the ${server.id} MCP server`,
             kind: "mcp" as const,
-          })),
+          }]),
       ];
     },
     async endSession() {
       /* no-op */
+    },
+    async startBtw(sessionId) {
+      if (sessionId !== session.sessionId) throw new Error("This chat is no longer active.");
+      const id = `btw-${crypto.randomUUID()}`;
+      sideConversations.set(id, { questions: [], cancelled: false, busy: false });
+      return id;
+    },
+    async sendBtw(id, text, onDelta) {
+      const side = sideConversations.get(id);
+      if (!side) throw new Error("This side conversation is closed.");
+      if (side.busy) throw new Error("This side conversation is still answering.");
+      if (!text.trim()) throw new Error("Write a question.");
+      side.busy = true;
+      side.cancelled = false;
+      try {
+        const answer = side.questions.length
+          ? `Following up on “${side.questions.at(-1)}”: this answer stays in the temporary conversation.`
+          : `This side conversation uses the context of your chat. Your question was: ${text}. The main conversation continues unchanged.`;
+        for (const chunk of answer.match(/.{1,24}/gs) ?? []) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          if (side.cancelled || !sideConversations.has(id)) throw new Error("Cancelled");
+          onDelta(chunk);
+          // btw-streaming: the answer stays live after its first chunk until
+          // Stop or close, so a spec can stop it without racing a 150 ms stream.
+          while (scenario === "btw-streaming" && !side.cancelled && sideConversations.has(id)) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        }
+        side.questions.push(text);
+        return answer;
+      } finally { side.busy = false; }
+    },
+    async cancelBtw(id) {
+      const side = sideConversations.get(id);
+      if (side) side.cancelled = true;
+    },
+    async closeBtw(id) {
+      const side = sideConversations.get(id);
+      if (side) side.cancelled = true;
+      sideConversations.delete(id);
     },
     async getSystemPrompt() {
       return {
@@ -1790,11 +2724,11 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async gitBranch() {
-      return "master";
+      return fixtureWorktrees.get(workspace) ?? "master";
     },
     async gitContext(): Promise<GitContext> {
       return {
-        branch: "master",
+        branch: scenario === "ui-stress" ? "feature/a-deliberately-long-branch-name-for-layout-checks" : "master",
         baseBranch: "master",
         branchChanged: false,
         additions: 12,
@@ -1838,6 +2772,20 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async pullRequestDiff(number = 13): Promise<WorkspaceChange> {
+      if (scenario === "pull-request-delayed") {
+        if (options.pullRequestDiffReady) {
+          await options.pullRequestDiffReady;
+        } else if (
+          typeof window !== "undefined" &&
+          new URLSearchParams(window.location.search).get("holdPullRequestDiff") === "1"
+        ) {
+          await new Promise<void>((resolve) => {
+            window.addEventListener("zest:fixture-release-pull-request-diff", () => resolve(), { once: true });
+          });
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
+      }
       return {
         changeId: `pr:${number}`,
         repository: "pull_request",
@@ -1871,25 +2819,35 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async contextUsage() {
+      if (scenario === "context-recovery" && contextUnavailable && !contextRecovered) {
+        throw new Error("Fixture context measurement is temporarily unavailable");
+      }
+      // Like the desktop, a chat cannot be measured while a turn holds it.
+      if (splitStreams.has(session.threadId) || pendingScenario) {
+        throw new Error(
+          JSON.stringify({ code: "busy", message: "this chat is still working — switch chats or wait for it to finish" }),
+        );
+      }
       return {
-        usedTokens: 12000,
-        windowTokens: 256000,
-        remainingTokens: 244000,
-        percentFull: 4.7,
+        usedTokens: scenario === "ui-stress" ? 109000 : 12000,
+        windowTokens: scenario === "ui-stress" ? 128000 : 256000,
+        remainingTokens: scenario === "ui-stress" ? 19000 : 244000,
+        percentFull: scenario === "ui-stress" ? 85.15625 : 4.7,
         source: "last_turn",
         systemTokens: 3200,
-        conversationTokens: 8800,
+        conversationTokens: scenario === "ui-stress" ? 105800 : 8800,
+        toolSchemaTokens: 0,
         // A measured turn, so the three columns sum to usedTokens. Cache-heavy on
         // purpose: that is what a real session looks like, and it is the shape
         // that used to read as an almost-empty window.
-        inputTokens: 400,
+        inputTokens: scenario === "ui-stress" ? 97400 : 400,
         cacheReadTokens: 11200,
         cacheWriteTokens: 400,
         messageCount: session.messages.length,
         checkpointCount: session.checkpoints.length,
         canCompact: session.messages.length >= 4,
         autoCompactThresholdPercent: 80,
-        shouldAutoCompact: false,
+        shouldAutoCompact: scenario === "ui-stress",
       };
     },
     async getUserProfile() {
@@ -1911,7 +2869,9 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       };
     },
     async listDelegationJobs(): Promise<DelegationJob[]> {
-      return [delegationSnapshot()];
+      return scenario === "sidebar-status"
+        ? [delegationSnapshot(), ...statusScenarioJobs()]
+        : [delegationSnapshot()];
     },
     async listDelegationTargets(): Promise<DelegationTargetOptionView[]> {
       return [
@@ -1956,15 +2916,18 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     },
     async updateDelegationJob(request: DelegationUpdateInput): Promise<DelegationJob> {
       if (request.jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
+      const edited = { ...fixtureDelegationJob };
+      if (request.title != null) edited.title = request.title;
+      if (request.objective != null) edited.objective = request.objective;
+      if (request.scope) edited.scope = request.scope;
+      if (request.context) edited.context = request.context;
+      if (request.acceptanceChecks) {
+        edited.acceptanceChecks = request.acceptanceChecks.map((command: string) => ({ command, status: "pending", output: "" }));
+      }
+      if (request.worker) edited.workerTarget = request.worker;
+      if (request.reviewer) edited.reviewerTarget = request.reviewer;
       fixtureDelegationJob = {
-        ...fixtureDelegationJob,
-        ...(request.title != null ? { title: request.title } : {}),
-        ...(request.objective != null ? { objective: request.objective } : {}),
-        ...(request.scope ? { scope: request.scope } : {}),
-        ...(request.context ? { context: request.context } : {}),
-        ...(request.acceptanceChecks ? { acceptanceChecks: request.acceptanceChecks.map((command: string) => ({ command, status: "pending", output: "" })) } : {}),
-        ...(request.worker ? { workerTarget: request.worker } : {}),
-        ...(request.reviewer ? { reviewerTarget: request.reviewer } : {}),
+        ...edited,
         status: "awaiting_approval",
         approved: false,
         updatedAt: fixtureDelegationJob.updatedAt + 1,
@@ -2023,10 +2986,41 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         }
       };
     },
+    async generateReadingDiff(diff: string) {
+      // Deterministic stand-in for the provider call: the full diff, nothing removed.
+      return { diff, summary: "Fixture reading diff: nothing abridged.", removedLines: 0, foldedLines: 0 };
+    },
     async boot(handler) {
       chatHandlerGeneration += 1;
       chatHandler = handler;
-      await runFixtureStream(handler);
+      if (scenario === "sidebar-status") startStatusScenario(handler);
+      if (!scenario || safetyScenario) await runFixtureStream(handler);
     },
   };
+  const recorded = recordFixtureCalls(backend);
+  // Specs drive the page's own instance here. Importing /src/lib/backend.ts by
+  // path loads a second copy once the dev server has served an edit (?t= URLs).
+  (globalThis as { __zestFixtureBackend?: DesktopBackend }).__zestFixtureBackend = recorded;
+  return recorded;
+}
+
+/**
+ * Count every backend method the UI calls, per page, on
+ * `globalThis.__zestFixtureCalls`. Tests and `scripts/zest-control.mjs inspect
+ * backend-calls` read it to see what the UI asked for, such as a provider call
+ * repeated on every poll.
+ */
+function recordFixtureCalls(backend: DesktopBackend): DesktopBackend {
+  const calls: Record<string, number> = {};
+  (globalThis as { __zestFixtureCalls?: Record<string, number> }).__zestFixtureCalls = calls;
+  return new Proxy(backend, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || typeof property !== "string") return value;
+      return (...args: unknown[]) => {
+        calls[property] = (calls[property] ?? 0) + 1;
+        return Reflect.apply(value, receiver, args);
+      };
+    },
+  });
 }

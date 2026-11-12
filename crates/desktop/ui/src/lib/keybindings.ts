@@ -24,10 +24,13 @@ export type CommandId =
   | "view.settings"
   | "view.shortcuts"
   | "view.provider"
-  | "view.palette";
+  | "view.palette"
+  | "split.zoom"
+  | "split.minimize"
+  | "split.restore";
 
 /** Groups in the shortcuts editor, in display order. */
-export const SECTIONS = ["Navigation", "Chat", "Focus"] as const;
+export const SECTIONS = ["Navigation", "Chat", "Focus", "Split view"] as const;
 export type Section = (typeof SECTIONS)[number];
 
 export type CommandDef = {
@@ -62,7 +65,7 @@ export const COMMANDS: CommandDef[] = [
     // Deliberately paired with Settings' `Mod+,` rather than the obvious
     // `Mod+Shift+C`, which Chromium claims for the element inspector.
     defaultChord: "Mod+Shift+,",
-    hint: "MCP servers, skills, extras, rules, and shortcuts",
+    hint: "Appearance, chat view, MCP servers, skills, extras, rules, and shortcuts",
   },
   { id: "view.settings", label: "Open settings", section: "Navigation", defaultChord: "Mod+," },
   {
@@ -99,6 +102,29 @@ export const COMMANDS: CommandDef[] = [
     section: "Focus",
     defaultChord: "/",
     hint: "Only when not already typing",
+  },
+  {
+    id: "split.zoom",
+    label: "Zoom split pane",
+    section: "Split view",
+    // Mod+Shift+Z is redo and Shift+Enter a newline in a text field, so a chord
+    // built on Enter never takes a shortcut the composer needs.
+    defaultChord: "Mod+Shift+Enter",
+    hint: "Show the focused pane full size; press again to bring the others back",
+  },
+  {
+    id: "split.minimize",
+    label: "Minimize split pane",
+    section: "Split view",
+    defaultChord: "Mod+Shift+H",
+    hint: "Put the focused pane away as a strip while its turn keeps running",
+  },
+  {
+    id: "split.restore",
+    label: "Restore all split panes",
+    section: "Split view",
+    defaultChord: "",
+    hint: "Ends zoom and brings back every minimized pane",
   },
 ];
 

@@ -143,7 +143,7 @@ html[data-theme="oceanic"] {
   --muted-foreground: #4c6b89;
   --accent: #dbeeff;
   --accent-foreground: #0d3151;
-  --destructive: #d43d5c;
+  --destructive: #c22a49;
   --border: #c9d3dd;
   --input: #9dc3ea;
   --ring: #12b8c4;
@@ -342,6 +342,93 @@ html {
   image-rendering: pixelated;
 }
 
+.zest-wallpaper-frame {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  margin: 6px 0 8px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 14%, transparent);
+  border-radius: 12px;
+}
+
+/*
+ * A minimized or zoomed-away split pane is drawn as a strip (SplitPaneStrip):
+ * a thin column beside an expanded pane, a short row above or below one. The
+ * pane's own content stays mounted behind it.
+ */
+.zest-split-pane[data-collapsed] { flex: 1 1 auto; }
+.zest-split-strip {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.5rem;
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+.zest-split-strip[data-orientation="vertical"] {
+  flex-direction: column;
+  width: 2.25rem;
+  padding: 0.625rem 0;
+}
+.zest-split-strip[data-orientation="horizontal"] {
+  flex-direction: row;
+  height: 2rem;
+  padding: 0 0.75rem;
+}
+.zest-split-strip-title {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zest-split-strip-status { flex: none; white-space: nowrap; }
+.zest-split-strip[data-orientation="vertical"] .zest-split-strip-title,
+.zest-split-strip[data-orientation="vertical"] .zest-split-strip-status { writing-mode: vertical-rl; }
+
+@media (max-width: 700px) {
+  .zest-split-panes,
+  .zest-split-node { flex-direction: column !important; }
+  .zest-split-panes .zest-split-node > div,
+  .zest-split-panes > .zest-split-pane { flex: 1 1 0% !important; }
+  .zest-split-panes .zest-split-node > div.zest-split-collapsed { flex: 0 0 auto !important; }
+  .zest-split-divider { display: none; }
+  /* Panes already stack, so every strip is a row. */
+  .zest-split-strip[data-orientation] {
+    flex-direction: row;
+    width: auto;
+    height: 2rem;
+    padding: 0 0.75rem;
+  }
+  .zest-split-strip[data-orientation] .zest-split-strip-title,
+  .zest-split-strip[data-orientation] .zest-split-strip-status { writing-mode: horizontal-tb; }
+}
+
+/* Keep the photo full-bleed while preserving the rounded canvas edge. */
+.zest-wallpaper-frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--foreground) 10%, transparent),
+    inset 0 -1px 0 rgb(0 0 0 / 24%);
+}
+
+@media (max-width: 640px) {
+  .zest-wallpaper-frame {
+    margin: 3px 0;
+    border-radius: 8px;
+  }
+}
+
 .zest-wallpaper {
   position: fixed;
   inset: 0;
@@ -354,6 +441,19 @@ html {
 
 .zest-wallpaper[data-filter="print"] {
   image-rendering: pixelated;
+}
+
+/* Keep the photo inside the transcript's rounded clipping boundary. */
+.zest-chat-wallpaper {
+  position: absolute;
+  z-index: -1;
+}
+
+.zest-chat-wallpaper::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--chat-canvas);
 }
 
 /*

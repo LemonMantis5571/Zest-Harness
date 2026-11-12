@@ -56,7 +56,13 @@ function makeOption(value: string): WorkerModelOption {
 }
 
 function uniqueModels(model: string, models: string[]): string[] {
-  const values = ["", ...models.map((value) => value.trim()).filter(Boolean)];
+  const values = [
+    "",
+    ...models.flatMap((value) => {
+      const trimmed = value.trim();
+      return trimmed ? [trimmed] : [];
+    }),
+  ];
   if (model.trim() && !values.includes(model.trim())) values.push(model.trim());
   return values.filter((value, index) => values.indexOf(value) === index);
 }

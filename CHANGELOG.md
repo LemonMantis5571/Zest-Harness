@@ -5,8 +5,61 @@ a replacement for the commit history.
 
 ## Unreleased
 
+## 0.3.0 stable - 2026-10-18
+
 ### Added
 
+- `zest usage --tasks` lists the last 30 days of tasks: provider rounds,
+  latency, request and tool errors, an API-equivalent cost estimate with its
+  pricing coverage, and estimated prompt sections. Traces hold no prompt text,
+  tool arguments or results, or project paths, stay on this machine, and expire
+  after 30 days. They are off until you set `task_traces = true` under
+  `[usage]`. Unknown usage and unpriced models are shown as gaps, never as
+  zero.
+- `[tools] mcp_discovery = true` offers MCP tools on demand through
+  `mcp_discover_tools` and `mcp_call_tool` instead of sending every server's
+  schemas with each request. See [docs/MCP.md](docs/MCP.md).
+
+### Changed
+
+- `read_file` pages to any line of a file, not only its first 256 KiB. A page
+  is still capped at 256 KiB; its footer names the lines actually shown and the
+  offset to continue from, and a single longer line is shown as a prefix.
+- `grep` searches up to 8 MiB of each file instead of 256 KiB, names any file it
+  cut, and clips long matching lines around the match.
+- OpenAI-compatible requests retry when no response arrives within 2 minutes,
+  or 10 minutes for a server on this machine or the local network, where a
+  model may still be loading.
+- With **Stream complete blocks** off, code blocks are syntax-coloured as they
+  stream instead of after the stream pauses. Each chunk tokenizes only its new
+  lines.
+- The native Anthropic provider offers Claude Opus 5, Opus 5.5, Fable 5.1 and
+  Sonnet 5 without a `models` list. Requests ask the API to drop, rather than
+  reject, thinking blocks after Zest edits the history, which Opus 5.5 and
+  Fable 5.1 enforce for accounts created from 2026-08-31.
+- DeepSeek presets use `deepseek-flash` (V4.1 Flash). DeepSeek retired V4 Flash
+  and routes `deepseek-v4-flash` to it, so existing configs keep working.
+- Cursor's fallback model list, used before the CLI has been asked, names Claude
+  Opus 5.5 and Grok 4.7.
+
+### Fixed
+
+- Two MCP tools whose names collapse to the same qualified name no longer make
+  every request fail.
+- A `usage.json` that cannot be parsed is renamed aside rather than overwritten
+  by the next save.
+- Syntax highlighting in the desktop app on Windows is about 3x faster for a
+  code block in a reply whose prose contains an em dash or another character
+  outside Latin-1.
+
+## 0.2.1 beta - 2026-09-10
+
+### Added
+
+- `/btw [question]` opens a temporary side conversation using the main chat's
+  completed context, with follow-ups and independent cancellation. Close the
+  desktop panel with Esc, or use `/back` in the terminal, to return without
+  adding the side exchange to the main history.
 - `zest serve --project PATH`, a windowless coordinator daemon with authenticated
   loopback MCP. Default policy is gated: create, then `delegation_approve` and
   `delegation_apply` after confirmation. `--policy trusted` lets a token holder
@@ -25,6 +78,31 @@ a replacement for the commit history.
 
 ### Changed
 
+- A Claude Code chat keeps one CLI session for its whole life. The first turn
+  sends the operating context and the transcript; every turn after it resumes
+  that session and sends only the new message. Changing model opens a fresh
+  session rather than answering from a conversation the new model never had.
+- Claude Code runs with an effort selector (`low` through `max`), which the CLI
+  has accepted for some time and Zest was still declaring unsupported. Haiku is
+  the exception and keeps no selector, because it rejects the flag. `fable` is
+  now offered alongside `sonnet`, `opus`, and `haiku`.
+- Claude Code is narrowed to the tools that mean something inside a Zest turn.
+  Cron, scheduled wakeups, remote triggers, push notifications, cross-session
+  messages, its own git worktrees, and multi-agent workflows are out of scope.
+  Its subagents stay in: they run in the same session, the same tool scope, and
+  behind the same approval card. This is a scope boundary, not an auto-approval
+  list, so nothing gained the right to run unasked.
+- Claude Code's permission mode now means what it says. Every configured value
+  except `plan` used to be silently rewritten, because the modes that existed
+  then approved edits before Zest was consulted. The default is `auto`, which
+  approves routine work and still refers everything else to the approval card;
+  `manual`, `accept_edits`, `plan`, `dont_ask`, and `bypass_permissions` are
+  passed through. A new `disallowed_tools` list takes more away when a project
+  wants it. Verified against Claude Code CLI 2.1.220.
+- Claude Code tool rows carry the tool's real name and target, such as
+  `Read src/provider/mod.rs`, instead of `External tool`. A completed edit
+  reports the file it changed, and a subagent reports progress on the row of the
+  `Task` that started it.
 - Hovering a dash on the chat turn rail lengthens the mark and shows that
   turn's preview beside it.
 - The README states what Zest does and drops the "what it is not" asides.

@@ -29,7 +29,7 @@ use serde_json::Value;
 use crate::anthropic::types::Usage;
 use crate::error::{HarnessError, Result};
 use crate::fsutil;
-use crate::provider::ResumeHandle;
+use crate::provider::{Provider, ResumeHandle, ResumeSupport};
 use crate::thread::{Thread, ThreadStore};
 
 // Zest is a single local desktop process, but approval commands and the stream
@@ -794,6 +794,16 @@ impl ChatPersistence {
     /// is therefore stale: close its pending waits and mark the run aborted so
     /// the next message starts from a truthful state.
     pub fn reconcile_after_restart(&self, thread_id: &str) -> Result<RecoveryReconciliation> {
+        self.reconcile_after_restart_with_provider(thread_id, None)
+    }
+
+    /// Consult the actual provider capability while recording why a stale run
+    /// cannot continue. A handle alone never authorizes replaying provider work.
+    pub fn reconcile_after_restart_with_provider(
+        &self,
+        thread_id: &str,
+        provider: Option<&dyn Provider>,
+    ) -> Result<RecoveryReconciliation> {
         let mut result = RecoveryReconciliation::default();
         for run in self.runs.list_by_thread(thread_id)? {
             if run.status.is_terminal() {
@@ -805,7 +815,47 @@ impl ChatPersistence {
                 self.interrupts.cancel(&interrupt.interrupt_id)?;
                 result.cancelled_interrupts += 1;
             }
-            self.runs.mark_aborted(&run.run_id)?;
+            let (code, message) = match provider {
+                None => (
+                    "provider_runtime_unavailable",
+                    "The provider runtime is unavailable after restart.",
+                ),
+                Some(provider)
+                    if run
+                        .provider_id
+                        .as_deref()
+                        .is_some_and(|id| id != provider.id()) =>
+                {
+                    (
+                        "provider_changed",
+                        "The saved run belongs to a different provider.",
+                    )
+                }
+                Some(provider) if provider.resume_support() == ResumeSupport::Unsupported => (
+                    "durable_resume_unsupported",
+                    "This provider does not support continuing an interrupted stream.",
+                ),
+                Some(_) if run.resume_handle.is_none() => (
+                    "resume_handle_missing",
+                    "The provider did not save a cursor for the interrupted stream.",
+                ),
+                Some(_) => (
+                    "resume_runtime_detached",
+                    "The saved stream has no attached execution runtime after restart.",
+                ),
+            };
+            self.runs.update(
+                &run.run_id,
+                RunPatch {
+                    status: Some(RunStatus::Aborted),
+                    finished_at: Some(now_millis()),
+                    error: Some(RunError {
+                        code: Some(code.into()),
+                        message: format!("{message} The saved user message can be retried."),
+                    }),
+                    ..RunPatch::default()
+                },
+            )?;
             result.aborted_runs += 1;
         }
 
@@ -822,6 +872,96 @@ impl ChatPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RecoveryProvider {
+        id: &'static str,
+        support: ResumeSupport,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RecoveryProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn default_model(&self) -> &str {
+            "test-model"
+        }
+        fn auth_status(&self) -> crate::AuthStatus {
+            crate::AuthStatus::Ready { account: None }
+        }
+        fn resume_support(&self) -> ResumeSupport {
+            self.support
+        }
+        async fn stream_turn(
+            &self,
+            _: &crate::provider::TurnRequest,
+            _: &mut (dyn for<'a> FnMut(crate::provider::StreamEvent<'a>) + Send),
+        ) -> Result<crate::provider::Completion> {
+            panic!("recovery must not spend quota or replay provider work")
+        }
+    }
+
+    #[test]
+    fn restart_recovery_records_capability_and_cursor_failures_without_replaying() {
+        for (current_id, support, handle, expected) in [
+            (
+                "original",
+                ResumeSupport::Unsupported,
+                false,
+                "durable_resume_unsupported",
+            ),
+            (
+                "other",
+                ResumeSupport::Unsupported,
+                true,
+                "provider_changed",
+            ),
+            (
+                "original",
+                ResumeSupport::ProviderManaged,
+                false,
+                "resume_handle_missing",
+            ),
+            (
+                "original",
+                ResumeSupport::ProviderManaged,
+                true,
+                "resume_runtime_detached",
+            ),
+        ] {
+            let root = scratch("provider-recovery");
+            let persistence = ChatPersistence::open(&root).unwrap();
+            persistence
+                .runs
+                .create_or_resume_for_provider("run-1", "thread-1", "original")
+                .unwrap();
+            if handle {
+                persistence
+                    .runs
+                    .set_resume_handle("run-1", ResumeHandle::new("remote-run"))
+                    .unwrap();
+            }
+            let provider = RecoveryProvider {
+                id: current_id,
+                support,
+            };
+            let result = persistence
+                .reconcile_after_restart_with_provider("thread-1", Some(&provider))
+                .unwrap();
+            assert_eq!(result.aborted_runs, 1);
+            let run = persistence.runs.load("run-1").unwrap().unwrap();
+            assert_eq!(run.status, RunStatus::Aborted);
+            assert_eq!(run.error.as_ref().unwrap().code.as_deref(), Some(expected));
+            assert!(run.error.unwrap().message.contains("can be retried"));
+            assert_eq!(
+                persistence
+                    .reconcile_after_restart_with_provider("thread-1", Some(&provider))
+                    .unwrap()
+                    .aborted_runs,
+                0
+            );
+        }
+    }
 
     fn scratch(name: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::ScratchDir::new(&format!("zest-chat-persistence-{name}-"))

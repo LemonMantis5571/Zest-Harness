@@ -2,8 +2,11 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import * as tauriApi from "./api";
 import { createFixtureBackend } from "./fixtureBackend";
-import type { SkillSummary, SystemPromptInfo } from "./api";
+import type { ReadingDiffView, SkillSummary, SystemPromptInfo } from "./api";
+import type { HtmlDocument, PreparedHtmlView } from "./htmlArtifacts";
 import type {
+  AdvisorChoice,
+  AdvisorSettings,
   ApprovalChoice,
   ApprovalMode,
   CommandView,
@@ -50,18 +53,26 @@ import type {
   WorkspacePickResult,
   WorkspaceChange,
   WorkspaceReview,
+  WorktreeChatStatus,
 } from "./types";
 
 export type { SkillSummary, SystemPromptInfo };
 
 /** Desktop I/O surface used by App — Tauri in production, fixture offline. */
 export type DesktopBackend = {
+  startBtw(sessionId: string): Promise<string>;
+  sendBtw(id: string, text: string, onDelta: (text: string) => void): Promise<string>;
+  cancelBtw(id: string): Promise<void>;
+  closeBtw(id: string): Promise<void>;
   readonly mode: "tauri" | "fixture";
   listProviders(): Promise<ProviderRow[]>;
   listExternalAgents(): Promise<ExternalAgentRow[]>;
   setExternalAgent(id: string, enabled: boolean): Promise<void>;
   setExternalAgentMcp(id: string, enabled: boolean): Promise<void>;
   setExternalAgentModel(id: string, model: string | null): Promise<void>;
+  advisorSettings(): Promise<AdvisorSettings>;
+  /** Writes `[advisor]`; rebuild the session for the open chat to use it. */
+  setAdvisor(choice: AdvisorChoice | null): Promise<AdvisorSettings>;
   checkExternalAgent(id: string): Promise<ExternalAgentCheck>;
   listMcpServers(): Promise<McpServerRow[]>;
   /** Saving also refreshes the server's tool list; every row comes back. */
@@ -97,6 +108,7 @@ export type DesktopBackend = {
     key: string;
   }): Promise<void>;
   configureClaudeCodeProvider(input: { id: string; model: string }): Promise<void>;
+  configureCursorProvider(input: { id: string; model: string }): Promise<void>;
   configureCodexCliProvider(input: { id: string; model: string }): Promise<void>;
   configureCodexOAuthProvider(input: { id: string; model: string }): Promise<void>;
   codexCliAvailable(): Promise<boolean>;
@@ -147,6 +159,8 @@ export type DesktopBackend = {
   listThreads(): Promise<ThreadSummary[]>;
   forgetWorkspace(projectPath: string): Promise<void>;
   listChatProjects(): Promise<ProjectChats[]>;
+  createWorktreeChat(projectPath: string): Promise<string>;
+  worktreeChatStatus(projectPath: string): Promise<WorktreeChatStatus | null>;
   searchChats(query: string): Promise<ChatSearchHit[]>;
   openProjectChat(options: {
     /** `null` opens a chat without a workspace. */
@@ -210,6 +224,9 @@ export type DesktopBackend = {
   ): Promise<JobRead>;
   jobKill(jobId: string, reason?: string, threadId?: string): Promise<JobSnapshot>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
+  prepareHtmlView(document: HtmlDocument): Promise<PreparedHtmlView>;
+  releaseHtmlView(token: string): Promise<void>;
+  saveHtmlDocument(document: HtmlDocument): Promise<boolean>;
   cancelTurn(threadId?: string): Promise<void>;
   resolveApproval(
     approvalId: string,
@@ -244,6 +261,8 @@ export type DesktopBackend = {
   gitBranch(): Promise<string | null>;
   gitContext(): Promise<GitContext>;
   workspaceChanges(): Promise<WorkspaceChange>;
+  /** Model-abridged "clean" view of a diff. A provider call: ask once per diff. */
+  generateReadingDiff(diff: string): Promise<ReadingDiffView>;
   pullRequestDiff(number?: number): Promise<WorkspaceChange>;
   verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
@@ -273,6 +292,8 @@ export function createTauriBackend(): DesktopBackend {
     setExternalAgent: (id, enabled) => tauriApi.setExternalAgent(id, enabled),
     setExternalAgentMcp: (id, enabled) => tauriApi.setExternalAgentMcp(id, enabled),
     setExternalAgentModel: (id, model) => tauriApi.setExternalAgentModel(id, model),
+    advisorSettings: () => tauriApi.advisorSettings(),
+    setAdvisor: (choice) => tauriApi.setAdvisor(choice),
     checkExternalAgent: (id) => tauriApi.checkExternalAgent(id),
     listMcpServers: () => tauriApi.listMcpServers(),
     saveMcpServer: (input) => tauriApi.saveMcpServer(input),
@@ -285,6 +306,7 @@ export function createTauriBackend(): DesktopBackend {
     configureApiProvider: (input) => tauriApi.configureApiProvider(input),
     configureAnthropicProvider: (input) => tauriApi.configureAnthropicProvider(input),
     configureClaudeCodeProvider: (input) => tauriApi.configureClaudeCodeProvider(input),
+    configureCursorProvider: (input) => tauriApi.configureCursorProvider(input),
     configureCodexCliProvider: (input) => tauriApi.configureCodexCliProvider(input),
     configureCodexOAuthProvider: (input) => tauriApi.configureCodexOAuthProvider(input),
     codexCliAvailable: () => tauriApi.codexCliAvailable(),
@@ -318,6 +340,8 @@ export function createTauriBackend(): DesktopBackend {
     listThreads: () => tauriApi.listThreads(),
     forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
+    createWorktreeChat: (projectPath) => tauriApi.createWorktreeChat(projectPath),
+    worktreeChatStatus: (projectPath) => tauriApi.worktreeChatStatus(projectPath),
     searchChats: (query) => tauriApi.searchChats(query),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadOlderThreadMessages: (options) => tauriApi.loadOlderThreadMessages(options),
@@ -348,6 +372,9 @@ export function createTauriBackend(): DesktopBackend {
     jobKill: (jobId, reason, threadId) => tauriApi.jobKill(jobId, reason, threadId),
     saveMarkdown: (suggestedName, markdown) =>
       tauriApi.saveMarkdown(suggestedName, markdown),
+    prepareHtmlView: (document) => tauriApi.prepareHtmlView(document),
+    releaseHtmlView: (token) => tauriApi.releaseHtmlView(token),
+    saveHtmlDocument: (document) => tauriApi.saveHtmlDocument(document),
     cancelTurn: (threadId) => tauriApi.cancelTurn(threadId),
     resolveApproval: (approvalId, decision, threadId) =>
       tauriApi.resolveApproval(approvalId, decision, threadId),
@@ -371,12 +398,17 @@ export function createTauriBackend(): DesktopBackend {
     gitBranch: () => tauriApi.gitBranch(),
     gitContext: () => tauriApi.gitContext(),
     workspaceChanges: () => tauriApi.workspaceChanges(),
+    generateReadingDiff: (diff) => tauriApi.generateReadingDiff(diff),
     pullRequestDiff: (number) => tauriApi.pullRequestDiff(number),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),
     getUserProfile: () => tauriApi.getUserProfile(),
     setUserProfile: (profile) => tauriApi.setUserProfile(profile),
     onChatEvent: (handler) => tauriApi.onChatEvent(handler),
+    startBtw: (sessionId) => tauriApi.startBtw(sessionId),
+    sendBtw: (id, text, onDelta) => tauriApi.sendBtw(id, text, onDelta),
+    cancelBtw: (id) => tauriApi.cancelBtw(id),
+    closeBtw: (id) => tauriApi.closeBtw(id),
     listDelegationJobs: () => tauriApi.listDelegationJobs(),
     listDelegationTargets: () => tauriApi.listDelegationTargets(),
     createDelegationJob: (request) => tauriApi.createDelegationJob(request),

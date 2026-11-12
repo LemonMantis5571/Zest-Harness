@@ -133,6 +133,18 @@ describe("dispatch lookup", () => {
     assert.equal(commandFor(bindings, ""), null);
   });
 
+  it("binds the split pane commands without taking an existing chord", () => {
+    const bindings = defaultBindings();
+    assert.equal(commandFor(bindings, "Mod+Shift+Enter"), "split.zoom");
+    assert.equal(commandFor(bindings, "Mod+Shift+H"), "split.minimize");
+    // Restore all is reachable from the palette and bindable, but takes no key by default.
+    assert.equal(bindings["split.restore"], "");
+    assert.deepEqual([...conflicts(bindings).keys()], []);
+    for (const id of ["split.zoom", "split.minimize"] as const) {
+      assert.deepEqual(chordIsBindable(bindings[id] ?? ""), { ok: true });
+    }
+  });
+
   it("every command has a unique id", () => {
     const ids = COMMANDS.map((c) => c.id);
     assert.equal(new Set(ids).size, ids.length);

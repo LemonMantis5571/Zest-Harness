@@ -60,14 +60,12 @@ impl Tool for ListDir {
         }
 
         let root = self.root.clone();
-        let entries = tokio::task::spawn_blocking(move || list_children(&root, &resolved))
-            .await
-            .map_err(|e| format!("list_dir task failed: {e}"))??;
-
-        let truncated = entries.len() >= MAX_ENTRIES;
+        let (entries, truncated) =
+            tokio::task::spawn_blocking(move || list_children(&root, &resolved, MAX_ENTRIES))
+                .await
+                .map_err(|e| format!("list_dir task failed: {e}"))??;
         let mut lines: Vec<String> = entries
             .into_iter()
-            .take(MAX_ENTRIES)
             .map(|e| {
                 if e.is_dir {
                     format!("{}/", e.name)

@@ -43,7 +43,12 @@ function IconLayer({ visible, children }: { visible: boolean; children: ReactNod
       className={cn(
         "col-start-1 row-start-1 flex items-center justify-center",
         "transition-[opacity,transform,filter] duration-200 ease-out",
-        !visible && "pointer-events-none"
+        // A hidden layer stays mounted, and an `animate-spin` inside it keeps
+        // ticking at opacity 0, forcing a style recalculation every frame. One
+        // per settled message pinned the renderer at idle. Paused, not removed,
+        // so a spinner that is fading out holds its pose instead of snapping.
+        // `!` because `animate-spin`'s shorthand resets `animation-play-state`.
+        !visible && "pointer-events-none [&_*]:[animation-play-state:paused]!"
       )}
       // Written as inline style rather than Tailwind's `scale-*`, which routes
       // through `--tw-scale-*` custom properties. A transition against a value

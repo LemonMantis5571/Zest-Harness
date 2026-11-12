@@ -49,6 +49,10 @@ pub enum CodexOAuthPoll {
 pub struct CodexOAuthLogin {
     account: String,
     state: Arc<Mutex<CodexOAuthPoll>>,
+    /// Shared so cancellation can drop the callback listener immediately. The
+    /// background callback loop must not keep localhost:1455 occupied for the
+    /// remainder of its timeout after the user cancels sign-in.
+    listener: Arc<Mutex<Option<TcpListener>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +274,7 @@ pub fn start_login(account: &str) -> Result<CodexOAuthLogin, String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
+    let listener = Arc::new(Mutex::new(Some(listener)));
     let (verifier, challenge) = random_pkce_pair()?;
     let state = random_state()?;
     let url = authorization_url(&challenge, &state);
@@ -279,16 +284,28 @@ pub fn start_login(account: &str) -> Result<CodexOAuthLogin, String> {
     let login = CodexOAuthLogin {
         account: account.to_string(),
         state: Arc::new(Mutex::new(CodexOAuthPoll::Running)),
+        listener: listener.clone(),
     };
     let reported = login.state.clone();
+    let listener_for_thread = listener;
     let account = account.to_string();
     thread::spawn(move || {
-        let outcome = complete_login(listener, &verifier, &state, &account);
+        let outcome = complete_login(listener_for_thread.clone(), &verifier, &state, &account);
+        // A completed login no longer needs the callback port. This also keeps
+        // the listener lifetime independent from when the desktop consumes the
+        // final login status.
+        if let Ok(mut guard) = listener_for_thread.lock() {
+            guard.take();
+        }
         if let Ok(mut guard) = reported.lock() {
-            *guard = match outcome {
-                Ok(()) => CodexOAuthPoll::Succeeded,
-                Err(detail) => CodexOAuthPoll::Failed(detail),
-            };
+            // Cancellation wins over a callback that was already accepted but
+            // had not finished exchanging its code yet.
+            if matches!(*guard, CodexOAuthPoll::Running) {
+                *guard = match outcome {
+                    Ok(()) => CodexOAuthPoll::Succeeded,
+                    Err(detail) => CodexOAuthPoll::Failed(detail),
+                };
+            }
         }
     });
     Ok(login)
@@ -312,11 +329,17 @@ impl CodexOAuthLogin {
                 *guard = CodexOAuthPoll::Failed("Authentication cancelled.".into());
             }
         }
+        // Dropping the listener is the important part of cancellation: merely
+        // changing the poll state would leave the callback port bound until the
+        // worker thread's 180-second timeout elapsed.
+        if let Ok(mut guard) = self.listener.lock() {
+            guard.take();
+        }
     }
 }
 
 fn complete_login(
-    listener: TcpListener,
+    listener: Arc<Mutex<Option<TcpListener>>>,
     verifier: &str,
     state: &str,
     account: &str,
@@ -326,7 +349,16 @@ fn complete_login(
         if SystemTime::now() > deadline {
             return Err("Timed out waiting for ChatGPT authorization.".into());
         }
-        match listener.accept() {
+        let accepted = {
+            let guard = listener
+                .lock()
+                .map_err(|_| "sign-in listener state lock poisoned".to_string())?;
+            let Some(listener) = guard.as_ref() else {
+                return Err("Authentication cancelled.".into());
+            };
+            listener.accept()
+        };
+        match accepted {
             Ok((stream, _)) => break read_callback(stream, state)?,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -611,5 +643,27 @@ mod tests {
         assert!(parsed_web_url("http://example.com/a", true).is_err());
         assert!(parsed_web_url("file:///tmp/x", false).is_err());
         assert!(parsed_web_url("javascript:alert(1)", false).is_err());
+    }
+
+    #[test]
+    fn cancelling_login_releases_the_callback_listener() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = Arc::new(Mutex::new(Some(listener)));
+        let login = CodexOAuthLogin {
+            account: "test".into(),
+            state: Arc::new(Mutex::new(CodexOAuthPoll::Running)),
+            listener: listener.clone(),
+        };
+
+        login.cancel();
+
+        assert_eq!(
+            login.poll(),
+            CodexOAuthPoll::Failed("Authentication cancelled.".into())
+        );
+        assert!(listener.lock().unwrap().is_none());
+        assert!(TcpListener::bind(address).is_ok());
     }
 }

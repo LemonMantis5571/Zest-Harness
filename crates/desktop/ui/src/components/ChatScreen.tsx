@@ -1,4 +1,5 @@
 import {
+  Fragment,
   lazy,
   memo,
   Suspense,
@@ -10,18 +11,13 @@ import {
   useState,
 } from "react";
 import {
-  CheckCircle2Icon,
+  Columns2Icon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
-  CommandIcon,
-  LoaderCircleIcon,
-  PanelRightOpenIcon,
   PencilIcon,
-  SettingsIcon,
   TriangleAlertIcon,
-  XCircleIcon,
   XIcon,
 } from "lucide-react";
 
@@ -33,9 +29,10 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
-import { SettingsPanel } from "@/components/SettingsPanel";
+import { SettingsPanel, type SettingsSectionId } from "@/components/SettingsPanel";
 import { BranchChangesBar } from "@/components/BranchChangesBar";
 import { Composer } from "@/components/Composer";
+import { BtwPanel } from "@/components/BtwPanel";
 import type { DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
 import { NeedsInputCard } from "@/components/NeedsInputCard";
@@ -45,10 +42,10 @@ import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
 import { Markdown } from "@/components/Markdown";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
-import { ToolCallRow } from "@/components/ToolCallRow";
-import { ToolRunGroup } from "@/components/ToolRunGroup";
-import { ThinkingReasoning } from "@/components/ThinkingReasoning";
+import { AssistantTrace } from "@/components/AssistantTrace";
 import { WorkingIndicator } from "@/components/WorkingIndicator";
+import { Marker, MarkerContent } from "@/components/ui/marker";
+import { visibleInterval } from "@/lib/visibleInterval";
 import {
   Attachment,
   AttachmentContent,
@@ -67,6 +64,7 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
   useMessageScroller,
+  useMessageScrollerVisibility,
 } from "@/components/ui/message-scroller";
 import { ZestPulse } from "@/components/ZestPulse";
 import { toast } from "@/components/ui/toast";
@@ -74,6 +72,7 @@ import { getBackend } from "@/lib/backend";
 import { ignoreExpectedFailure } from "@/lib/backgroundFailure";
 import { openExternalUrl } from "@/lib/externalLinks";
 import { buildConversationTurns } from "@/lib/conversationTurns";
+import { noticesByMessage, type TranscriptNotice } from "@/lib/transcriptNotices";
 import { ensureFontLoaded } from "@/lib/fonts";
 import { LinkifyText } from "@/lib/linkify";
 import {
@@ -81,9 +80,12 @@ import {
   modelPickerHasChoices,
   type EffortId,
 } from "@/lib/models";
-import { isModelCommandName, isModelSlash } from "@/lib/slashCommands";
+import { useHiddenPickerProviders } from "@/lib/pickerProviders";
+import type { PaletteFilter } from "@/lib/commandPaletteSearch";
+import type { SendTurnRequest } from "@/lib/sendTurn";
+import { btwQuestion, isModelCommandName, isModelSlash } from "@/lib/slashCommands";
 import type { CustomizeTab, ShellPanel } from "@/lib/navigationHistory";
-import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
+import type { SplitSidebarGroup } from "@/lib/splitLayout";
 import { currentTurnAction, type ThreadActivityMap } from "@/lib/threadActivity";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import { escapeAction } from "@/lib/escapeStack";
@@ -99,12 +101,12 @@ import type {
   GitContext,
   PreparedAttachment,
   ProjectChats,
-  ProviderActivityPart,
   ProviderRow,
   SessionInfo,
   ThreadSummary,
   SessionWarning,
   UserProfile,
+  WallpaperView,
   WorkspaceChange,
   WorkspaceReview,
 } from "@/lib/types";
@@ -116,6 +118,9 @@ measureStartup("chat-chunk", "boot-effect");
 
 const CustomizePanel = lazy(() =>
   import("@/components/CustomizePanel").then((m) => ({ default: m.CustomizePanel }))
+);
+const PullRequestsPanel = lazy(() =>
+  import("@/components/PullRequestsPanel").then((m) => ({ default: m.PullRequestsPanel }))
 );
 const ProfileScreen = lazy(() =>
   import("@/components/ProfileScreen").then((m) => ({ default: m.ProfileScreen }))
@@ -140,12 +145,17 @@ function shortRoot(root: string): string {
   if (parts.length <= 2) return cleaned;
   return parts.slice(-2).join("/");
 }
-type Props = {
+export type ChatScreenProps = {
+  onOpenSplit?: () => void;
+  onOpenPullRequests?: () => void;
+  wallpaper?: WallpaperView | null;
   session: SessionInfo;
   messages: ChatMessage[];
   hasOlderMessages?: boolean;
   hasNewerMessages?: boolean;
   hiddenUserTurns?: number;
+  /** Housekeeping dividers for this chat, such as automatic compaction. */
+  transcriptNotices?: readonly TranscriptNotice[];
   loadingOlder?: boolean;
   loadingNewer?: boolean;
   onLoadOlder?: () => void;
@@ -165,7 +175,7 @@ type Props = {
   model: string;
   effort: EffortId;
   onDraftChange: (value: string) => void;
-  onSend: (text?: string) => void;
+  onSend: (request?: SendTurnRequest) => void;
   onEditMessage: (messageId: string, text: string) => Promise<void>;
   onStop?: () => void;
   onNewChat: () => void;
@@ -210,7 +220,7 @@ type Props = {
   onOpenProfile?: () => void;
   /** Show the usage screen. */
   onOpenUsage?: () => void;
-  /** Show the Customize panel (MCP servers, skills, project instructions). */
+  /** Show the Customize panel (appearance, chat view, tools, and instructions). */
   onOpenCustomize?: () => void;
   /** Which panel is showing in the transcript's place, or null for the transcript. */
   shellPanel?: ShellPanel | null;
@@ -254,7 +264,13 @@ type Props = {
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
+  splitGroups?: ReadonlyArray<SplitSidebarGroup>;
+  activeSplitGroupId?: string | null;
+  onOpenSplitGroup?: (groupId: string) => void;
+  onFocusSplitPane?: (groupId: string, paneId: string) => void;
 };
+
+type Props = ChatScreenProps;
 
 function focusComposer() {
   const el = document.getElementById(
@@ -271,16 +287,17 @@ type ChatMessageRowProps = {
   isLast: boolean;
   sending: boolean;
   approvalMode: ApprovalMode;
+  /** Names the provider-activity trace. A CLI loop is not always Claude Code. */
+  providerLabel: string;
+  /** The board, so a feature card this turn created shows its live state. */
+  delegationJobs: ReadonlyArray<DelegationJob>;
+  onOpenDelegation: (jobId: string) => void;
   isPlanToBuild?: boolean;
   onBuildPlan?: () => void;
-  onResolveApproval: (
-    approvalId: string,
-    decision: ApprovalChoice
-  ) => Promise<void>;
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
   onOpenProviderSwitch?: () => void;
-  onSend: (text?: string) => void;
+  onSend: (request?: SendTurnRequest) => void;
   editing: boolean;
   editingText: string;
   editingBusy: boolean;
@@ -362,40 +379,6 @@ function MessageEditForm({
   );
 }
 
-function ProviderActivityTrace({
-  activities,
-}: {
-  activities: ProviderActivityPart[];
-}) {
-  if (activities.length === 0) return null;
-  return (
-    <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground" aria-label="Provider activity">
-      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
-        Claude Code
-      </div>
-      {activities.map((activity) => {
-        const icon =
-          activity.status === "done" ? (
-            <CheckCircle2Icon className="size-3.5 shrink-0 text-primary/90" aria-hidden />
-          ) : activity.status === "error" ? (
-            <XCircleIcon className="size-3.5 shrink-0 text-destructive/90" aria-hidden />
-          ) : (
-            <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden />
-          );
-        return (
-          <div key={activity.id} className="flex min-w-0 items-center gap-1.5">
-            {icon}
-            <span className="min-w-0 truncate text-foreground/75">{activity.title}</span>
-            <span className="shrink-0 text-[10px] text-muted-foreground/60">
-              {activity.status}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /**
  * Keep settled messages out of the streaming render path. Appending a delta
  * still updates the active row, but unchanged rows now retain their existing
@@ -406,9 +389,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
   isLast,
   sending,
   approvalMode,
+  providerLabel,
+  delegationJobs,
+  onOpenDelegation,
   isPlanToBuild = false,
   onBuildPlan,
-  onResolveApproval,
   onOpenDiff,
   onReconnectProvider,
   onOpenProviderSwitch,
@@ -513,7 +498,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const submitQuestion = structuredQuestion?.questionId
     ? (answer: string) =>
         onResolveQuestion(structuredQuestion.questionId as string, answer)
-    : onSend;
+    : (answer: string) => onSend({ origin: "answer", text: answer });
 
   return (
     <MessageScrollerItem
@@ -527,36 +512,13 @@ const ChatMessageRow = memo(function ChatMessageRow({
             Zest
           </div>
 
-          {msg.tools.length > 0 ? (
-            <div className="flex w-full max-w-full flex-col gap-0.5">
-              {groupToolRuns(msg.tools, collapseThresholdFor(msg.tools)).map((run) =>
-                run.kind === "group" ? (
-                  <ToolRunGroup
-                    key={`group-${run.tools[0].id}`}
-                    tools={run.tools}
-                    summary={run.summary}
-                    onResolveApproval={onResolveApproval}
-                    onOpenDiff={onOpenDiff}
-                  />
-                ) : (
-                  <ToolCallRow
-                    key={run.tool.id}
-                    tool={run.tool}
-                    onResolveApproval={onResolveApproval}
-                    onOpenDiff={onOpenDiff}
-                  />
-                )
-              )}
-            </div>
-          ) : null}
-
-          {msg.providerActivity ? (
-            <ProviderActivityTrace activities={msg.providerActivity} />
-          ) : null}
-
-          {msg.thinking ? (
-            <ThinkingReasoning thinking={msg.thinking} streaming={msg.streaming} />
-          ) : null}
+          <AssistantTrace
+            message={msg}
+            providerLabel={providerLabel}
+            delegationJobs={delegationJobs}
+            onOpenDiff={onOpenDiff}
+            onOpenDelegation={onOpenDelegation}
+          />
 
           {planningQuestion ? (
             <PlanningQuestionnaire
@@ -679,12 +641,33 @@ function TranscriptScrollRegistration({
   return null;
 }
 
+function ConversationScrollButton({ messageIds }: { messageIds: string[] }) {
+  const { visibleMessageIds } = useMessageScrollerVisibility();
+  const messageIndexes = useMemo(
+    () => new Map(messageIds.map((messageId, index) => [messageId, index])),
+    [messageIds]
+  );
+  let lastVisibleIndex = -1;
+  for (const messageId of visibleMessageIds) {
+    const index = messageIndexes.get(messageId);
+    if (index !== undefined) lastVisibleIndex = Math.max(lastVisibleIndex, index);
+  }
+  const messageCount =
+    lastVisibleIndex < 0 ? 0 : messageIds.length - lastVisibleIndex - 1;
+
+  return <MessageScrollerButton messageCount={messageCount} />;
+}
+
 export function ChatScreen({
+  onOpenSplit,
+  onOpenPullRequests,
+  wallpaper,
   session,
   messages,
   hasOlderMessages = false,
   hasNewerMessages = false,
   hiddenUserTurns = 0,
+  transcriptNotices,
   loadingOlder = false,
   loadingNewer = false,
   onLoadOlder,
@@ -761,9 +744,17 @@ export function ChatScreen({
   onCancelDelegation,
   onRetryDelegation,
   onApplyDelegation,
+  splitGroups = [],
+  activeSplitGroupId = null,
+  onOpenSplitGroup,
+  onFocusSplitPane,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [focusUser, setFocusUser] = useState(false);
+  const [btw, setBtw] = useState<{ sessionId: string; question: string } | null>(null);
+  useEffect(() => {
+    if (btw && btw.sessionId !== session.sessionId) setBtw(null);
+  }, [btw, session.sessionId]);
+  const [settingsFocus, setSettingsFocus] = useState<SettingsSectionId | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   /**
    * Too narrow to hold the sidebar, a checkpoint rail, and a readable
@@ -778,6 +769,7 @@ export function ChatScreen({
   const pendingPullRequestRef = useRef<{ number: number; url: string } | null>(
     null
   );
+  const pullRequestLoadRef = useRef(0);
   const ignoreBranchRestoreRef = useRef(false);
   const workspaceRefreshRef = useRef<{
     threadId: string;
@@ -804,6 +796,7 @@ export function ChatScreen({
   );
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const hiddenPickerProviders = useHiddenPickerProviders();
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const refreshAndOpenProviderSwitch = useCallback(() => {
     void onRefreshProviders()
@@ -829,7 +822,13 @@ export function ChatScreen({
    * interrupts you.
    */
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  /** A job the sidebar asked the Workbench to show; `request` re-fires a repeat click. */
+  const [workbenchJobFocus, setWorkbenchJobFocus] = useState<{
+    jobId: string;
+    request: number;
+  } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteFilter, setPaletteFilter] = useState<PaletteFilter>("all");
   useEffect(() => {
     void ensureFontLoaded("jetbrains-mono");
   }, []);
@@ -853,6 +852,14 @@ export function ChatScreen({
         windowed: hasOlderMessages || hasNewerMessages,
       }),
     [hasNewerMessages, hasOlderMessages, hiddenUserTurns, messages, session.checkpoints]
+  );
+  const noticesAfterMessage = useMemo(
+    () => noticesByMessage(transcriptNotices),
+    [transcriptNotices]
+  );
+  const conversationMessageIds = useMemo(
+    () => messages.map((message) => message.id),
+    [messages]
   );
   const pendingScrollRestore = useRef<{ height: number; top: number } | null>(
     null
@@ -960,9 +967,25 @@ export function ChatScreen({
     scrollToTranscriptMessage(focusId);
   }, [messages, scrollToTranscriptMessage, session.focusMessageId]);
 
-  const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
+  // A jump request belongs to the click that made it; reopening the Workbench
+  // later starts on its usual tab.
+  const closeWorkbench = useCallback(() => {
+    setWorkbenchOpen(false);
+    setWorkbenchJobFocus(null);
+  }, []);
+  // The sidebar's job rows and a subagent line's "Open in Delegation" both land
+  // on the job's card; a new request lets the same card be asked for twice.
+  const openDelegationJob = useCallback(
+    (jobId: string) => {
+      if (session.isFreeChat) return;
+      setWorkbenchOpen(true);
+      setWorkbenchJobFocus((current) => ({ jobId, request: (current?.request ?? 0) + 1 }));
+    },
+    [session.isFreeChat]
+  );
   const toggleWorkbench = useCallback(() => {
     if (session.isFreeChat) return;
+    setWorkbenchJobFocus(null);
     setWorkbenchOpen((value) => !value);
   }, [session.isFreeChat]);
 
@@ -972,8 +995,18 @@ export function ChatScreen({
         await openExternalUrl(link.url);
         return;
       }
+      const requestId = ++pullRequestLoadRef.current;
+      const loadingTarget: DiffViewerTarget = {
+        path: `Pull request #${link.number}`,
+        diff: "",
+        source: "pull_request",
+        changeId: `pr:${link.number}`,
+        loading: true,
+      };
+      setDiffTarget(loadingTarget);
       try {
         const change = await getBackend().pullRequestDiff(link.number);
+        if (requestId !== pullRequestLoadRef.current) return;
         if (
           change.unavailable ||
           (!change.changedFiles.length && !change.diff.trim())
@@ -982,13 +1015,14 @@ export function ChatScreen({
           return;
         }
         setDiffTarget({
-          path: `Pull request #${link.number}`,
+          ...loadingTarget,
+          loading: false,
           diff: change.diff,
-          source: "pull_request",
-          changeId: `pr:${link.number}`,
         });
       } catch (error) {
+        if (requestId !== pullRequestLoadRef.current) return;
         ignoreExpectedFailure(error, "open pull request diff");
+        setDiffTarget(null);
         await openExternalUrl(link.url);
       }
     },
@@ -998,6 +1032,7 @@ export function ChatScreen({
   useEffect(() => {
     const pending = pendingPullRequestRef.current;
     pendingPullRequestRef.current = null;
+    pullRequestLoadRef.current += 1;
     setDiffTarget(null);
     if (typeof window === "undefined") {
       setDiffWidth(520);
@@ -1051,13 +1086,26 @@ export function ChatScreen({
   const requestPullRequest = useCallback(
     (link: { number: number; url: string }, switchTo?: { root: string | null; threadId: string }) => {
       if (switchTo && switchTo.threadId !== session.threadId) {
+        setDiffTarget({
+          path: `Pull request #${link.number}`,
+          diff: "",
+          source: "pull_request",
+          changeId: `pr:${link.number}`,
+          loading: true,
+        });
         ignoreBranchRestoreRef.current = true;
         pendingPullRequestRef.current = link;
-        void onOpenProjectChat({
-          root: switchTo.root,
-          threadId: switchTo.threadId,
-        }).catch((error) =>
-          ignoreExpectedFailure(error, "open chat for pull request")
+        void onOpenProjectChat({ root: switchTo.root, threadId: switchTo.threadId }).then(
+          (opened) => {
+            if (opened) return;
+            pendingPullRequestRef.current = null;
+            setDiffTarget(null);
+          },
+          (error) => {
+            pendingPullRequestRef.current = null;
+            setDiffTarget(null);
+            ignoreExpectedFailure(error, "open chat for pull request");
+          }
         );
         return;
       }
@@ -1143,17 +1191,22 @@ export function ChatScreen({
       try {
         const next = await refreshWorkspaceChanges();
         if (cancelled) return;
+        // Keep the same target while nothing changed, so an idle poll does
+        // not re-render (or re-request) the open diff.
         setDiffTarget((current) =>
-          current?.source === "branch" ? branchTarget(next) : current
+          current?.source !== "branch" ||
+          (current.diff === next.diff && current.changeId === next.changeId)
+            ? current
+            : branchTarget(next)
         );
       } catch {
         // The last rendered snapshot stays visible when Git is temporarily unavailable.
       }
     };
-    const interval = window.setInterval(tick, 2500);
+    const stopPolling = visibleInterval(document, () => void tick(), 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      stopPolling();
     };
   }, [branchTarget, refreshWorkspaceChanges, openBranchChangeId]);
 
@@ -1166,6 +1219,7 @@ export function ChatScreen({
   );
 
   const closeDiff = useCallback(() => {
+    pullRequestLoadRef.current += 1;
     rememberDiffOpen(false);
     if (diffTarget?.source === "branch" && diffTarget.changeId) {
       setDismissedChangeId(diffTarget.changeId);
@@ -1205,7 +1259,8 @@ export function ChatScreen({
       label: providerLabel,
       models: session.models,
     },
-    providers
+    providers,
+    hiddenPickerProviders
   );
   const showPicker = modelPickerHasChoices(pickerGroups) || modelPickerOpen;
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
@@ -1310,15 +1365,16 @@ export function ChatScreen({
   }, []);
 
   const openSettings = useCallback(
-    (focusUser = false) => {
-      setFocusUser(focusUser);
+    (section: SettingsSectionId | null = null) => {
+      setSettingsFocus(section);
       setSettingsOpen(true);
       onOpenSettings?.();
     },
     [onOpenSettings]
   );
 
-  const openPalette = useCallback(() => {
+  const openPalette = useCallback((filter: PaletteFilter = "all") => {
+    setPaletteFilter(filter);
     setPaletteOpen(true);
   }, []);
 
@@ -1353,25 +1409,9 @@ export function ChatScreen({
     }
   }, [onEditMessage]);
 
-  /**
-   * Hand focus back to the toggle when the Workbench closes.
-   *
-   * In an effect rather than in the close handler: the panel holds focus while
-   * it is open, and it is only removed from the document during React's commit.
-   * Focusing from the handler raced that — the toggle was focused, the panel was
-   * then torn down, and the browser reset focus to `<body>`, stranding the
-   * keyboard at the top of the document.
-   */
-  const workbenchWasOpen = useRef(false);
   useEffect(() => {
     if (session.isFreeChat) setWorkbenchOpen(false);
   }, [session.isFreeChat]);
-  useEffect(() => {
-    if (workbenchWasOpen.current && !workbenchOpen) {
-      document.getElementById("workbench-toggle")?.focus();
-    }
-    workbenchWasOpen.current = workbenchOpen;
-  }, [workbenchOpen]);
 
   const jumpToMessage = useCallback(
     (messageId: string) => {
@@ -1429,7 +1469,7 @@ export function ChatScreen({
             {
               id: "open-customize",
               label: "Open Customize",
-              description: "MCP servers, skills, and project instructions",
+              description: "Appearance, chat view, tools, skills, and project instructions",
               shortcut: shortcutFor("view.customize"),
               group: "settings" as const,
               run: openCustomize,
@@ -1442,7 +1482,7 @@ export function ChatScreen({
         description: "Configure Zest and keyboard shortcuts",
         shortcut: shortcutFor("view.settings"),
         group: "settings" as const,
-        run: openSettings,
+        run: () => openSettings(),
       },
       ...(onOpenProfile
         ? [
@@ -1489,19 +1529,19 @@ export function ChatScreen({
   // panel does not fly open on mount.
   useEffect(() => {
     if (settingsRequest <= 0) return;
-    setFocusUser(true);
+    setSettingsFocus("user");
     setSettingsOpen(true);
   }, [settingsRequest]);
 
   useEffect(() => {
     if (settingsOpenRequest <= 0) return;
-    setFocusUser(false);
+    setSettingsFocus(null);
     setSettingsOpen(true);
   }, [settingsOpenRequest]);
 
   const closeSettings = useCallback(() => {
     setSettingsOpen(false);
-    setFocusUser(false);
+    setSettingsFocus(null);
     onCloseSettings?.();
   }, [onCloseSettings]);
 
@@ -1589,8 +1629,10 @@ export function ChatScreen({
   });
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--chat-canvas)]">
+    <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--canvas-solid)]">
       <ChatHistorySidebar
+        onOpenPullRequests={onOpenPullRequests}
+        pullRequestsActive={shellPanel?.kind === "pullRequests"}
         open={sidebarOpen}
         activeThreadId={session.threadId}
         activeProjectPath={session.isFreeChat ? null : session.root}
@@ -1609,6 +1651,7 @@ export function ChatScreen({
         profile={profile}
         providerLabel={providerLabel}
         onOpenProfile={openProfile}
+        onOpenSettings={openSettings}
         providers={providers}
         quotaRefreshKey={`${session.threadId}:${messages.length}`}
         onSearch={openPalette}
@@ -1625,6 +1668,12 @@ export function ChatScreen({
         canNavigateForward={canNavigateForward}
         onNavigateBack={onNavigateBack}
         onNavigateForward={onNavigateForward}
+        splitGroups={splitGroups}
+        activeSplitGroupId={activeSplitGroupId}
+        onOpenSplitGroup={onOpenSplitGroup}
+        onFocusSplitPane={onFocusSplitPane}
+        delegationJobs={delegationJobs}
+        onOpenDelegationJob={openDelegationJob}
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1653,6 +1702,7 @@ export function ChatScreen({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {onOpenSplit ? <Button type="button" variant="ghost" size="icon-sm" title="Split view" aria-label="Open split view" disabled={compacting} onClick={onOpenSplit}><Columns2Icon aria-hidden="true" /></Button> : null}
             {/* Branch changes moved out of this row and into BranchChangesBar
                 below the header, where the counts can say which project and
                 branch they belong to. */}
@@ -1673,43 +1723,9 @@ export function ChatScreen({
                 <FolderOpenIcon aria-hidden="true" />
               </Button>
             ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Command palette (Ctrl+K)"
-              aria-label="Open command palette"
-              aria-expanded={paletteOpen}
-              onClick={openPalette}
-            >
-              <CommandIcon />
-            </Button>
-            {!session.isFreeChat ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                title={workbenchOpen ? "Close Workbench" : "Open Workbench"}
-                aria-label={workbenchOpen ? "Close Workbench" : "Open Workbench"}
-                aria-controls="workbench-panel"
-                aria-expanded={workbenchOpen}
-                id="workbench-toggle"
-                onClick={toggleWorkbench}
-              >
-                <PanelRightOpenIcon aria-hidden="true" />
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Settings (Ctrl+,)"
-              aria-label="Open settings"
-              aria-expanded={settingsOpen}
-              onClick={() => openSettings()}
-            >
-              <SettingsIcon />
-            </Button>
+            {/* Settings opens from the account menu at the bottom of the
+                sidebar, or Mod+, — not from a gear competing with the project
+                actions here. */}
           </div>
         </header>
 
@@ -1749,12 +1765,19 @@ export function ChatScreen({
          */}
         {shellPanel ? (
           <Suspense fallback={null}>
-          {shellPanel.kind === "customize" ? (
+          {shellPanel.kind === "pullRequests" ? (
+            <PullRequestsPanel onOpen={(project, thread) => {
+              const link = thread.gitContext?.pullRequest;
+              if (link) requestPullRequest(link, { root: project.path, threadId: thread.id });
+            }} />
+          ) : shellPanel.kind === "customize" ? (
             <CustomizePanel
               tab={shellPanel.tab}
               sending={sending}
               providerOwnsAgentLoop={session.ownsAgentLoop}
               providerLabel={providerLabel}
+              providers={providers}
+              currentProviderId={session.provider}
               onTabChange={(next) => onCustomizeTabChange?.(next)}
               onBack={() => onClosePanel?.()}
             />
@@ -1769,7 +1792,7 @@ export function ChatScreen({
                   onBack={() => onClosePanel?.()}
                   // Editing name and avatar stays in Settings; the profile
                   // page reports, it does not duplicate the form.
-                  onEditProfile={() => openSettings(true)}
+                  onEditProfile={() => openSettings("user")}
                   onOpenUsage={openUsage}
                 />
               ) : (
@@ -1779,7 +1802,15 @@ export function ChatScreen({
           )}
           </Suspense>
         ) : (
-        <div className="relative min-h-0 flex-1">
+        <div className="zest-wallpaper-frame relative min-h-0 flex-1">
+          {wallpaper?.status === "ready" && wallpaper.imageDataUrl ? (
+            <div
+              aria-hidden="true"
+              className="zest-wallpaper zest-chat-wallpaper"
+              data-filter={wallpaper.filter}
+              style={{ backgroundImage: `url("${wallpaper.imageDataUrl}")` }}
+            />
+          ) : null}
           {/* The rail needs a gutter of its own; a narrow window has none to
               spare, so it steps aside and the transcript takes the width. */}
           {narrow ? null : (
@@ -1833,39 +1864,54 @@ export function ChatScreen({
                     const isLast = index === messages.length - 1;
                     const isActiveWorking = showTurnWorking && isLast;
                     return (
-                      <ChatMessageRow
-                        key={msg.id}
-                        message={msg}
-                        isLast={isLast}
-                        sending={sending}
-                        approvalMode={approvalMode}
-                        isPlanToBuild={planToBuild === msg.id}
-                        onBuildPlan={onBuildPlan}
-                        onResolveApproval={onResolveApproval}
-                        onOpenDiff={openDiff}
-                        onReconnectProvider={onReconnectProvider}
-                        onOpenProviderSwitch={refreshAndOpenProviderSwitch}
-                        onSend={onSend}
-                        editing={editingMessageId === msg.id}
-                        editingText={
-                          editingMessageId === msg.id ? editingMessageText : ""
-                        }
-                        editingBusy={editingMessageBusy}
-                        onStartEdit={startEditingMessage}
-                        onChangeEdit={setEditingMessageText}
-                        onCancelEdit={cancelEditingMessage}
-                        onSubmitEdit={submitEditingMessage}
-                        onResolveQuestion={onResolveQuestion}
-                        pinQuestion={
-                          pendingApprovals.length === 0 &&
-                          pendingQuestion?.messageId === msg.id
-                        }
-                        showWorking={isActiveWorking && msg.role === "assistant"}
-                        workingStartedAt={
-                          isActiveWorking ? turnActivity?.startedAt : undefined
-                        }
-                        workingAction={isActiveWorking ? workingAction : undefined}
-                      />
+                      <Fragment key={msg.id}>
+                        <ChatMessageRow
+                          message={msg}
+                          isLast={isLast}
+                          sending={sending}
+                          approvalMode={approvalMode}
+                          providerLabel={providerLabel}
+                          delegationJobs={delegationJobs}
+                          onOpenDelegation={openDelegationJob}
+                          isPlanToBuild={planToBuild === msg.id}
+                          onBuildPlan={onBuildPlan}
+                          onOpenDiff={openDiff}
+                          onReconnectProvider={onReconnectProvider}
+                          onOpenProviderSwitch={refreshAndOpenProviderSwitch}
+                          onSend={onSend}
+                          editing={editingMessageId === msg.id}
+                          editingText={
+                            editingMessageId === msg.id ? editingMessageText : ""
+                          }
+                          editingBusy={editingMessageBusy}
+                          onStartEdit={startEditingMessage}
+                          onChangeEdit={setEditingMessageText}
+                          onCancelEdit={cancelEditingMessage}
+                          onSubmitEdit={submitEditingMessage}
+                          onResolveQuestion={onResolveQuestion}
+                          pinQuestion={
+                            pendingApprovals.length === 0 &&
+                            pendingQuestion?.messageId === msg.id
+                          }
+                          showWorking={isActiveWorking && msg.role === "assistant"}
+                          workingStartedAt={
+                            isActiveWorking ? turnActivity?.startedAt : undefined
+                          }
+                          workingAction={isActiveWorking ? workingAction : undefined}
+                        />
+                        {noticesAfterMessage.get(msg.id)?.map((notice) => (
+                          <MessageScrollerItem key={notice.id} messageId={notice.id}>
+                            <Marker
+                              variant="separator"
+                              role="note"
+                              data-transcript-notice=""
+                              className="text-xs"
+                            >
+                              <MarkerContent>{notice.text}</MarkerContent>
+                            </Marker>
+                          </MessageScrollerItem>
+                        ))}
+                      </Fragment>
                     );
                   })}
                   {hasNewerMessages || loadingNewer ? (
@@ -1909,7 +1955,7 @@ export function ChatScreen({
               <TranscriptScrollRegistration
                 onRegisterScrollToMessage={registerScrollToTranscriptMessage}
               />
-              <MessageScrollerButton />
+              <ConversationScrollButton messageIds={conversationMessageIds} />
             </MessageScroller>
           </MessageScrollerProvider>
 
@@ -1936,6 +1982,7 @@ export function ChatScreen({
           ) : null}
 
           <Composer
+            onBtw={() => setBtw({ sessionId: session.sessionId, question: "" })}
             approvalMode={approvalMode}
             onApprovalModeChange={onApprovalModeChange}
             value={draft}
@@ -1947,6 +1994,7 @@ export function ChatScreen({
             branch={branch}
             gitContext={gitContext}
             contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
+            contextScope={session.threadId}
             sending={sending}
             queuedMessages={queuedMessages}
             onUpdateQueuedMessage={onUpdateQueuedMessage}
@@ -1967,12 +2015,18 @@ export function ChatScreen({
             onChange={onDraftChange}
             onSubmit={(currentDraft?: string) => {
               const text = currentDraft ?? draft;
+              const question = btwQuestion(text);
+              if (question !== null) {
+                setBtw({ sessionId: session.sessionId, question });
+                onDraftChange("");
+                return;
+              }
               if (isModelSlash(text)) {
                 onDraftChange("");
                 setModelPickerOpen(true);
                 return;
               }
-              onSend(text);
+              onSend({ origin: "composer", text });
             }}
             onStop={onStop}
             onModelChange={onModelChange}
@@ -2040,7 +2094,7 @@ export function ChatScreen({
           effort={effort}
           sending={sending}
           profile={profile}
-          focusUser={focusUser}
+          focusSection={settingsFocus}
           onClose={closeSettings}
           onChangeProvider={() => {
             closeSettings();
@@ -2111,14 +2165,24 @@ export function ChatScreen({
             onRetryDelegation={onRetryDelegation}
             onApplyDelegation={onApplyDelegation}
             onReconnectProvider={onReconnectProvider}
+            focusDelegationJob={workbenchJobFocus}
           />
         </Suspense>
       ) : null}
+
+      {btw?.sessionId === session.sessionId ? <BtwPanel
+        key={btw.sessionId}
+        sessionId={btw.sessionId}
+        initialQuestion={btw.question}
+        mainRunning={sending}
+        onClose={() => { setBtw(null); requestAnimationFrame(focusComposer); }}
+      /> : null}
 
       {paletteOpen ? (
         <CommandPalette
           open={paletteOpen}
           actions={paletteActions}
+          initialFilter={paletteFilter}
           onClose={() => setPaletteOpen(false)}
           onOpenChat={(options) => {
             void onOpenProjectChat(options).catch((error) =>
@@ -2127,6 +2191,10 @@ export function ChatScreen({
           }}
           onCommand={(name) => {
             setPaletteOpen(false);
+            if (name.toLowerCase() === "btw") {
+              setBtw({ sessionId: session.sessionId, question: "" });
+              return;
+            }
             if (isModelCommandName(name)) {
               setModelPickerOpen(true);
               return;

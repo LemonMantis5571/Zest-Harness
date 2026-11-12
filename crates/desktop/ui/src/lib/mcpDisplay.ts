@@ -35,6 +35,7 @@ export function approvalTitle(name: string): string {
   if (parsed) return `Run ${parsed.tool} on ${parsed.server}?`;
   if (name === "bash") return "Run this command?";
   if (name === "delegate_external") return "Delegate this task?";
+  if (name === "consult_advisor") return "Share this chat with the advisor?";
   return `Allow ${name}?`;
 }
 

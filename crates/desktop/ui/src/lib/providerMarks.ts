@@ -11,7 +11,7 @@
  * through the same `openai_compatible` shape — so the model says little about
  * who is being talked to, while the id is exactly what the user configured.
  */
-export type ProviderMark = "codex" | "claude" | "deepseek" | "gemini" | "generic";
+export type ProviderMark = "codex" | "claude" | "deepseek" | "gemini" | "cursor" | "generic";
 
 const RULES: { mark: Exclude<ProviderMark, "generic">; test: (id: string) => boolean }[] = [
   { mark: "codex", test: (id) => id === "codex" || id.startsWith("codex-") || id.startsWith("openai") },
@@ -21,6 +21,7 @@ const RULES: { mark: Exclude<ProviderMark, "generic">; test: (id: string) => boo
     mark: "gemini",
     test: (id) => id.startsWith("gemini") || id === "antigravity",
   },
+  { mark: "cursor", test: (id) => id === "cursor" || id.startsWith("cursor-") },
 ];
 
 /**
