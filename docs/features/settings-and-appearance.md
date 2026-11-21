@@ -63,6 +63,7 @@ verify:
 - `cargo test -p zest-core --lib -- config` runs the `config`, `config_edit`, and `config_migrate` tests (comment preservation, gateway migration, lint).
 - `cargo test -p zest-core --lib -- profile::` runs the streak and heatmap tests.
 - `npm run ui:test` covers the theme, font, and chat-view registries.
+- The [native GPUI workspace](gpui-workspace.md) copies only the default `zest` theme's tokens and Geist into `spikes/gpui/src/theme.rs`. Its theme, font and chat-view pickers and the profile screen are not ported, so keep those tokens in step when the default palette changes.
 - Fixture: open `/?fixture=1`, then Customize > Appearance / Typography; Profile works on canned stats.
 
 ## Pitfalls
