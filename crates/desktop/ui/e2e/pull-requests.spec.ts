@@ -41,6 +41,18 @@ test("pull request review shows progress before a slow diff fetch completes", as
   const diff = page.getByRole("dialog");
   const progress = diff.getByRole("status").filter({ hasText: "Fetching the pull request diff" });
   await expect(diff).toBeVisible();
+  const checks = diff.getByRole("region", { name: "Pull request checks" });
+  await expect(checks.getByRole("link", { name: "Linux verify" })).toHaveAttribute("href", "https://github.com/zest/app/actions/runs/42");
+  await expect(checks.getByText("Failed", { exact: true })).toBeVisible();
+  await expect(checks.getByText("Running", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("fixturePrMerged", "1");
+    history.replaceState(null, "", url);
+  });
+  await checks.getByRole("button", { name: "Refresh checks" }).click();
+  await expect(checks.getByText("Merged · Checks")).toBeVisible();
+  await expect(checks.getByText("Passed", { exact: true })).toHaveCount(2);
   await expect(progress).toBeVisible();
   await expect(diff.getByRole("button", { name: "Clean", exact: true })).toBeDisabled();
   await expect(diff.getByRole("button", { name: "Raw", exact: true })).toBeDisabled();

@@ -149,7 +149,7 @@ impl Workspace {
             search_task: None,
             search_cancel: zest_core::CancelToken::new(),
         };
-        ws.add(Thread::new(), window, cx);
+        ws.new_chat(window, cx);
         ws.load_history(cx);
         ws
     }
@@ -241,7 +241,6 @@ impl Workspace {
         self.search_cancel = zest_core::CancelToken::new();
         let cancel = self.search_cancel.clone();
         let store = self.project.store.clone();
-        let history = self.history.clone();
         self.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(180))
@@ -249,11 +248,14 @@ impl Workspace {
             let query = term.clone();
             let hits = cx
                 .background_executor()
-                .spawn(async move { search::search(&store, &history, &query, &cancel) })
+                .spawn(async move { search::search(&store, &query, &cancel) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 if ws.search_term == term && ws.panel == Panel::Search {
-                    ws.hits = hits;
+                    match hits {
+                        Ok(hits) => ws.hits = hits,
+                        Err(e) => ws.note = e.to_string(),
+                    }
                     cx.notify();
                 }
             });
@@ -270,6 +272,16 @@ impl Workspace {
                 cx.notify();
             }
         });
+    }
+
+    fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut thread = Thread::new();
+        if let Some((commit, branch)) =
+            zest_core::worktree_chat::chat_git_baseline(&self.project.path)
+        {
+            thread.ensure_git_context(branch, Some(commit));
+        }
+        self.add(thread, window, cx);
     }
 
     fn add(&mut self, thread: Thread, window: &mut Window, cx: &mut Context<Self>) {
@@ -339,7 +351,7 @@ impl Workspace {
     fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.second.take().is_none() {
             let previous = self.active.clone();
-            self.add(Thread::new(), window, cx);
+            self.new_chat(window, cx);
             self.second = Some(previous);
         }
         self.panel = Panel::Chat;
@@ -1171,7 +1183,7 @@ impl Render for Workspace {
             .child(button(
                 "new",
                 "+ New chat",
-                cx.listener(|ws, _, w, cx| ws.add(Thread::new(), w, cx)),
+                cx.listener(|ws, _, w, cx| ws.new_chat(w, cx)),
             ))
             .child(history)
             .child(nav);
@@ -1286,7 +1298,7 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .on_action(cx.listener(|ws, _: &NewChat, w, cx| ws.add(Thread::new(), w, cx)))
+            .on_action(cx.listener(|ws, _: &NewChat, w, cx| ws.new_chat(w, cx)))
             .on_action(cx.listener(|ws, _: &FindChat, w, cx| ws.page(Panel::Search, w, cx)))
             .on_action(cx.listener(|ws, _: &OpenFolder, _, cx| ws.pick_project(cx)))
             .on_action(cx.listener(|ws, _: &ToggleSplit, w, cx| ws.split(w, cx)))
@@ -1425,6 +1437,9 @@ pub fn launch_if_requested() -> bool {
         if let Err(e) = zest_core::ensure_user_config() {
             eprintln!("Could not initialize provider configuration: {e}");
         }
+    }
+    if test {
+        workspace_test::init_repository(&root);
     }
     gpui_platform::application().run(move |cx| {
         composer::bind_keys(cx);

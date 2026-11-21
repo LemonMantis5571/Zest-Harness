@@ -4,10 +4,12 @@ on:
   pull_request:
     paths:
       - 'spikes/gpui/**'
+      - 'Cargo.toml'
       - 'crates/core/**'
       - 'crates/coordinator/**'
       - 'crates/desktop/src/attachments.rs'
       - 'crates/desktop/src/context_meter.rs'
+      - 'crates/desktop/src/scratch_dir.rs'
       - 'crates/desktop/src/workspace_files.rs'
       - '.github/workflows/gpui-windows.yml'
 
@@ -28,5 +30,13 @@ jobs:
         with:
           workspaces: spikes/gpui -> target
           save-if: false
-      - run: cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
+      - name: Test native workspace, including offline agent and delegation flows
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml -- --nocapture | Tee-Object -Variable testLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($scenario in 'native_workspace', 'delegation_board') {
+            if (-not ($testLog -match "^SELFTEST ${scenario}: PASS ")) { throw "Missing $scenario smoke result" }
+          }
       - run: cargo build --locked --release --manifest-path spikes/gpui/Cargo.toml

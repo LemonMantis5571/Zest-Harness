@@ -166,6 +166,9 @@ export type ChatScreenProps = {
   gitContext: GitContext | null;
   profile: UserProfile;
   sending: boolean;
+  unsentFollowups: ReadonlyArray<QueuedTurn>;
+  onRestoreFollowup: (turn: QueuedTurn) => void;
+  onDiscardFollowup: (turn: QueuedTurn) => void;
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
   onRemoveQueuedMessage: (turnId: string) => void;
@@ -678,6 +681,9 @@ export function ChatScreen({
   gitContext,
   profile,
   sending,
+  unsentFollowups,
+  onRestoreFollowup,
+  onDiscardFollowup,
   queuedMessages,
   onUpdateQueuedMessage,
   onRemoveQueuedMessage,
@@ -1001,29 +1007,23 @@ export function ChatScreen({
         diff: "",
         source: "pull_request",
         changeId: `pr:${link.number}`,
+        pullRequest: link,
         loading: true,
       };
       setDiffTarget(loadingTarget);
       try {
         const change = await getBackend().pullRequestDiff(link.number);
         if (requestId !== pullRequestLoadRef.current) return;
-        if (
-          change.unavailable ||
-          (!change.changedFiles.length && !change.diff.trim())
-        ) {
-          await openExternalUrl(link.url);
-          return;
-        }
         setDiffTarget({
           ...loadingTarget,
           loading: false,
+          diffUnavailable: change.unavailable,
           diff: change.diff,
         });
       } catch (error) {
         if (requestId !== pullRequestLoadRef.current) return;
         ignoreExpectedFailure(error, "open pull request diff");
-        setDiffTarget(null);
-        await openExternalUrl(link.url);
+        setDiffTarget({ ...loadingTarget, loading: false, diffUnavailable: true });
       }
     },
     [session.isFreeChat]
@@ -1996,6 +1996,9 @@ export function ChatScreen({
             contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
             contextScope={session.threadId}
             sending={sending}
+            unsentFollowups={unsentFollowups}
+            onRestoreFollowup={onRestoreFollowup}
+            onDiscardFollowup={onDiscardFollowup}
             queuedMessages={queuedMessages}
             onUpdateQueuedMessage={onUpdateQueuedMessage}
             onRemoveQueuedMessage={onRemoveQueuedMessage}

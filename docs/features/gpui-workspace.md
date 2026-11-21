@@ -44,16 +44,16 @@ Run `npm run gpui -- --demo` for a temporary offline workspace. Send `Demo: writ
 | Files and interaction | Attach files or paste images, inspect proposed tool inputs, approve or deny individual requests and answer agent questions. The agent uses Zest's shared tools and approval policy. |
 | Provider and commands | Choose a configured provider, model, effort and permission mode. The settings panel exposes supported sign-in flows. Use skills, MCP slash commands, plan mode and the independent `/btw` conversation. |
 | Context and history | Fork a thread or checkpoint, inspect context usage, and compact agent history. The usage panel reads the shared ledger and can request provider quota. |
-| Project inspection | Browse project files, preview bounded text content, read the Git diff, and inspect the current chat's background jobs and the project's saved delegations. |
+| Project inspection | Browse project files, preview bounded text content, read the Git diff, and inspect the current chat's background jobs and the project's saved delegations. Each new chat, including a split, records the project's current commit. Changes shows edits since that commit even after committing and reopening the chat. A legacy chat without a saved starting commit shows working tree changes. |
 | Delegation | Create a scoped card, select worker and reviewer targets, approve dispatch, review acceptance evidence, page through the diff, then apply, cancel or prepare a retry. Changes appear in the board while the worker and reviewer run. |
 
 ## Implementation and verification
 
 `workspace.rs` owns navigation. Each open chat owns a `Root` view and its own command channel. `native.rs` sends work to the shared Rust agent on Tokio, checkpoints before turns and writes the transcript, provider history and run status. Each approval or question has an individual response channel. `side.rs` keeps side questions out of the main transcript.
 
-The sidebar reads saved summaries in the background at startup and when opening Find chats. Turn events update the affected chat directly, and pinned chats appear first. Transcript search uses the answer's rendered row so clicking a match lands below that turn's reasoning and tool trace.
+The sidebar reads saved summaries in the background at startup and when opening Find chats. Turn events update the affected chat directly, and pinned chats appear first. Find chats uses the [shared local transcript index](threads-and-history.md), including for older histories over 8 MiB. A transcript result opens the answer's rendered row below that turn's reasoning and tool trace.
 
-`npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary project. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
+`npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary Git repository. Windows CI runs the same scenario in a GPUI test window through `cargo test`, including an approved edit that is committed and reviewed after reopening, then the delegation board's worker, reviewer and apply sequence. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
 
 ## Remaining desktop coverage
 

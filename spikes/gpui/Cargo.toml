@@ -35,6 +35,9 @@ zest-coordinator = { path = "../../crates/coordinator" }
 # Syntax pack from bat (TypeScript, TSX, TOML, Dockerfile, Kotlin, Swift, ...). Same regex backend as syntect above.
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"], optional = true }
 
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "7a349ce42df27b03c3ac16d478c88b8e1411607e", features = ["test-support"] }
+
 [features]
 default = ["core"]
 core = []

@@ -263,6 +263,7 @@ export type DesktopBackend = {
   workspaceChanges(): Promise<WorkspaceChange>;
   /** Model-abridged "clean" view of a diff. A provider call: ask once per diff. */
   generateReadingDiff(diff: string): Promise<ReadingDiffView>;
+  pullRequestStatus: typeof tauriApi.pullRequestStatus;
   pullRequestDiff(number?: number): Promise<WorkspaceChange>;
   verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
@@ -399,6 +400,7 @@ export function createTauriBackend(): DesktopBackend {
     gitContext: () => tauriApi.gitContext(),
     workspaceChanges: () => tauriApi.workspaceChanges(),
     generateReadingDiff: (diff) => tauriApi.generateReadingDiff(diff),
+    pullRequestStatus: tauriApi.pullRequestStatus,
     pullRequestDiff: (number) => tauriApi.pullRequestDiff(number),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),

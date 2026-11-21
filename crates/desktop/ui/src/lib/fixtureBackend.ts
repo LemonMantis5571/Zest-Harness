@@ -2318,6 +2318,10 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           chatHandler?.({ kind: "assistant_start", ...id, message_id: assistantId });
         });
       }
+      if (target === "followup" && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("holdQueueFailure")) {
+        await new Promise<void>((resolve) => window.addEventListener("zest:fixture-reject-queue", () => resolve(), { once: true }));
+        throw new Error("Fixture could not save the follow-up");
+      }
       if (target === "followup" || target === "steer" || target === "inject") {
         const input = {
           id: `input-${crypto.randomUUID()}`,
@@ -2769,6 +2773,17 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         diff: FIXTURE_PULL_REQUEST_DIFF,
         truncated: false,
         unavailable: false,
+      };
+    },
+    async pullRequestStatus(number) {
+      const merged = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("fixturePrMerged");
+      return {
+        state: merged ? "MERGED" : "OPEN",
+        url: "https://github.com/zest/app/pull/" + number,
+        checks: [
+          { name: "Linux verify", status: merged ? "SUCCESS" : "FAILURE", url: "https://github.com/zest/app/actions/runs/42" },
+          { name: "Windows verify", status: merged ? "SUCCESS" : "IN_PROGRESS", url: null },
+        ],
       };
     },
     async pullRequestDiff(number = 13): Promise<WorkspaceChange> {

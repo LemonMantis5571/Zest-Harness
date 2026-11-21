@@ -16,6 +16,7 @@ import {
   XIcon,
 } from "lucide-react";
 
+import { PullRequestChecks } from "@/components/PullRequestChecks";
 import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
 import type { ReadingDiffView } from "@/lib/api";
@@ -31,6 +32,8 @@ export type DiffViewerTarget = {
   source?: "tool" | "branch" | "pull_request";
   changeId?: string;
   loading?: boolean;
+  pullRequest?: { number: number; url: string };
+  diffUnavailable?: boolean;
 };
 
 type Props = {
@@ -83,7 +86,7 @@ export function DiffViewer({
   // Keyed on the diff text, not the target object: the branch view re-polls
   // Git every 2.5 s and hands over a fresh object each time. Keying on identity
   // made every poll a new model call and collapsed the reader's sections.
-  const targetDiff = target && !target.loading ? target.diff : null;
+  const targetDiff = target && !target.loading && target.diff ? target.diff : null;
   const wantsReading = view === "reading";
   // One request per diff, shared by every effect run that wants it (StrictMode
   // runs effects twice, and toggling Clean/Raw re-runs them).
@@ -303,6 +306,8 @@ export function DiffViewer({
               </Button>
             </div>
           </div>
+          {target.pullRequest ? <PullRequestChecks key={target.pullRequest.url} link={target.pullRequest} /> : null}
+          {target.diffUnavailable ? <p className="px-3 py-1 text-xs text-muted-foreground">Diff unavailable.</p> : null}
           {target.loading ? (
             <div role="status" className="flex items-center gap-2 border-t border-border/50 px-3 py-1.5 text-[11px] text-muted-foreground">
               <LoaderCircleIcon className="size-3 animate-spin" aria-hidden="true" />

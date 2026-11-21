@@ -1,5 +1,80 @@
 use super::*;
 
+fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Zest Test",
+            "-c",
+            "user.email=zest@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+        ])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+pub(super) fn init_repository(root: &std::path::Path) {
+    git(root, &["init", "-q", "-b", "native-test"]);
+    std::fs::write(root.join(".gitignore"), ".zest/\n").unwrap();
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "--no-verify", "-qm", "Initial checkout"]);
+}
+
+// Service runners lack an interactive Windows desktop. Exercise the same
+// workspace scenario with a GPUI test window and the real Tokio agent.
+#[::core::prelude::v1::test]
+fn offline_workspace_smoke() {
+    use futures::FutureExt;
+
+    let project = tempfile::tempdir().unwrap();
+    init_repository(project.path());
+    let project_state = Project::open(project.path().to_owned(), true).unwrap();
+    let mut app = gpui::TestAppContext::single();
+    app.update(composer::bind_keys);
+    let window = app.open_window(size(px(1150.), px(790.)), |w, cx| {
+        Workspace::new(project_state, w, cx)
+    });
+    let mut cx = app.to_async();
+    let mut scenario = std::pin::pin!(check(window, &mut cx));
+    let tick = Duration::from_millis(10);
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while scenario.as_mut().now_or_never().is_none() {
+        app.run_until_parked();
+        assert!(
+            Instant::now() < deadline,
+            "native workspace smoke test timed out"
+        );
+        // Tokio, Git and the delegation subprocess use real time. Advance
+        // GPUI's simulated clock at their pace while their results arrive.
+        std::thread::sleep(tick);
+        app.executor().advance_clock(tick);
+    }
+    app.quit();
+}
+
+async fn changes(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) -> String {
+    handle
+        .update(cx, |ws, w, cx| ws.page(Panel::Changes, w, cx))
+        .unwrap();
+    for _ in 0..150 {
+        let report = handle.update(cx, |ws, _, _| ws.report.clone()).unwrap();
+        if !report.contains("Reading Git") {
+            return report;
+        }
+        settle(cx, 50).await;
+    }
+    panic!("Changes panel timed out");
+}
+
 pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     settle(cx, 300).await;
     let (first, root) = handle
@@ -56,21 +131,9 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
                 ws.page(page, w, cx);
                 let _ = ws.panel_body(cx);
             }
-            ws.page(Panel::Changes, w, cx);
         })
         .unwrap();
-    for _ in 0..150 {
-        settle(cx, 50).await;
-        if handle
-            .update(cx, |ws, _, _| !ws.report.contains("Reading Git"))
-            .unwrap()
-        {
-            break;
-        }
-    }
-    handle
-        .update(cx, |ws, _, _| assert!(!ws.report.contains("Reading Git")))
-        .unwrap();
+    assert_eq!(changes(handle, cx).await, "Working tree clean.");
     handle
         .update(cx, |ws, w, cx| ws.open(&first, w, cx))
         .unwrap();
@@ -91,10 +154,15 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
             settle(cx, 50).await;
         }
         root.update(cx, |r, cx| {
-            let card = r
-                .cards
-                .front()
-                .unwrap_or_else(|| panic!("{prompt} expected a decision, busy={}, queued={}, turns={}, status={}", r.turn_active, r.pending.len(), r.turns_done, r.note));
+            let card = r.cards.front().unwrap_or_else(|| {
+                panic!(
+                    "{prompt} expected a decision, busy={}, queued={}, turns={}, status={}",
+                    r.turn_active,
+                    r.pending.len(),
+                    r.turns_done,
+                    r.note
+                )
+            });
             match &card.request {
                 interaction::Request::Approval { preview, .. } => {
                     assert!(preview.contains("demo.txt"))
@@ -118,6 +186,35 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
             })
             .unwrap();
     }
+    let project_path = handle
+        .update(cx, |ws, _, _| ws.project.path.clone())
+        .unwrap();
+    git(&project_path, &["add", "demo.txt"]);
+    git(
+        &project_path,
+        &[
+            "commit",
+            "--no-verify",
+            "-qm",
+            "Commit approved native edit",
+        ],
+    );
+    assert!(git(&project_path, &["status", "--porcelain"]).is_empty());
+    let committed_report = changes(handle, cx).await;
+    assert!(
+        committed_report.contains("+Approved in GPUI"),
+        "{committed_report}"
+    );
+    // A split opened after the commit has its own baseline, independent of the first chat.
+    handle
+        .update(cx, |ws, w, cx| {
+            if ws.second.is_some() {
+                ws.split(w, cx);
+            }
+            ws.split(w, cx);
+        })
+        .unwrap();
+    assert_eq!(changes(handle, cx).await, "Working tree clean.");
     handle
         .update(cx, |ws, w, cx| {
             let saved = ws.project.store.load(&first).unwrap();
@@ -126,13 +223,18 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
                     .unwrap()
                     .contains("Second")
             );
-            ws.add(Thread::new(), w, cx);
             ws.chats.remove(&first);
             ws.open(&first, w, cx);
             assert_eq!(
                 ws.chat(cx).thread.lock().unwrap().agent_messages.len(),
                 saved.agent_messages.len()
             );
+        })
+        .unwrap();
+    assert_eq!(changes(handle, cx).await, committed_report);
+    handle
+        .update(cx, |ws, w, cx| {
+            ws.open(&first, w, cx);
             let view = ws.chats[&first].clone();
             let attachment = attachments::prepare_paths(&[ws.project.path.join("demo.txt")])
                 .pop()
@@ -288,7 +390,7 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
                 runs.iter()
                     .any(|r| r.status == zest_core::RunStatus::Completed)
             );
-            ws.add(Thread::new(), w, cx);
+            ws.new_chat(w, cx);
             ws.chats.remove(&first);
             ws.open(&first, w, cx);
             ws.chats[&first].clone()
@@ -335,7 +437,7 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
         );
     });
     println!(
-        "SELFTEST native_workspace: PASS chat, queue edit and resume after reopen, run records, wire context, checkpoint fork, split, disk reopen, deny/allow, question, file attachment, file preview, transcript search, side chat isolation and workbench"
+        "SELFTEST native_workspace: PASS chat, queue edit and resume after reopen, run records, wire context, checkpoint fork, split, committed changes after reopen, deny/allow, question, file attachment, file preview, transcript search, side chat isolation and workbench"
     );
     board::selftest::check(handle, cx).await;
     cx.update(|cx| cx.quit());

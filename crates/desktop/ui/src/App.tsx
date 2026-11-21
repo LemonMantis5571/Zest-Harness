@@ -90,6 +90,7 @@ import { markThreadSeen, recordUnreadEvent } from "@/lib/threadUnread";
 import {
   pendingInputToQueuedTurn,
   updateThreadTurn,
+  enqueueThreadTurn,
   removeThreadTurn,
   type ThreadQueueMap,
 } from "@/lib/threadQueue";
@@ -536,6 +537,7 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [threadActivity, setThreadActivity] = useState<ThreadActivityMap>({});
   const [delegationJobs, setDelegationJobs] = useState<DelegationJob[]>([]);
+  const [unsentFollowups, setUnsentFollowups] = useState<ThreadQueueMap>({});
   const [threadQueues, setThreadQueues] = useState<ThreadQueueMap>({});
   const [resumingQueuedThread, setResumingQueuedThread] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
@@ -2843,9 +2845,8 @@ export default function App() {
           );
         } catch (error) {
           if (!keepComposer) {
-            setDraft(text);
-            setAttachments(pending);
-            saveDraft(queueThreadId, text);
+            const turn = { id: newId("unsent"), threadId: queueThreadId, text, attachments: pending, createdAt: Date.now() };
+            setUnsentFollowups((current) => enqueueThreadTurn(current, queueThreadId, turn));
           }
           toast.add({
             type: "error",
@@ -3475,6 +3476,15 @@ export default function App() {
             gitContext={gitContext}
             profile={profile}
             sending={sending}
+            unsentFollowups={unsentFollowups[session.threadId] ?? []}
+            onRestoreFollowup={(turn) => {
+              if (threadIdRef.current !== turn.threadId) return;
+              setDraft(turn.text);
+              saveDraft(turn.threadId, turn.text);
+              setAttachments([...turn.attachments]);
+              setUnsentFollowups((current) => removeThreadTurn(current, turn.threadId, turn.id));
+            }}
+            onDiscardFollowup={(turn) => setUnsentFollowups((current) => removeThreadTurn(current, turn.threadId, turn.id))}
             queuedMessages={threadQueues[session.threadId] ?? []}
             onUpdateQueuedMessage={(turnId, text) =>
               updateQueuedTurn(session.threadId, turnId, text)

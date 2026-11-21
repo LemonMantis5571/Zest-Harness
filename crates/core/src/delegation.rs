@@ -760,6 +760,9 @@ pub struct DelegationJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_reviewer_target: Option<ResolvedTargetMetadata>,
     pub status: DelegationStatus,
+    /// The coordinator saved its intent to run Git, but has not recorded the outcome yet.
+    #[serde(default)]
+    apply_pending: bool,
     pub worker_attempt_id: Option<String>,
     pub reviewer_attempt_id: Option<String>,
     pub attempt: u32,
@@ -1004,17 +1007,30 @@ impl DelegationJob {
             ));
         }
         if next == DelegationStatus::AwaitingApproval {
+            self.dispatch_receipt = None;
             self.approved_at = None;
             self.approval_fingerprint = None;
             self.resolved_worker_target = None;
             self.resolved_reviewer_target = None;
         }
         self.status = next;
+        self.apply_pending = false;
         self.updated_at = now_millis();
         self.orchestration.set_phase(
             LifecyclePhase::from(next),
             self.updated_at,
             format!("delegation status changed to {next:?}"),
+        );
+        Ok(true)
+    }
+
+    pub fn block_interrupted_apply(&mut self) -> Result<bool> {
+        if self.status != DelegationStatus::ReadyToApply || !self.apply_pending {
+            return Ok(false);
+        }
+        self.transition(DelegationStatus::Blocked)?;
+        self.set_error(
+            "Apply was interrupted before its result was saved. Inspect the project changes and worker.diff before retrying. Some or all changes may already be present.",
         );
         Ok(true)
     }
@@ -1664,6 +1680,16 @@ impl DelegationStore {
         read_job(&self.job_path(&job_id)?, &job_id)
     }
 
+    pub fn begin_apply(&self, job: &mut DelegationJob) -> Result<()> {
+        if job.status != DelegationStatus::ReadyToApply || job.apply_pending {
+            return Err(HarnessError::Other(
+                "expected a reviewed job awaiting apply".into(),
+            ));
+        }
+        job.apply_pending = true;
+        self.save(job)
+    }
+
     pub fn save(&self, job: &DelegationJob) -> Result<()> {
         validate_id(&job.job_id, "delegation job")?;
         if job.version != DELEGATION_FORMAT_VERSION {
@@ -1673,7 +1699,9 @@ impl DelegationStore {
         }
         let _guard = state_lock()?;
         let path = self.job_path(&job.job_id)?;
+        let mut applying = job.apply_pending;
         if let Some(current) = read_job(&path, &job.job_id)? {
+            applying |= current.apply_pending;
             if current.status == DelegationStatus::Cancelled
                 && job.status != DelegationStatus::Cancelled
             {
@@ -1681,6 +1709,14 @@ impl DelegationStore {
                     "delegation job was cancelled while this attempt was running".into(),
                 ));
             }
+        }
+        if applying {
+            return fsutil::atomic_write_json_durable(&path, job, &self.root).map_err(|error| {
+                HarnessError::Other(format!(
+                    "persist apply for delegation {}: {error}",
+                    job.job_id
+                ))
+            });
         }
         write_json(&path, "delegation job", &job.job_id, job)
     }
@@ -1750,6 +1786,7 @@ impl DelegationStore {
                 card
             },
             status: DelegationStatus::AwaitingApproval,
+            apply_pending: false,
             worker_attempt_id: None,
             reviewer_attempt_id: None,
             attempt: 0,
@@ -1837,6 +1874,11 @@ impl DelegationStore {
     pub fn reconcile_after_restart(&self) -> Result<Vec<DelegationJob>> {
         let mut changed = Vec::new();
         for mut job in self.list()? {
+            if job.block_interrupted_apply()? {
+                self.save(&job)?;
+                changed.push(job);
+                continue;
+            }
             if !matches!(
                 job.status,
                 DelegationStatus::WorkerRunning | DelegationStatus::ReviewRunning
@@ -2326,6 +2368,7 @@ mod tests {
             resolved_worker_target: None,
             resolved_reviewer_target: None,
             status: DelegationStatus::Planned,
+            apply_pending: false,
             worker_attempt_id: None,
             reviewer_attempt_id: None,
             attempt: 0,
@@ -2481,6 +2524,7 @@ Here is the JSON verdict:
             resolved_worker_target: None,
             resolved_reviewer_target: None,
             status: DelegationStatus::AwaitingApproval,
+            apply_pending: false,
             worker_attempt_id: None,
             reviewer_attempt_id: None,
             attempt: 0,

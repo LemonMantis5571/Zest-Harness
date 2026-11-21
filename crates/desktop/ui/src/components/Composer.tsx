@@ -85,6 +85,9 @@ type Props = {
   /** The chat the context meter measures. */
   contextScope: string;
   sending: boolean;
+  unsentFollowups: ReadonlyArray<QueuedTurn>;
+  onRestoreFollowup: (turn: QueuedTurn) => void;
+  onDiscardFollowup: (turn: QueuedTurn) => void;
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
   onRemoveQueuedMessage: (turnId: string) => void;
@@ -136,6 +139,9 @@ export const Composer = memo(function Composer({
   contextRefreshKey,
   contextScope,
   sending,
+  unsentFollowups,
+  onRestoreFollowup,
+  onDiscardFollowup,
   queuedMessages,
   onUpdateQueuedMessage,
   onRemoveQueuedMessage,
@@ -395,6 +401,15 @@ export const Composer = memo(function Composer({
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-3 pt-20">
       <div className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)]">
         {aboveComposer}
+        {unsentFollowups.map((turn) => (
+          <div key={turn.id} className="mb-2 flex items-center gap-2 rounded-lg border border-border bg-card p-2 text-xs">
+            <span className="min-w-0 flex-1 truncate">Not sent · {turn.text || turn.attachments.map((file) => file.name).join(", ")}</span>
+            <Button size="sm" variant="outline" disabled={Boolean(text || attachments.length)}
+              title={text || attachments.length ? "Finish your current draft before restoring this message" : undefined}
+              onClick={() => { flushChange(""); onRestoreFollowup(turn); }}>Restore draft</Button>
+            <Button size="sm" variant="ghost" aria-label="Discard unsent follow-up" onClick={() => onDiscardFollowup(turn)}><XIcon /></Button>
+          </div>
+        ))}
         {queuedMessages.length > 0 ? (
           <div
             className="pointer-events-auto mb-2 rounded-xl border border-border/80 bg-[color-mix(in_srgb,var(--card)_92%,transparent)] p-2 shadow-lg backdrop-blur-xl"

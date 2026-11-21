@@ -20,6 +20,7 @@ getrandom = "0.4"
 globset.workspace = true
 ignore.workspace = true
 regex.workspace = true
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "libsqlite3-sys"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

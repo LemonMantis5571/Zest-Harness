@@ -6,6 +6,8 @@ paths:
   - crates/desktop/ui/src/lib/pullRequestLink.ts
   - crates/desktop/ui/src/components/BranchChangesBar.tsx
   - crates/core/src/workspace_changes.rs
+  - crates/desktop/src/pr_checks.rs
+  - crates/desktop/ui/src/components/PullRequestChecks.tsx
 tests:
   - crates/desktop/ui/src/lib/pullRequestLink.test.ts
   - crates/desktop/ui/e2e/pull-requests.spec.ts
@@ -35,8 +37,8 @@ verify:
   in the browser instead. The external-link icon always opens GitHub.
 - The diff comes from `gh pr diff <n>` (30 s timeout); if that fails it falls back
   to `git diff <base_branch>...HEAD`. Both go through the same redaction and
-  2 MiB cap as branch changes. If the result is unavailable or empty, or the
-  chat is a free chat, the URL opens externally.
+  2 MiB cap as branch changes. Free chats open the URL externally. A project chat keeps the review open when the diff is empty or unavailable.
+- Opening a PR in a chat also reads its current merge state and checks with a separate read-only GitHub CLI request. Check links open the check provider's log or details page. The review refreshes every 30 seconds while visible and on **Refresh checks**. An unavailable diff or check lookup leaves the other information and GitHub link available.
 - PR numbers must be 1-1000000; a requested number wins over the stored one.
 
 ## How it works
@@ -71,7 +73,6 @@ runner observing the fixture's short loading window in real time.
 - `gh` must be installed and authenticated; without it no PR is detected and
   `pull_request_diff` falls back to the merge-base diff.
 - `PULL_REQUEST_CACHE` is a single process-wide slot keyed by (root, branch) that
-  also caches "not found". A PR opened after the first lookup is not detected
-  until the branch or project changes or the app restarts.
+  expires after 30 seconds, including a missing PR. Returning focus to the chat can discover a newly opened PR after that interval.
 - A stale `pullRequestLoadRef` response is dropped; keep incrementing it when the
   pane closes or the chat changes.
