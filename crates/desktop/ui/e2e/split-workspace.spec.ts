@@ -537,10 +537,14 @@ test("pane shortcuts and palette commands zoom, minimize, and restore", async ({
   const zoom = right.getByRole("button", { name: "Zoom pane" });
 
   await right.getByRole("textbox", { name: "Message", exact: true }).focus();
-  await page.keyboard.press("Control+Shift+Enter");
-  await expect(zoom).toHaveAttribute("aria-pressed", "true");
-  await page.keyboard.press("Control+Shift+Enter");
-  await expect(zoom).toHaveAttribute("aria-pressed", "false");
+  for (let cycle = 0; cycle < 3; cycle++) {
+    await page.keyboard.press("Control+Shift+Enter");
+    await expect(zoom).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Control+Shift+Enter");
+    await splitTurn(page, "left running", "delta", ` restored-${cycle}`);
+    await expect(left.getByText(new RegExp(`restored-${cycle}`))).toBeVisible();
+    await expect(zoom).toHaveAttribute("aria-pressed", "false");
+  }
 
   await left.getByRole("textbox", { name: "Message", exact: true }).focus();
   await page.keyboard.press("Control+Shift+H");

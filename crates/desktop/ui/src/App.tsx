@@ -506,10 +506,10 @@ export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [splitVisible, setSplitVisible] = useState(false);
   const [splitSnapshot, setSplitSnapshot] = useState<SplitWorkspaceSnapshot | null>(null);
+  const [splitNavigation, setSplitNavigation] = useState<SplitWorkspaceSnapshot | null>(null);
   const splitSnapshotRef = useRef<SplitWorkspaceSnapshot | null>(null);
   const splitVisibleRef = useRef(false);
   const splitChoosingPaneRef = useRef<string | null>(null);
-  splitSnapshotRef.current = splitSnapshot;
   splitVisibleRef.current = splitVisible;
   const [splitStartNewGroup, setSplitStartNewGroup] = useState(false);
   const [chatListRevision, setChatListRevision] = useState(0);
@@ -678,6 +678,7 @@ export default function App() {
         ),
       };
       rememberSplitSnapshot(next);
+      setSplitNavigation(next);
       setSplitStartNewGroup(false);
       splitVisibleRef.current = true;
       setSplitVisible(true);
@@ -3304,7 +3305,8 @@ export default function App() {
             initial={session}
             initialDraft={draftRef.current}
             states={chatStatesRef.current}
-            snapshot={splitSnapshot}
+            initialSnapshot={splitSnapshot}
+            navigation={splitNavigation}
             startNewGroup={splitStartNewGroup}
             onStateChange={rememberSplitSnapshot}
             onResolveApproval={onResolveApproval}
