@@ -9304,43 +9304,8 @@ fn normalize_effort(effort: &str) -> String {
     zest_core::normalize_effort(effort)
 }
 
-/// User-facing turn errors. An unreachable endpoint is the usual alpha failure
-/// mode and should not look like a missing system prompt.
 fn format_turn_error(err: &HarnessError) -> String {
-    // A provider that wrote its own user-facing reason always knows more than a
-    // classifier here does. Only text explicitly tagged as user-facing qualifies;
-    // see `HarnessError::provider_user_message`.
-    if let Some(message) = err.provider_user_message() {
-        return message.to_string();
-    }
-    if err.is_unreachable() {
-        return "Zest could not reach the provider. Try reconnecting, then send your message again.".into();
-    }
-    if err.is_context_limit() {
-        return "This conversation is too long for the selected model. Start a new conversation or shorten the request.".into();
-    }
-    if err.is_auth_problem() {
-        return "This provider needs you to sign in again. Reconnect, then send your message again.".into();
-    }
-    if let Some(message) = err.provider_api_message() {
-        return message;
-    }
-    match err.root() {
-        HarnessError::PrematureEof => {
-            "The provider stopped sending a reply before it finished.".into()
-        }
-        HarnessError::StreamIdleTimeout => "The provider went quiet. Try again.".into(),
-        HarnessError::ResponseTimeout { .. } => {
-            "The provider did not start answering in time. A local server may still be loading the model; try again.".into()
-        }
-        HarnessError::StoppedEarly(reason) if reason.contains("max_tokens") => {
-            "The model hit its output limit before it finished.".into()
-        }
-        HarnessError::StoppedEarly(reason) if reason.contains("declined") => {
-            "The model declined this request.".into()
-        }
-        _ => "The provider could not complete the request. Try again.".into(),
-    }
+    err.turn_message()
 }
 
 fn format_turn_error_for_provider(err: &HarnessError, provider_id: &str) -> String {

@@ -78,6 +78,44 @@ impl HarnessError {
         }
     }
 
+    /// A user-facing turn failure suitable for desktop views and saved transcripts.
+    pub fn turn_message(&self) -> String {
+        // A provider that wrote its own user-facing reason always knows more than a
+        // classifier here does. Only text explicitly tagged as user-facing qualifies;
+        // see `HarnessError::provider_user_message`.
+        if let Some(message) = self.provider_user_message() {
+            return message.to_string();
+        }
+        if self.is_unreachable() {
+            return "Zest could not reach the provider. Try reconnecting, then send your message again.".into();
+        }
+        if self.is_context_limit() {
+            return "This conversation is too long for the selected model. Start a new conversation or shorten the request.".into();
+        }
+        if self.is_auth_problem() {
+            return "This provider needs you to sign in again. Reconnect, then send your message again.".into();
+        }
+        if let Some(message) = self.provider_api_message() {
+            return message;
+        }
+        match self.root() {
+            HarnessError::PrematureEof => {
+                "The provider stopped sending a reply before it finished.".into()
+            }
+            HarnessError::StreamIdleTimeout => "The provider went quiet. Try again.".into(),
+            HarnessError::ResponseTimeout { .. } => {
+                "The provider did not start answering in time. A local server may still be loading the model; try again.".into()
+            }
+            HarnessError::StoppedEarly(reason) if reason.contains("max_tokens") => {
+                "The model hit its output limit before it finished.".into()
+            }
+            HarnessError::StoppedEarly(reason) if reason.contains("declined") => {
+                "The model declined this request.".into()
+            }
+            _ => "The provider could not complete the request. Try again.".into(),
+        }
+    }
+
     /// A message the provider wrote for the user, safe to show as-is.
     ///
     /// The bug this exists for: Codex reports `"You've hit your usage limit ... try

@@ -3,6 +3,7 @@
 
 fn describe(m: &Msg) -> String {
     match &m.trace {
+        Some(Trace { kind: TraceKind::Recorded { label, .. }, .. }) => label.clone(),
         Some(Trace { kind: TraceKind::Thinking { .. }, .. }) => "think".into(),
         Some(Trace { kind: TraceKind::Tool { name, status, .. }, .. }) => format!("tool:{name}:{status:?}"),
         None if m.user => "user".into(),

@@ -46,6 +46,62 @@ fn clipboard_text(cx: &mut AsyncApp, handle: WindowHandle<Root>) -> String {
     inject(cx, handle, |_, cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default())
 }
 
+/// Exercise the composer subscription and the native Tokio event pump in one window.
+async fn selftest_queue(handle: WindowHandle<Root>, cx: &mut AsyncApp) {
+    let before = handle.update(cx, |r, _, _| r.msgs.len()).unwrap();
+    let composer = handle.update(cx, |r, _, _| r.composer.clone()).unwrap();
+    let submit = |text: &str, cx: &mut AsyncApp| {
+        inject(cx, handle, |window, cx| {
+            composer.update(cx, |c, cx| c.replace_text_in_range(None, text, window, cx));
+            window.dispatch_keystroke(key("enter"), cx);
+        });
+    };
+    submit("first", cx);
+    submit("remove me", cx);
+    submit("second", cx);
+    handle.update(cx, |r, _, cx| {
+        assert!(r.turn_active);
+        assert_eq!(r.pending.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["remove me", "second"]);
+        assert_eq!(r.msgs[before..].iter().filter(|m| m.user).count(), 1);
+        r.remove_queued(r.pending[0].id, cx);
+    }).unwrap();
+    inject(cx, handle, |w, cx| { w.dispatch_keystroke(key("escape"), cx); });
+    for _ in 0..100 {
+        settle(cx, 50).await;
+        if handle.update(cx, |r, _, _| !r.turn_active).unwrap() {
+            break;
+        }
+    }
+    handle.update(cx, |r, _, cx| {
+        assert!(!r.turn_active);
+        assert_eq!(r.turns_done, 1);
+        assert_eq!(r.pending.front().unwrap().text, "second");
+        // An image-only submission to a paused queue must wait behind the older prompt.
+        r.send(String::new(), 1, cx);
+        assert!(!r.turn_active);
+        assert_eq!(r.pending.len(), 2);
+        r.start_next();
+        cx.notify();
+    }).unwrap();
+    for _ in 0..300 {
+        settle(cx, 50).await;
+        if handle.update(cx, |r, _, _| r.turns_done == 3).unwrap() {
+            break;
+        }
+    }
+    handle.update(cx, |r, _, _| {
+        assert!(r.pending.is_empty() && !r.turn_active);
+        assert_eq!(r.turns_done, 3);
+        let users: Vec<_> = r.msgs[before..].iter().filter(|m| m.user).collect();
+        assert_eq!(users.len(), 3);
+        assert_eq!(users[0].doc.units[0].text, "first");
+        assert_eq!(users[1].doc.units[0].text, "second");
+        assert_eq!(users[2].attachments, 1);
+    }).unwrap();
+    report("followup_queue", true, "rapid Enter, remove, Stop, idle enqueue, resume, FIFO and image count");
+    inject(cx, handle, |_, cx| cx.quit());
+}
+
 async fn selftest(handle: WindowHandle<Root>, cx: &mut AsyncApp) {
     // 1/2/3: stick-to-bottom and release on scroll-up.
     let following = handle.update(cx, |r, _, _| r.list.is_following_tail()).unwrap();

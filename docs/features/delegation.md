@@ -43,6 +43,8 @@ Queueing, locking and restart recovery are in
 
 ## Behavior
 
+The GPUI **Delegation** panel uses the same coordinator as the packaged desktop. It accepts scoped cards and separate worker and reviewer targets, follows worker events, shows check output and review findings, and pages through the saved artifacts. Actions carry the revision displayed to the user. An existing coordinator lock permits browsing while the other process owns the queue. The Windows native self-test runs the fixture worker and reviewer and verifies the checkout before and after clicking apply.
+
 - A feature card (title, objective, lane, scope, context, dependsOn,
   acceptanceChecks, worker, reviewer) becomes a job at
   `.zest/delegations/<jobId>.json`. Its artifacts are `worker.diff`,

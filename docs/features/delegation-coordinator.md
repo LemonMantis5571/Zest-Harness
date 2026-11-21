@@ -22,6 +22,8 @@ use. The job record and its state machine live in `zest-core`
 
 ## Behavior
 
+The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool dispatch receipts directly to its coordinator. Shutdown recovery also acquires the project lock before marking an interrupted job.
+
 - **One coordinator per project.** `CoordinatorLock` holds an exclusive OS lock
   (`flock` on Unix, `LockFileEx` on Windows) on
   `.zest/delegations/coordinator.lock`. Another coordinator on the same root

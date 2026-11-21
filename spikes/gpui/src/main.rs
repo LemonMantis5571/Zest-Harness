@@ -1,4 +1,21 @@
 mod bridge;
+#[path = "../../../crates/desktop/src/attachments.rs"]
+mod attachments;
+#[path = "../../../crates/desktop/src/workspace_files.rs"]
+mod workspace_files;
+#[path = "../../../crates/desktop/src/context_meter.rs"]
+mod context_meter;
+#[cfg(test)]
+#[path = "../../../crates/desktop/src/scratch_dir.rs"]
+mod scratch_dir;
+#[cfg(test)]
+use scratch_dir::ScratchDir;
+mod interaction;
+mod native;
+mod native_view;
+mod side;
+mod search;
+mod workspace;
 mod composer;
 mod md;
 mod seed;
@@ -11,7 +28,9 @@ use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::*;
 use md::Doc;
+use native_view::ChatChanged;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use view::*;
@@ -21,6 +40,7 @@ struct Args {
     bench: bool,
     scroll: bool,
     selftest: bool,
+    selftest_queue: bool,
     idle: bool,
     topmost: bool,
     webview: bool,
@@ -44,6 +64,10 @@ fn parse_args() -> Args {
             "--bench" => a.bench = true,
             "--scroll" => a.scroll = true,
             "--selftest" => a.selftest = true,
+            "--selftest-queue" => {
+                a.selftest = true;
+                a.selftest_queue = true;
+            }
             "--idle" => a.idle = true,
             "--topmost" => a.topmost = true,
             "--webview" => a.webview = true,
@@ -111,7 +135,28 @@ struct Stats {
     snapshot0: Option<gpui::FrameDurationSnapshot>,
 }
 
+struct QueuedPrompt {
+    id: usize,
+    saved_id: Option<String>,
+    text: String,
+    images: usize,
+    attachments: usize,
+}
+
 struct Root {
+    native_start: Option<(usize, usize)>,
+    native_text_rows: std::collections::HashMap<String, usize>,
+    compacting: bool,
+    native: Option<native::Chat>,
+    cards: VecDeque<interaction::Card>,
+    decision_input: Entity<Composer>,
+    side_input: Entity<Composer>,
+    side: side::Side,
+    editing: Option<String>,
+    queue_input: Entity<Composer>,
+    note: String,
+    session_label: String,
+    files: Vec<zest_core::ThreadInputAttachment>,
     msgs: Vec<Msg>,
     list: ListState,
     shared: SharedRef,
@@ -119,8 +164,11 @@ struct Root {
     focus: FocusHandle,
     live: Option<usize>,
     live_text: String,
-    /// True from a turn's Start to its End, including before the first answer token.
+    /// Reserve the turn before sending to Tokio, including the gap before Start arrives.
     turn_active: bool,
+    stop_requested: bool,
+    pending: VecDeque<QueuedPrompt>,
+    next_prompt_id: usize,
     turns_done: usize,
     /// The reasoning row of the running turn: (row index, text so far, started).
     think: Option<(usize, String, Instant)>,
@@ -184,11 +232,46 @@ impl Root {
         let list = ListState::new(msgs.len(), ListAlignment::Bottom, px(800.));
         list.set_follow_mode(FollowMode::Tail);
         let composer = cx.new(Composer::new);
-        cx.subscribe(&composer, |this, _, ev: &ComposerEvent, cx| match ev {
-            ComposerEvent::Send { text, images } => this.send(text.clone(), *images, cx),
-            ComposerEvent::Stop => {
-                let _ = this.cmd_tx.send(Cmd::Cancel);
+        let decision_input = cx.new(Composer::new);
+        let queue_input = cx.new(Composer::new);
+        queue_input.update(cx, |c, _| c.placeholder = "Edit queued message");
+        cx.subscribe(&queue_input, |this, _, ev: &ComposerEvent, cx| {
+            if let Some(id) = this.editing.take() {
+                if let ComposerEvent::Send { text, .. } = ev {
+                    if let Some(chat) = &this.native {
+                        match chat.edit(|t| t.update_input(&id, text).map_err(zest_core::HarnessError::Other)) {
+                            Ok(true) => { if let Some(p) = this.pending.iter_mut().find(|p| p.saved_id.as_ref() == Some(&id)) { p.text = text.clone(); } }
+                            Ok(false) => {}
+                            Err(e) => this.note = e.to_string(),
+                        }
+                    }
+                }
+                cx.notify();
             }
+        }).detach();
+        decision_input.update(cx, |c, _| c.placeholder = "Type an answer and press Enter");
+        let side_input = cx.new(Composer::new);
+        side_input.update(cx, |c, _| c.placeholder = "Ask a side question");
+        cx.subscribe(&side_input, |this, _, ev: &ComposerEvent, cx| match ev {
+            ComposerEvent::Send { text, .. } => this.ask_side(text, cx),
+            ComposerEvent::Stop => this.side.cancel_current(),
+        }).detach();
+        cx.subscribe(&decision_input, |this, _, ev: &ComposerEvent, cx| {
+            if let ComposerEvent::Send { text, .. } = ev {
+                if !text.is_empty() && this.cards.front().is_some_and(|card| matches!(card.request, interaction::Request::Question { .. })) {
+                    this.respond(interaction::Response::Answer(vec![text.clone()]), cx);
+                }
+            }
+        }).detach();
+        cx.subscribe(&composer, |this, _, ev: &ComposerEvent, cx| match ev {
+            ComposerEvent::Send { text, images } => {
+                if this.native.is_some() {
+                    this.submit_native(text, images, cx);
+                } else {
+                    this.send(text.clone(), images.len(), cx);
+                }
+            }
+            ComposerEvent::Stop => this.stop(cx),
         })
         .detach();
 
@@ -201,13 +284,31 @@ impl Root {
                     batch.push(e);
                 }
                 if this.update(cx, |root, cx| root.apply(batch, cx)).is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = this.update(cx, |root, cx| {
+                root.turn_active = false;
+                root.stop_requested = false;
+                cx.notify();
+            });
         })
         .detach();
 
         Self {
+            native: None,
+            native_start: None,
+            native_text_rows: Default::default(),
+            compacting: false,
+            cards: VecDeque::new(),
+            decision_input,
+            side_input,
+            side: side::Side::default(),
+            queue_input,
+            editing: None,
+            note: String::new(),
+            session_label: String::new(),
+            files: Vec::new(),
             msgs,
             list,
             shared: Rc::new(RefCell::new(Shared::default())),
@@ -216,6 +317,9 @@ impl Root {
             live: None,
             live_text: String::new(),
             turn_active: false,
+            stop_requested: false,
+            pending: VecDeque::new(),
+            next_prompt_id: 0,
             turns_done: 0,
             think: None,
             tools: vec![],
@@ -235,18 +339,60 @@ impl Root {
     }
 
     fn send(&mut self, text: String, images: usize, cx: &mut Context<Self>) {
-        self.push(Msg::user(&text, images));
-        let _ = self.cmd_tx.send(Cmd::Reply { prompt: text, images, agent: self.args.agent });
-        self.list.set_follow_mode(FollowMode::Tail);
+        let start_now = !self.turn_active && self.pending.is_empty();
+        let id = self.next_prompt_id;
+        self.next_prompt_id += 1;
+        self.pending.push_back(QueuedPrompt { id, text, images, attachments: images, saved_id: None });
+        if start_now {
+            self.start_next();
+        }
         cx.notify();
+    }
+
+    fn start_next(&mut self) {
+        if self.turn_active {
+            return;
+        }
+        let Some(prompt) = self.pending.front() else { return };
+        let native_start = self.native.as_ref().map(|chat| (self.msgs.len(), chat.thread.lock().unwrap().messages.len()));
+        let cmd = match &prompt.saved_id {
+            Some(id) => Cmd::Run(id.clone()),
+            None => Cmd::Reply { prompt: prompt.text.clone(), images: prompt.images, agent: self.args.agent },
+        };
+        if self.cmd_tx.send(cmd).is_err() {
+            return;
+        }
+        let prompt = self.pending.pop_front().unwrap();
+        if self.editing == prompt.saved_id { self.editing = None; }
+        self.turn_active = true;
+        self.native_start = native_start;
+        self.push(Msg::user(&prompt.text, prompt.images));
+        self.list.set_follow_mode(FollowMode::Tail);
+    }
+
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        if self.turn_active && !self.stop_requested {
+            self.stop_requested = true;
+            let _ = self.cmd_tx.send(Cmd::Cancel);
+            cx.notify();
+        }
     }
 
     fn apply(&mut self, batch: Vec<bridge::Ev>, cx: &mut Context<Self>) {
         let now = Instant::now();
         let mut dirty = false;
         for ev in batch {
-            self.stats.latency_us.push(now.duration_since(ev.at).as_micros() as u64);
+            if self.native.is_none() {
+                self.stats.latency_us.push(now.duration_since(ev.at).as_micros() as u64);
+            }
             match ev.kind {
+                EvKind::Notice(note) => { self.note = note; dirty = true; }
+                EvKind::SessionInfo(info) => { self.session_label = info; dirty = true; }
+                EvKind::Card(card) => { self.cards.push_back(card); dirty = true; }
+                EvKind::Activity { id, title, status } => {
+                    self.update_activity(id, title, status);
+                    dirty = true;
+                }
                 EvKind::Start => {
                     // The answer row is pushed on the first text token, after any reasoning and tool rows.
                     self.turn_active = true;
@@ -256,10 +402,12 @@ impl Root {
                     self.live_text.clear();
                     self.stats.stream_started = Some(Instant::now());
                     self.stats.tokens = 0;
-                    self.stats.snapshot0 = self
+                    if self.native.is_none() {
+                        self.stats.snapshot0 = self
                         .window
                         .update(cx, |_, w, _| w.frame_duration_snapshot())
                         .ok();
+                    }
                 }
                 EvKind::Thinking(t) => {
                     if self.think.is_none() {
@@ -320,7 +468,20 @@ impl Root {
                     if let Some(ix) = self.live.take() {
                         self.reparse(ix);
                     }
-                    println!("turn end: {tokens} tokens cancelled={cancelled}");
+                    // Stop can cross an already-emitted successful End on its way to the UI.
+                    let stopped = std::mem::take(&mut self.stop_requested);
+                    self.cards.clear();
+                    if self.native.is_some() {
+                        self.restore_native();
+                        cx.emit(ChatChanged);
+                    }
+                    let compacted = std::mem::take(&mut self.compacting);
+                    if !cancelled && !stopped && !compacted {
+                        self.start_next();
+                    }
+                    if self.native.is_none() {
+                        println!("turn end: {tokens} tokens cancelled={cancelled}");
+                    }
                     if self.args.bench {
                         self.report_and_quit(cx);
                     }
@@ -549,6 +710,86 @@ impl Root {
         .size_full()
     }
 
+    fn remove_queued(&mut self, id: usize, cx: &mut Context<Self>) {
+        if let Some(chat) = &self.native {
+            if let Some(saved_id) = self.pending.iter().find(|p| p.id == id).and_then(|p| p.saved_id.as_ref()) {
+                if let Err(e) = chat.edit(|t| Ok(t.remove_input(saved_id))) {
+                    self.note = e.to_string();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.pending.retain(|prompt| prompt.id != id);
+        cx.notify();
+    }
+
+    fn edit_queued(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.pending.iter().find(|p| p.saved_id.as_deref() == Some(key)) else { return };
+        self.editing = Some(key.to_owned());
+        self.queue_input.update(cx, |field, cx| {
+            field.text = item.text.clone();
+            field.sel = 0..field.text.len();
+            field.marked = None;
+            field.has_files = item.attachments > 0;
+            cx.notify();
+        });
+        window.focus(&self.queue_input.read(cx).focus.clone(), cx);
+        cx.notify();
+    }
+
+    fn render_queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = div()
+            .flex()
+            .justify_between()
+            .child(format!("Queued ({})", self.pending.len()))
+            .when(!self.turn_active && !self.cmd_tx.is_closed(), |d| {
+                d.child(
+                    div().id("resume-queue").tab_index(0).role(Role::Button)
+                        .cursor_pointer().text_color(rgb(LINK)).child("Resume queued")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.start_next();
+                            window.focus(&this.composer.read(cx).focus.clone(), cx);
+                            cx.notify();
+                        })),
+                )
+            });
+        let rows = self.pending.iter().map(|prompt| {
+            let id = prompt.id;
+            let mut label = first_line(&prompt.text);
+            if prompt.images > 0 {
+                if !label.is_empty() {
+                    label.push_str(" · ");
+                }
+                label.push_str(&format!("{} image{}", prompt.images, if prompt.images == 1 { "" } else { "s" }));
+            }
+            if prompt.attachments > prompt.images {
+                let files = prompt.attachments - prompt.images;
+                if !label.is_empty() { label.push_str(" · "); }
+                label.push_str(&format!("{files} file{}", if files == 1 { "" } else { "s" }));
+            }
+            let remove_label = format!("Remove queued message: {label}");
+            let saved_id = prompt.saved_id.clone();
+            div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .when_some(saved_id, |d, key| d.child(native_view::button(("edit-queued", id), "Edit", cx.listener(move |r, _, w, cx| {
+                    r.edit_queued(&key, w, cx);
+                }))))
+                .child(
+                    div().id(("remove-queued", id)).tab_index(0).role(Role::Button)
+                        .aria_label(remove_label).cursor_pointer().text_color(rgb(LINK)).child("Remove")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.editing = None;
+                            this.remove_queued(id, cx);
+                            window.focus(&this.composer.read(cx).focus.clone(), cx);
+                        })),
+                )
+        });
+        div().px_4().py_1().text_size(px(13.)).child(header)
+            .child(div().id("queued-messages").max_h(px(108.)).overflow_y_scroll().children(rows))
+            .when(self.editing.is_some(), |d| d.child(self.queue_input.clone()))
+    }
+
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(m) = self.msgs.get(ix) else { return div().into_any_element() };
         let el = if let Some(tr) = &m.trace {
@@ -586,7 +827,7 @@ impl Render for Root {
         let list = self.list.clone();
         div()
             .id("root")
-            .when(self.args.a11y, |d| d.role(Role::Application).aria_label("Zest GPUI spike"))
+            .when(self.args.a11y, |d| d.role(Role::Application).aria_label("Zest chat"))
             .key_context("Chat")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::copy))
@@ -613,10 +854,18 @@ impl Render for Root {
                     .py_1()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
-                    .child(format!(
+                    .when(self.native.is_none(), |d| d.child(format!(
                         "{n} messages \u{2022} {} \u{2022} {}",
-                        if busy { "streaming" } else { "idle" },
+                        if self.cmd_tx.is_closed() { "backend disconnected" } else if self.stop_requested { "stopping" } else if busy { "streaming" } else { "idle" },
                         if following { "following tail" } else { "scrolled up (tail released)" }
+                    )))
+                    .when(self.native.is_some(), |d| d.child(if self.stop_requested { "Stopping…" } else if busy { "Working…" } else { "" }))
+                    .when(busy, |d| d.child(
+                        div().id("stop-turn").tab_index(0).role(Role::Button).cursor_pointer().text_color(rgb(LINK))
+                            .child("Stop").on_click(cx.listener(|this, _, window, cx| {
+                                this.stop(cx);
+                                window.focus(&this.composer.read(cx).focus.clone(), cx);
+                            })),
                     ))
                     .child(
                         div()
@@ -628,11 +877,15 @@ impl Render for Root {
                             .on_click(move |_, _, _| list.set_follow_mode(FollowMode::Tail)),
                     ),
             )
+            .when(!self.pending.is_empty(), |d| d.child(self.render_queue(cx)))
+            .when(self.native.is_some(), |d| d.child(self.native_controls(cx)))
+            .when(self.side.open, |d| d.child(self.render_side(cx)))
             .child(div().px_4().pb_3().child(self.composer.clone()))
     }
 }
 
 fn main() {
+    if workspace::launch_if_requested() { return; }
     let args = parse_args();
     let hl = md::init_highlighter();
     println!("syntect: loaded default syntaxes+theme in {hl:?}");
@@ -765,7 +1018,9 @@ fn main() {
         if args.selftest {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
-                if args.agent {
+                if args.selftest_queue {
+                    selftest_queue(handle, cx).await;
+                } else if args.agent {
                     selftest_trace(handle, cx).await;
                 } else {
                     selftest(handle, cx).await;

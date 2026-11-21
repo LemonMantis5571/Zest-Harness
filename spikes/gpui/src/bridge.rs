@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub enum Cmd {
+    Run(String),
+    Compact,
     /// A user turn: stream a canned reply for `secs` at `rate` tokens/s (with tool rows when `agent`).
     Reply { prompt: String, images: usize, agent: bool },
     Stream { rate: u32, secs: u32, chars: usize },
@@ -26,6 +28,10 @@ pub struct Ev {
 }
 
 pub enum EvKind {
+    Notice(String),
+    SessionInfo(String),
+    Activity { id: String, title: String, status: String },
+    Card(crate::interaction::Card),
     Start,
     Thinking(String),
     Text(String),
@@ -281,6 +287,7 @@ pub fn start() -> Bridge {
                 let mut cancel = Arc::new(AtomicBool::new(false));
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        Cmd::Run(_) | Cmd::Compact => {}
                         Cmd::Cancel => cancel.store(true, Ordering::Relaxed),
                         Cmd::Reply { prompt, images, agent } => {
                             cancel = Arc::new(AtomicBool::new(false));

@@ -1,5 +1,7 @@
 # GPUI spike: could it host Zest's chat UI on Windows 11?
 
+The default executable now opens the [native Zest workspace](../../docs/features/gpui-workspace.md). Use `npm run gpui -- --demo` for an offline project. The experiments and benchmarks below describe the original rendering fixture, which remains available with explicit fixture flags.
+
 Throwaway code in this folder (about 3,400 lines of Rust). Run on 2026-11-02 in two rounds (the spike, then a follow-up on the parts where GPUI looked like a win; see "Round 2"), Windows 11 Pro 26200, Ryzen 7 8700G
 (16 logical CPUs), RTX 3060 Ti + Radeon 780M, one 60 Hz display, MSVC (VS 2022 17.14), Windows SDK 10.0.26100, rustc 1.97.1.
 **Caveat for every number below: a game (Fortnite) and a Discord clip-recording process were running on the machine the whole time.**
@@ -243,11 +245,18 @@ About 39,000 lines of TypeScript across 81 components, 28 Playwright specs, `zes
 
 ## Reproduce
 
+The interactive prototype now queues follow-ups in the current window. Send another
+prompt while an answer streams to see it above the composer. On completion the next
+prompt runs in submission order. Stop (or Escape in the composer) holds the rest
+for **Resume queued**. Closing the window discards pending prompts. The bridge
+still uses the mock provider and represents pasted images by their count.
+
 ```bash
 cd spikes/gpui
 cargo build --release --features core,webview
 target/release/zest-gpui-spike.exe                       # interactive
 target/release/zest-gpui-spike.exe --selftest            # in-process checks, prints PASS/FAIL
+target/release/zest-gpui-spike.exe --selftest-queue      # submit, remove, stop, resume, FIFO
 target/release/zest-gpui-spike.exe --bench --rate=75 --secs=30   # prints BENCH {json}, writes bench-last.json
 target/release/zest-gpui-spike.exe --scroll --secs=20    # scroll bench
 target/release/zest-gpui-spike.exe --langs               # grammar coverage

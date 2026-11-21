@@ -19,20 +19,25 @@ futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 async-trait = "0.1"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+base64 = "0.23"
+tempfile = "3"
+pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", rev = "ef52f77850b29189048797a48b24862251f54fe7" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Quick investigation: can a GPUI window host a wry child webview (raw window handle)?
 wry = { version = "0.57", optional = true }
 
 # Experiment 3: provider-neutral streaming types from Zest's core crate.
-zest-core = { path = "../../crates/core", optional = true }
+zest-core = { path = "../../crates/core" }
+zest-coordinator = { path = "../../crates/coordinator" }
 
 # Syntax pack from bat (TypeScript, TSX, TOML, Dockerfile, Kotlin, Swift, ...). Same regex backend as syntect above.
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"], optional = true }
 
 [features]
-default = []
-core = ["dep:zest-core"]
+default = ["core"]
+core = []
 webview = ["dep:wry"]
 grammars = ["dep:two-face"]
 

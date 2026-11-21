@@ -399,6 +399,7 @@ pub enum ToolStatus {
 
 #[derive(Clone, Debug)]
 pub enum TraceKind {
+    Recorded { label: String, status: String },
     Thinking { live: bool, secs: f32 },
     Tool { name: String, id: String, status: ToolStatus, secs: f32 },
 }
@@ -421,6 +422,7 @@ pub fn render_trace(
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let (label, badge, badge_color) = match &tr.kind {
+        TraceKind::Recorded { label, status } => (label.clone(), status.clone(), MUTED),
         TraceKind::Thinking { live: true, .. } => ("Thinking".to_string(), "\u{2026}".to_string(), MUTED),
         TraceKind::Thinking { secs, .. } => ("Thought".to_string(), format!("{secs:.0}s"), MUTED),
         TraceKind::Tool { name, status, secs, .. } => (

@@ -51,11 +51,14 @@ fn ime_log(msg: String) {
 }
 
 pub enum ComposerEvent {
-    Send { text: String, images: usize },
+    Send { text: String, images: Vec<Arc<Image>> },
     Stop,
 }
 
 pub struct Composer {
+    pub multiline_field: bool,
+    pub placeholder: &'static str,
+    pub has_files: bool,
     pub focus: FocusHandle,
     pub text: String,
     pub sel: Range<usize>,
@@ -74,6 +77,9 @@ impl EventEmitter<ComposerEvent> for Composer {}
 impl Composer {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            multiline_field: false,
+            has_files: false,
+            placeholder: "Message Zest…  (Enter sends, Shift+Enter newline)",
             focus: cx.focus_handle(),
             text: String::new(),
             sel: 0..0,
@@ -156,14 +162,17 @@ impl Composer {
         if self.marked.is_some() {
             return;
         }
-        let text = self.text.trim().to_string();
-        if text.is_empty() && self.images.is_empty() {
+        if self.multiline_field {
+            self.insert("\n", window, cx);
             return;
         }
-        let images = self.images.len();
+        let text = self.text.trim().to_string();
+        if text.is_empty() && self.images.is_empty() && !self.has_files {
+            return;
+        }
+        let images = std::mem::take(&mut self.images);
         cx.emit(ComposerEvent::Send { text, images });
         self.text.clear();
-        self.images.clear();
         self.sel = 0..0;
         window.notify_text_input_changed(&self.focus);
         cx.notify();
@@ -258,6 +267,7 @@ impl Composer {
                     self.insert(&t, w, cx);
                 }
                 ClipboardEntry::Image(img) => {
+                    if self.multiline_field { continue; }
                     summary.push(format!("image({:?},{}b)", img.format, img.bytes().len()));
                     self.images.push(Arc::new(img.clone()));
                 }
@@ -598,7 +608,7 @@ impl Render for Composer {
                                 .top_0()
                                 .left_0()
                                 .text_color(rgb(MUTED))
-                                .child("Message Zest\u{2026}  (Enter sends, Shift+Enter newline)"),
+                                .child(self.placeholder),
                         )
                     }),
             )
