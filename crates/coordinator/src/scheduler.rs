@@ -16,13 +16,14 @@ use crate::runtime::{
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
-    diff_paths, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
-    run_delegation_worker, run_provider_reviewer, run_provider_worker, validate_diff_scope,
-    AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob, DelegationOrigin,
-    DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
-    ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
-    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
+    acceptance_check_skip_reason, apply_diff_checked, capture_workspace_snapshot,
+    capture_worktree_lineage, dependency_blocker, diff_paths, resolve_provider_target,
+    run_acceptance_checks, run_delegation_reviewer, run_delegation_worker, run_provider_reviewer,
+    run_provider_worker, validate_diff_scope, AttemptRole, AttemptUsage, CheckStatus, Config,
+    DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus, DelegationStore,
+    DelegationTarget, ExternalUsageReport, NativeTaskUsageContext, ProviderConfig,
+    ResolvedTargetMetadata, ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget,
+    WorkerResult,
 };
 use zest_core::{
     DecisionGate, DispatchState, ExternalSessionEvidence, InboxMessage, LifecycleEntry,
@@ -930,6 +931,19 @@ fn resolve_job_targets(
     Ok(ResolvedDelegationTargets { worker, reviewer })
 }
 
+/// The first acceptance check Zest would skip instead of run, as a card error.
+/// A skipped required check can never pass, so this stops the job before a
+/// worker spends a full attempt on it.
+fn unrunnable_check(config: &Config, job: &DelegationJob) -> Option<String> {
+    job.card.acceptance_checks.iter().find_map(|command| {
+        acceptance_check_skip_reason(config, command).map(|reason| {
+            format!(
+                "Acceptance check `{command}` cannot run: {reason}. Fix the check or the config, then retry."
+            )
+        })
+    })
+}
+
 fn attempt_usage_from_external(report: &ExternalUsageReport) -> AttemptUsage {
     AttemptUsage {
         input_tokens: report.input_tokens,
@@ -1416,7 +1430,13 @@ impl DelegationCoordinator {
         }
         job.require_updated_at(expected_updated_at)
             .map_err(|error| error.to_string())?;
-        let resolved = match resolve_job_targets(root, &job) {
+        let blocker = Config::find(root)
+            .map_err(|error| error.to_string())
+            .map(|config| unrunnable_check(&config, &job));
+        let resolved = match blocker.and_then(|blocker| match blocker {
+            Some(blocker) => Err(blocker),
+            None => resolve_job_targets(root, &job),
+        }) {
             Ok(resolved) => resolved,
             Err(error) => {
                 job.transition(CoreDelegationStatus::Blocked)
@@ -2029,6 +2049,16 @@ impl DelegationCoordinator {
             return self.cancelled(&store, job).await;
         }
         let config = Config::find(root).map_err(|error| error.to_string())?;
+        if let Some(blocker) = unrunnable_check(&config, &job) {
+            job.transition(CoreDelegationStatus::Blocked)
+                .map_err(|error| error.to_string())?;
+            job.set_error(blocker);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(&store, &job, EventKind::Blocked);
+            return Ok(());
+        }
         let parent_secret_envs = config.provider_key_env_names();
         let resolved_targets = resolve_job_targets(root, &job).map_err(|error| {
             format!("{error}. Reconnect the provider/worker or choose another target.")
@@ -2729,6 +2759,26 @@ mod tests {
             "{}",
             check.output
         );
+    }
+
+    #[tokio::test]
+    async fn approval_blocks_a_card_whose_check_cannot_auto_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let mut request = create_request("Unrunnable check");
+        request.acceptance_checks = vec!["cargo test".into()];
+        let created = coordinator.create_job(root, request).unwrap();
+        let blocked = coordinator.approve(root, &created.job_id, None).unwrap();
+        assert_eq!(blocked.status, DelegationStatus::Blocked);
+        let error = blocked.error.as_deref().unwrap();
+        assert!(error.contains("`cargo test` cannot run"), "{error}");
+        assert!(
+            error.contains(r#"add ["cargo", "test"] to extra_allowlist under [tools.bash]"#),
+            "{error}"
+        );
+        assert!(blocked.attempts.is_empty(), "no worker may start");
     }
 
     const INTERRUPTED_DIFF: &str = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-fixture project\n+reviewed change\n";

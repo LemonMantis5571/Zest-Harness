@@ -85,8 +85,9 @@ pub use config::{
     Target, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use delegated_worker::{
-    run_acceptance_checks, run_provider_reviewer, run_provider_worker, NativeReviewerResult,
-    NativeTaskUsageContext, NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
+    acceptance_check_skip_reason, run_acceptance_checks, run_provider_reviewer,
+    run_provider_worker, NativeReviewerResult, NativeTaskUsageContext, NativeWorkerResult,
+    ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
 };
 pub use delegation::{
     apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,

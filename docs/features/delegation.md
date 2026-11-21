@@ -229,10 +229,14 @@ Code and Gemini presets.
 ## Pitfalls
 
 - **Acceptance checks that never pass.** Commands such as `cargo test` and
-  `npm test` are not auto-run, so they are recorded as `skipped`. If the
-  reviewer then says `accepted`, the report fails validation with "required
-  check lacks evidence" and the job becomes `blocked`. The card can only reach
-  `ready_to_apply` if the command prefix is in `[tools.bash] extra_allowlist`.
+  `npm test` are not auto-run, and a skipped required check can never pass.
+  Approval (and the start of each worker run) therefore blocks such a card
+  with `acceptance_check_skip_reason`, which names the exact
+  `extra_allowlist` entry to add under `[tools.bash]`, or explains that the
+  command uses shell syntax or matches the denylist. Checks run as argv
+  (`parse_auto_argv`, so quotes group arguments) with the program resolved
+  by `resolve_program`, which finds `npm`/`npx`/`pnpm` `.cmd` shims on
+  Windows.
 - **Reviewer target format.** `ReviewerTarget` is stored adjacently tagged,
   `{"kind":"target","target":{..}}`, the same shape as `ReviewerTargetView`.
   It used to nest one `kind`-tagged enum inside another, writing `kind` twice;

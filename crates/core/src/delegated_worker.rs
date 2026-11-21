@@ -111,15 +111,8 @@ async fn run_checks_in_workspace(
         if cancel.map(CancelToken::is_cancelled).unwrap_or(false) {
             return Err(HarnessError::Cancelled);
         }
-        if !config.tools.bash.enabled {
-            results.push(skipped_check(command, "command checks are disabled"));
-            continue;
-        }
-        if classify(command, &settings.extra_allowlist, &settings.denylist) != Clearance::AutoRun {
-            results.push(skipped_check(
-                command,
-                "command is not on the read-only auto-run allowlist",
-            ));
+        if let Some(reason) = acceptance_check_skip_reason(config, command) {
+            results.push(skipped_check(command, &reason));
             continue;
         }
         results.push(
@@ -134,6 +127,41 @@ async fn run_checks_in_workspace(
         );
     }
     Ok(results)
+}
+
+/// Why Zest will record `command` as skipped instead of running it, with
+/// the config change that would let it run. `None` means it auto-runs.
+///
+/// A required check that is skipped can never pass, so the coordinator asks
+/// this before approving a card rather than after a full worker run.
+pub fn acceptance_check_skip_reason(config: &Config, command: &str) -> Option<String> {
+    if !config.tools.bash.enabled {
+        return Some(
+            "command checks are disabled; set `enabled = true` under [tools.bash] in zest.toml"
+                .into(),
+        );
+    }
+    let settings = config.tools.bash.settings();
+    if classify(command, &settings.extra_allowlist, &settings.denylist) == Clearance::AutoRun {
+        return None;
+    }
+    if classify(command, &settings.extra_allowlist, &[]) == Clearance::AutoRun {
+        return Some("command matches the [tools.bash] denylist in zest.toml".into());
+    }
+    if crate::tools::bash::parse_auto_argv(command).is_none() {
+        return Some(
+            "acceptance checks run without a shell, so pipes, redirection, `&&` and backslashes are not allowed"
+                .into(),
+        );
+    }
+    let prefix = command
+        .split_whitespace()
+        .map(|token| format!("{token:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "command is not on the read-only auto-run allowlist; add [{prefix}] to extra_allowlist under [tools.bash] in zest.toml so Zest can run it"
+    ))
 }
 
 fn skipped_check(command: &str, reason: &str) -> AcceptanceCheckResult {
@@ -554,6 +582,39 @@ mod tests {
             .unwrap()
             .stdout;
         assert_eq!(before, after, "acceptance checks must clean their worktree");
+    }
+
+    #[test]
+    fn skip_reason_names_the_config_change_that_lets_a_check_run() {
+        let mut config = Config::default();
+        assert_eq!(acceptance_check_skip_reason(&config, "git status"), None);
+        let reason = acceptance_check_skip_reason(&config, "cargo test --workspace").unwrap();
+        assert!(
+            reason.contains(
+                r#"add ["cargo", "test", "--workspace"] to extra_allowlist under [tools.bash]"#
+            ),
+            "{reason}"
+        );
+        assert!(
+            acceptance_check_skip_reason(&config, "cargo test | tee out")
+                .unwrap()
+                .contains("without a shell")
+        );
+        config.tools.bash.extra_allowlist = vec![vec!["cargo".into(), "test".into()]];
+        assert_eq!(
+            acceptance_check_skip_reason(&config, "cargo test --workspace"),
+            None
+        );
+        config.tools.bash.denylist = vec!["--workspace".into()];
+        assert!(
+            acceptance_check_skip_reason(&config, "cargo test --workspace")
+                .unwrap()
+                .contains("denylist")
+        );
+        config.tools.bash.enabled = false;
+        assert!(acceptance_check_skip_reason(&config, "git status")
+            .unwrap()
+            .contains("disabled"));
     }
 
     #[tokio::test]
