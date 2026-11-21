@@ -275,8 +275,13 @@ Code and Gemini presets.
   Its custom `Deserialize` still reads those legacy records (the last `kind`
   wins, which is the target's own tag). Keep a disk round trip in any test of
   record shapes.
-- **Clipped external diffs.** External worker diffs are cut in the middle at
-  512 KiB (`clip_diff`). A clipped diff will not apply.
+- **Diff size limits.** A feature-card worker diff is stored whole, binary
+  files included (`git diff --binary`, also for files the worker created). A
+  file the worker created over 2 MB (`MAX_NEW_FILE_BYTES`) fails the run with
+  its name, and a whole diff over 8 MiB (`MAX_WORKER_DIFF_BYTES`) fails with
+  its size, instead of being left out or cut. Only the direct
+  `delegate_external` tool still clips its diff at 512 KiB (`clip_diff`),
+  because that diff goes to the model, not to `git apply`.
 - **No automatic worker retries.** A failed, blocked or rejected job waits
   for a manual `retry`, which needs a new approval. Only the reviewer is
   retried automatically, once. Keep the README saying so.

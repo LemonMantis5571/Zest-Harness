@@ -15,6 +15,9 @@ use tokio::process::Command;
 use super::sensitive::is_sensitive_path;
 
 const MAX_ERROR_CHARS: usize = 2_000;
+/// Largest file a worker may create. Bigger output is refused by name
+/// instead of being left out of the diff.
+pub(crate) const MAX_NEW_FILE_BYTES: u64 = 2_000_000;
 
 /// A prepared isolated worktree and the baseline used to distinguish worker
 /// edits from the user's pre-existing dirty state.
@@ -320,9 +323,13 @@ async fn collect_git_diff_with_untracked(
             Ok(metadata) if metadata.file_type().is_file() => metadata,
             _ => continue,
         };
-        if metadata.len() > 2_000_000 {
-            diff.push_str(&format!("\nBinary or large untracked file: {relative}\n"));
-            continue;
+        if metadata.len() > MAX_NEW_FILE_BYTES {
+            // A note in the diff looked like a change but applied as nothing:
+            // `git apply` skips lines that are not part of a patch.
+            return Err(format!(
+                "the worker created {relative} ({} bytes), larger than the {MAX_NEW_FILE_BYTES}-byte limit for a file in a delegated diff",
+                metadata.len()
+            ));
         }
         let source = source_root.join(&relative);
         let output = if source.is_file() {
@@ -408,7 +415,7 @@ async fn git_no_index_diff(
     relative: &str,
 ) -> Result<String, String> {
     let output = Command::new("git")
-        .args(["diff", "--no-index", "--no-ext-diff", "--"])
+        .args(["diff", "--no-index", "--no-ext-diff", "--binary", "--"])
         .arg(left)
         .arg(right)
         .current_dir(cwd)
@@ -588,6 +595,39 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert!(!String::from_utf8_lossy(&output.stdout).contains(&worktree.display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_new_binary_file_survives_the_diff_round_trip() {
+        let temp = committed_repo().await;
+        let mut worker = prepare(temp.path()).await.unwrap();
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        std::fs::write(worker.path().join("image.bin"), &bytes).unwrap();
+        let diff = worker.collect_diff().await.unwrap();
+        worker.cleanup().await.unwrap();
+        assert!(diff.contains("GIT binary patch"), "{diff}");
+
+        let mut reviewer = prepare_reviewer(temp.path(), &diff).await.unwrap();
+        assert_eq!(
+            std::fs::read(reviewer.path().join("image.bin")).unwrap(),
+            bytes
+        );
+        reviewer.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_oversized_new_file_is_refused_by_name() {
+        let temp = committed_repo().await;
+        let mut worker = prepare(temp.path()).await.unwrap();
+        std::fs::write(
+            worker.path().join("huge.txt"),
+            vec![b'a'; MAX_NEW_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = worker.collect_diff().await.unwrap_err();
+        worker.cleanup().await.unwrap();
+        assert!(error.contains("huge.txt"), "{error}");
+        assert!(error.contains("limit"), "{error}");
     }
 
     #[tokio::test]

@@ -45,6 +45,21 @@ fn delegation_flaky_reviewer(counter: &str, failures: &str, prompt: &str) {
     delegation(prompt);
 }
 
+/// A worker that adds a binary file, or with `large` a file over the
+/// delegated-diff file limit.
+fn delegation_file(kind: &str, prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        delegation(prompt);
+        return;
+    }
+    match kind {
+        "large" => std::fs::write("large.txt", vec![b'a'; 2_100_000]),
+        _ => std::fs::write("image.bin", (0..=255u8).cycle().take(4096).collect::<Vec<u8>>()),
+    }
+    .expect("write fixture file");
+    send(r#"{"type":"result","response":"{\"summary\":\"fixture worker added a file\",\"changedFiles\":[],\"checksAttempted\":[],\"blockers\":[]}"}"#);
+}
+
 /// A worker that edits a file, then goes silent and never finishes.
 fn delegation_hang() {
     std::fs::write("partial.txt", "unfinished work
@@ -155,6 +170,10 @@ fn main() {
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         Some("delegation_hang") => delegation_hang(),
+        Some("delegation_file") => {
+            let kind = args.next().expect("file kind");
+            delegation_file(&kind, &args.next().unwrap_or_default())
+        }
         Some("delegation_flaky_reviewer") => {
             let counter = args.next().expect("counter file");
             let failures = args.next().expect("failure count");

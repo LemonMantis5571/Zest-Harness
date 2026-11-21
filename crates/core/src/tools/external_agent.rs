@@ -1093,7 +1093,9 @@ async fn run_isolated_with_cancel(
     run.session_evidence = Some(session_evidence_for(&run, &workspace_path, config));
     let diff = diff?;
     cleanup?;
-    run.diff = clip_diff(&diff);
+    // Not clipped: this diff is a job artifact that must apply, and a diff
+    // cut in the middle does not. The coordinator refuses one that is too big.
+    run.diff = diff;
     if !run.diff.trim().is_empty() {
         run.events.push(ExternalAgentEvent::Diff {
             path: "isolated worktree".into(),

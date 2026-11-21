@@ -32,6 +32,9 @@ use zest_core::{
 };
 
 const MAX_ACTIVE_WORKER_JOBS: usize = 2;
+/// Largest worker diff a job stores and reviews. A bigger one is refused
+/// with its size rather than cut down to something that no longer applies.
+const MAX_WORKER_DIFF_BYTES: usize = 8 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub const ARTIFACT_PAGE_BYTES: usize = 64 * 1024;
 pub const ALLOWED_ARTIFACTS: &[&str] = &[
@@ -2365,6 +2368,12 @@ impl DelegationCoordinator {
         if worker_diff.trim().is_empty() {
             return Err("worker returned no diff artifact".into());
         }
+        if worker_diff.len() > MAX_WORKER_DIFF_BYTES {
+            return Err(format!(
+                "worker diff is {} bytes, larger than the {MAX_WORKER_DIFF_BYTES}-byte limit for a delegated change; split the card into smaller ones",
+                worker_diff.len()
+            ));
+        }
         validate_diff_scope(root, &worker_diff, &job.card.scope)
             .map_err(|error| format!("worker produced an unsafe or out-of-scope diff: {error}"))?;
         store
@@ -3275,6 +3284,56 @@ mod tests {
         assert!(coordinator
             .artifact_page(root, &created.job_id, "worker.diff", 0)
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_new_binary_file_is_reviewed_and_applied_byte_for_byte() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &fixture_agent("binary", &["delegation_file", "binary"]),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Binary file", "binary"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(ready.changed_files, vec!["image.bin".to_string()]);
+        let applied = coordinator.apply(root, &ready.job_id, None).unwrap();
+        assert_eq!(applied.status, DelegationStatus::Accepted);
+        let expected: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        assert_eq!(std::fs::read(root.join("image.bin")).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_new_file_fails_the_worker_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("large", &["delegation_file", "large"]));
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Large file", "large"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.contains("large.txt"), "{error}");
+        assert!(error.contains("limit"), "{error}");
+        assert!(!root.join("large.txt").exists());
     }
 
     #[tokio::test]
