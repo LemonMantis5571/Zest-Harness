@@ -53,7 +53,7 @@ Run `npm run gpui -- --demo` for a temporary offline workspace. Send `Demo: writ
 
 The sidebar reads saved summaries in the background at startup and when opening Find chats. Turn events update the affected chat directly, and pinned chats appear first. Find chats uses the [shared local transcript index](threads-and-history.md), including for older histories over 8 MiB. A transcript result opens the answer's rendered row below that turn's reasoning and tool trace.
 
-`npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary project. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
+`npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary Git repository. Windows CI runs the same scenario in a GPUI test window through `cargo test`, including an approved edit that is committed and reviewed after reopening, then the delegation board's worker, reviewer and apply sequence. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
 
 ## Remaining desktop coverage
 

@@ -29,6 +29,38 @@ pub(super) fn init_repository(root: &std::path::Path) {
     git(root, &["commit", "--no-verify", "-qm", "Initial checkout"]);
 }
 
+// Service runners lack an interactive Windows desktop. Exercise the same
+// workspace scenario with a GPUI test window and the real Tokio agent.
+#[::core::prelude::v1::test]
+fn offline_workspace_smoke() {
+    use futures::FutureExt;
+
+    let project = tempfile::tempdir().unwrap();
+    init_repository(project.path());
+    let project_state = Project::open(project.path().to_owned(), true).unwrap();
+    let mut app = gpui::TestAppContext::single();
+    app.update(composer::bind_keys);
+    let window = app.open_window(size(px(1150.), px(790.)), |w, cx| {
+        Workspace::new(project_state, w, cx)
+    });
+    let mut cx = app.to_async();
+    let mut scenario = std::pin::pin!(check(window, &mut cx));
+    let tick = Duration::from_millis(10);
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while scenario.as_mut().now_or_never().is_none() {
+        app.run_until_parked();
+        assert!(
+            Instant::now() < deadline,
+            "native workspace smoke test timed out"
+        );
+        // Tokio, Git and the delegation subprocess use real time. Advance
+        // GPUI's simulated clock at their pace while their results arrive.
+        std::thread::sleep(tick);
+        app.executor().advance_clock(tick);
+    }
+    app.quit();
+}
+
 async fn changes(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) -> String {
     handle
         .update(cx, |ws, w, cx| ws.page(Panel::Changes, w, cx))
