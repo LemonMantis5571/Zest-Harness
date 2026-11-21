@@ -366,3 +366,107 @@ async fn an_unknown_stop_reason_is_continued_then_gives_up() {
     assert_eq!(provider.requests().len() as u32, MAX_CONTINUATIONS + 1);
     assert!(wire(&provider.requests()[1].messages[2]).contains("stopped unexpectedly"));
 }
+
+#[tokio::test]
+async fn the_step_limit_ends_with_a_round_that_may_not_call_tools() {
+    let provider = ScriptedProvider::new(vec![
+        reply(vec![tool_call("a", "echo", json!({ "n": 1 }))], "tool_use"),
+        reply(vec![tool_call("b", "echo", json!({ "n": 2 }))], "tool_use"),
+        reply(
+            vec![
+                text("Done so far: two echoes."),
+                tool_call("c", "echo", json!({ "n": 3 })),
+            ],
+            "tool_use",
+        ),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    agent.max_steps = 2;
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("loop", &mut sink).await.unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].allow_tool_use && requests[1].allow_tool_use);
+    assert!(!requests[2].allow_tool_use);
+    assert!(wire(requests[2].messages.last().unwrap()).contains("limit of 2 steps"));
+    // The wrap-up's tool call is dropped, so history stays valid.
+    let last = agent.messages.last().unwrap();
+    assert_eq!(last.role, "assistant");
+    assert!(!wire(last).contains("tool_use"));
+}
+
+fn same_call(id: &str) -> Result<Completion> {
+    reply(vec![tool_call(id, "echo", json!({ "n": 7 }))], "tool_use")
+}
+
+#[tokio::test]
+async fn the_same_call_three_times_stops_a_headless_turn() {
+    let provider = ScriptedProvider::new(vec![same_call("1"), same_call("2"), same_call("3")]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut questions = 0;
+    let mut sink = |event: StreamEvent<'_>| {
+        if matches!(event, StreamEvent::QuestionNeeded { .. }) {
+            questions += 1;
+        }
+    };
+
+    let error = agent.send("loop", &mut sink).await.unwrap_err();
+
+    assert!(matches!(error, HarnessError::StoppedEarly(_)));
+    assert_eq!(questions, 1);
+    // The third call never ran; its committed result says so.
+    let results = wire(&agent.messages[agent.messages.len() - 2]);
+    assert!(results.contains("Not run"), "{results}");
+}
+
+struct Answer(&'static str);
+
+#[async_trait]
+impl crate::tools::question::Questioner for Answer {
+    async fn answer(
+        &self,
+        _request: &crate::tools::QuestionRequest,
+    ) -> std::result::Result<String, String> {
+        Ok(self.0.into())
+    }
+}
+
+#[tokio::test]
+async fn the_user_can_let_a_repeating_model_keep_going() {
+    let provider = ScriptedProvider::new(vec![
+        same_call("1"),
+        same_call("2"),
+        same_call("3"),
+        reply(vec![text("Finally done.")], "end_turn"),
+    ]);
+    let mut agent =
+        agent_with_echo(provider.clone(), None).with_questioner(Arc::new(Answer("Keep going")));
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("loop", &mut sink).await.unwrap();
+
+    assert_eq!(provider.requests().len(), 4);
+}
+
+#[test]
+fn a_different_input_resets_the_repeat_count() {
+    let call = |n: i64| crate::anthropic::types::ToolUse {
+        id: format!("id-{n}"),
+        name: "echo".into(),
+        input: json!({ "n": n }),
+    };
+    let mut tracker = RepeatTracker::default();
+    let (one, two) = (call(1), call(2));
+    // A batch repeating one call counts once.
+    assert!(tracker.observe([&one, &one, &one]).is_none());
+    assert!(tracker.observe([&one]).is_none());
+    assert!(tracker.observe([&two]).is_none());
+    assert!(tracker.observe([&two]).is_none());
+    assert!(tracker.observe([&two]).is_some());
+    // Counting starts over after the user is asked.
+    assert!(tracker.observe([&two]).is_none());
+    assert!(tracker.observe([&two]).is_none());
+    assert!(tracker.observe([&two]).is_some());
+}

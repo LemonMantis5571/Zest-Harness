@@ -40,6 +40,14 @@ use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, A
 use crate::tools::ToolRegistry;
 use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
 
+/// Provider rounds one turn may take before the model is asked to wrap up
+/// without tools, unless a front-end configures another limit.
+pub const DEFAULT_MAX_STEPS: u32 = 200;
+
+/// Consecutive identical tool calls that make the agent ask whether the model
+/// is stuck.
+pub const REPEATED_CALL_LIMIT: u32 = 3;
+
 /// Rounds in a row the agent asks the model to continue a response that was
 /// empty or cut off before the turn gives up.
 const MAX_CONTINUATIONS: u32 = 3;
@@ -182,6 +190,10 @@ pub struct Agent {
     pub max_tokens: u32,
     /// A request, not a command — providers that have no notion of effort ignore it.
     pub effort: String,
+    /// Provider rounds one turn may take. When it is reached the model gets
+    /// one more round, without tools, to summarize where it stopped. `0`
+    /// means no limit.
+    pub max_steps: u32,
     pub system: Option<SystemPrompt>,
     pub messages: Vec<Message>,
     /// Provider-native continuation state. The desktop copies this to the
@@ -218,6 +230,7 @@ impl Agent {
             model,
             max_tokens: 32_000,
             effort: "high".to_string(),
+            max_steps: DEFAULT_MAX_STEPS,
             system: None,
             messages: Vec::new(),
             provider_session: None,
@@ -923,6 +936,10 @@ impl Agent {
         let mut consulted_on_failures = false;
         // Rounds in a row that ended part-way and were asked to continue.
         let mut continuations = 0u32;
+        let mut steps = 0u32;
+        // Set once the step limit is reached: the next round may not call tools.
+        let mut wrapping_up = false;
+        let mut repeats = RepeatTracker::default();
 
         publish_side_context(self, staged, turn_sensitive, on_side_context);
 
@@ -946,6 +963,13 @@ impl Agent {
                 }
             }
 
+            steps += 1;
+            if self.max_steps > 0 && steps > self.max_steps && !wrapping_up {
+                wrapping_up = true;
+                staged.push(Message::user_text(step_limit_note(self.max_steps)));
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
+            }
+
             let request = TurnRequest {
                 model: self.model.clone(),
                 system: self.system.clone(),
@@ -955,7 +979,7 @@ impl Agent {
                 // model, and do not send an effort request to a model whose
                 // provider has no wire-level effort control.
                 tools: self.tools_for_model(),
-                allow_tool_use: true,
+                allow_tool_use: !wrapping_up,
                 max_tokens: self.max_tokens,
                 effort: self.effort_for_model(),
                 thinking: true,
@@ -1048,6 +1072,18 @@ impl Agent {
                 self.tools.input_schema(name)
             });
 
+            // The wrap-up round after the step limit ends the turn whatever it
+            // says. A tool call in it is dropped, not run.
+            if wrapping_up {
+                content.retain(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) != Some("tool_use")
+                });
+                if Self::has_assistant_output(&content) {
+                    staged.push(Message::assistant(content));
+                }
+                return Ok(());
+            }
+
             let stop = completion.stop_reason.as_deref();
             let has_output = Self::has_assistant_output(&content);
             let has_calls = !tool_uses(&content).is_empty();
@@ -1134,6 +1170,20 @@ impl Agent {
                         return Err(HarnessError::Other(
                             "stop_reason was tool_use but no tool_use block was present".into(),
                         ));
+                    }
+
+                    let valid = calls
+                        .iter()
+                        .filter(|call| !invalid_calls.contains_key(&call.id));
+                    if let Some(repeated) = repeats.observe(valid) {
+                        if !self.confirm_repeated_call(repeated, on_event, cancel).await {
+                            Self::check_cancel(cancel)?;
+                            return Err(HarnessError::StoppedEarly(format!(
+                                "`{}` was called with the same input {REPEATED_CALL_LIMIT} times \
+                                 in a row",
+                                repeated.name
+                            )));
+                        }
                     }
 
                     Self::check_cancel(cancel)?;
@@ -1637,6 +1687,43 @@ impl Agent {
 
     /// One interactive question: reserve the waiter, notify the front-end,
     /// then turn the answer into the ordinary model-visible tool result.
+    /// Ask the user whether a model that keeps repeating one call may go on.
+    /// Without an interactive front-end the answer is no.
+    async fn confirm_repeated_call(
+        &self,
+        call: &crate::anthropic::types::ToolUse,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> bool {
+        let request = crate::tools::QuestionRequest {
+            question_id: new_id("question"),
+            tool_call_id: call.id.clone(),
+            prompt: format!(
+                "The model called `{}` with the same input {REPEATED_CALL_LIMIT} times in a \
+                 row and may be stuck. Let it keep going?",
+                call.name
+            ),
+            choices: vec![KEEP_GOING.into(), STOP_TURN.into()],
+            multiple: false,
+            placeholder: None,
+        };
+        self.questioner.prepare(&request.question_id).await;
+        on_event(StreamEvent::QuestionNeeded {
+            question_id: request.question_id.clone(),
+            tool_call_id: request.tool_call_id.clone(),
+            prompt: request.prompt.clone(),
+            choices: request.choices.clone(),
+            multiple: false,
+            placeholder: None,
+        });
+        let answer = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err("turn cancelled".to_string()),
+            answer = self.questioner.answer(&request) => answer,
+        };
+        matches!(answer, Ok(answer) if answer.trim() == KEEP_GOING)
+    }
+
     async fn run_question_call(
         &self,
         call: &crate::anthropic::types::ToolUse,
@@ -2079,6 +2166,61 @@ pub(crate) fn task_request_usage(
             0
         },
         source_estimates: request_source_estimates(request),
+    }
+}
+
+const KEEP_GOING: &str = "Keep going";
+const STOP_TURN: &str = "Stop the turn";
+
+/// The note that ends a turn at its step limit: one last round, no tools.
+fn step_limit_note(max_steps: u32) -> String {
+    format!(
+        "[Zest: this turn has reached its limit of {max_steps} steps. Do not call any more \
+         tools. Summarize what you did, what is left, and how to continue.]"
+    )
+}
+
+/// Counts how many times in a row the model has made the same tool call.
+#[derive(Default)]
+struct RepeatTracker {
+    last: Option<(String, serde_json::Value)>,
+    count: u32,
+}
+
+impl RepeatTracker {
+    /// Feed one round's calls in order. Returns the call that made
+    /// [`REPEATED_CALL_LIMIT`] identical calls in a row, across rounds (a
+    /// call repeated within one batch counts once), and starts counting
+    /// again from zero so a user who lets it go on is asked again only after
+    /// as many more.
+    fn observe<'c>(
+        &mut self,
+        calls: impl IntoIterator<Item = &'c crate::anthropic::types::ToolUse>,
+    ) -> Option<&'c crate::anthropic::types::ToolUse> {
+        let mut hit = None;
+        let mut previous_in_round: Option<&crate::anthropic::types::ToolUse> = None;
+        for call in calls {
+            // One batch asking for the same call several times is one step.
+            if previous_in_round.is_some_and(|p| p.name == call.name && p.input == call.input) {
+                continue;
+            }
+            previous_in_round = Some(call);
+            let same = self
+                .last
+                .as_ref()
+                .is_some_and(|(name, input)| *name == call.name && *input == call.input);
+            if same {
+                self.count += 1;
+            } else {
+                self.last = Some((call.name.clone(), call.input.clone()));
+                self.count = 1;
+            }
+            if self.count >= REPEATED_CALL_LIMIT && hit.is_none() {
+                hit = Some(call);
+                self.count = 0;
+            }
+        }
+        hit
     }
 }
 
