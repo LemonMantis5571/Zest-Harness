@@ -8,10 +8,12 @@
 //! The loop is provider-agnostic. It describes the turn it wants and lets the
 //! provider decide how to express that on the wire.
 //!
-//! Provider-facing history is **transactional**: mutations are staged and only
-//! committed when the turn reaches a complete terminal state. Errors and
-//! cancellation leave `Agent::messages` unchanged so wire history never contains
-//! a half-built assistant/tool turn. UI transcript is the front-end's job.
+//! Provider-facing history is staged while a turn runs and committed when it
+//! ends. A finished turn commits everything. A failed or cancelled turn commits
+//! the user message and every completed provider round and tool result, closes
+//! any unanswered tool call, and ends with an interruption note, so the model
+//! knows what it already did (tools may have changed files). Wire history never
+//! holds a half-built assistant message. UI transcript is the front-end's job.
 //!
 //! Sensitive tool results are redacted when committed to durable wire history
 //! while the live in-memory turn still sees the real body for the model.
@@ -312,8 +314,7 @@ impl Agent {
     /// Build a side conversation from a caller-supplied wire snapshot.
     ///
     /// The desktop uses this while a turn is still running: `self.messages`
-    /// intentionally remains transactional until the turn reaches a terminal
-    /// state, but a side question should be able to see the user prompt and
+    /// is only committed when the turn reaches a terminal state, but a side question should be able to see the user prompt and
     /// completed provider rounds that existed when it was opened.
     pub fn side_conversation_with_messages(
         &self,
@@ -793,18 +794,85 @@ impl Agent {
         inbox: Option<&InputInbox>,
         mut on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
-        let mut staged = self.messages.clone();
         self.turn_usage = None;
         if let Some(advisor) = &self.advisor {
             advisor.begin_request();
         }
-        staged.push(user_message);
-        // Track which tool_use ids were sensitive so tool_result redaction can
-        // strip them from durable history while live memory keeps the body.
-        let mut turn_sensitive: Vec<String> = Vec::new();
-        // Overwritten each provider round; only the final end_turn value is kept.
-        #[allow(unused_assignments)]
-        let mut last_usage: Option<Usage> = None;
+        let mut progress = TurnProgress {
+            staged: self.messages.clone(),
+            sensitive: Vec::new(),
+            last_usage: None,
+        };
+        progress.staged.push(user_message);
+        let result = self
+            .run_turn_steps(&mut progress, on_event, cancel, inbox, &mut on_side_context)
+            .await;
+        match &result {
+            Ok(()) => self.commit_turn(progress),
+            Err(error) => self.commit_interrupted_turn(progress, error),
+        }
+        result
+    }
+
+    /// Commit a finished turn's wire history.
+    fn commit_turn(&mut self, progress: TurnProgress) {
+        self.sensitive_tool_ids.extend(progress.sensitive);
+        // Live memory keeps real tool bodies; persist path redacts.
+        self.messages = progress.staged;
+        self.last_usage = progress.last_usage;
+    }
+
+    /// Commit what a failed or cancelled turn already did.
+    ///
+    /// Tools may have edited files before the failure, and those edits stay.
+    /// Dropping the turn from the wire history would leave the model unaware of
+    /// its own changes, so the user message, every completed provider round and
+    /// every tool result are kept. Tool calls that never got a result are
+    /// closed with an error result (providers reject an unanswered call), and a
+    /// closing note tells the model the turn was interrupted.
+    fn commit_interrupted_turn(&mut self, mut progress: TurnProgress, error: &HarnessError) {
+        let staged = &mut progress.staged;
+        if let Some(last) = staged.last().filter(|message| message.role == "assistant") {
+            let unanswered = tool_uses(&last.content);
+            if !unanswered.is_empty() {
+                let results = unanswered
+                    .iter()
+                    .map(|call| {
+                        tool_result(
+                            &call.id,
+                            "Not run: the turn was interrupted before this tool ran.",
+                            true,
+                        )
+                    })
+                    .collect();
+                staged.push(Message::user_blocks(results));
+            }
+        }
+        staged.push(Message::user_text(interrupted_turn_note(error)));
+        self.sensitive_tool_ids.extend(progress.sensitive);
+        self.messages = progress.staged;
+        // The last completed round still measures the prompt better than the
+        // previous turn did; with no completed round, keep the old reading.
+        if progress.last_usage.is_some() {
+            self.last_usage = progress.last_usage;
+        }
+        // A provider-side thread never saw the interruption note.
+        self.provider_session = None;
+    }
+
+    async fn run_turn_steps(
+        &mut self,
+        progress: &mut TurnProgress,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        on_side_context: &mut Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+    ) -> Result<()> {
+        let TurnProgress {
+            staged,
+            sensitive: turn_sensitive,
+            last_usage,
+        } = progress;
         // Zest's own advisor consultations: at most one before a turn that
         // changed files ends, and one after two failed tool calls in a row.
         let mut wrote_files = false;
@@ -812,7 +880,7 @@ impl Agent {
         let mut reviewed_before_finish = false;
         let mut consulted_on_failures = false;
 
-        publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+        publish_side_context(self, &staged, &turn_sensitive, on_side_context);
 
         loop {
             Self::check_cancel(cancel)?;
@@ -830,7 +898,7 @@ impl Agent {
                     // A side panel opened while this provider call is running
                     // should see injected context that has already been sent,
                     // even though its response is not complete yet.
-                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+                    publish_side_context(self, &staged, &turn_sensitive, on_side_context);
                 }
             }
 
@@ -927,22 +995,24 @@ impl Agent {
             self.turn_usage
                 .get_or_insert_with(TurnUsageSummary::default)
                 .record(&completion.usage, completion.usage_available);
-            last_usage = Some(completion.usage.clone());
-
-            Self::check_cancel(cancel)?;
+            *last_usage = Some(completion.usage.clone());
 
             if matches!(completion.stop_reason.as_deref(), Some("end_turn") | None)
                 && !Self::has_assistant_output(&completion.content)
             {
+                Self::check_cancel(cancel)?;
                 return Err(HarnessError::Other(
                     "provider returned an empty assistant response".into(),
                 ));
             }
 
             // Echo the assistant turn back verbatim — thinking signatures and
-            // tool_use blocks both have to survive intact.
+            // tool_use blocks both have to survive intact. Staged before the
+            // cancel check: this response was paid for, and an interrupted turn
+            // still commits it.
             staged.push(Message::assistant(completion.content.clone()));
-            publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+            publish_side_context(self, &staged, &turn_sensitive, on_side_context);
+            Self::check_cancel(cancel)?;
 
             match completion.stop_reason.as_deref() {
                 Some("end_turn") | None => {
@@ -966,19 +1036,10 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::finish_review_note(
                                 &advice,
                             )));
-                            publish_side_context(
-                                self,
-                                &staged,
-                                &turn_sensitive,
-                                &mut on_side_context,
-                            );
+                            publish_side_context(self, &staged, &turn_sensitive, on_side_context);
                             continue;
                         }
                     }
-                    self.sensitive_tool_ids.extend(turn_sensitive);
-                    // Live memory keeps real tool bodies; persist path redacts.
-                    self.messages = staged;
-                    self.last_usage = last_usage;
                     return Ok(());
                 }
 
@@ -1012,8 +1073,10 @@ impl Agent {
                             redact_sensitive_staged(staged.clone(), &sensitive_ids);
                         self.tools.update_context(&handoff_messages);
                     }
+                    // Cancellation is honored after the results are staged:
+                    // a tool that ran may have changed files, and an
+                    // interrupted turn commits what it did.
                     let outcomes = self.execute_tool_calls(&calls, on_event, cancel).await;
-                    Self::check_cancel(cancel)?;
 
                     // Emission and wire order both follow the order the model
                     // asked in, never completion order.
@@ -1123,6 +1186,7 @@ impl Agent {
 
                     // One user message carrying every result.
                     staged.push(Message::user_blocks(results));
+                    Self::check_cancel(cancel)?;
                     if failure_streak >= 2 && !consulted_on_failures {
                         consulted_on_failures = true;
                         let advice = self
@@ -1142,7 +1206,7 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
                         }
                     }
-                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+                    publish_side_context(self, &staged, &turn_sensitive, on_side_context);
                 }
 
                 // A server-side tool hit its iteration cap. Resend as-is; the
@@ -1935,6 +1999,28 @@ pub(crate) fn task_request_usage(
     }
 }
 
+/// Wire history a turn has built so far, kept outside the step loop so a
+/// failed or cancelled turn can still commit it.
+struct TurnProgress {
+    staged: Vec<Message>,
+    /// Tool-use ids whose results must be redacted from durable history.
+    sensitive: Vec<String>,
+    /// The latest completed provider round's usage.
+    last_usage: Option<Usage>,
+}
+
+/// The note that closes an interrupted turn in wire history, so the next turn
+/// knows the work above it stopped part-way.
+fn interrupted_turn_note(error: &HarnessError) -> String {
+    let reason = match error {
+        HarnessError::Cancelled => "the user stopped it".to_string(),
+        other => format!("it failed ({})", other.turn_message().trim_end_matches('.')),
+    };
+    format!(
+        "[Zest: this turn was interrupted because {reason}. The tool calls and results above          really happened and any file changes they made are still in place. Do not assume          unfinished steps were done; wait for the user's next message.]"
+    )
+}
+
 fn publish_side_context(
     agent: &Agent,
     messages: &[Message],
@@ -1989,6 +2075,10 @@ fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> 
     }
     out
 }
+
+#[cfg(test)]
+#[path = "agent_resilience_tests.rs"]
+mod resilience_tests;
 
 #[cfg(test)]
 mod billing_tests {
@@ -3006,7 +3096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_error_does_not_commit_staged_history() {
+    async fn provider_error_commits_staged_history_marked_interrupted() {
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
             calls: AtomicUsize::new(0),
             fail_after: Some(0),
@@ -3018,8 +3108,15 @@ mod tests {
         let mut sink = |_ev: StreamEvent<'_>| {};
         let err = agent.send("new", &mut sink).await.unwrap_err();
         assert!(matches!(err, HarnessError::Other(_)));
-        assert_eq!(agent.messages.len(), prior_len);
+        // The new user message and the interruption note are committed after
+        // the prior history, which is untouched.
+        assert_eq!(agent.messages.len(), prior_len + 2);
         assert_eq!(agent.messages[0].role, "user");
+        assert!(
+            serde_json::to_string(&agent.messages[prior_len + 1].content)
+                .unwrap()
+                .contains("interrupted")
+        );
     }
 
     /// A tool that sleeps for `delay_ms` and reports its own name, so a batch
@@ -3641,7 +3738,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HarnessError::Cancelled));
-        assert!(agent.messages.is_empty());
+        // The provider was never called; the prompt is kept, marked interrupted.
+        assert_eq!(agent.messages.len(), 2);
+        assert!(serde_json::to_string(&agent.messages[1].content)
+            .unwrap()
+            .contains("stopped it"));
     }
 
     /// A warning nobody can trust is worse than no warning: if a healthy turn
@@ -3959,7 +4060,11 @@ mod tests {
                     .await,
                 Err(HarnessError::Cancelled)
             ));
-            assert!(agent.messages.is_empty());
+            assert!(
+                serde_json::to_string(&agent.messages.last().unwrap().content)
+                    .unwrap()
+                    .contains("interrupted")
+            );
             agent
                 .send("A different request", &mut |_| {})
                 .await

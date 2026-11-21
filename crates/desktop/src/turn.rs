@@ -779,8 +779,9 @@ async fn run_with_sink_internal<S: EventSink>(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    // Wire history is already transactional inside Agent; only sync committed
-    // messages after a successful terminal turn.
+    // Agent commits wire history at every terminal state: the whole turn on
+    // success, and on error or cancel the completed part closed with an
+    // interruption note. Persist whatever it committed.
     let final_event = match &result {
         Ok(()) => {
             // Persist redacted wire history; live agent memory keeps secrets.
@@ -796,7 +797,7 @@ async fn run_with_sink_internal<S: EventSink>(
             }
         }
         Err(HarnessError::Cancelled) => {
-            // Keep UI transcript; leave agent.messages at the last committed turn.
+            // Keep UI transcript and the interrupted wire turn.
             // Terminalize any pending approval/running tool cards.
             let _ = session.thread.terminalize_interrupted();
             session
