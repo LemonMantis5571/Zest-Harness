@@ -45,6 +45,13 @@ fn delegation_flaky_reviewer(counter: &str, failures: &str, prompt: &str) {
     delegation(prompt);
 }
 
+/// A worker that edits a file, then goes silent and never finishes.
+fn delegation_hang() {
+    std::fs::write("partial.txt", "unfinished work
+").expect("write partial fixture change");
+    std::thread::sleep(std::time::Duration::from_secs(300));
+}
+
 fn stream() {
     send(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}}"#);
     send(r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"Read"}}}"#);
@@ -147,6 +154,7 @@ fn main() {
         Some("ask_then_result") => ask_then_result(),
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
+        Some("delegation_hang") => delegation_hang(),
         Some("delegation_flaky_reviewer") => {
             let counter = args.next().expect("counter file");
             let failures = args.next().expect("failure count");

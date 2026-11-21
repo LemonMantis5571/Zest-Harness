@@ -40,6 +40,7 @@ use crate::provider::stream_contract::StreamNormalizer;
 use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
 use crate::tools::isolated_workspace;
 use crate::usage::{ExternalCost, ExternalUsageReport};
+use crate::worker_activity::{watchdog, WorkerActivity, WorkerLimits, DEFAULT_WORKER_IDLE};
 
 pub const EXTERNAL_AGENT_TOOL: &str = "delegate_external";
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
@@ -803,6 +804,14 @@ fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
             "timeout_secs must be between 1 and {MAX_TIMEOUT_SECS}"
         ));
     }
+    if config
+        .idle_timeout_secs
+        .is_some_and(|secs| secs == 0 || secs > MAX_TIMEOUT_SECS)
+    {
+        return Err(format!(
+            "idle_timeout_secs must be between 1 and {MAX_TIMEOUT_SECS}"
+        ));
+    }
     if config.mode == ExternalAgentMode::Acp
         && config
             .args
@@ -966,20 +975,35 @@ async fn run_isolated(
     Ok(run)
 }
 
+/// The limits a feature-card worker or reviewer from `config` runs under:
+/// `timeout_secs` in total, and `idle_timeout_secs` (900 s by default)
+/// without any output.
+pub fn delegation_limits(config: &ExternalAgentConfig) -> WorkerLimits {
+    WorkerLimits {
+        total: Duration::from_secs(config.timeout_secs.clamp(1, MAX_TIMEOUT_SECS)),
+        idle: config
+            .idle_timeout_secs
+            .map(|secs| Duration::from_secs(secs.clamp(1, MAX_TIMEOUT_SECS)))
+            .unwrap_or(DEFAULT_WORKER_IDLE),
+    }
+}
+
 /// Run an implementation worker in the same isolated-worktree seam used by
 /// `delegate_external`, with a cancellation token owned by the coordinator.
+/// `activity` carries the run's limits and records its progress.
 pub async fn run_delegation_worker(
     root: &Path,
     config: &ExternalAgentConfig,
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
+    activity: &WorkerActivity,
 ) -> Result<ExternalAgentResult, String> {
     validate_config(config)?;
     if config.workspace != ExternalWorkspace::Isolated {
         return Err("feature-card workers require an isolated workspace".into());
     }
-    run_isolated_with_cancel(root, config, prompt, cancel, parent_secret_envs).await
+    run_isolated_with_cancel(root, config, prompt, cancel, parent_secret_envs, activity).await
 }
 
 /// Prepare a fresh reviewer worktree from the same project snapshot, apply the
@@ -993,6 +1017,7 @@ pub async fn run_delegation_reviewer(
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
+    activity: &WorkerActivity,
 ) -> Result<ExternalAgentResult, String> {
     validate_config(config)?;
     if config.workspace != ExternalWorkspace::Isolated {
@@ -1019,6 +1044,7 @@ pub async fn run_delegation_reviewer(
         cancel,
         None,
         parent_secret_envs,
+        Some(activity),
     )
     .await;
     let reviewer_diff = workspace.collect_diff().await;
@@ -1042,6 +1068,7 @@ async fn run_isolated_with_cancel(
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
+    activity: &WorkerActivity,
 ) -> Result<ExternalAgentResult, String> {
     let mut workspace = isolated_workspace::prepare(root)
         .await
@@ -1054,6 +1081,7 @@ async fn run_isolated_with_cancel(
         cancel,
         None,
         parent_secret_envs,
+        Some(activity),
     )
     .await;
     let diff = workspace.collect_diff().await;
@@ -1077,7 +1105,7 @@ async fn spawn_and_run(
     prompt: &str,
     parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
-    spawn_and_run_with_cancel(cwd, config, prompt, None, None, parent_secret_envs).await
+    spawn_and_run_with_cancel(cwd, config, prompt, None, None, parent_secret_envs, None).await
 }
 
 pub(crate) type ExternalEventSink<'a> = dyn FnMut(ExternalAgentEvent) + Send + 'a;
@@ -1102,6 +1130,19 @@ pub(crate) trait ControlResponder: Send {
     async fn respond(&mut self, message: &Value) -> Option<Value>;
 }
 
+/// Resolve once the run is out of budget: `activity`'s total and no-progress
+/// limits when the coordinator watches the run, otherwise `timeout`.
+async fn run_limit(activity: Option<&WorkerActivity>, timeout: Duration) -> String {
+    match activity {
+        Some(activity) => watchdog(activity).await,
+        None => {
+            sleep(timeout).await;
+            format!("timed out after {} seconds", timeout.as_secs())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_run_with_cancel(
     cwd: &Path,
     config: &ExternalAgentConfig,
@@ -1109,6 +1150,7 @@ async fn spawn_and_run_with_cancel(
     cancel: Option<&CancelToken>,
     on_event: Option<&mut ExternalEventSink<'_>>,
     parent_secret_envs: &[String],
+    activity: Option<&WorkerActivity>,
 ) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(resolve_program(&config.command));
@@ -1158,16 +1200,14 @@ async fn spawn_and_run_with_cancel(
     let run_result = tokio::select! {
         result = async {
             match mode {
-                ExternalAgentMode::Headless => run_headless(stdout, on_event).await,
+                ExternalAgentMode::Headless => run_headless(stdout, on_event, activity).await,
                 ExternalAgentMode::Acp => {
                     let stdin = stdin.ok_or_else(|| "ACP agent stdin was not piped".to_string())?;
-                    run_acp(stdin, stdout, cwd, prompt, parent_secret_envs).await
+                    run_acp(stdin, stdout, cwd, prompt, parent_secret_envs, activity).await
                 }
             }
         } => result,
-        _ = sleep(timeout) => {
-            Err(format!("timed out after {} seconds", timeout.as_secs()))
-        }
+        reason = run_limit(activity, timeout) => Err(reason),
         _ = wait_cancel(cancel) => {
             Err(EXTERNAL_RUN_CANCELLED.to_string())
         }
@@ -1621,9 +1661,22 @@ fn expand_windows_environment(value: &str) -> String {
     expanded
 }
 
+/// A short name for what a worker event shows it doing, for the heartbeat.
+fn activity_label(event: &ExternalAgentEvent) -> Option<String> {
+    match event {
+        ExternalAgentEvent::ToolCall { title, .. } => Some(format!("tool {title}")),
+        ExternalAgentEvent::Text(_) | ExternalAgentEvent::TextDelta(_) => Some("writing".into()),
+        ExternalAgentEvent::Thinking(_) => Some("thinking".into()),
+        ExternalAgentEvent::Diff { path } => Some(format!("edited {path}")),
+        ExternalAgentEvent::Error(_) => Some("reported an error".into()),
+        ExternalAgentEvent::Done => None,
+    }
+}
+
 async fn run_headless(
     stdout: ChildStdout,
     mut on_event: Option<&mut ExternalEventSink<'_>>,
+    activity: Option<&WorkerActivity>,
 ) -> Result<ExternalAgentRun, String> {
     let mut reader = BufReader::new(stdout);
     let mut run = ExternalAgentRun::default();
@@ -1645,6 +1698,13 @@ async fn run_headless(
             Ok(value) => {
                 let event_start = run.events.len();
                 absorb_headless_value(&value, &mut run);
+                if let Some(activity) = activity {
+                    let label = run.events[event_start..]
+                        .iter()
+                        .rev()
+                        .find_map(activity_label);
+                    activity.progress(label.as_deref());
+                }
                 if let Some(on_event) = on_event.as_deref_mut() {
                     for event in run.events[event_start..].iter().cloned() {
                         on_event(event);
@@ -1657,6 +1717,9 @@ async fn run_headless(
                 // not fully structured so a wholly malformed response is
                 // reported explicitly instead of looking like an empty answer.
                 run.malformed_lines += 1;
+                if let Some(activity) = activity {
+                    activity.progress(Some("output"));
+                }
                 let text = line.to_string();
                 run.events.push(ExternalAgentEvent::Text(text.clone()));
                 if let Some(on_event) = on_event.as_deref_mut() {
@@ -2147,6 +2210,7 @@ async fn run_acp(
     cwd: &Path,
     prompt: &str,
     parent_secret_envs: &[String],
+    activity: Option<&WorkerActivity>,
 ) -> Result<ExternalAgentRun, String> {
     let mut reader = BufReader::new(stdout);
     let mut run = ExternalAgentRun::default();
@@ -2167,7 +2231,15 @@ async fn run_acp(
         }),
     )
     .await?;
-    wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session).await?;
+    wait_for_response(
+        &mut reader,
+        &mut stdin,
+        next_id,
+        &mut run,
+        &mut session,
+        activity,
+    )
+    .await?;
     next_id += 1;
 
     send_rpc(
@@ -2177,12 +2249,19 @@ async fn run_acp(
         json!({"cwd": cwd.display().to_string(), "mcpServers": []}),
     )
     .await?;
-    let session_id = wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session)
-        .await?
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "ACP session/new returned no sessionId".to_string())?
-        .to_string();
+    let session_id = wait_for_response(
+        &mut reader,
+        &mut stdin,
+        next_id,
+        &mut run,
+        &mut session,
+        activity,
+    )
+    .await?
+    .get("sessionId")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "ACP session/new returned no sessionId".to_string())?
+    .to_string();
     run.session_id = Some(session_id.clone());
     next_id += 1;
 
@@ -2196,8 +2275,15 @@ async fn run_acp(
         }),
     )
     .await?;
-    let prompt_result =
-        wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session).await?;
+    let prompt_result = wait_for_response(
+        &mut reader,
+        &mut stdin,
+        next_id,
+        &mut run,
+        &mut session,
+        activity,
+    )
+    .await?;
     if let Some(report) = external_usage_from_value(&prompt_result) {
         run.merge_usage(report);
     }
@@ -2239,6 +2325,7 @@ async fn wait_for_response(
     expected_id: u64,
     run: &mut ExternalAgentRun,
     session: &mut AcpSession,
+    activity: Option<&WorkerActivity>,
 ) -> Result<Value, String> {
     let mut line = String::new();
     loop {
@@ -2249,6 +2336,17 @@ async fn wait_for_response(
             .map_err(|error| format!("read ACP response: {error}"))?;
         if bytes == 0 {
             return Err("ACP agent closed stdout before completing the request".into());
+        }
+        if let Some(activity) = activity {
+            let method = serde_json::from_str::<Value>(line.trim())
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            activity.progress(method.as_deref());
         }
         let value: Value = match serde_json::from_str(line.trim()) {
             Ok(value) => value,
@@ -2831,6 +2929,7 @@ mod tests {
             model: Some("test-model".into()),
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         }
     }
 
@@ -2905,6 +3004,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -2936,6 +3036,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -2969,6 +3070,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -3011,6 +3113,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -3736,6 +3839,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         }
     }
 

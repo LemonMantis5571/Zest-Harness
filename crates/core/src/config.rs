@@ -468,6 +468,11 @@ pub struct ExternalAgentConfig {
     /// a turn wait indefinitely.
     #[serde(default = "default_external_timeout_secs")]
     pub timeout_secs: u64,
+    /// A delegated feature-card worker or reviewer that prints nothing for
+    /// this long is stopped, even if `timeout_secs` has not run out.
+    /// Defaults to 900 seconds; capped like `timeout_secs`.
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]

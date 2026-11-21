@@ -58,7 +58,11 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
   origin is `desktop_agent_board` (the default). A repeated key returns the
   existing job. MCP sets the origin to `inbound_mcp`.
 - **Heartbeat.** While a worker or reviewer runs, a heartbeat every 15 s updates
-  `orchestration.heartbeatAt` and emits `heartbeat`.
+  `orchestration.heartbeatAt` and emits `heartbeat`. Its detail is the
+  watched run's `WorkerActivity::summary`: how long it has run, how long ago
+  it last showed progress, and what that was (`tool Read`, `writing`, an ACP
+  method). During the review phase it says the checks are running until the
+  first reviewer starts (`ActivitySlot`).
 - **`reconcile`**:
   - approves jobs that have a valid dispatch receipt (`ingest_inner`);
   - marks `worker_running`/`review_running` jobs with no live task as `blocked`

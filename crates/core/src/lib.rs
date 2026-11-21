@@ -52,6 +52,7 @@ pub mod thread_window;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;
+pub mod worker_activity;
 pub mod workspace_changes;
 pub mod worktree_chat;
 pub mod worktree_registry;
@@ -172,8 +173,8 @@ pub use tools::approval::{
 };
 pub use tools::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
 pub use tools::external_agent::{
-    prepare_external_command, resolve_program, run_delegation_reviewer, run_delegation_worker,
-    ExternalAgent, ExternalAgentResult, EXTERNAL_AGENT_TOOL,
+    delegation_limits, prepare_external_command, resolve_program, run_delegation_reviewer,
+    run_delegation_worker, ExternalAgent, ExternalAgentResult, EXTERNAL_AGENT_TOOL,
 };
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
@@ -199,6 +200,7 @@ pub use usage::{
     UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, MAX_TASK_USAGE_RECORDS,
     TASK_USAGE_RETENTION_SECS,
 };
+pub use worker_activity::{WorkerActivity, WorkerLimits};
 pub use workspace_changes::{
     inspect_merge_base, snapshot_from_unified_diff, FileChangeSummary, WorkspaceChangeSet,
 };

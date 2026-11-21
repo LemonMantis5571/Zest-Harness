@@ -9,6 +9,7 @@ paths:
   - crates/core/src/tools/delegate_feature.rs
   - crates/core/src/tools/external_agent.rs
   - crates/core/src/tools/isolated_workspace.rs
+  - crates/core/src/worker_activity.rs
   - crates/coordinator/src/scheduler.rs
   - crates/desktop/src/delegation.rs
   - crates/desktop/ui/src/components/WorkbenchPanel.tsx
@@ -61,6 +62,15 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
 - Review cannot be turned off: `review_required: false` is rejected. The
   reviewer defaults to `sameAsWorker` but always runs as a fresh process or
   runtime in a fresh worktree.
+- **Limits.** Every worker and reviewer process runs under two limits
+  (`WorkerLimits`, enforced by `worker_activity::watchdog`): a total budget
+  and a no-progress budget. External agents use `timeout_secs` and
+  `idle_timeout_secs` (default 900 s) from their `[agents.<id>]` entry
+  (`delegation_limits`); native provider workers get 60 minutes in total and
+  15 minutes without a stream event. Any output line from a CLI, any ACP
+  message and any native stream event counts as progress. A run that hits
+  either limit is stopped and the job fails with "timed out after …" or
+  "made no progress for … seconds".
 - Workers never edit the user's checkout. Each runs in a temporary detached
   `git worktree` that holds the current dirty snapshot (tracked diff plus
   untracked files), with sensitive files removed and `.zest/` left out. What

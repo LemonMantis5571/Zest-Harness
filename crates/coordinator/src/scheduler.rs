@@ -17,13 +17,14 @@ use crate::runtime::{
 use ts_rs::TS;
 use zest_core::{
     acceptance_check_skip_reason, apply_diff_checked, capture_workspace_snapshot,
-    capture_worktree_lineage, dependency_blocker, diff_paths, resolve_provider_target,
-    run_acceptance_checks, run_delegation_reviewer, run_delegation_worker, run_provider_reviewer,
-    run_provider_worker, validate_diff_scope, worker_diff_hash, AttemptRole, AttemptUsage,
-    CheckStatus, Config, DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus,
-    DelegationStore, DelegationTarget, ExternalUsageReport, NativeTaskUsageContext, ProviderConfig,
-    ResolvedTargetMetadata, ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget,
-    WorkerResult,
+    capture_worktree_lineage, delegation_limits, dependency_blocker, diff_paths,
+    resolve_provider_target, run_acceptance_checks, run_delegation_reviewer, run_delegation_worker,
+    run_provider_reviewer, run_provider_worker, validate_diff_scope, worker_diff_hash, AttemptRole,
+    AttemptUsage, CheckStatus, Config, DelegationJob, DelegationOrigin,
+    DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
+    ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
+    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerActivity,
+    WorkerLimits, WorkerResult,
 };
 use zest_core::{
     DecisionGate, DispatchState, ExternalSessionEvidence, InboxMessage, LifecycleEntry,
@@ -934,6 +935,49 @@ fn resolve_job_targets(
     Ok(ResolvedDelegationTargets { worker, reviewer })
 }
 
+/// The run the heartbeat reports on. The review phase swaps in each
+/// reviewer's activity; before the first one it reports the checks.
+#[derive(Clone, Default)]
+struct ActivitySlot(Arc<Mutex<Option<(&'static str, Arc<WorkerActivity>)>>>);
+
+impl ActivitySlot {
+    fn watching(role: &'static str, activity: Arc<WorkerActivity>) -> Self {
+        let slot = Self::default();
+        slot.set(role, activity);
+        slot
+    }
+
+    fn set(&self, role: &'static str, activity: Arc<WorkerActivity>) {
+        if let Ok(mut current) = self.0.lock() {
+            *current = Some((role, activity));
+        }
+    }
+
+    fn detail(&self, idle: &str) -> String {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|current| {
+                current
+                    .as_ref()
+                    .map(|(role, activity)| activity.summary(role))
+            })
+            .unwrap_or_else(|| idle.to_string())
+    }
+}
+
+/// The limits a worker or reviewer on `target` runs under.
+fn limits_for(config: &Config, target: &DelegationTarget) -> WorkerLimits {
+    match target {
+        DelegationTarget::ExternalAgent { agent_id } => config
+            .agents
+            .get(agent_id)
+            .map(delegation_limits)
+            .unwrap_or_default(),
+        DelegationTarget::Provider { .. } => WorkerLimits::default(),
+    }
+}
+
 /// A reviewer that fails or returns an unreadable report gets one fresh
 /// replacement before the card blocks.
 const MAX_REVIEWER_ATTEMPTS: u32 = 2;
@@ -1298,12 +1342,15 @@ impl DelegationCoordinator {
         true
     }
 
+    /// Every `HEARTBEAT_INTERVAL_SECS`, record what the watched run last did
+    /// (`idle` while nothing is watched).
     fn start_heartbeat_loop(
         self: &Arc<Self>,
         root: PathBuf,
         job_id: String,
         cancel: zest_core::CancelToken,
-        detail: String,
+        idle: String,
+        activity: ActivitySlot,
     ) -> Box<dyn SpawnAbort> {
         let coordinator = self.clone();
         self.spawner.spawn(Box::pin(async move {
@@ -1312,7 +1359,7 @@ impl DelegationCoordinator {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if !coordinator.record_heartbeat(&root, &job_id, &detail) {
+                        if !coordinator.record_heartbeat(&root, &job_id, &activity.detail(&idle)) {
                             break;
                         }
                     }
@@ -2187,11 +2234,16 @@ impl DelegationCoordinator {
             .update(job.clone())
             .map_err(|error| error.to_string())?;
         self.emit(&store, &job, EventKind::WorkerStarted);
+        let worker_activity = Arc::new(WorkerActivity::new(limits_for(
+            &config,
+            &resolved_targets.worker.target,
+        )));
         let worker_heartbeat = self.start_heartbeat_loop(
             root.to_path_buf(),
             job_id.to_string(),
             cancel.clone(),
             "worker dispatch is still active".into(),
+            ActivitySlot::watching("worker", worker_activity.clone()),
         );
 
         let snapshot = job.base_workspace_snapshot.clone();
@@ -2241,6 +2293,7 @@ impl DelegationCoordinator {
                     &worker_prompt,
                     Some(cancel),
                     &parent_secret_envs,
+                    &worker_activity,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -2268,6 +2321,7 @@ impl DelegationCoordinator {
                         correlation_id: Some(job_id.to_string()),
                     },
                     Some(cancel),
+                    &worker_activity,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -2351,11 +2405,13 @@ impl DelegationCoordinator {
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
+        let watched = ActivitySlot::default();
         let heartbeat = self.start_heartbeat_loop(
             root.to_path_buf(),
             job.job_id.clone(),
             cancel.clone(),
-            "review dispatch is still active".into(),
+            "acceptance checks are running".into(),
+            watched.clone(),
         );
         let result = self
             .review_attempts(
@@ -2367,6 +2423,7 @@ impl DelegationCoordinator {
                 worker_diff,
                 worker_result,
                 cancel,
+                &watched,
             )
             .await;
         heartbeat.abort();
@@ -2384,6 +2441,7 @@ impl DelegationCoordinator {
         worker_diff: &str,
         worker_result: &WorkerResult,
         cancel: &zest_core::CancelToken,
+        watched: &ActivitySlot,
     ) -> Result<(), String> {
         let job_id = job.job_id.clone();
         let checks = run_acceptance_checks(
@@ -2413,6 +2471,8 @@ impl DelegationCoordinator {
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
             self.emit(store, &job, EventKind::ReviewerStarted);
+            let activity = Arc::new(WorkerActivity::new(limits_for(config, &reviewer.target)));
+            watched.set("reviewer", activity.clone());
             let outcome = self
                 .run_reviewer(
                     root,
@@ -2422,6 +2482,7 @@ impl DelegationCoordinator {
                     &review_prompt,
                     &job_id,
                     cancel,
+                    &activity,
                 )
                 .await;
             if cancel.is_cancelled() {
@@ -2508,6 +2569,7 @@ impl DelegationCoordinator {
         prompt: &str,
         job_id: &str,
         cancel: &zest_core::CancelToken,
+        activity: &WorkerActivity,
     ) -> Result<ReviewOutput, String> {
         let parent_secret_envs = config.provider_key_env_names();
         match target {
@@ -2523,6 +2585,7 @@ impl DelegationCoordinator {
                     prompt,
                     Some(cancel),
                     &parent_secret_envs,
+                    activity,
                 )
                 .await?;
                 if let Ok(mut ledger) = self.ledger.lock() {
@@ -2551,6 +2614,7 @@ impl DelegationCoordinator {
                         correlation_id: Some(job_id.to_string()),
                     },
                     Some(cancel),
+                    activity,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -3109,6 +3173,40 @@ mod tests {
             .review_again(root, &created.job_id, None)
             .unwrap_err();
         assert!(error.contains("blocked or failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_goes_silent_is_stopped_at_its_idle_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // `timeout_secs = 30` would let it hang far longer than the test.
+        write_fixture_project_with(
+            root,
+            &format!(
+                "{}idle_timeout_secs = 1\n",
+                fixture_agent("hang", &["delegation_hang"])
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Silent worker", "hang"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let started = std::time::Instant::now();
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.contains("made no progress for 1 seconds"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert!(failed
+            .attempts
+            .iter()
+            .all(|attempt| attempt.finished_at.is_some()));
     }
 
     #[tokio::test]

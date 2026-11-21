@@ -2448,6 +2448,7 @@ mod tests {
                 model: None,
                 workspace: ExternalWorkspace::Isolated,
                 timeout_secs: 10,
+                idle_timeout_secs: None,
             },
         );
         agents

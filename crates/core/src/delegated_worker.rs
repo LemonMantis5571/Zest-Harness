@@ -22,6 +22,7 @@ use crate::tools::bash::{classify, Clearance};
 use crate::tools::capture::drain_bounded;
 use crate::tools::isolated_workspace::{prepare, prepare_reviewer};
 use crate::usage::Ledger;
+use crate::worker_activity::{watchdog, WorkerActivity};
 
 pub const MAX_NATIVE_RESULT_CHARS: usize = 16_000;
 const MAX_CHECK_STREAM_BYTES: usize = 60 * 1024;
@@ -302,6 +303,7 @@ pub async fn run_provider_worker(
     prompt: &str,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
+    activity: &WorkerActivity,
 ) -> Result<NativeWorkerResult> {
     let target = provider_target(root, &config, target)?;
     let mut workspace = prepare(root).await.map_err(HarnessError::Other)?;
@@ -313,6 +315,7 @@ pub async fn run_provider_worker(
         RuntimeRole::DelegationWorker,
         usage,
         cancel,
+        activity,
     )
     .await;
     let diff = match result {
@@ -359,6 +362,7 @@ pub async fn run_provider_reviewer(
     prompt: &str,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
+    activity: &WorkerActivity,
 ) -> Result<NativeReviewerResult> {
     let target = provider_target(root, &config, target)?;
     let mut workspace = prepare_reviewer(root, worker_diff)
@@ -372,6 +376,7 @@ pub async fn run_provider_reviewer(
         RuntimeRole::DelegationReviewer,
         usage,
         cancel,
+        activity,
     )
     .await;
     let output = match result {
@@ -431,6 +436,7 @@ fn provider_target(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_in_workspace(
     root: &Path,
     config: Config,
@@ -439,6 +445,7 @@ async fn run_in_workspace(
     role: RuntimeRole,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
+    activity: &WorkerActivity,
 ) -> Result<(String, AttemptUsage)> {
     let mut runtime = RuntimeBuilder::new(root)
         .with_config(config)
@@ -462,17 +469,33 @@ async fn run_in_workspace(
     if let Some(run_id) = run_id {
         session.agent.set_next_run_id(run_id);
     }
-    let mut sink = discard_event;
-    session
-        .agent
-        .send_cancellable(prompt, &mut sink, cancel)
-        .await?;
+    let mut sink =
+        |event: StreamEvent<'_>| activity.progress(stream_event_label(&event).as_deref());
+    // A provider stream that stalls, or a turn that never ends, used to hold
+    // the job's lane forever. Dropping the turn is safe here: the worker has
+    // no shell, and its worktree is removed by the caller either way.
+    tokio::select! {
+        result = session.agent.send_cancellable(prompt, &mut sink, cancel) => result?,
+        reason = watchdog(activity) => return Err(HarnessError::Other(reason)),
+    }
     let final_text = final_text(&session.agent);
     let usage = attempt_usage(session.agent.turn_usage().as_ref());
     Ok((final_text, usage))
 }
 
-fn discard_event(_event: StreamEvent<'_>) {}
+/// What a native stream event shows the worker doing, for the heartbeat.
+fn stream_event_label(event: &StreamEvent<'_>) -> Option<String> {
+    match event {
+        StreamEvent::Text(_) => Some("writing".into()),
+        StreamEvent::Thinking(_) => Some("thinking".into()),
+        StreamEvent::ToolCallStart { name, .. } => Some(format!("tool {name}")),
+        StreamEvent::ToolCallResult { name, path, .. } => Some(match path {
+            Some(path) => format!("tool {name} {path}"),
+            None => format!("tool {name} finished"),
+        }),
+        _ => None,
+    }
+}
 
 fn final_text(agent: &crate::agent::Agent) -> String {
     agent
@@ -645,6 +668,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_native_worker_whose_provider_goes_silent_is_stopped() {
+        // Accepts the request and never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(stream);
+        });
+        let config = Config::parse(&format!(
+            "[providers.silent]\nkind = \"openai_compatible\"\nbase_url = \"http://{address}/v1\"\nmodel = \"test-model\"\n"
+        ))
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let activity = WorkerActivity::new(crate::worker_activity::WorkerLimits {
+            total: Duration::from_secs(60),
+            idle: Duration::from_millis(500),
+        });
+        let started = std::time::Instant::now();
+        let error = run_in_workspace(
+            temp.path(),
+            config,
+            &ResolvedWorkerMetadata {
+                provider_id: "silent".into(),
+                model: "test-model".into(),
+                effort: "high".into(),
+            },
+            "prompt",
+            RuntimeRole::DelegationWorker,
+            NativeTaskUsageContext::default(),
+            None,
+            &activity,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("made no progress"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(30));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn native_worker_trace_is_labelled_and_correlated_to_its_job() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -709,6 +773,7 @@ mod tests {
                 correlation_id: Some("job-7".into()),
             },
             None,
+            &WorkerActivity::new(crate::worker_activity::WorkerLimits::default()),
         )
         .await
         .unwrap();
