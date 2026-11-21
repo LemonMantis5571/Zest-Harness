@@ -166,6 +166,9 @@ export type ChatScreenProps = {
   gitContext: GitContext | null;
   profile: UserProfile;
   sending: boolean;
+  unsentFollowups: ReadonlyArray<QueuedTurn>;
+  onRestoreFollowup: (turn: QueuedTurn) => void;
+  onDiscardFollowup: (turn: QueuedTurn) => void;
   queuedMessages: ReadonlyArray<QueuedTurn>;
   onUpdateQueuedMessage: (turnId: string, text: string) => void;
   onRemoveQueuedMessage: (turnId: string) => void;
@@ -678,6 +681,9 @@ export function ChatScreen({
   gitContext,
   profile,
   sending,
+  unsentFollowups,
+  onRestoreFollowup,
+  onDiscardFollowup,
   queuedMessages,
   onUpdateQueuedMessage,
   onRemoveQueuedMessage,
@@ -1996,6 +2002,9 @@ export function ChatScreen({
             contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
             contextScope={session.threadId}
             sending={sending}
+            unsentFollowups={unsentFollowups}
+            onRestoreFollowup={onRestoreFollowup}
+            onDiscardFollowup={onDiscardFollowup}
             queuedMessages={queuedMessages}
             onUpdateQueuedMessage={onUpdateQueuedMessage}
             onRemoveQueuedMessage={onRemoveQueuedMessage}

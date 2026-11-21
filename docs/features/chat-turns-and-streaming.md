@@ -35,6 +35,7 @@ tests:
   - crates/desktop/ui/src/lib/serialActions.test.ts
   - crates/desktop/ui/src/lib/invokeErrors.test.ts
   - crates/desktop/ui/e2e/conversation-scroll.spec.ts
+  - crates/desktop/ui/e2e/failed-followup.spec.ts
 verify:
   - npm run ui:test
   - npm run ui:e2e -- conversation-scroll
@@ -56,6 +57,7 @@ verify:
 - Enter sends (Shift+Enter is a newline, IME composition is ignored). An empty message with no usable attachment is refused (`empty message`).
 - While a turn runs, the Send button is Stop. Esc (when nothing else is open) or the `chat.stop` binding cancels via `cancel_turn`; the UI stays busy until the `cancelled` event arrives.
 - Sending while a turn runs, or while the chat already has queued messages, queues a durable **followup** instead of starting a turn. Queued messages show above the composer and can be edited or removed.
+- When saving a follow-up fails, its chat keeps the text and attachments in an unsent row for the session. Restore draft returns them to an empty composer, or Discard removes the row. Switching chats or typing a new draft does not overwrite either message.
 - After a turn **completes**, the next followup starts automatically (FIFO). After cancel or error, queued followups stay put; "Resume queued" starts the oldest. Idle queues never spend quota by themselves.
 - Text and thinking stream live. Each thinking block is a Reasoning line in the turn's Trace: it reads "Thinking", shimmers and stays open (height-capped, following the newest line) while it streams, then folds to "Thought for Ns" (or "Thought through N steps" for a reopened chat). Once the user opens or closes it, their choice wins.
 - Text from separate provider rounds (split by a tool call) is separated by a blank line, never glued together.

@@ -2318,6 +2318,10 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
           chatHandler?.({ kind: "assistant_start", ...id, message_id: assistantId });
         });
       }
+      if (target === "followup" && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("holdQueueFailure")) {
+        await new Promise<void>((resolve) => window.addEventListener("zest:fixture-reject-queue", () => resolve(), { once: true }));
+        throw new Error("Fixture could not save the follow-up");
+      }
       if (target === "followup" || target === "steer" || target === "inject") {
         const input = {
           id: `input-${crypto.randomUUID()}`,
