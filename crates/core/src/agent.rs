@@ -463,14 +463,16 @@ impl Agent {
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
-        self.compact_context_for_run(self.active_run_id.clone())
+        self.compact_context_for_run(self.active_run_id.clone(), None)
             .await
     }
 
     /// Attribute maintenance after an idle host turn to that turn's durable ID.
+    /// `cancel` stops the summarization request, leaving history unchanged.
     pub async fn compact_context_for_run(
         &mut self,
         run_id: Option<String>,
+        cancel: Option<&CancelToken>,
     ) -> Result<CompactionOutcome> {
         let task_id = new_id("task");
         let parent_task_id = self.active_usage_task_id.clone();
@@ -499,17 +501,20 @@ impl Agent {
             }
         }
         let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id);
-        let result = self.compact_context_inner().await;
-        trace.finish(if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
+        let result = self.compact_context_inner(cancel).await;
+        trace.finish(match &result {
+            Ok(_) => "completed",
+            Err(HarnessError::Cancelled) => "cancelled",
+            Err(_) => "failed",
         });
         self.active_usage_task_id = prior_task;
         result
     }
 
-    async fn compact_context_inner(&mut self) -> Result<CompactionOutcome> {
+    async fn compact_context_inner(
+        &mut self,
+        cancel: Option<&CancelToken>,
+    ) -> Result<CompactionOutcome> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
                 "there is not enough conversation to compact yet".into(),
@@ -539,15 +544,51 @@ impl Agent {
             });
         }
 
+        let sensitive = self.sensitive_tool_ids.clone();
+        let summary = self.write_checkpoint(pruned, &sensitive, cancel).await;
+        self.provider_session = None;
+        let summary = summary?;
+        self.messages = checkpoint_messages(&summary);
+        self.sensitive_tool_ids.clear();
+        // The compaction request measured the old history, not the compacted
+        // conversation. Do not let that maintenance request masquerade as the
+        // next turn's context usage in the footer.
+        self.last_usage = None;
+        Ok(CompactionOutcome::Summarized { summary })
+    }
+
+    /// Ask the model for a checkpoint of `history` and return its text.
+    ///
+    /// The request receives the persistence-safe history, so a sensitive tool
+    /// result cannot be copied into the durable checkpoint, and is fitted to
+    /// the context window first: when even the history being summarized is too
+    /// long, long tool results are shortened and then the oldest exchanges left
+    /// out. It calls no tools and asks for no thinking, and `cancel` stops it.
+    async fn write_checkpoint(
+        &mut self,
+        history: Vec<Message>,
+        sensitive_ids: &[String],
+        cancel: Option<&CancelToken>,
+    ) -> Result<String> {
+        let window = self.context_window();
+        // An eighth of the window at most, so a small local model still has
+        // room for the history it is summarizing.
+        let max_tokens = self
+            .max_tokens
+            .min(CHECKPOINT_MAX_TOKENS)
+            .min(u32::try_from(window / 8).unwrap_or(u32::MAX))
+            .max(1_024);
+        let tools = self.tools_for_model();
+        let fixed = crate::context_budget::system_tokens(self.system.as_ref())
+            + crate::context_budget::tool_schema_tokens(&tools)
+            + u64::from(max_tokens);
+        // Nine tenths of what is left: the estimate under-counts code and JSON.
+        let budget = (window.saturating_sub(fixed)).saturating_mul(9) / 10;
         // Redaction is last before the wire. It is the safety property, so
         // nothing may run after it that could resurrect a sensitive body.
-        let mut messages = redact_sensitive_staged(pruned, &self.sensitive_tool_ids);
-        messages.push(Message::user_text(
-            "Create a concise context checkpoint for the next coding turn. ".to_string()
-                + "Preserve the user’s goals, decisions, constraints, files changed, "
-                + "unfinished work, and important tool findings. Do not invent facts. "
-                + "Return only the checkpoint, with compact headings.",
-        ));
+        let mut messages =
+            fit_history_for_checkpoint(redact_sensitive_staged(history, sensitive_ids), budget);
+        messages.push(Message::user_text(CHECKPOINT_REQUEST));
         let request = TurnRequest {
             model: self.model.clone(),
             system: self.system.clone(),
@@ -558,18 +599,27 @@ impl Agent {
             // would both miss the session's cached prefix and write a second
             // full copy of it — twice the price of the thing it exists to
             // make cheaper.
-            tools: self.tools_for_model(),
+            tools,
             allow_tool_use: false,
-            max_tokens: 4_096,
+            max_tokens,
             effort: None,
             thinking: false,
             provider_session: self.provider_session.clone(),
             interaction: self.provider_interaction.clone(),
-            cancel: None,
+            cancel: cancel.cloned(),
         };
         let mut sink = |_event: StreamEvent<'_>| {};
         let request_started = tokio::time::Instant::now();
-        let completion = match self.provider.stream_turn(&request, &mut sink).await {
+        let streamed = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err(HarnessError::Cancelled),
+            result = self.provider.stream_turn(&request, &mut sink) => result,
+        };
+        let elapsed_ms = request_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let completion = match streamed {
             Ok(completion) => completion,
             Err(error) => {
                 if let (Some(ledger), Some(task_id)) =
@@ -582,21 +632,15 @@ impl Agent {
                                 "compaction",
                                 self.provider.id(),
                                 &request,
-                                request_started
-                                    .elapsed()
-                                    .as_millis()
-                                    .min(u128::from(u64::MAX))
-                                    as u64,
+                                elapsed_ms,
                                 None,
                             ),
                         );
                     }
                 }
-                self.provider_session = None;
                 return Err(error);
             }
         };
-        self.provider_session = None;
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
                 // The trace first: the spend record's save then persists both.
@@ -607,10 +651,7 @@ impl Agent {
                             "compaction",
                             self.provider.id(),
                             &request,
-                            request_started
-                                .elapsed()
-                                .as_millis()
-                                .min(u128::from(u64::MAX)) as u64,
+                            elapsed_ms,
                             Some(&completion),
                         ),
                     );
@@ -626,11 +667,8 @@ impl Agent {
         let summary = completion
             .content
             .iter()
-            .filter_map(|block| {
-                (block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
-                    .then(|| block.get("text").and_then(|text| text.as_str()))
-                    .flatten()
-            })
+            .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
             .collect::<Vec<_>>()
             .join("\n")
             .trim()
@@ -640,25 +678,101 @@ impl Agent {
                 "provider returned an empty context checkpoint".into(),
             ));
         }
+        Ok(summary)
+    }
 
-        self.messages = vec![
-            Message::user_text(
-                "[Zest context checkpoint] The earlier conversation is represented by the "
-                    .to_string()
-                    + "assistant checkpoint that follows. Use it as working context.",
-            ),
-            Message::assistant(vec![serde_json::json!({
-                "type": "text",
-                "text": summary,
-            })]),
-        ];
-        self.sensitive_tool_ids.clear();
+    /// Compact a running turn's history in place.
+    ///
+    /// The same two steps as [`Self::compact_context`]: shorten long tool
+    /// results, and when that does not bring `used` prompt tokens under the
+    /// threshold (or `used` is `None` because the provider already said the
+    /// prompt is too long) replace the history with a
+    /// checkpoint followed by a note to carry on with the current task. Shown
+    /// as a provider activity row. Returns whether the history changed.
+    async fn compact_staged(
+        &mut self,
+        staged: &mut Vec<Message>,
+        turn_start: &mut usize,
+        turn_sensitive: &[String],
+        used: Option<u64>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Result<bool> {
+        let id = new_id("compact");
+        let turn_start_before = *turn_start;
+        let running = "Compacting the conversation to fit the context window";
+        on_event(StreamEvent::ProviderActivity {
+            id: &id,
+            title: running,
+            status: "running",
+        });
+        let mut pruned = staged.clone();
+        let report =
+            crate::prune::prune_tool_results(&mut pruned, crate::prune::KEEP_RECENT_MESSAGES);
+        let threshold = crate::context_budget::auto_compact_threshold(self.context_window());
+        let pruning_is_enough = used.is_some_and(|used| {
+            report.replaced > 0 && used.saturating_sub(report.tokens_saved_estimate()) < threshold
+        });
+        if pruning_is_enough {
+            *staged = pruned;
+            self.provider_session = None;
+            let title = format!("Trimmed {} long tool results", report.replaced);
+            on_event(StreamEvent::ProviderActivity {
+                id: &id,
+                title: &title,
+                status: "completed",
+            });
+            return Ok(true);
+        }
+
+        let mut sensitive = self.sensitive_tool_ids.clone();
+        sensitive.extend(turn_sensitive.iter().cloned());
+        let summary = self.write_checkpoint(pruned, &sensitive, cancel).await;
         self.provider_session = None;
-        // The compaction request measured the old history, not the compacted
-        // conversation. Do not let that maintenance request masquerade as the
-        // next turn's context usage in the footer.
-        self.last_usage = None;
-        Ok(CompactionOutcome::Summarized { summary })
+        match summary {
+            Ok(summary) => {
+                let mut compacted = checkpoint_messages(&summary);
+                // The request this turn is working on stays word for word.
+                *turn_start = compacted.len();
+                if let Some(request) = staged.get(turn_start_before) {
+                    compacted.push(request.clone());
+                }
+                compacted.push(Message::user_text(MID_TURN_CHECKPOINT_NOTE));
+                *staged = compacted;
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: "Compacted the conversation to fit the context window",
+                    status: "completed",
+                });
+                Ok(true)
+            }
+            Err(error) => {
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: "Could not compact the conversation",
+                    status: "error",
+                });
+                Err(error)
+            }
+        }
+    }
+
+    /// The prompt a request built from `staged` would send, in tokens.
+    ///
+    /// Anchored on the provider's own count of an earlier request where there
+    /// is one (`measured`: its prompt plus the reply, and how many messages it
+    /// covered), with only the messages since then estimated.
+    fn staged_prompt_tokens(&self, staged: &[Message], measured: Option<(u64, usize)>) -> u64 {
+        match measured {
+            Some((tokens, covered)) if covered <= staged.len() => {
+                tokens + crate::context_budget::conversation_tokens(&staged[covered..])
+            }
+            _ => {
+                crate::context_budget::system_tokens(self.system.as_ref())
+                    + crate::context_budget::conversation_tokens(staged)
+                    + crate::context_budget::tool_schema_tokens(&self.tools_for_model())
+            }
+        }
     }
 
     /// Would shortening those tool results alone bring the prompt back under the
@@ -940,6 +1054,20 @@ impl Agent {
         // Set once the step limit is reached: the next round may not call tools.
         let mut wrapping_up = false;
         let mut repeats = RepeatTracker::default();
+        // The provider's own count of the latest request (prompt plus reply)
+        // and how many staged messages it covered; the previous turn's last
+        // round to begin with.
+        let mut measured: Option<(u64, usize)> = self
+            .last_usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens() + u64::from(usage.output_tokens))
+            .filter(|tokens| *tokens > 0)
+            .map(|tokens| (tokens, self.messages.len()));
+        // Set after compacting because the provider said the prompt was too
+        // long, so a second rejection ends the turn instead of looping.
+        let mut compacted_for_limit = false;
+        // Where this turn's user message sits in `staged`.
+        let mut turn_start = self.messages.len();
 
         publish_side_context(self, staged, turn_sensitive, on_side_context);
 
@@ -961,6 +1089,36 @@ impl Agent {
                     // even though its response is not complete yet.
                     publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
+            }
+
+            // Compact before a step whose prompt is near the window, as a
+            // front-end does between turns, so a long turn (or a CLI session,
+            // which has no between-turn compaction) does not run into it.
+            let window = self.context_window();
+            let used = self.staged_prompt_tokens(staged, measured);
+            if crate::context_budget::auto_compaction_due(
+                used,
+                window,
+                crate::context_budget::conversation_tokens(staged),
+                staged.len(),
+            ) {
+                match self
+                    .compact_staged(
+                        staged,
+                        &mut turn_start,
+                        turn_sensitive,
+                        Some(used),
+                        on_event,
+                        cancel,
+                    )
+                    .await
+                {
+                    Ok(_) => measured = None,
+                    Err(HarnessError::Cancelled) => return Err(HarnessError::Cancelled),
+                    // The step may still fit; the provider says so if not.
+                    Err(_) => {}
+                }
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
             }
 
             steps += 1;
@@ -1012,11 +1170,36 @@ impl Agent {
                             );
                         }
                     }
-                    // Do not commit staged history — keep prior wire messages intact.
                     self.provider_session = None;
+                    // Too long for the model: compact and try the step again,
+                    // once.
+                    if e.is_context_limit() && !compacted_for_limit && staged.len() >= 4 {
+                        compacted_for_limit = true;
+                        Self::check_cancel(cancel)?;
+                        match self
+                            .compact_staged(
+                                staged,
+                                &mut turn_start,
+                                turn_sensitive,
+                                None,
+                                on_event,
+                                cancel,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                measured = None;
+                                publish_side_context(self, staged, turn_sensitive, on_side_context);
+                                continue;
+                            }
+                            Err(HarnessError::Cancelled) => return Err(HarnessError::Cancelled),
+                            Err(_) => return Err(e),
+                        }
+                    }
                     return Err(e);
                 }
             };
+            compacted_for_limit = false;
 
             self.provider_session = completion.provider_session.clone();
 
@@ -1112,6 +1295,10 @@ impl Agent {
                 staged.push(Message::assistant(content.clone()));
                 publish_side_context(self, staged, turn_sensitive, on_side_context);
             }
+            let reply_tokens =
+                completion.usage.prompt_tokens() + u64::from(completion.usage.output_tokens);
+            measured = (completion.usage_available && reply_tokens > 0)
+                .then_some((reply_tokens, staged.len()));
             Self::check_cancel(cancel)?;
 
             match stop {
@@ -2167,6 +2354,70 @@ pub(crate) fn task_request_usage(
         },
         source_estimates: request_source_estimates(request),
     }
+}
+
+/// Output budget for a checkpoint, capped by `Agent::max_tokens` and by an
+/// eighth of the context window.
+const CHECKPOINT_MAX_TOKENS: u32 = 16_000;
+
+const CHECKPOINT_REQUEST: &str = "Create a concise context checkpoint for the next coding \
+    turn. Preserve the user's goals, decisions, constraints, files changed, unfinished work, \
+    and important tool findings. If a request is still being worked on, say what it is, what \
+    has been done so far, and the next step. Do not invent facts. Return only the checkpoint, \
+    with compact headings.";
+
+const MID_TURN_CHECKPOINT_NOTE: &str = "[Zest: the conversation was compacted to fit the \
+    context window while this turn was running. Continue the current task from the \
+    checkpoint above.]";
+
+/// The two messages a summarized history becomes.
+fn checkpoint_messages(summary: &str) -> Vec<Message> {
+    vec![
+        Message::user_text(
+            "[Zest context checkpoint] The earlier conversation is represented by the ".to_string()
+                + "assistant checkpoint that follows. Use it as working context.",
+        ),
+        Message::assistant(vec![serde_json::json!({
+            "type": "text",
+            "text": summary,
+        })]),
+    ]
+}
+
+/// Make the history sent to the summarizer fit `budget` tokens.
+///
+/// Every long tool result is shortened first, the recent ones too: the
+/// checkpoint needs what they found, not every line. If that is still too
+/// long, the oldest exchanges are left out, always cutting at a user message
+/// that is not a tool result so no call loses its result.
+fn fit_history_for_checkpoint(mut messages: Vec<Message>, budget: u64) -> Vec<Message> {
+    use crate::context_budget::conversation_tokens;
+    if conversation_tokens(&messages) <= budget {
+        return messages;
+    }
+    crate::prune::prune_tool_results(&mut messages, 0);
+    let mut dropped = false;
+    while conversation_tokens(&messages) > budget {
+        let next = messages.iter().skip(1).position(|message| {
+            message.role == "user"
+                && !message.content.iter().any(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                })
+        });
+        let Some(next) = next else { break };
+        messages.drain(..=next);
+        dropped = true;
+    }
+    if dropped {
+        messages.insert(
+            0,
+            Message::user_text(
+                "[Zest: the oldest part of the conversation was left out to fit the context \
+                 window.]",
+            ),
+        );
+    }
+    messages
 }
 
 const KEEP_GOING: &str = "Keep going";

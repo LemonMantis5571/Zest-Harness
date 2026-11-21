@@ -16,13 +16,20 @@ use std::collections::VecDeque;
 struct ScriptedProvider {
     script: Mutex<VecDeque<Result<Completion>>>,
     requests: Mutex<Vec<TurnRequest>>,
+    /// Context window to advertise; the static table's default when `None`.
+    window: Option<u64>,
 }
 
 impl ScriptedProvider {
     fn new(script: Vec<Result<Completion>>) -> Arc<Self> {
+        Self::with_window(script, None)
+    }
+
+    fn with_window(script: Vec<Result<Completion>>, window: Option<u64>) -> Arc<Self> {
         Arc::new(Self {
             script: Mutex::new(script.into()),
             requests: Mutex::new(Vec::new()),
+            window,
         })
     }
 
@@ -41,6 +48,20 @@ impl Provider for ScriptedProvider {
     }
     fn auth_status(&self) -> AuthStatus {
         AuthStatus::Ready { account: None }
+    }
+    fn models(&self) -> Vec<crate::provider::ModelSpec> {
+        self.window
+            .map(|context_window| crate::provider::ModelSpec {
+                id: self.default_model().into(),
+                efforts: Vec::new(),
+                context_window,
+                supports_tools: true,
+                supports_vision: false,
+                resolves_to: None,
+                needs_cli: None,
+            })
+            .into_iter()
+            .collect()
     }
     async fn stream_turn(
         &self,
@@ -469,4 +490,136 @@ fn a_different_input_resets_the_repeat_count() {
     assert!(tracker.observe([&two]).is_none());
     assert!(tracker.observe([&two]).is_none());
     assert!(tracker.observe([&two]).is_some());
+}
+
+/// Four messages of about 2,500 tokens each, with no tool result to trim.
+fn long_history() -> Vec<Message> {
+    let long = "word ".repeat(2_000);
+    vec![
+        Message::user_text(&long),
+        Message::assistant(vec![text(&long)]),
+        Message::user_text(&long),
+        Message::assistant(vec![text(&long)]),
+    ]
+}
+
+#[tokio::test]
+async fn a_turn_near_the_window_compacts_before_its_step() {
+    let provider = ScriptedProvider::with_window(
+        vec![
+            reply(vec![text("CHECKPOINT: earlier work")], "end_turn"),
+            reply(vec![text("Answer.")], "end_turn"),
+        ],
+        Some(12_000),
+    );
+    let mut agent = agent_with_echo(provider.clone(), None).with_messages(long_history());
+    let mut activity = Vec::new();
+    let mut sink = |event: StreamEvent<'_>| {
+        if let StreamEvent::ProviderActivity { title, status, .. } = event {
+            activity.push(format!("{status}: {title}"));
+        }
+    };
+
+    agent.send("next request", &mut sink).await.unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[0].allow_tool_use,
+        "the first request is the summary"
+    );
+    let step = &requests[1].messages;
+    assert!(wire(&step[0]).contains("context checkpoint"));
+    assert!(wire(&step[1]).contains("CHECKPOINT: earlier work"));
+    assert!(
+        wire(&step[2]).contains("next request"),
+        "kept word for word"
+    );
+    assert!(wire(&step[3]).contains("compacted"));
+    assert!(activity
+        .iter()
+        .any(|line| line.starts_with("completed: Compacted")));
+    // The committed history is the compacted one.
+    assert!(wire(&agent.messages[0]).contains("context checkpoint"));
+}
+
+#[tokio::test]
+async fn a_prompt_the_provider_rejects_as_too_long_is_compacted_and_retried() {
+    let provider = ScriptedProvider::new(vec![
+        Err(HarnessError::Api {
+            status: 400,
+            body: r#"{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#
+                .into(),
+        }),
+        reply(vec![text("CHECKPOINT")], "end_turn"),
+        reply(vec![text("Answer.")], "end_turn"),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None).with_messages(long_history());
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("next request", &mut sink).await.unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[1].allow_tool_use);
+    assert!(wire(&requests[2].messages[1]).contains("CHECKPOINT"));
+}
+
+#[tokio::test]
+async fn a_second_too_long_rejection_ends_the_turn() {
+    let too_long = || {
+        Err(HarnessError::Api {
+            status: 413,
+            body: String::new(),
+        })
+    };
+    let provider = ScriptedProvider::new(vec![
+        too_long(),
+        reply(vec![text("CHECKPOINT")], "end_turn"),
+        too_long(),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None).with_messages(long_history());
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    let error = agent.send("next request", &mut sink).await.unwrap_err();
+
+    assert!(error.is_context_limit());
+    assert_eq!(provider.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn a_cancelled_compaction_leaves_history_alone() {
+    let provider = ScriptedProvider::new(vec![reply(vec![text("CHECKPOINT")], "end_turn")]);
+    let mut agent = agent_with_echo(provider, None).with_messages(long_history());
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    let error = agent
+        .compact_context_for_run(None, Some(&cancel))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, HarnessError::Cancelled));
+    assert_eq!(agent.messages.len(), 4);
+}
+
+#[test]
+fn a_history_too_long_to_summarize_loses_its_oldest_exchanges_first() {
+    let long = "word ".repeat(2_000);
+    let history = vec![
+        Message::user_text("first request"),
+        Message::assistant(vec![tool_call("t1", "echo", json!({}))]),
+        Message::user_blocks(vec![crate::anthropic::types::tool_result(
+            "t1", &long, false,
+        )]),
+        Message::assistant(vec![text(&long)]),
+        Message::user_text("second request"),
+        Message::assistant(vec![text("short answer")]),
+    ];
+
+    let fitted = fit_history_for_checkpoint(history, 500);
+
+    assert!(wire(&fitted[0]).contains("left out"));
+    assert!(wire(&fitted[1]).contains("second request"));
+    assert_eq!(fitted.len(), 3);
 }
