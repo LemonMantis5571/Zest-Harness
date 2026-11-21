@@ -6981,6 +6981,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "globset",
+ "httpdate",
  "ignore",
  "keyring",
  "regex",

@@ -12,6 +12,7 @@ paths:
   - crates/core/src/provider/rig_convert.rs
   - crates/core/src/anthropic/
   - crates/core/src/alpha_prove.rs
+  - crates/core/src/retry.rs
 tests:
   - crates/core/tests/prompt_cache_e2e.rs
 verify:
@@ -25,6 +26,7 @@ verify:
   - cargo test -p zest-core --lib provider::codex_oauth
   - cargo test -p zest-core --lib anthropic::
   - cargo test -p zest-core --lib alpha_prove
+  - cargo test -p zest-core --lib retry::
 ---
 
 # Provider runtime and native API providers
@@ -67,9 +69,22 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
   OpenAI-compatible advertises no effort control
   (`EffortPolicy::Unsupported`). UI aliases normalize via `normalize_effort`
   (`med` → `medium`, `extra high` → `xhigh`, unknown → `high`).
-- Anthropic: always streams, sends `thinking` and `output_config.effort`, retries
-  only before the body starts (3 attempts, honours `retry-after`), fails on 120 s
-  of silence or a stream that ends without `message_stop`.
+- Anthropic: always streams and sends `thinking` and `output_config.effort`.
+- Retry (Anthropic, OpenAI-compatible and ChatGPT Codex alike, `retry.rs`): a
+  request or stream that fails before any visible text reached the user is tried
+  again. That covers 408/429/5xx/529, a connect or header timeout, a stream that
+  drops, ends without its final event or goes 120 s silent, and a mid-stream
+  `overloaded_error`. Gaps double from 2 s up to 30 s, plus jitter, for up to 10
+  tries, or 15 when the provider is unreachable. A server's `retry-after`,
+  `retry-after-ms` or HTTP-date wins, up to 10 minutes; a longer one ends the
+  retries and shows the provider's error. Each wait appears as a provider
+  activity row ("The provider is overloaded. Retrying in 4s (attempt 2 of 10)")
+  and Stop ends it at once. A local OpenAI-compatible server that has not sent
+  headers is not retried (it is usually loading the model).
+- A stream that fails after visible text has streamed keeps that text: the
+  provider returns it with stop reason `stream_interrupted`, and the agent asks
+  the model to continue from where it stopped. Thinking and unfinished tool calls
+  from that response are dropped. After 3 such rounds in a row the turn stops.
 - Prompt caching (Anthropic only): long-TTL breakpoint on the last tool, a
   breakpoint splitting the cacheable system prompt from the volatile environment
   block, and two rolling breakpoints on the two messages before the last.
@@ -95,8 +110,10 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
 3. `AnthropicProvider::stream_turn` → `tool_plan`, `cached_system_blocks`,
    `mark_conversation_prefix` → `AnthropicClient::stream_cancellable`
    (`anthropic/client.rs`) → `SseParser` (`sse.rs`) → `TurnAccumulator`
-   (`accumulate.rs`, reassembles partial tool JSON, keeps thinking signatures).
-   Wire types are in `anthropic/types.rs`.
+   (`accumulate.rs`, reassembles partial tool JSON, keeps thinking signatures;
+   `salvage` keeps the text of a broken stream). Wire types are in
+   `anthropic/types.rs`. Every HTTP provider wraps one try (`try_once`) in a
+   `retry::Attempt` and runs it with `retry::run_with_retry`.
 4. `OpenAiCompatibleProvider` converts history at the HTTP boundary
    (`convert_messages`, `convert_tool`), streams Chat Completions with
    `include_usage`, splits cached prompt tokens out of `prompt_tokens`, and reads
@@ -112,7 +129,9 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
 ## Verify
 
 - Unit tests above need no network except `anthropic::client` tests, which bind
-  a local mock server.
+  a local mock server. `a_stream_that_drops_before_any_text_is_retried` and
+  `a_stream_that_drops_after_text_keeps_the_text` cover the two halves of
+  stream recovery; `agent::resilience_tests` covers the continuation.
 - `alpha_prove` drives the real agent loop with a scripted fake provider: model
   pinning, tool round trip, ledger attribution, thread restore.
 - Live cache check (spends quota):

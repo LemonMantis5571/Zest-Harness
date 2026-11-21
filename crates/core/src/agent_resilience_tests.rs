@@ -221,3 +221,42 @@ async fn an_unanswered_tool_call_is_closed_when_the_turn_stops() {
     assert_eq!(closed["tool_use_id"], "call-9");
     assert_eq!(closed["is_error"], true);
 }
+
+#[tokio::test]
+async fn a_response_cut_off_mid_stream_is_continued() {
+    let provider = ScriptedProvider::new(vec![
+        reply(
+            vec![text("First half")],
+            crate::provider::STREAM_INTERRUPTED,
+        ),
+        reply(vec![text(" and the rest.")], "end_turn"),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("explain", &mut sink).await.unwrap();
+
+    let second = &provider.requests()[1].messages;
+    assert!(wire(&second[1]).contains("First half"));
+    assert!(wire(&second[2]).contains("cut off"));
+    assert_eq!(
+        roles(&agent.messages),
+        ["user", "assistant", "user", "assistant"]
+    );
+}
+
+#[tokio::test]
+async fn a_response_that_keeps_getting_cut_off_stops_the_turn() {
+    let provider = ScriptedProvider::new(
+        (0..=MAX_CONTINUATIONS)
+            .map(|_| reply(vec![text("again")], crate::provider::STREAM_INTERRUPTED))
+            .collect(),
+    );
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    let error = agent.send("explain", &mut sink).await.unwrap_err();
+
+    assert!(matches!(error, HarnessError::StoppedEarly(_)));
+    assert_eq!(provider.requests().len() as u32, MAX_CONTINUATIONS + 1);
+}

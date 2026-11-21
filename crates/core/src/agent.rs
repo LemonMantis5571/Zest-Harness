@@ -40,6 +40,14 @@ use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, A
 use crate::tools::ToolRegistry;
 use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
 
+/// Rounds in a row the agent asks the model to continue a response that was
+/// cut off before the turn gives up.
+const MAX_CONTINUATIONS: u32 = 3;
+
+const STREAM_INTERRUPTED_NOTE: &str = "[Zest: your previous response was cut off by a \
+    connection problem. Continue exactly where it stopped, without repeating what you \
+    already wrote.]";
+
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
 
@@ -879,8 +887,10 @@ impl Agent {
         let mut failure_streak = 0u32;
         let mut reviewed_before_finish = false;
         let mut consulted_on_failures = false;
+        // Rounds in a row that ended part-way and were asked to continue.
+        let mut continuations = 0u32;
 
-        publish_side_context(self, &staged, &turn_sensitive, on_side_context);
+        publish_side_context(self, staged, turn_sensitive, on_side_context);
 
         loop {
             Self::check_cancel(cancel)?;
@@ -898,7 +908,7 @@ impl Agent {
                     // A side panel opened while this provider call is running
                     // should see injected context that has already been sent,
                     // even though its response is not complete yet.
-                    publish_side_context(self, &staged, &turn_sensitive, on_side_context);
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
             }
 
@@ -1011,7 +1021,7 @@ impl Agent {
             // cancel check: this response was paid for, and an interrupted turn
             // still commits it.
             staged.push(Message::assistant(completion.content.clone()));
-            publish_side_context(self, &staged, &turn_sensitive, on_side_context);
+            publish_side_context(self, staged, turn_sensitive, on_side_context);
             Self::check_cancel(cancel)?;
 
             match completion.stop_reason.as_deref() {
@@ -1020,8 +1030,8 @@ impl Agent {
                         reviewed_before_finish = true;
                         let review = self
                             .harness_consult(
-                                &staged,
-                                &turn_sensitive,
+                                staged,
+                                turn_sensitive,
                                 crate::advisor::FINISH_REVIEW_QUESTION,
                                 on_event,
                                 cancel,
@@ -1036,14 +1046,26 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::finish_review_note(
                                 &advice,
                             )));
-                            publish_side_context(self, &staged, &turn_sensitive, on_side_context);
+                            publish_side_context(self, staged, turn_sensitive, on_side_context);
                             continue;
                         }
                     }
                     return Ok(());
                 }
 
+                Some(crate::provider::STREAM_INTERRUPTED) => {
+                    continuations += 1;
+                    if continuations > MAX_CONTINUATIONS {
+                        return Err(HarnessError::StoppedEarly(
+                            "the provider kept cutting the response off".into(),
+                        ));
+                    }
+                    staged.push(Message::user_text(STREAM_INTERRUPTED_NOTE));
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
+                }
+
                 Some("tool_use") => {
+                    continuations = 0;
                     if Self::has_malformed_tool_input(&completion.content) {
                         return Err(HarnessError::Other(
                             "provider returned non-object arguments for a tool call".into(),
@@ -1191,8 +1213,8 @@ impl Agent {
                         consulted_on_failures = true;
                         let advice = self
                             .harness_consult(
-                                &staged,
-                                &turn_sensitive,
+                                staged,
+                                turn_sensitive,
                                 crate::advisor::FAILURE_QUESTION,
                                 on_event,
                                 cancel,
@@ -1206,7 +1228,7 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
                         }
                     }
-                    publish_side_context(self, &staged, &turn_sensitive, on_side_context);
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
 
                 // A server-side tool hit its iteration cap. Resend as-is; the
@@ -2017,7 +2039,9 @@ fn interrupted_turn_note(error: &HarnessError) -> String {
         other => format!("it failed ({})", other.turn_message().trim_end_matches('.')),
     };
     format!(
-        "[Zest: this turn was interrupted because {reason}. The tool calls and results above          really happened and any file changes they made are still in place. Do not assume          unfinished steps were done; wait for the user's next message.]"
+        "[Zest: this turn was interrupted because {reason}. The tool calls and results above \
+         really happened and any file changes they made are still in place. Do not assume \
+         unfinished steps were done; wait for the user's next message.]"
     )
 }
 

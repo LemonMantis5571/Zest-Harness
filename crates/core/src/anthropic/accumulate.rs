@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::types::Usage;
 use crate::error::{HarnessError, Result};
-use crate::provider::{Completion, RateLimitSnapshot, StreamEvent};
+use crate::provider::{Completion, RateLimitSnapshot, StreamEvent, STREAM_INTERRUPTED};
 
 #[derive(Default)]
 pub(crate) struct TurnAccumulator {
@@ -172,6 +172,36 @@ impl TurnAccumulator {
             served_model: self.served_model,
             provider_session: None,
         }
+    }
+}
+
+impl TurnAccumulator {
+    /// What survives of a stream that broke off: the visible text, which the
+    /// user has already read. Thinking without its signature and tool calls
+    /// without a result cannot be sent back, so they are dropped and the model
+    /// is asked to continue. `None` when there is no text to keep.
+    pub(crate) fn salvage(self, limits: Option<RateLimitSnapshot>) -> Option<Completion> {
+        let content: Vec<Value> = self
+            .blocks
+            .into_values()
+            .filter(|block| {
+                block.get("type").and_then(Value::as_str) == Some("text")
+                    && block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+            })
+            .map(|block| json!({ "type": "text", "text": block["text"] }))
+            .collect();
+        (!content.is_empty()).then(|| Completion {
+            content,
+            stop_reason: Some(STREAM_INTERRUPTED.into()),
+            usage: self.usage,
+            usage_available: true,
+            limits,
+            served_model: self.served_model,
+            provider_session: None,
+        })
     }
 }
 

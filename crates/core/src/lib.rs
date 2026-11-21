@@ -44,6 +44,7 @@ pub mod pull_request;
 pub mod quota;
 pub mod rates;
 pub mod reading_diff;
+pub mod retry;
 pub mod runtime;
 pub mod skills;
 pub mod thread;
