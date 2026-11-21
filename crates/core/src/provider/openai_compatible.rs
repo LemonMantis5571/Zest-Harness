@@ -475,8 +475,10 @@ impl OpenAiAccumulator {
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.stop_reason = Some(
                 match reason {
-                    "tool_calls" => "tool_use",
+                    "tool_calls" | "function_call" => "tool_use",
                     "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    "content_filter" => "refusal",
                     other => other,
                 }
                 .into(),

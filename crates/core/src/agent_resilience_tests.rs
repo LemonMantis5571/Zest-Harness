@@ -293,3 +293,76 @@ async fn malformed_tool_arguments_go_back_to_the_model_as_a_tool_error() {
         .to_string()
         .contains("echoed {\\\"n\\\":2}"));
 }
+
+#[tokio::test]
+async fn a_response_cut_off_at_max_tokens_is_continued_in_smaller_pieces() {
+    let provider = ScriptedProvider::new(vec![
+        reply(vec![text("Part one")], "max_tokens"),
+        reply(vec![text("Part two.")], "end_turn"),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("write it", &mut sink).await.unwrap();
+
+    let second = &provider.requests()[1].messages;
+    assert!(wire(&second[1]).contains("Part one"));
+    assert!(wire(&second[2]).contains("smaller"));
+}
+
+#[tokio::test]
+async fn max_tokens_keeps_finished_calls_and_rejects_the_cut_off_one() {
+    let provider = ScriptedProvider::new(vec![
+        reply(
+            vec![
+                tool_call("done", "echo", json!({ "n": 1 })),
+                tool_call("cut", "echo", json!("{\"n\": 2, \"te")),
+            ],
+            "max_tokens",
+        ),
+        reply(vec![text("Finished.")], "end_turn"),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("go", &mut sink).await.unwrap();
+
+    let second = &provider.requests()[1].messages;
+    let results = &second[2].content;
+    assert_eq!(results[0]["is_error"], false);
+    assert_eq!(results[1]["is_error"], true);
+    assert!(wire(&second[3]).contains("output token limit"));
+}
+
+#[tokio::test]
+async fn an_empty_response_is_asked_for_again() {
+    let provider = ScriptedProvider::new(vec![
+        reply(Vec::new(), "end_turn"),
+        reply(vec![text("Here it is.")], "end_turn"),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("answer", &mut sink).await.unwrap();
+
+    let second = &provider.requests()[1].messages;
+    assert_eq!(roles(second), ["user", "user"]);
+    assert!(wire(&second[1]).contains("empty"));
+}
+
+#[tokio::test]
+async fn an_unknown_stop_reason_is_continued_then_gives_up() {
+    let provider = ScriptedProvider::new(
+        (0..=MAX_CONTINUATIONS)
+            .map(|_| reply(vec![text("partial")], "model_context_window_exceeded_v9"))
+            .collect(),
+    );
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    let error = agent.send("go", &mut sink).await.unwrap_err();
+
+    assert!(matches!(error, HarnessError::StoppedEarly(_)));
+    assert_eq!(provider.requests().len() as u32, MAX_CONTINUATIONS + 1);
+    assert!(wire(&provider.requests()[1].messages[2]).contains("stopped unexpectedly"));
+}

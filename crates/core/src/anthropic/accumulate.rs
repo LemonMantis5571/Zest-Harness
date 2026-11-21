@@ -162,7 +162,14 @@ impl TurnAccumulator {
         Ok(())
     }
 
-    pub(crate) fn finish(self, limits: Option<RateLimitSnapshot>) -> Completion {
+    pub(crate) fn finish(mut self, limits: Option<RateLimitSnapshot>) -> Completion {
+        // A tool call whose block never closed (the response hit `max_tokens`
+        // mid-input) keeps its partial text, so it is rejected, not run as `{}`.
+        for (idx, buf) in std::mem::take(&mut self.json_bufs) {
+            if let Some(block) = self.blocks.get_mut(&idx) {
+                block["input"] = Value::String(buf);
+            }
+        }
         Completion {
             content: self.blocks.into_values().collect(),
             stop_reason: self.stop_reason,

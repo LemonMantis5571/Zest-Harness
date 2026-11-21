@@ -41,12 +41,46 @@ use crate::tools::ToolRegistry;
 use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
 
 /// Rounds in a row the agent asks the model to continue a response that was
-/// cut off before the turn gives up.
+/// empty or cut off before the turn gives up.
 const MAX_CONTINUATIONS: u32 = 3;
 
-const STREAM_INTERRUPTED_NOTE: &str = "[Zest: your previous response was cut off by a \
-    connection problem. Continue exactly where it stopped, without repeating what you \
-    already wrote.]";
+/// What the model is told after a response that did not finish, by stop
+/// reason; `None` is an empty response.
+fn continuation_note(reason: Option<&str>) -> String {
+    match reason {
+        None => "[Zest: your last response was empty. Continue with the task, or give \
+                 your final answer.]"
+            .into(),
+        Some("max_tokens") => "[Zest: your last response hit the output token limit and \
+                               was cut off. Continue from where it stopped, in smaller \
+                               pieces: split a large file or edit into several smaller \
+                               tool calls.]"
+            .into(),
+        Some(crate::provider::STREAM_INTERRUPTED) => "[Zest: your last response was cut off \
+                                                      by a connection problem. Continue \
+                                                      exactly where it stopped, without \
+                                                      repeating what you already wrote.]"
+            .into(),
+        Some(other) => format!(
+            "[Zest: your last response stopped unexpectedly (stop reason `{other}`). \
+             Continue the task from where it stopped.]"
+        ),
+    }
+}
+
+/// The error for a turn whose responses kept stopping short.
+fn stopped_after_continuations(reason: &str) -> HarnessError {
+    HarnessError::StoppedEarly(match reason {
+        "max_tokens" => format!(
+            "hit max_tokens {MAX_CONTINUATIONS} times in a row — raise Agent::max_tokens \
+             or lower effort"
+        ),
+        crate::provider::STREAM_INTERRUPTED => {
+            "the provider kept cutting the response off".to_string()
+        }
+        other => format!("stopped with `{other}` {MAX_CONTINUATIONS} times in a row"),
+    })
+}
 
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
@@ -1014,24 +1048,37 @@ impl Agent {
                 self.tools.input_schema(name)
             });
 
-            if matches!(completion.stop_reason.as_deref(), Some("end_turn") | None)
-                && !Self::has_assistant_output(&content)
-            {
+            let stop = completion.stop_reason.as_deref();
+            let has_output = Self::has_assistant_output(&content);
+            let has_calls = !tool_uses(&content).is_empty();
+
+            // A response with nothing in it is asked for again rather than
+            // ending the turn, a few times at most.
+            if matches!(stop, Some("end_turn") | None) && !has_output {
                 Self::check_cancel(cancel)?;
-                return Err(HarnessError::Other(
-                    "provider returned an empty assistant response".into(),
-                ));
+                continuations += 1;
+                if continuations > MAX_CONTINUATIONS {
+                    return Err(HarnessError::Other(
+                        "provider returned an empty assistant response".into(),
+                    ));
+                }
+                staged.push(Message::user_text(continuation_note(None)));
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
+                continue;
             }
 
             // Echo the assistant turn back verbatim — thinking signatures and
             // tool_use blocks both have to survive intact. Staged before the
             // cancel check: this response was paid for, and an interrupted turn
-            // still commits it.
-            staged.push(Message::assistant(content.clone()));
-            publish_side_context(self, staged, turn_sensitive, on_side_context);
+            // still commits it. A response with no visible output (only
+            // thinking, cut off) is not worth sending back.
+            if has_output {
+                staged.push(Message::assistant(content.clone()));
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
+            }
             Self::check_cancel(cancel)?;
 
-            match completion.stop_reason.as_deref() {
+            match stop {
                 Some("end_turn") | None => {
                     if wrote_files && !reviewed_before_finish {
                         reviewed_before_finish = true;
@@ -1060,19 +1107,28 @@ impl Agent {
                     return Ok(());
                 }
 
-                Some(crate::provider::STREAM_INTERRUPTED) => {
-                    continuations += 1;
-                    if continuations > MAX_CONTINUATIONS {
-                        return Err(HarnessError::StoppedEarly(
-                            "the provider kept cutting the response off".into(),
-                        ));
-                    }
-                    staged.push(Message::user_text(STREAM_INTERRUPTED_NOTE));
-                    publish_side_context(self, staged, turn_sensitive, on_side_context);
+                // A server-side tool hit its iteration cap. Resend as-is; the
+                // server picks up where it left off.
+                Some("pause_turn") => continue,
+
+                Some("refusal") => {
+                    return Err(HarnessError::StoppedEarly(
+                        "the model declined this request".into(),
+                    ))
                 }
 
-                Some("tool_use") => {
-                    continuations = 0;
+                // Tool calls run whatever the stop reason says, so a response
+                // cut off at `max_tokens` keeps the calls it finished. Its
+                // cut-off call fails to parse and gets an error result.
+                Some(reason) if reason == "tool_use" || has_calls => {
+                    if reason == "tool_use" {
+                        continuations = 0;
+                    } else {
+                        continuations += 1;
+                        if continuations > MAX_CONTINUATIONS {
+                            return Err(stopped_after_continuations(reason));
+                        }
+                    }
                     let calls = tool_uses(&content);
                     if calls.is_empty() {
                         return Err(HarnessError::Other(
@@ -1247,29 +1303,22 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
                         }
                     }
+                    if reason != "tool_use" {
+                        staged.push(Message::user_text(continuation_note(Some(reason))));
+                    }
                     publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
 
-                // A server-side tool hit its iteration cap. Resend as-is; the
-                // server picks up where it left off.
-                Some("pause_turn") => continue,
-
-                Some("max_tokens") => {
-                    return Err(HarnessError::StoppedEarly(
-                        "hit max_tokens — raise Agent::max_tokens or lower effort".into(),
-                    ))
-                }
-
-                Some("refusal") => {
-                    return Err(HarnessError::StoppedEarly(
-                        "the model declined this request".into(),
-                    ))
-                }
-
-                Some(other) => {
-                    return Err(HarnessError::StoppedEarly(format!(
-                        "unrecognized stop_reason: {other}"
-                    )))
+                // Cut off (`max_tokens`, a broken stream) or stopped for a
+                // reason Zest does not know: keep what arrived and ask the model
+                // to carry on, a few rounds in a row at most.
+                Some(reason) => {
+                    continuations += 1;
+                    if continuations > MAX_CONTINUATIONS {
+                        return Err(stopped_after_continuations(reason));
+                    }
+                    staged.push(Message::user_text(continuation_note(Some(reason))));
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
             }
         }
