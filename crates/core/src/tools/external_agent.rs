@@ -1086,6 +1086,9 @@ async fn run_isolated_with_cancel(
     .await;
     let diff = workspace.collect_diff().await;
     let cleanup = workspace.cleanup().await;
+    if let (Err(_), Ok(diff)) = (&result, &diff) {
+        activity.keep_partial_diff(diff.clone());
+    }
     let mut run = result?;
     run.session_evidence = Some(session_evidence_for(&run, &workspace_path, config));
     let diff = diff?;
@@ -1175,6 +1178,11 @@ async fn spawn_and_run_with_cancel(
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", config.command))?;
+    // Preparing the worktree is not the worker's silence; its no-progress
+    // clock starts with the process.
+    if let Some(activity) = activity {
+        activity.progress(Some("started"));
+    }
     let stdout = child
         .stdout
         .take()

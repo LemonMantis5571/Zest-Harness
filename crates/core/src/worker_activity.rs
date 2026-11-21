@@ -46,6 +46,7 @@ struct ActivityState {
     last_progress: Instant,
     last_label: Option<String>,
     events: u64,
+    partial_diff: Option<String>,
 }
 
 impl WorkerActivity {
@@ -58,6 +59,7 @@ impl WorkerActivity {
                 last_progress: now,
                 last_label: None,
                 events: 0,
+                partial_diff: None,
             }),
         }
     }
@@ -87,6 +89,24 @@ impl WorkerActivity {
 
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// Keep what a worker that failed or timed out had changed so far.
+    pub fn keep_partial_diff(&self, diff: String) {
+        if diff.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.partial_diff = Some(diff);
+        }
+    }
+
+    /// The diff a failed run left behind, if any.
+    pub fn take_partial_diff(&self) -> Option<String> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.partial_diff.take())
     }
 
     /// One line for the heartbeat: how long the run has gone and what it did

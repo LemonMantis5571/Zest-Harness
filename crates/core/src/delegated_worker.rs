@@ -339,7 +339,12 @@ pub async fn run_provider_worker(
                     usage,
                 }
             }),
-        Err(error) => Err(error),
+        Err(error) => {
+            if let Ok(diff) = workspace.collect_diff().await {
+                activity.keep_partial_diff(diff);
+            }
+            Err(error)
+        }
     };
     let cleanup = workspace.cleanup().await;
     match (diff, cleanup) {
@@ -469,6 +474,7 @@ async fn run_in_workspace(
     if let Some(run_id) = run_id {
         session.agent.set_next_run_id(run_id);
     }
+    activity.progress(Some("started"));
     let mut sink =
         |event: StreamEvent<'_>| activity.progress(stream_event_label(&event).as_deref());
     // A provider stream that stalls, or a turn that never ends, used to hold

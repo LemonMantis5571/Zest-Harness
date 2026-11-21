@@ -439,13 +439,13 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
         ),
         tool(
             "delegation_artifact",
-            "Read a paged worker.diff, worker-result.json, or review-result.json artifact.",
+            "Read a paged artifact: worker.diff, worker-result.json, review-result.json, or worker-partial.diff (what a failed or timed-out worker had changed; never reviewed).",
             json!({
                 "type": "object",
                 "required": ["jobId", "name"],
                 "properties": {
                     "jobId": {"type": "string"},
-                    "name": {"type": "string", "enum": ["worker.diff", "worker-result.json", "review-result.json"]},
+                    "name": {"type": "string", "enum": zest_coordinator::ALLOWED_ARTIFACTS},
                     "offset": {"type": "integer", "minimum": 0}
                 }
             }),

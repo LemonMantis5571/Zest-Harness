@@ -49,7 +49,8 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
 - A feature card (title, objective, lane, scope, context, dependsOn,
   acceptanceChecks, worker, reviewer) becomes a job at
   `.zest/delegations/<jobId>.json`. Its artifacts are `worker.diff`,
-  `worker-result.json` and `review-result.json` in `.zest/delegations/<jobId>/`.
+  `worker-result.json`, `review-result.json` and, after a failed worker,
+  `worker-partial.diff`, in `.zest/delegations/<jobId>/`.
 - Every new card starts in `awaiting_approval`. No worker runs until an approval
   is recorded. That can be the desktop **Approve** button, `delegation_approve`,
   a trusted `zest serve`, or a dispatch receipt written by `delegate_feature`
@@ -70,7 +71,13 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   15 minutes without a stream event. Any output line from a CLI, any ACP
   message and any native stream event counts as progress. A run that hits
   either limit is stopped and the job fails with "timed out after …" or
-  "made no progress for … seconds".
+  "made no progress for … seconds". The no-progress clock starts when the
+  process does, not while its worktree is prepared.
+- **Partial work.** When a worker fails or is stopped, whatever it had
+  changed in its worktree is saved as `worker-partial.diff` and the card
+  error says so. It is evidence only: never reviewed, never applied by Zest,
+  and it does not make the card reviewable. Read it through the artifact
+  pager (`ALLOWED_ARTIFACTS`, MCP `delegation_artifact`).
 - Workers never edit the user's checkout. Each runs in a temporary detached
   `git worktree` that holds the current dirty snapshot (tracked diff plus
   untracked files), with sensitive files removed and `.zest/` left out. What

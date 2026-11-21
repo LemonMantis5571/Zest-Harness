@@ -34,7 +34,12 @@ use zest_core::{
 const MAX_ACTIVE_WORKER_JOBS: usize = 2;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub const ARTIFACT_PAGE_BYTES: usize = 64 * 1024;
-pub const ALLOWED_ARTIFACTS: &[&str] = &["worker.diff", "worker-result.json", "review-result.json"];
+pub const ALLOWED_ARTIFACTS: &[&str] = &[
+    "worker.diff",
+    "worker-result.json",
+    "review-result.json",
+    "worker-partial.diff",
+];
 pub const DESKTOP_ORIGIN: &str = "desktop_agent_board";
 pub const INBOUND_MCP_ORIGIN: &str = "inbound_mcp";
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
@@ -2281,64 +2286,82 @@ impl DelegationCoordinator {
         };
         let worker_target = resolved_targets.worker.target.clone();
         let mut worker_evidence = None;
-        let worker = match &worker_target {
-            DelegationTarget::ExternalAgent { agent_id } => {
-                let agent = config
-                    .agents
-                    .get(agent_id)
-                    .ok_or_else(|| format!("external worker `{agent_id}` is unavailable"))?;
-                let result = run_delegation_worker(
-                    root,
-                    agent,
-                    &worker_prompt,
-                    Some(cancel),
-                    &parent_secret_envs,
-                    &worker_activity,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                if let Ok(mut ledger) = self.ledger.lock() {
-                    ledger.record_external(agent_id, result.usage.as_ref());
+        let worker: Result<_, String> = async {
+            match &worker_target {
+                DelegationTarget::ExternalAgent { agent_id } => {
+                    let agent = config
+                        .agents
+                        .get(agent_id)
+                        .ok_or_else(|| format!("external worker `{agent_id}` is unavailable"))?;
+                    let result = run_delegation_worker(
+                        root,
+                        agent,
+                        &worker_prompt,
+                        Some(cancel),
+                        &parent_secret_envs,
+                        &worker_activity,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    if let Ok(mut ledger) = self.ledger.lock() {
+                        ledger.record_external(agent_id, result.usage.as_ref());
+                    }
+                    let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
+                    let parsed = WorkerResult::from_external(&result.text, &result.diff)
+                        .ok_or_else(|| "worker returned no usable result".to_string())?;
+                    if let Some(mut evidence) = result.session_evidence {
+                        evidence.worker_id = agent_id.clone();
+                        evidence.preview = Some(parsed.summary.clone());
+                        worker_evidence = Some(evidence);
+                    }
+                    Ok((parsed, result.diff, result.text, attempt_usage))
                 }
-                let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
-                let parsed = WorkerResult::from_external(&result.text, &result.diff)
-                    .ok_or_else(|| "worker returned no usable result".to_string())?;
-                if let Some(mut evidence) = result.session_evidence {
-                    evidence.worker_id = agent_id.clone();
-                    evidence.preview = Some(parsed.summary.clone());
-                    worker_evidence = Some(evidence);
+                DelegationTarget::Provider { .. } => {
+                    let result = run_provider_worker(
+                        root,
+                        config.clone(),
+                        &worker_target,
+                        &worker_prompt,
+                        NativeTaskUsageContext {
+                            ledger: Some(self.ledger.clone()),
+                            correlation_id: Some(job_id.to_string()),
+                        },
+                        Some(cancel),
+                        &worker_activity,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    Ok((
+                        result.result,
+                        result.diff,
+                        result.final_text,
+                        Some(result.usage),
+                    ))
                 }
-                Ok((parsed, result.diff, result.text, attempt_usage))
             }
-            DelegationTarget::Provider { .. } => {
-                let result = run_provider_worker(
-                    root,
-                    config.clone(),
-                    &worker_target,
-                    &worker_prompt,
-                    NativeTaskUsageContext {
-                        ledger: Some(self.ledger.clone()),
-                        correlation_id: Some(job_id.to_string()),
-                    },
-                    Some(cancel),
-                    &worker_activity,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                Ok((
-                    result.result,
-                    result.diff,
-                    result.final_text,
-                    Some(result.usage),
-                ))
-            }
-        };
+        }
+        .await;
         worker_heartbeat.abort();
         if cancel.is_cancelled() {
             return self.cancelled(&store, job).await;
         }
-        let (worker_result, worker_diff, worker_text, worker_usage) =
-            worker.map_err(|error: String| format!("worker failed: {error}"))?;
+        let (worker_result, worker_diff, worker_text, worker_usage) = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                let mut error = format!("worker failed: {error}");
+                if let Some(partial) = worker_activity.take_partial_diff() {
+                    if store
+                        .write_artifact(job_id, "worker-partial.diff", partial.as_bytes())
+                        .is_ok()
+                    {
+                        error.push_str(
+                            ". What it had changed so far is saved as worker-partial.diff (not reviewed).",
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
         if worker_diff.trim().is_empty() {
             return Err("worker returned no diff artifact".into());
         }
@@ -3183,7 +3206,7 @@ mod tests {
         write_fixture_project_with(
             root,
             &format!(
-                "{}idle_timeout_secs = 1\n",
+                "{}idle_timeout_secs = 2\n",
                 fixture_agent("hang", &["delegation_hang"])
             ),
         );
@@ -3201,12 +3224,57 @@ mod tests {
         )
         .await;
         let error = failed.error.as_deref().unwrap();
-        assert!(error.contains("made no progress for 1 seconds"), "{error}");
+        assert!(error.contains("made no progress for 2 seconds"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(15));
         assert!(failed
             .attempts
             .iter()
             .all(|attempt| attempt.finished_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_keeps_what_it_had_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &format!(
+                "{}idle_timeout_secs = 2\n",
+                fixture_agent("hang", &["delegation_hang"])
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Partial work", "hang"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("worker-partial.diff"),
+            "{:?}",
+            failed.error
+        );
+        let partial = coordinator
+            .artifact_page(root, &created.job_id, "worker-partial.diff", 0)
+            .unwrap()
+            .content;
+        assert!(partial.contains("+++ b/partial.txt"), "{partial}");
+        assert!(partial.contains("+unfinished work"), "{partial}");
+        // It is evidence only: nothing becomes reviewable or applicable.
+        assert!(!failed.can_review_again);
+        assert!(coordinator
+            .artifact_page(root, &created.job_id, "worker.diff", 0)
+            .is_err());
     }
 
     #[tokio::test]
