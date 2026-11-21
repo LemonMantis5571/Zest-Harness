@@ -76,13 +76,13 @@ pub fn button(
         .px_2()
         .py_1()
         .text_size(px(13.))
-        .text_color(rgb(theme::SECONDARY_FOREGROUND))
-        .hover(|s| s.bg(rgb(theme::SECONDARY)).text_color(rgb(theme::FOREGROUND)))
-        .focus_visible(|s| s.bg(rgb(theme::ACCENT)).text_color(rgb(theme::FOREGROUND)))
+        .text_color(rgb(theme::secondary_foreground()))
+        .hover(|s| s.bg(rgb(theme::secondary())).text_color(rgb(theme::foreground())))
+        .focus_visible(|s| s.bg(rgb(theme::accent())).text_color(rgb(theme::foreground())))
         .when(selected.is_some(), |d| {
-            d.bg(theme::alpha(theme::PRIMARY, 0.18))
-                .text_color(rgb(theme::FOREGROUND))
-                .child(theme::icon(theme::Icon::Check, 12.).text_color(rgb(theme::PRIMARY_HOVER)))
+            d.bg(theme::alpha(theme::primary(), 0.18))
+                .text_color(rgb(theme::foreground()))
+                .child(theme::icon(theme::Icon::Check, 12.).text_color(rgb(theme::primary_hover())))
         })
         .child(selected.unwrap_or(label))
         .on_click(click)
@@ -205,6 +205,7 @@ impl Root {
         view.session_label = chat.options.lock().unwrap().provider.clone();
         view.native = Some(chat);
         view.restore_native();
+        view.refresh_git_stats(cx);
         view
     }
 
@@ -447,12 +448,12 @@ impl Root {
                                 .overflow_y_scroll()
                                 .rounded(px(8.))
                                 .border_1()
-                                .border_color(rgb(theme::BORDER))
-                                .bg(rgb(0x17181b))
+                                .border_color(rgb(theme::border()))
+                                .bg(rgb(crate::theme::input_bg()))
                                 .p(px(10.))
                                 .font_family(MONO)
                                 .text_size(px(12.))
-                                .text_color(rgb(theme::SECONDARY_FOREGROUND))
+                                .text_color(rgb(theme::secondary_foreground()))
                                 .child(preview.clone()),
                         )
                         .child(
@@ -474,7 +475,7 @@ impl Root {
                             .items_center()
                             .gap_2()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(theme::icon(Icon::CircleQuestionMark, 14.).text_color(rgb(theme::LINK)))
+                            .child(theme::icon(Icon::CircleQuestionMark, 14.).text_color(rgb(theme::link())))
                             .child(prompt.clone()),
                     );
                     let mut buttons = div().flex().flex_wrap().gap(px(6.));
@@ -537,6 +538,122 @@ impl Root {
         panel
     }
 
+    /// Recounts changed lines since the chat's start commit in the background.
+    pub fn refresh_git_stats(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = &self.native else { return };
+        let path = chat.project.path.clone();
+        let start = chat
+            .thread
+            .lock()
+            .unwrap()
+            .git_context
+            .as_ref()
+            .and_then(|g| g.start_commit.clone());
+        let task = crate::native::executor().spawn(async move {
+            let stats = zest_core::workspace_changes::diff_stats(&path, start.as_deref()).await;
+            let branch = tokio::task::spawn_blocking(move || {
+                zest_core::worktree_chat::chat_git_baseline(&path).and_then(|(_, branch)| branch)
+            })
+            .await
+            .ok()
+            .flatten();
+            (stats, branch)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok((stats, branch)) = task.await {
+                let _ = this.update(cx, |root, cx| {
+                    root.git_stats = Some(stats);
+                    root.checkout_branch = branch;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// The card above the composer with the project, branch, changed lines and linked pull
+    /// request (the React UI's BranchChangesBar).
+    pub fn branch_strip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use crate::theme::{self, Icon, alpha};
+        let chat = self.native.as_ref()?;
+        // As in the React UI: only with changed lines, not during a turn, and a dismissal
+        // lasts until the counts move.
+        let stats = self.git_stats.filter(|s| s.changed_files > 0 && s.additions + s.deletions > 0)?;
+        if self.turn_active || self.strip_hidden == Some(stats) {
+            return None;
+        }
+        let (branch, pr) = {
+            let thread = chat.thread.lock().unwrap();
+            let git = thread.git_context.as_ref();
+            (
+                git.and_then(|g| g.branch.clone()).or_else(|| self.checkout_branch.clone()),
+                git.and_then(|g| g.pull_request.as_ref().map(|p| p.number)),
+            )
+        };
+        let name = chat.project.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py(px(6.))
+                .pl(px(10.))
+                .pr(px(6.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(rgb(theme::soft_border()))
+                .bg(rgb(theme::card()))
+                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(name))
+                .when_some(branch, |d, branch| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::muted_foreground()))
+                            .child(theme::icon(Icon::GitBranch, 12.).opacity(0.7))
+                            .child(div().truncate().child(branch)),
+                    )
+                })
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .bg(alpha(theme::secondary(), 0.7))
+                        .text_size(px(11.))
+                        .child(div().text_color(rgb(theme::primary())).child(format!("+{}", stats.additions)))
+                        .child(div().text_color(rgb(theme::destructive())).child(format!("−{}", stats.deletions))),
+                )
+                .when_some(pr, |d, number| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py(px(2.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgb(theme::soft_border()))
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::muted_foreground()))
+                            .child(theme::icon(Icon::GitPullRequest, 12.).opacity(0.8))
+                            .child(format!("#{number}")),
+                    )
+                })
+                .child(crate::ui::icon_button("hide-branch-strip", Icon::X, "Hide branch bar", cx.listener(|root, _, _, cx| {
+                    root.strip_hidden = root.git_stats;
+                    cx.notify();
+                }))),
+        )
+    }
+
     /// The row under the composer's text: attach, attached files, model, send or stop.
     pub fn composer_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::theme::{self, Icon, alpha};
@@ -589,9 +706,9 @@ impl Root {
                 .rounded(px(6.))
                 .text_size(px(11.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(0xd5d6d6))
-                .hover(|s| s.bg(alpha(theme::SECONDARY, 0.5)))
-                .child(theme::icon(Icon::Sparkles, 14.).text_color(rgb(theme::SECONDARY_FOREGROUND)))
+                .text_color(rgb(crate::theme::model_text()))
+                .hover(|s| s.bg(alpha(theme::secondary(), 0.5)))
+                .child(theme::icon(Icon::Sparkles, 14.).text_color(rgb(theme::secondary_foreground())))
                 .child(div().max_w(px(220.)).truncate().child(model))
                 .child(theme::icon(Icon::ChevronDown, 12.).opacity(0.6))
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(ChooseModel))),
@@ -608,10 +725,10 @@ impl Root {
             .items_center()
             .justify_center()
             .rounded_full()
-            .bg(rgb(theme::PRIMARY))
-            .hover(|s| s.bg(alpha(theme::PRIMARY, 0.8)))
+            .bg(rgb(theme::primary()))
+            .hover(|s| s.bg(alpha(theme::primary(), 0.8)))
             .when(!busy && empty, |d| d.opacity(0.5))
-            .child(theme::icon(if busy { Icon::Square } else { Icon::ArrowUp }, 14.).text_color(rgb(0xffffff)))
+            .child(theme::icon(if busy { Icon::Square } else { Icon::ArrowUp }, 14.).text_color(rgb(crate::theme::ON_PRIMARY)))
             .on_click(cx.listener(move |r, _, w, cx| {
                 if r.turn_active {
                     r.stop(cx);
@@ -642,10 +759,11 @@ impl Root {
                 div().flex().items_center().gap_1().child(theme::icon(Icon::FolderOpen, 12.).opacity(0.7)).child(name),
             );
             let thread = chat.thread.lock().unwrap();
+            let branch = thread.git_context.as_ref().and_then(|g| g.branch.clone()).or_else(|| self.checkout_branch.clone());
+            if let Some(branch) = branch {
+                left = left.child(div().flex().items_center().gap_1().child(theme::icon(Icon::GitBranch, 12.)).child(branch));
+            }
             if let Some(git) = &thread.git_context {
-                if let Some(branch) = &git.branch {
-                    left = left.child(div().flex().items_center().gap_1().child(theme::icon(Icon::GitBranch, 12.)).child(branch.clone()));
-                }
                 if let Some(pr) = &git.pull_request {
                     left = left.child(
                         div().flex().items_center().gap_1().child(theme::icon(Icon::GitPullRequest, 12.)).child(format!("#{}", pr.number)),
@@ -655,10 +773,10 @@ impl Root {
             drop(thread);
             let mode = chat.policy.lock().unwrap().mode();
             let (label, color) = match mode {
-                zest_core::ApprovalMode::Manual => ("Ask".to_string(), theme::MUTED_FOREGROUND),
-                zest_core::ApprovalMode::AcceptEdits => ("Edits".to_string(), theme::MUTED_FOREGROUND),
-                zest_core::ApprovalMode::Plan => ("Plan".to_string(), theme::LINK),
-                other => (format!("{other:?}"), theme::MUTED_FOREGROUND),
+                zest_core::ApprovalMode::Manual => ("Ask".to_string(), theme::muted_foreground()),
+                zest_core::ApprovalMode::AcceptEdits => ("Edits".to_string(), theme::muted_foreground()),
+                zest_core::ApprovalMode::Plan => ("Plan".to_string(), theme::link()),
+                other => (format!("{other:?}"), theme::muted_foreground()),
             };
             right = right.child(
                 div()
@@ -685,7 +803,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(theme::icon(Icon::CircleDot, 12.).text_color(rgb(theme::PRIMARY)))
+                    .child(theme::icon(Icon::CircleDot, 12.).text_color(rgb(theme::primary())))
                     .child(format!("{percent} · {remaining} left")),
             );
         }
@@ -696,7 +814,7 @@ impl Root {
             .items_center()
             .justify_between()
             .text_size(px(11.))
-            .text_color(rgb(crate::theme::MUTED_FOREGROUND))
+            .text_color(rgb(crate::theme::muted_foreground()))
             .child(left)
             .child(right)
     }

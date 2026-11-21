@@ -16,10 +16,10 @@ const ICONS = [
   "git-pull-request", "globe", "hammer", "history", "image", "layers", "layout-grid",
   "list-checks", "list-todo", "loader-circle", "lock", "maximize-2", "message-square",
   "minimize-2", "music", "network", "package", "panel-left", "panel-right", "paperclip",
-  "pause", "pencil", "pin", "pin-off", "play", "plug", "plus", "puzzle", "refresh-cw",
+  "palette", "pause", "pencil", "pin", "pin-off", "play", "plug", "plus", "puzzle", "refresh-cw",
   "rotate-ccw", "rows-2", "search", "send", "server", "settings", "shield", "shield-check",
   "skip-back", "skip-forward", "sliders-horizontal", "sparkles", "split", "square",
-  "square-pen", "square-terminal", "sun", "terminal", "trash-2", "triangle-alert", "user",
+  "square-pen", "square-terminal", "sun", "terminal", "trash-2", "triangle-alert", "type", "user",
   "users", "wand-sparkles", "workflow", "wrench", "x", "zap",
 ];
 

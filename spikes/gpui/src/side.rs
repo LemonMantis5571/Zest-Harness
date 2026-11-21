@@ -161,7 +161,7 @@ impl Root {
             .gap_1();
         for (q, a) in &self.side.history {
             body = body
-                .child(div().mt_1().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(rgb(LINK)).child(q.clone()))
+                .child(div().mt_1().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(rgb(link())).child(q.clone()))
                 .child(div().text_size(px(13.)).child(a.clone()));
         }
         crate::ui::card()

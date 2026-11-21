@@ -189,6 +189,12 @@ struct Root {
     args: Args,
     window: AnyWindowHandle,
     last_link: Option<String>,
+    /// Line counts since the chat's start commit, for the strip above the composer.
+    git_stats: Option<zest_core::workspace_changes::GitDiffStats>,
+    /// The checkout's current branch, for chats that have not recorded one.
+    checkout_branch: Option<String>,
+    /// The counts the user dismissed the branch strip at; it returns when they change.
+    strip_hidden: Option<zest_core::workspace_changes::GitDiffStats>,
 }
 
 fn pct(v: &mut Vec<u64>, p: f64) -> f64 {
@@ -339,6 +345,9 @@ impl Root {
             args,
             window,
             last_link: None,
+            git_stats: None,
+            checkout_branch: None,
+            strip_hidden: None,
         }
     }
 
@@ -487,6 +496,7 @@ impl Root {
                 }
                 EvKind::End { tokens, cancelled } => {
                     dirty = true;
+                    self.refresh_git_stats(cx);
                     self.finish_think();
                     self.turn_active = false;
                     self.turns_done += 1;
@@ -776,7 +786,7 @@ impl Root {
                 d.child(
                     div().id("resume-queue").tab_index(0).role(Role::Button)
                         .aria_label("Resume queued")
-                        .cursor_pointer().text_color(rgb(LINK)).child("Resume queued")
+                        .cursor_pointer().text_color(rgb(link())).child("Resume queued")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.start_next();
                             window.focus(&this.composer.read(cx).focus.clone(), cx);
@@ -807,7 +817,7 @@ impl Root {
                 }))))
                 .child(
                     div().id(("remove-queued", id)).tab_index(0).role(Role::Button)
-                        .aria_label(remove_label).cursor_pointer().text_color(rgb(LINK)).child("Remove")
+                        .aria_label(remove_label).cursor_pointer().text_color(rgb(link())).child("Remove")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.editing = None;
                             this.remove_queued(id, cx);
@@ -818,6 +828,37 @@ impl Root {
         div().px_4().py_1().text_size(px(13.)).child(header)
             .child(div().id("queued-messages").max_h(px(108.)).overflow_y_scroll().children(rows))
             .when(self.editing.is_some(), |d| d.child(self.queue_input.clone()))
+    }
+
+    /// Saves a reply as Markdown where the user chooses, like the React UI's download action.
+    fn save_message(&mut self, text: String, cx: &mut Context<Self>) {
+        let directory = self
+            .native
+            .as_ref()
+            .map(|chat| chat.project.path.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&directory, Some("zest-reply.md"));
+        cx.spawn(async move |this, cx| {
+            let result: Result<(), String> = async {
+                let Some(mut path) = picker.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())? else {
+                    return Ok(());
+                };
+                if path.extension().is_none() {
+                    path.set_extension("md");
+                }
+                cx.background_executor()
+                    .spawn(async move { zest_core::atomic_write(&path, text.as_bytes()).map_err(|e| e.to_string()) })
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |root, cx| {
+                    root.note = format!("Could not save the reply: {error}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -862,18 +903,27 @@ impl Root {
                             div()
                                 .text_size(px(11.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(0x71767d))
+                                .text_color(rgb(crate::theme::label()))
                                 .child("Zest"),
                         )
                     })
                     .child(el)
                     .when_some(copy_text, |d, text| {
+                        let saved = text.clone();
                         d.child(
-                            div().flex().gap(px(2.)).opacity(0.7).child(
-                                ui::icon_button(("copy-message", ix), theme::Icon::Copy, "Copy message", move |_, _, cx| {
+                            div()
+                                .flex()
+                                .gap(px(2.))
+                                .opacity(0.7)
+                                .child(ui::icon_button(("copy-message", ix), theme::Icon::Copy, "Copy message", move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                                }),
-                            ),
+                                }))
+                                .child(ui::icon_button(
+                                    ("download-message", ix),
+                                    theme::Icon::Download,
+                                    "Download message",
+                                    cx.listener(move |root, _, _, cx| root.save_message(saved.clone(), cx)),
+                                )),
                         )
                     }),
             )
@@ -912,9 +962,9 @@ impl Render for Root {
             .size_full()
             .flex()
             .flex_col()
-            .when(self.native.is_none(), |d| d.bg(rgb(BG)))
-            .text_color(rgb(FG))
-            .font_family(SANS)
+            .when(self.native.is_none(), |d| d.bg(rgb(bg())))
+            .text_color(rgb(fg()))
+            .font_family(sans())
             .text_size(px(14.))
             .child(
                 div().id("transcript").when(self.args.a11y, |d| d.role(Role::List).aria_label("Conversation")).flex_1().min_h_0().relative().child(
@@ -936,12 +986,12 @@ impl Render for Root {
                             .gap_1()
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(theme::BORDER))
-                            .bg(rgb(theme::POPOVER))
+                            .border_color(rgb(theme::border()))
+                            .bg(rgb(theme::popover()))
                             .text_size(px(12.))
                             .font_weight(FontWeight::MEDIUM)
-                            .hover(|s| s.bg(rgb(theme::ACCENT)))
-                            .child(theme::icon(theme::Icon::ArrowDown, 14.).text_color(rgb(theme::FOREGROUND)))
+                            .hover(|s| s.bg(rgb(theme::accent())))
+                            .child(theme::icon(theme::Icon::ArrowDown, 14.).text_color(rgb(theme::foreground())))
                             .child("Jump to latest")
                             .on_click(move |_, _, _| list.set_follow_mode(FollowMode::Tail)),
                     ),
@@ -955,14 +1005,14 @@ impl Render for Root {
                     .px_4()
                     .py_1()
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(muted()))
                     .child(format!(
                         "{n} messages \u{2022} {} \u{2022} {}",
                         if self.cmd_tx.is_closed() { "backend disconnected" } else if self.stop_requested { "stopping" } else if busy { "streaming" } else { "idle" },
                         if following { "following tail" } else { "scrolled up (tail released)" }
                     ))
                     .when(busy, |d| d.child(
-                        div().id("stop-turn").tab_index(0).role(Role::Button).cursor_pointer().text_color(rgb(LINK))
+                        div().id("stop-turn").tab_index(0).role(Role::Button).cursor_pointer().text_color(rgb(link()))
                             .aria_label("Stop response")
                             .child("Stop").on_click(cx.listener(|this, _, window, cx| {
                                 this.stop(cx);
@@ -985,21 +1035,22 @@ impl Render for Root {
                                 .gap_2()
                                 .px_1()
                                 .text_size(px(12.))
-                                .text_color(rgb(theme::MUTED_FOREGROUND))
-                                .child(theme::icon(theme::Icon::LoaderCircle, 14.).text_color(rgb(theme::PRIMARY)))
+                                .text_color(rgb(theme::muted_foreground()))
+                                .child(theme::icon(theme::Icon::LoaderCircle, 14.).text_color(rgb(theme::primary())))
                                 .child(if self.stop_requested { "Stopping…" } else { "Working…" }),
                         ))
                         .when(!self.pending.is_empty(), |d| d.child(self.render_queue(cx)))
                         .when(self.native.is_some(), |d| d.child(self.native_controls(cx)))
                         .when(self.side.open, |d| d.child(self.render_side(cx)))
+                        .children(self.branch_strip(cx))
                         .child(
                             div()
                                 .rounded(px(14.4))
                                 .border_1()
-                                .border_color(rgb(theme::BORDER))
-                                .bg(rgb(theme::CARD))
+                                .border_color(rgb(theme::border()))
+                                .bg(rgb(theme::card()))
                                 .shadow(vec![BoxShadow {
-                                    color: hsla(0., 0., 0., 0.55),
+                                    color: hsla(0., 0., 0., if theme::palette().dark { 0.55 } else { 0.12 }),
                                     offset: point(px(0.), px(16.)),
                                     blur_radius: px(48.),
                                     spread_radius: px(0.),

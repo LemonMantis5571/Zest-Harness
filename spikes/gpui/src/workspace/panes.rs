@@ -300,9 +300,9 @@ impl Workspace {
                     .gap(px(6.))
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(if active { crate::theme::FOREGROUND } else { crate::theme::MUTED_FOREGROUND }))
-                    .hover(|s| s.text_color(rgb(crate::theme::FOREGROUND)))
-                    .when(active, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(rgb(crate::theme::PRIMARY))))
+                    .text_color(rgb(if active { crate::theme::foreground() } else { crate::theme::muted_foreground() }))
+                    .hover(|s| s.text_color(rgb(crate::theme::foreground())))
+                    .when(active, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(rgb(crate::theme::primary()))))
                     .child(div().min_w_0().truncate().child(label))
                     .on_click(cx.listener(move |ws, _, w, cx| ws.open(&target, w, cx)));
                 let mut region = div()
@@ -317,9 +317,9 @@ impl Workspace {
                     .flex_col();
                 if hidden {
                     return region
-                        .bg(crate::theme::alpha(crate::theme::FOREGROUND, 0.04))
+                        .bg(crate::theme::alpha(crate::theme::foreground(), 0.04))
                         .border_1()
-                        .border_color(rgb(0x1f2125))
+                        .border_color(rgb(crate::theme::canvas_line()))
                         .child(div().h(px(32.)).flex().child(header))
                         .into_any_element();
                 }
@@ -332,7 +332,7 @@ impl Workspace {
                         .items_center()
                         .pr_1()
                         .border_b_1()
-                        .border_color(rgb(0x1f2125))
+                        .border_color(rgb(crate::theme::canvas_line()))
                         .child(header)
                         .child(crate::ui::icon_button_xs(
                             SharedString::from(format!("close-{id}")),
@@ -405,8 +405,8 @@ impl Workspace {
                     .when(!across, |d| d.h(px(5.)).cursor_row_resize().flex_col())
                     .child(
                         div()
-                            .bg(rgb(crate::theme::BORDER))
-                            .group_hover("divider", |s| s.bg(rgb(crate::theme::PRIMARY)))
+                            .bg(rgb(crate::theme::border()))
+                            .group_hover("divider", |s| s.bg(rgb(crate::theme::primary())))
                             .when(across, |d| d.w(px(1.)).h_full())
                             .when(!across, |d| d.h(px(1.)).w_full()),
                     )

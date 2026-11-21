@@ -9,14 +9,12 @@ use std::ops::Range;
 use std::rc::Rc;
 
 // Short names for the theme tokens the views use most.
-pub use crate::theme::{BORDER, LINK, MONO, SANS};
-pub const BG: u32 = crate::theme::CANVAS;
-pub const FG: u32 = crate::theme::FOREGROUND;
-pub const MUTED: u32 = crate::theme::MUTED_FOREGROUND;
-pub const PANEL: u32 = crate::theme::CARD;
-/// Text selection: the primary accent dimmed onto the canvas.
-pub const SEL_BG: u32 = 0x2b3060;
-pub const CODE_FG: u32 = crate::theme::SECONDARY_FOREGROUND;
+pub use crate::theme::{MONO, border, link, sans};
+pub fn bg() -> u32 { crate::theme::canvas() }
+pub fn fg() -> u32 { crate::theme::foreground() }
+pub fn muted() -> u32 { crate::theme::muted_foreground() }
+pub fn panel() -> u32 { crate::theme::card() }
+pub fn sel_bg() -> u32 { crate::theme::selection() }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
@@ -195,12 +193,12 @@ fn styled(unit: &Unit, sel: Option<Range<usize>>) -> StyledText {
                         hs.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: None })
                     }
                     SpanKind::Code => {
-                        hs.background_color = Some(rgb(crate::theme::SECONDARY).into());
-                        hs.color = Some(rgb(crate::theme::FOREGROUND).into());
+                        hs.background_color = Some(rgb(crate::theme::secondary()).into());
+                        hs.color = Some(rgb(crate::theme::foreground()).into());
                         mono = true;
                     }
                     SpanKind::Link(_) => {
-                        hs.color = Some(rgb(LINK).into());
+                        hs.color = Some(rgb(link()).into());
                     }
                     SpanKind::Color(c) => hs.color = Some(*c),
                 }
@@ -208,7 +206,7 @@ fn styled(unit: &Unit, sel: Option<Range<usize>>) -> StyledText {
         }
         if let Some(s) = &sel {
             if s.start <= a && s.end >= b {
-                hs.background_color = Some(rgb(SEL_BG).into());
+                hs.background_color = Some(rgb(sel_bg()).into());
                 touched = true;
             }
         }
@@ -234,7 +232,7 @@ fn unit_el(doc: &Doc, unit: usize, msg: usize, shared: &SharedRef) -> SelText {
 
 fn quoted(el: Div, quote: usize) -> Div {
     if quote > 0 {
-        el.border_l_2().border_color(rgb(BORDER)).pl_3().text_color(rgb(MUTED))
+        el.border_l_2().border_color(rgb(border())).pl_3().text_color(rgb(muted()))
     } else {
         el
     }
@@ -275,7 +273,7 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                 .flex_row()
                 .gap_2()
                 .pl(px(18. * *depth as f32))
-                .child(div().w(px(20.)).flex_shrink_0().text_color(rgb(MUTED)).child(marker.clone()))
+                .child(div().w(px(20.)).flex_shrink_0().text_color(rgb(muted())).child(marker.clone()))
                 .child(div().flex_1().min_w_0().child(unit_el(doc, *unit, msg, shared)))
                 .into_any_element(),
             Block::Code { lang, unit, indent } => {
@@ -284,9 +282,9 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                     .when(*indent > 0, |d| d.ml(px(list_text_offset(*indent))))
                     .my_1()
                     .rounded(px(8.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(panel()))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .overflow_hidden()
                     .child(
                         div()
@@ -297,19 +295,19 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                             .gap_2()
                             .px_3()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(border()))
                             .child(
                                 div()
                                     .px(px(6.))
                                     .py(px(2.))
                                     .rounded(px(6.))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .bg(rgb(0x18191a))
+                                    .border_color(rgb(border()))
+                                    .bg(rgb(crate::theme::chip_bg()))
                                     .font_family(MONO)
                                     .text_size(px(11.))
                                     .line_height(px(12.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(muted()))
                                     .child(if lang.is_empty() { "TEXT".to_string() } else { lang.to_uppercase() }),
                             )
                             .child(div().flex_1())
@@ -338,8 +336,8 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                 .flex_col()
                 .rounded(px(12.))
                 .border_1()
-                .border_color(rgb(0x25262b))
-                .bg(rgb(0x111213))
+                .border_color(rgb(crate::theme::soft_border()))
+                .bg(rgb(crate::theme::table_bg()))
                 .overflow_hidden()
                 .text_size(px(13.))
                 .children(rows.iter().enumerate().map(|(ri, cells)| {
@@ -347,26 +345,26 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                         .flex()
                         .flex_row()
                         .when(ri == 0, |d| {
-                            d.bg(rgb(0x18191b))
+                            d.bg(rgb(crate::theme::table_head()))
                                 .text_size(px(11.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .border_b_1()
-                                .border_color(rgb(BORDER))
+                                .border_color(rgb(border()))
                         })
-                        .when(ri > 1, |d| d.border_t_1().border_color(rgb(0x1f2125)))
+                        .when(ri > 1, |d| d.border_t_1().border_color(rgb(crate::theme::canvas_line())))
                         .children(cells.iter().enumerate().map(|(ci, u)| {
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .px_3()
                                 .py(px(if ri == 0 { 8. } else { 10. }))
-                                .when(ri > 0 && ci > 0, |d| d.text_color(rgb(MUTED)))
+                                .when(ri > 0 && ci > 0, |d| d.text_color(rgb(muted())))
                                 .child(unit_el(doc, *u, msg, shared))
                         }))
                 }))
                 .into_any_element(),
-            Block::Rule => div().h(px(1.)).my_4().bg(rgb(BORDER)).into_any_element(),
+            Block::Rule => div().h(px(1.)).my_4().bg(rgb(border())).into_any_element(),
         };
         out.push(div().mt(px(gap)).child(el).into_any_element());
     }
@@ -384,7 +382,7 @@ pub fn render_user(doc: &Rc<Doc>, msg: usize, shared: &SharedRef, attachments: u
             div()
                 .max_w(relative(0.85))
                 .rounded(px(12.))
-                .bg(rgb(crate::theme::USER_BUBBLE))
+                .bg(rgb(crate::theme::user_bubble()))
                 .px_3()
                 .py_2()
                 .text_size(px(13.5))
@@ -392,7 +390,7 @@ pub fn render_user(doc: &Rc<Doc>, msg: usize, shared: &SharedRef, attachments: u
                 .child(unit_el(doc, 0, msg, shared)),
         )
         .when(attachments > 0, |d| {
-            d.child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(format!("{attachments} image attachment(s)")))
+            d.child(div().text_size(px(12.)).text_color(rgb(muted())).child(format!("{attachments} image attachment(s)")))
         })
         .into_any_element()
 }
@@ -407,7 +405,7 @@ pub fn render_assistant(doc: &Rc<Doc>, msg: usize, shared: &SharedRef, live: boo
                 .text_size(px(15.))
                 .line_height(px(25.))
                 .children(render_blocks(doc, msg, shared))
-                .when(live, |d| d.child(div().w(px(6.)).h(px(16.)).bg(crate::theme::alpha(FG, 0.7)))),
+                .when(live, |d| d.child(div().w(px(6.)).h(px(16.)).bg(crate::theme::alpha(fg(), 0.7)))),
         )
         .into_any_element()
 }
@@ -450,12 +448,12 @@ pub fn render_trace(
             (
                 label.clone(),
                 status.clone(),
-                if failed { theme::DESTRUCTIVE } else { MUTED },
+                if failed { theme::destructive() } else { muted() },
                 if failed { Icon::X } else { trace_icon(label) },
             )
         }
-        TraceKind::Thinking { live: true, .. } => ("Thinking".to_string(), String::new(), MUTED, Icon::Brain),
-        TraceKind::Thinking { secs, .. } => ("Thought".to_string(), format!("for {secs:.0}s"), MUTED, Icon::Brain),
+        TraceKind::Thinking { live: true, .. } => ("Thinking".to_string(), String::new(), muted(), Icon::Brain),
+        TraceKind::Thinking { secs, .. } => ("Thought".to_string(), format!("for {secs:.0}s"), muted(), Icon::Brain),
         TraceKind::Tool { name, status, secs, .. } => (
             name.clone(),
             match status {
@@ -463,8 +461,8 @@ pub fn render_trace(
                 ToolStatus::Ok | ToolStatus::Error => format!("{secs:.1}s"),
             },
             match status {
-                ToolStatus::Error => theme::DESTRUCTIVE,
-                _ => MUTED,
+                ToolStatus::Error => theme::destructive(),
+                _ => muted(),
             },
             match status {
                 ToolStatus::Error => Icon::X,
@@ -472,7 +470,7 @@ pub fn render_trace(
             },
         ),
     };
-    let failed = badge_color == theme::DESTRUCTIVE;
+    let failed = badge_color == theme::destructive();
     let has_body = !doc.units.is_empty();
     let sh = shared.clone();
     let group = SharedString::from(format!("trace-{msg}"));
@@ -502,12 +500,12 @@ pub fn render_trace(
                 .gap_2()
                 .cursor_pointer()
                 .text_size(px(14.))
-                .text_color(rgb(if failed { theme::DESTRUCTIVE } else { MUTED }))
-                .hover(|s| s.text_color(rgb(FG)))
+                .text_color(rgb(if failed { theme::destructive() } else { muted() }))
+                .hover(|s| s.text_color(rgb(fg())))
                 .child(
                     theme::icon(glyph, 16.)
-                        .text_color(rgb(if failed { theme::DESTRUCTIVE } else { MUTED }))
-                        .group_hover(group.clone(), |s| s.text_color(rgb(FG))),
+                        .text_color(rgb(if failed { theme::destructive() } else { muted() }))
+                        .group_hover(group.clone(), |s| s.text_color(rgb(fg()))),
                 )
                 .child(div().flex_none().child(label))
                 .child(div().min_w_0().truncate().font_family(MONO).text_size(px(13.)).child(tr.title.clone()))
@@ -515,7 +513,7 @@ pub fn render_trace(
                 .when(has_body, |d| {
                     d.child(
                         theme::icon(if tr.open { Icon::ChevronDown } else { Icon::ChevronRight }, 16.)
-                            .group_hover(group, |s| s.text_color(rgb(FG))),
+                            .group_hover(group, |s| s.text_color(rgb(fg()))),
                     )
                 })
                 .on_click(on_toggle),
@@ -529,11 +527,11 @@ pub fn render_trace(
                     .pl_4()
                     .pr_1()
                     .border_l_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .flex()
                     .flex_col()
                     .text_size(px(13.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(muted()))
                     .line_height(px(21.))
                     .children(render_blocks(doc, msg, shared)),
             )

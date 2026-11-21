@@ -27,11 +27,11 @@ pub fn nav_item(
         .gap_2()
         .rounded(px(6.))
         .text_size(px(13.))
-        .text_color(rgb(theme::FOREGROUND))
-        .when(selected, |d| d.bg(rgb(theme::SECONDARY)))
-        .hover(|s| s.bg(rgb(theme::SECONDARY)))
-        .focus_visible(|s| s.bg(rgb(theme::ACCENT)))
-        .child(icon(glyph, 16.).text_color(rgb(theme::MUTED_FOREGROUND)))
+        .text_color(rgb(theme::foreground()))
+        .when(selected, |d| d.bg(rgb(theme::secondary())))
+        .hover(|s| s.bg(rgb(theme::secondary())))
+        .focus_visible(|s| s.bg(rgb(theme::accent())))
+        .child(icon(glyph, 16.).text_color(rgb(theme::muted_foreground())))
         .child(div().flex_1().min_w_0().truncate().child(label))
         .on_click(click)
 }
@@ -80,12 +80,12 @@ fn sized_icon_button(
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .text_color(rgb(theme::MUTED_FOREGROUND))
-        .hover(|s| s.bg(rgb(theme::SECONDARY)).text_color(rgb(theme::FOREGROUND)))
-        .focus_visible(|s| s.bg(rgb(theme::ACCENT)).text_color(rgb(theme::FOREGROUND)))
+        .text_color(rgb(theme::muted_foreground()))
+        .hover(|s| s.bg(rgb(theme::secondary())).text_color(rgb(theme::foreground())))
+        .focus_visible(|s| s.bg(rgb(theme::accent())).text_color(rgb(theme::foreground())))
         .child(
             icon(glyph, glyph_size)
-                .group_hover(group, |s| s.text_color(rgb(theme::FOREGROUND))),
+                .group_hover(group, |s| s.text_color(rgb(theme::foreground()))),
         )
         .on_click(click)
 }
@@ -98,7 +98,7 @@ pub fn section_label(glyph: Icon, label: &'static str) -> Div {
         .gap(px(6.))
         .text_size(px(10.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme::MUTED_FOREGROUND))
+        .text_color(rgb(theme::muted_foreground()))
         .child(icon(glyph, 14.))
         .child(label.to_uppercase())
 }
@@ -139,35 +139,35 @@ pub fn button(
         .whitespace_nowrap();
     let styled = match variant {
         Variant::Primary => base
-            .bg(rgb(theme::PRIMARY))
-            .text_color(rgb(0xffffff))
-            .hover(|s| s.bg(alpha(theme::PRIMARY, 0.8))),
+            .bg(rgb(theme::primary()))
+            .text_color(rgb(crate::theme::ON_PRIMARY))
+            .hover(|s| s.bg(alpha(theme::primary(), 0.8))),
         Variant::Secondary => base
-            .bg(rgb(theme::SECONDARY))
-            .text_color(rgb(theme::SECONDARY_FOREGROUND))
-            .hover(|s| s.bg(rgb(theme::ACCENT))),
+            .bg(rgb(theme::secondary()))
+            .text_color(rgb(theme::secondary_foreground()))
+            .hover(|s| s.bg(rgb(theme::accent()))),
         Variant::Outline => base
             .border_1()
-            .border_color(rgb(theme::BORDER))
-            .bg(rgb(0x17181b))
-            .text_color(rgb(theme::FOREGROUND))
-            .hover(|s| s.bg(rgb(0x1f2024))),
+            .border_color(rgb(theme::border()))
+            .bg(rgb(crate::theme::input_bg()))
+            .text_color(rgb(theme::foreground()))
+            .hover(|s| s.bg(rgb(crate::theme::input_hover()))),
         Variant::Ghost => base
-            .text_color(rgb(theme::SECONDARY_FOREGROUND))
-            .hover(|s| s.bg(rgb(theme::SECONDARY)).text_color(rgb(theme::FOREGROUND))),
+            .text_color(rgb(theme::secondary_foreground()))
+            .hover(|s| s.bg(rgb(theme::secondary())).text_color(rgb(theme::foreground()))),
         Variant::Destructive => base
-            .bg(alpha(theme::DESTRUCTIVE, 0.2))
-            .text_color(rgb(theme::DESTRUCTIVE))
-            .hover(|s| s.bg(alpha(theme::DESTRUCTIVE, 0.3))),
+            .bg(alpha(theme::destructive(), 0.2))
+            .text_color(rgb(theme::destructive()))
+            .hover(|s| s.bg(alpha(theme::destructive(), 0.3))),
     };
     styled
-        .focus_visible(|s| s.border_1().border_color(rgb(theme::PRIMARY)))
+        .focus_visible(|s| s.border_1().border_color(rgb(theme::primary())))
         .when_some(glyph, |d, g| {
             let color = match variant {
-                Variant::Primary => 0xffffff,
-                Variant::Destructive => theme::DESTRUCTIVE,
-                Variant::Outline => theme::FOREGROUND,
-                Variant::Secondary | Variant::Ghost => theme::SECONDARY_FOREGROUND,
+                Variant::Primary => crate::theme::ON_PRIMARY,
+                Variant::Destructive => theme::destructive(),
+                Variant::Outline => theme::foreground(),
+                Variant::Secondary | Variant::Ghost => theme::secondary_foreground(),
             };
             d.child(icon(g, 14.).text_color(rgb(color)))
         })
@@ -178,9 +178,9 @@ pub fn button(
 /// Bordered surface used for panels, cards and the composer.
 pub fn card() -> Div {
     div()
-        .bg(rgb(theme::CARD))
+        .bg(rgb(theme::card()))
         .border_1()
-        .border_color(rgb(theme::BORDER))
+        .border_color(rgb(theme::border()))
         .rounded(px(12.))
 }
 
@@ -195,9 +195,9 @@ pub fn pill(glyph: Option<Icon>, label: impl Into<SharedString>) -> Div {
         .gap(px(4.))
         .rounded_md()
         .border_1()
-        .border_color(rgb(theme::BORDER))
+        .border_color(rgb(theme::border()))
         .text_size(px(12.))
-        .text_color(rgb(theme::SECONDARY_FOREGROUND))
+        .text_color(rgb(theme::secondary_foreground()))
         .when_some(glyph, |d, g| d.child(icon(g, 12.)))
         .child(label.into())
 }
@@ -209,7 +209,7 @@ pub fn section_title(text: impl Into<SharedString>) -> Div {
         .mt_2()
         .text_size(px(13.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(theme::FOREGROUND))
+        .text_color(rgb(theme::foreground()))
         .child(text.into())
 }
 
@@ -217,6 +217,6 @@ pub fn section_title(text: impl Into<SharedString>) -> Div {
 pub fn hint(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(12.))
-        .text_color(rgb(theme::MUTED_FOREGROUND))
+        .text_color(rgb(theme::muted_foreground()))
         .child(text.into())
 }

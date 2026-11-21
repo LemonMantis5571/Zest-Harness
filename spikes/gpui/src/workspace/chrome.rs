@@ -6,6 +6,7 @@ use crate::ui;
 
 /// Settings-type panels, shown as tabs under Customize (the React UI's CustomizePanel).
 pub(super) const CUSTOMIZE: &[(Panel, &str, Icon)] = &[
+    (Panel::Appearance, "Appearance", Icon::Palette),
     (Panel::Settings, "Models", Icon::Layers),
     (Panel::Commands, "Skills & MCP", Icon::Plug),
     (Panel::Extras, "Add-ons", Icon::Puzzle),
@@ -21,10 +22,6 @@ pub(super) const WORKBENCH: &[(Panel, &str, Icon)] = &[
     (Panel::Delegation, "Delegation", Icon::Workflow),
     (Panel::Worktrees, "Worktrees", Icon::FolderGit2),
 ];
-
-const SIDEBAR_LINE: u32 = 0x202225;
-const SECTION_LINE: u32 = 0x1c1d20;
-const SELECTED_ROW: u32 = 0x202336;
 
 /// Relative age the way the React sidebar prints it: "now", "45s", "6m", "8h", "2d".
 pub(super) fn age(then: u64, now: u64) -> String {
@@ -74,9 +71,9 @@ pub(super) fn chat_row(
                 .gap(px(6.))
                 .rounded(px(6.))
                 .text_size(px(13.))
-                .text_color(rgb(theme::FOREGROUND))
+                .text_color(rgb(theme::foreground()))
                 .when(selected, |d| {
-                    d.bg(rgb(SELECTED_ROW)).child(
+                    d.bg(rgb(theme::selected_row())).child(
                         div()
                             .absolute()
                             .left_0()
@@ -84,14 +81,14 @@ pub(super) fn chat_row(
                             .bottom(px(4.))
                             .w(px(2.))
                             .rounded_full()
-                            .bg(rgb(theme::PRIMARY)),
+                            .bg(rgb(theme::primary())),
                     )
                 })
-                .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SECONDARY))))
-                .focus_visible(|s| s.bg(rgb(theme::ACCENT)))
+                .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::secondary()))))
+                .focus_visible(|s| s.bg(rgb(theme::accent())))
                 .child(
                     icon(glyph, 16.)
-                        .text_color(if busy { rgb(theme::PRIMARY) } else { rgb(theme::MUTED_FOREGROUND) }),
+                        .text_color(if busy { rgb(theme::primary()) } else { rgb(theme::muted_foreground()) }),
                 )
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(
@@ -99,7 +96,7 @@ pub(super) fn chat_row(
                         .flex_none()
                         .pr_1()
                         .text_size(px(10.))
-                        .text_color(rgb(theme::MUTED_FOREGROUND))
+                        .text_color(rgb(theme::muted_foreground()))
                         .child(age),
                 )
                 .on_click(click),
@@ -115,9 +112,9 @@ fn kbd(key: &'static str) -> Div {
         .items_center()
         .rounded(px(4.))
         .border_1()
-        .border_color(rgb(theme::BORDER))
+        .border_color(rgb(theme::border()))
         .text_size(px(10.))
-        .text_color(rgb(theme::MUTED_FOREGROUND))
+        .text_color(rgb(theme::muted_foreground()))
         .child(key)
 }
 
@@ -167,9 +164,9 @@ impl Workspace {
                 .items_center()
                 .gap(px(2.))
                 .py(px(6.))
-                .bg(rgb(theme::SIDEBAR))
+                .bg(rgb(theme::sidebar()))
                 .border_r_1()
-                .border_color(rgb(SIDEBAR_LINE))
+                .border_color(rgb(theme::sidebar_line()))
                 .child(ui::icon_button("expand-sidebar", Icon::PanelLeft, "Show sidebar", cx.listener(|ws, _, _, cx| {
                     ws.sidebar_open = true;
                     cx.notify();
@@ -241,7 +238,7 @@ impl Workspace {
             .items_center()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(SIDEBAR_LINE))
+            .border_color(rgb(theme::sidebar_line()))
             .child(
                 div()
                     .flex()
@@ -276,7 +273,7 @@ impl Workspace {
                 ui::section_label(Icon::Folder, "Projects").child(
                     div()
                         .text_size(px(10.))
-                        .text_color(rgb(0x5a5d63))
+                        .text_color(rgb(crate::theme::faint()))
                         .child("1"),
                 ),
             )
@@ -301,12 +298,12 @@ impl Workspace {
             .px(px(6.))
             .py_1()
             .rounded(px(6.))
-            .hover(|s| s.bg(rgb(theme::SECONDARY)))
+            .hover(|s| s.bg(rgb(theme::secondary())))
             .child(
                 icon(if self.project_open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.)
-                    .text_color(rgb(theme::MUTED_FOREGROUND)),
+                    .text_color(rgb(theme::muted_foreground())),
             )
-            .child(icon(Icon::FolderOpen, 14.).text_color(rgb(theme::PRIMARY)))
+            .child(icon(Icon::FolderOpen, 14.).text_color(rgb(theme::primary())))
             .child(
                 div()
                     .flex_1()
@@ -339,7 +336,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .child(nav)
-            .child(div().my_2().h(px(1.)).bg(rgb(SECTION_LINE)))
+            .child(div().my_2().h(px(1.)).bg(rgb(theme::section_line())))
             .child(
                 div()
                     .flex_1()
@@ -374,7 +371,7 @@ impl Workspace {
         let footer = div()
             .flex_none()
             .border_t_1()
-            .border_color(rgb(SIDEBAR_LINE))
+            .border_color(rgb(theme::sidebar_line()))
             .p(px(6.))
             .flex()
             .items_center()
@@ -393,7 +390,7 @@ impl Workspace {
                     .gap_2()
                     .p(px(6.))
                     .rounded(px(6.))
-                    .hover(|s| s.bg(rgb(theme::SECONDARY)))
+                    .hover(|s| s.bg(rgb(theme::secondary())))
                     .child(
                         div()
                             .size(px(28.))
@@ -402,9 +399,9 @@ impl Workspace {
                             .items_center()
                             .justify_center()
                             .rounded(px(6.))
-                            .bg(rgb(theme::CARD))
+                            .bg(rgb(theme::card()))
                             .border_1()
-                            .border_color(rgb(theme::BORDER))
+                            .border_color(rgb(theme::border()))
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Z"),
@@ -421,11 +418,11 @@ impl Workspace {
                                     .truncate()
                                     .text_size(px(11.))
                                     .line_height(px(14.))
-                                    .text_color(rgb(theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(theme::muted_foreground()))
                                     .child(provider),
                             ),
                     )
-                    .child(icon(Icon::ChevronsUpDown, 14.).text_color(rgb(theme::MUTED_FOREGROUND)))
+                    .child(icon(Icon::ChevronsUpDown, 14.).text_color(rgb(theme::muted_foreground())))
                     .on_click(cx.listener(|ws, _, w, cx| ws.page(Panel::Settings, w, cx))),
             )
             .child(ui::icon_button("usage", Icon::Gauge, "Usage", cx.listener(|ws, _, w, cx| ws.page(Panel::Usage, w, cx))));
@@ -434,9 +431,9 @@ impl Workspace {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(rgb(theme::SIDEBAR))
+            .bg(rgb(theme::sidebar()))
             .border_r_1()
-            .border_color(rgb(SIDEBAR_LINE))
+            .border_color(rgb(theme::sidebar_line()))
             .child(top)
             .child(body)
             .child(footer)
@@ -504,9 +501,9 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_2()
-            .bg(rgb(theme::HEADER))
+            .bg(rgb(theme::header()))
             .border_b_1()
-            .border_color(rgb(0x1f2125))
+            .border_color(rgb(crate::theme::canvas_line()))
             .child(
                 div()
                     .flex_1()
@@ -514,7 +511,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(project_name))
-                    .child(div().truncate().text_size(px(11.)).line_height(px(14.)).text_color(rgb(theme::MUTED_FOREGROUND)).child(subtitle)),
+                    .child(div().truncate().text_size(px(11.)).line_height(px(14.)).text_color(rgb(theme::muted_foreground())).child(subtitle)),
             )
             .child(actions)
     }
@@ -528,7 +525,7 @@ impl Workspace {
             Panel::Rename => ("Rename chat", "Type a new title and press Enter."),
             _ if group.is_some_and(|g| std::ptr::eq(g, CUSTOMIZE)) => (
                 "Customize",
-                "Models, permissions, skills, MCP servers and add-ons. Everything here stays on this computer.",
+                "Appearance, models, permissions, skills, MCP servers and add-ons. Everything here stays on this computer.",
             ),
             _ => ("Workbench", "Changes, files, jobs, checkpoints, delegation and worktrees for this project."),
         };
@@ -543,7 +540,7 @@ impl Workspace {
                     .flex_col()
                     .gap_1()
                     .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED_FOREGROUND)).child(subtitle)),
+                    .child(div().text_size(px(12.)).text_color(rgb(theme::muted_foreground())).child(subtitle)),
             )
             .child(
                 div()
@@ -560,7 +557,7 @@ impl Workspace {
                 .gap(px(6.))
                 .pb_3()
                 .border_b_1()
-                .border_color(rgb(0x1f2125))
+                .border_color(rgb(crate::theme::canvas_line()))
                 .children(group.iter().map(|&(panel, label, glyph)| {
                     let active = panel == self.panel;
                     ui::button(
@@ -570,7 +567,7 @@ impl Workspace {
                         label,
                         cx.listener(move |ws, _, w, cx| ws.page(panel, w, cx)),
                     )
-                    .when(active, |d| d.text_color(rgb(theme::FOREGROUND)))
+                    .when(active, |d| d.text_color(rgb(theme::foreground())))
                 }))
         });
         div()
@@ -578,7 +575,7 @@ impl Workspace {
             .min_h_0()
             .flex()
             .justify_center()
-            .bg(rgb(theme::CANVAS))
+            .bg(rgb(theme::canvas()))
             .child(
                 div()
                     .w_full()
@@ -597,6 +594,118 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// Customize > Appearance: theme and font, applied at once and saved per machine.
+    pub(super) fn appearance_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active = theme::palette().id;
+        let themes = div().flex().flex_wrap().gap_3().children(theme::THEMES.iter().map(|palette| {
+            let selected = palette.id == active;
+            let id = palette.id;
+            let swatch = |color: u32| {
+                div()
+                    .size(px(18.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(alpha(theme::foreground(), 0.15))
+                    .bg(rgb(color))
+            };
+            div()
+                .id(SharedString::from(format!("theme-{id}")))
+                .role(Role::Button)
+                .aria_label(SharedString::from(if selected {
+                    format!("Theme: {}, current", palette.name)
+                } else {
+                    format!("Theme: {}", palette.name)
+                }))
+                .tab_index(0)
+                .cursor_pointer()
+                .w(px(240.))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if selected { rgb(theme::primary()) } else { rgb(theme::soft_border()) })
+                .bg(rgb(theme::card()))
+                .hover(|s| s.bg(rgb(theme::secondary())))
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(swatch(palette.background))
+                        .child(swatch(palette.sidebar))
+                        .child(swatch(palette.card))
+                        .child(swatch(palette.primary)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(palette.name)
+                        .when(selected, |d| d.child(icon(Icon::Check, 14.).text_color(rgb(theme::primary()))))
+                        .when(!palette.dark, |d| d.child(ui::pill(None, "Light"))),
+                )
+                .child(ui::hint(palette.description))
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    theme::set_theme(id);
+                    ws.save_appearance(window, cx);
+                }))
+        }));
+        let current_face = theme::face().id;
+        let faces = div().flex().flex_col().gap(px(2.)).children(theme::available_faces(cx).into_iter().map(|face| {
+            let selected = face.id == current_face;
+            let id = face.id;
+            div()
+                .id(SharedString::from(format!("font-{id}")))
+                .role(Role::Button)
+                .aria_label(SharedString::from(if selected {
+                    format!("Font: {}, current", face.name)
+                } else {
+                    format!("Font: {}", face.name)
+                }))
+                .tab_index(0)
+                .cursor_pointer()
+                .h(px(36.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(6.))
+                .when(selected, |d| d.bg(alpha(theme::primary(), 0.18)))
+                .hover(|s| s.bg(rgb(theme::secondary())))
+                .child(div().flex_1().font_family(face.family).text_size(px(14.)).child(face.name))
+                .when(selected, |d| d.child(icon(Icon::Check, 14.).text_color(rgb(theme::primary()))))
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    theme::set_face(id);
+                    ws.save_appearance(window, cx);
+                }))
+        }));
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(ui::section_title("Theme"))
+            .child(themes)
+            .child(ui::section_title("Typography"))
+            .child(ui::hint("Geist ships with Zest. Inter, Plus Jakarta Sans, JetBrains Mono and Fira Code appear here when installed."))
+            .child(div().max_w(px(420.)).child(faces))
+            .into_any_element()
+    }
+
+    fn save_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = theme::save_appearance() {
+            self.note = error;
+        }
+        window.refresh();
+        cx.refresh_windows();
+        cx.notify();
+    }
+}
+
 /// The chat area as a rounded, bordered canvas inset below the header.
 pub(super) fn canvas_frame(content: AnyElement) -> Div {
     div()
@@ -609,8 +718,8 @@ pub(super) fn canvas_frame(content: AnyElement) -> Div {
         .flex_col()
         .rounded(px(12.))
         .border_1()
-        .border_color(alpha(theme::FOREGROUND, 0.14))
-        .bg(rgb(theme::CANVAS))
+        .border_color(alpha(theme::foreground(), 0.14))
+        .bg(rgb(theme::canvas()))
         .overflow_hidden()
         .child(content)
 }

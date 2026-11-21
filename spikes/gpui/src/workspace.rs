@@ -30,6 +30,7 @@ actions!(
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Chat,
+    Appearance,
     Search,
     Settings,
     Commands,
@@ -131,6 +132,7 @@ pub struct Workspace {
 }
 
 const PAGES: &[(Panel, &str)] = &[
+    (Panel::Appearance, "Appearance"),
     (Panel::Search, "Find chats"),
     (Panel::Settings, "Model & permissions"),
     (Panel::Commands, "Skills & MCP"),
@@ -741,6 +743,7 @@ impl Workspace {
             .flex_col()
             .gap_2();
         match self.panel {
+            Panel::Appearance => body = body.child(self.appearance_body(cx)),
             Panel::Worktrees => body = body.child(self.worktrees_body(cx)),
             Panel::PullRequests => body = body.child(self.pull_requests_body(cx)),
             Panel::Extras => body = body.child(self.extras_body(cx)),
@@ -1017,14 +1020,14 @@ impl Workspace {
                             .relative()
                             .rounded(px(8.))
                             .border_1()
-                            .border_color(rgb(crate::theme::BORDER))
-                            .bg(rgb(0x17181b))
+                            .border_color(rgb(crate::theme::border()))
+                            .bg(rgb(crate::theme::input_bg()))
                             .p(px(10.))
                             .pr_10()
                             .font_family(MONO)
                             .text_size(px(12.))
                             .line_height(px(19.))
-                            .text_color(rgb(crate::theme::SECONDARY_FOREGROUND))
+                            .text_color(rgb(crate::theme::secondary_foreground()))
                             .child(self.report.clone())
                             .child(
                                 div().absolute().top_1().right_1().child(crate::ui::icon_button(
@@ -1302,8 +1305,8 @@ impl Render for Workspace {
                 .gap_2()
                 .rounded(px(8.))
                 .border_1()
-                .border_color(rgb(crate::theme::BORDER))
-                .bg(rgb(crate::theme::CARD))
+                .border_color(rgb(crate::theme::border()))
+                .bg(rgb(crate::theme::card()))
                 .text_size(px(13.))
                 .child(crate::theme::icon(crate::theme::Icon::CircleAlert, 14.).text_color(rgb(crate::theme::WARNING)))
                 .child(div().flex_1().min_w_0().child(self.note.clone()))
@@ -1325,9 +1328,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &MinimizePane, w, cx| ws.minimize_active(w, cx)))
             .on_action(cx.listener(|ws, _: &ToggleSplit, w, cx| ws.split(w, cx)))
             .on_action(cx.listener(|ws, _: &ClosePanel, w, cx| ws.page(Panel::Chat, w, cx)))
-            .bg(rgb(crate::theme::HEADER))
-            .font_family(SANS)
-            .text_color(rgb(FG))
+            .bg(rgb(crate::theme::header()))
+            .font_family(sans())
+            .text_color(rgb(fg()))
             .text_size(px(14.))
             .relative()
             .when_some(self.extras.image.clone(), |d, image| {
@@ -1414,9 +1417,9 @@ impl Render for ProjectPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
-            .bg(rgb(crate::theme::CANVAS))
-            .font_family(SANS)
-            .text_color(rgb(FG))
+            .bg(rgb(crate::theme::canvas()))
+            .font_family(sans())
+            .text_color(rgb(fg()))
             .flex()
             .flex_col()
             .items_center()
@@ -1463,7 +1466,7 @@ impl Render for ProjectPicker {
                 }),
             ))
             .when(!self.error.is_empty(), |d| {
-                d.child(div().text_size(px(12.)).text_color(rgb(crate::theme::DESTRUCTIVE)).child(self.error.clone()))
+                d.child(div().text_size(px(12.)).text_color(rgb(crate::theme::destructive())).child(self.error.clone()))
             })
     }
 }

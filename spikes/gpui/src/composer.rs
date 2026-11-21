@@ -2,7 +2,7 @@
 //! IME through `EntityInputHandler`. Built on `StyledText` so wrapping and hit-testing come
 //! from GPUI's own text layout instead of hand-rolled line breaking.
 
-use crate::view::{FG, MONO, MUTED, SANS, SEL_BG};
+use crate::view::{fg, MONO, muted, sans, sel_bg};
 use gpui::prelude::*;
 use gpui::*;
 use std::ops::Range;
@@ -573,7 +573,7 @@ impl Element for ComposerText {
         if focus.is_focused(w) && collapsed && self.caret_blink_on {
             let origin = layout.position_for_index(cursor).unwrap_or(bounds.origin);
             let lh = layout.line_height();
-            w.paint_quad(fill(Bounds::new(origin, size(px(1.5), lh)), rgb(FG)));
+            w.paint_quad(fill(Bounds::new(origin, size(px(1.5), lh)), rgb(fg())));
             w.request_autoscroll(Bounds::new(origin, size(px(1.5), lh)));
         }
         let input = self.input.clone();
@@ -622,11 +622,11 @@ impl Render for Composer {
             let mut hs = HighlightStyle::default();
             let mut touched = false;
             if !self.sel.is_empty() && self.sel.start <= a && self.sel.end >= b {
-                hs.background_color = Some(rgb(SEL_BG).into());
+                hs.background_color = Some(rgb(sel_bg()).into());
                 touched = true;
             }
             if self.marked.as_ref().is_some_and(|m| m.start <= a && m.end >= b) {
-                hs.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(rgb(FG).into()), wavy: false });
+                hs.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(rgb(fg()).into()), wavy: false });
                 touched = true;
             }
             if touched {
@@ -693,9 +693,9 @@ impl Render for Composer {
                 d.px(px(10.))
                     .py(px(5.))
                     .rounded(px(8.))
-                    .bg(rgb(0x17181b))
+                    .bg(rgb(crate::theme::input_bg()))
                     .border_1()
-                    .border_color(if focused { rgb(crate::theme::PRIMARY) } else { rgb(crate::theme::BORDER) })
+                    .border_color(if focused { rgb(crate::theme::primary()) } else { rgb(crate::theme::border()) })
             })
             .when(!thumbs.is_empty(), |d| {
                 d.child(div().flex().flex_row().gap_2().children(thumbs.into_iter().map(|im| {
@@ -705,7 +705,7 @@ impl Render for Composer {
                         .items_center()
                         .gap_1()
                         .text_size(px(11.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(muted()))
                         .child(img(im.clone()).size(px(56.)).rounded_md().object_fit(ObjectFit::Cover))
                         .child(format!("{:?} {}KB", im.format, im.bytes().len() / 1024))
                 })))
@@ -717,10 +717,10 @@ impl Render for Composer {
                     .min_h(lh)
                     .max_h(if chat { px(180.) } else { lh * 8. })
                     .overflow_y_scroll()
-                    .font_family(SANS)
+                    .font_family(sans())
                     .text_size(px(14.))
                     .line_height(lh)
-                    .text_color(rgb(FG))
+                    .text_color(rgb(fg()))
                     .on_mouse_down(MouseButton::Left, {
                         let this = this.clone();
                         move |e: &MouseDownEvent, w, cx| {
@@ -739,7 +739,7 @@ impl Render for Composer {
                                 .absolute()
                                 .top_0()
                                 .left_0()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .child(self.placeholder),
                         )
                     }),

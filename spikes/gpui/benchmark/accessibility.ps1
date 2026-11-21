@@ -19,6 +19,7 @@ $valuePattern = $false
 $editRoundTrip = $false
 $editMilliseconds = $null
 $textRoundTrip = $false
+$retried = $false
 foreach ($node in $nodes) {
     $role = $node.Current.ControlType.ProgrammaticName
     $name = $node.Current.Name
@@ -39,7 +40,9 @@ foreach ($node in $nodes) {
                 try {
                     $timer = [Diagnostics.Stopwatch]::StartNew()
                     $value.SetValue('Zest benchmark input')
-                    while ($timer.ElapsedMilliseconds -lt 1000 -and $value.Current.Value -ne 'Zest benchmark input') {
+                    # A cold start can still be building its accessibility tree; retry once.
+                    while ($timer.ElapsedMilliseconds -lt 3000 -and $value.Current.Value -ne 'Zest benchmark input') {
+                        if ($timer.ElapsedMilliseconds -gt 1500 -and -not $retried) { $retried = $true; $value.SetValue('Zest benchmark input') }
                         Start-Sleep -Milliseconds 10
                     }
                     $editRoundTrip = $value.Current.Value -eq 'Zest benchmark input'

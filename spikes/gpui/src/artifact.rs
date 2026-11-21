@@ -106,8 +106,8 @@ pub fn card(
         .gap_2()
         .border_1()
         .rounded(px(12.))
-        .border_color(rgb(0x25262b))
-        .bg(rgb(0x121314))
+        .border_color(rgb(crate::theme::soft_border()))
+        .bg(rgb(crate::theme::header()))
         .child(controls)
         .when(source_visible, |d| {
             d.child(
@@ -117,8 +117,8 @@ pub fn card(
                     .overflow_y_scroll()
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(rgb(crate::theme::BORDER))
-                    .bg(rgb(0x17181b))
+                    .border_color(rgb(crate::theme::border()))
+                    .bg(rgb(crate::theme::input_bg()))
                     .p(px(10.))
                     .font_family(crate::theme::MONO)
                     .text_size(px(12.))
