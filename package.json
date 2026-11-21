@@ -15,7 +15,7 @@
     }
   },
   "scripts": {
-    "dev": "npm run desktop:dev",
+    "dev": "npm run gpui --",
     "dev:official": "npm run dev:official -w zest-desktop",
     "ui:dev": "npm run dev -w ui",
     "ui:build": "npm run build -w ui",
@@ -28,6 +28,7 @@
     "desktop:smoke": "node ./scripts/desktop-smoke.mjs",
     "gpui": "cargo run --locked --release --manifest-path spikes/gpui/Cargo.toml --",
     "gpui:test": "cargo run --locked --release --manifest-path spikes/gpui/Cargo.toml -- --selftest-workspace",
+    "gpui:package": "node ./scripts/package-gpui.mjs",
     "verify": "node ./scripts/dev-verify.mjs",
     "output-policy:check": "node ./scripts/check-output-artifacts.mjs",
     "output-policy:test": "node --test ./scripts/check-output-artifacts.test.mjs",

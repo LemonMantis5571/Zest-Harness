@@ -2,6 +2,7 @@
 title: Interactive HTML artifacts
 summary: Agents publish self-contained interactive HTML cards in chat, with isolated execution, source/export controls, and optional real screenshot feedback.
 paths:
+  - spikes/gpui/src/artifact.rs
   - crates/core/src/html.rs
   - crates/core/src/html_preview.rs
   - crates/core/src/tools/html.rs

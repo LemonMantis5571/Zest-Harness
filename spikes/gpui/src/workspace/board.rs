@@ -362,10 +362,10 @@ impl Workspace {
             cx.listener(|ws, _, _, cx| ws.load_board(true, cx)),
         ));
         if b.readonly {
-            body = body.child("Another coordinator owns this project. Cards are read-only.");
+            body = body.child(crate::ui::hint("Another coordinator owns this project. Cards are read-only."));
         }
         if b.busy {
-            body = body.child("Updating delegation…");
+            body = body.child(crate::ui::hint("Updating delegation…"));
         }
         if !b.message.is_empty() {
             body = body.child(b.message.clone());

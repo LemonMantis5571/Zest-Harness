@@ -6,12 +6,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use zest_core::{ApprovalMode, Thread, ThreadSummary};
 mod board;
+mod panes;
+use panes::{Direction, Layout};
+mod chrome;
+mod extras;
+mod projects;
 #[path = "workspace_test.rs"]
 mod workspace_test;
 
 actions!(
     native_workspace,
-    [NewChat, FindChat, OpenFolder, ToggleSplit, ClosePanel]
+    [
+        NewChat,
+        FindChat,
+        OpenFolder,
+        ToggleSplit,
+        ZoomPane,
+        MinimizePane,
+        ClosePanel
+    ]
 );
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,17 +38,72 @@ enum Panel {
     Usage,
     Jobs,
     Delegation,
+    Worktrees,
+    PullRequests,
+    Extras,
     Checkpoints,
     Rename,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatAttention {
+    Approval,
+    Question,
+    Failed,
+    Ready,
+}
+
+impl ChatAttention {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Approval => "Approval needed",
+            Self::Question => "Input needed",
+            Self::Failed => "Request failed",
+            Self::Ready => "Response ready",
+        }
+    }
+    fn pending(self, root: &Root) -> bool {
+        match self {
+            Self::Approval => root
+                .cards
+                .iter()
+                .any(|c| matches!(c.request, interaction::Request::Approval { .. })),
+            Self::Question => root
+                .cards
+                .iter()
+                .any(|c| matches!(c.request, interaction::Request::Question { .. })),
+            _ => true,
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum AlertRoute {
+    Quiet,
+    Banner,
+    System,
+}
+
+fn chat_alert_route(focused: bool, visible: bool) -> AlertRoute {
+    match (focused, visible) {
+        (false, _) => AlertRoute::System,
+        (true, true) => AlertRoute::Quiet,
+        (true, false) => AlertRoute::Banner,
+    }
+}
+
+impl EventEmitter<ChatAttention> for Root {}
+
 pub struct Workspace {
     project: Project,
     board: board::Board,
+    projects: projects::ProjectPanels,
+    extras: extras::Extras,
     chats: HashMap<String, Entity<Root>>,
     draft_ids: Vec<String>,
     active: String,
-    second: Option<String>,
+    layout: Option<Layout>,
+    saved_layouts: Vec<Layout>,
+    alerts: Vec<(String, ChatAttention, String)>,
     history: Arc<Vec<ThreadSummary>>,
     // Edits that landed after the background directory scan started.
     loading_history: Option<HashMap<String, ThreadSummary>>,
@@ -53,6 +121,13 @@ pub struct Workspace {
     directory: String,
     entries: Vec<workspace_files::WorkspaceFileView>,
     preview: Option<workspace_files::WorkspaceFileContent>,
+    /// Places visited, for the sidebar's back and forward arrows.
+    nav: Vec<(Panel, String)>,
+    nav_index: usize,
+    sidebar_open: bool,
+    project_open: bool,
+    /// The checkout's branch when the window opened, for chats without a recorded one.
+    branch: Option<String>,
 }
 
 const PAGES: &[(Panel, &str)] = &[
@@ -61,6 +136,9 @@ const PAGES: &[(Panel, &str)] = &[
     (Panel::Commands, "Skills & MCP"),
     (Panel::Files, "Files"),
     (Panel::Changes, "Changes"),
+    (Panel::Worktrees, "Worktrees"),
+    (Panel::PullRequests, "Pull requests"),
+    (Panel::Extras, "Add-ons"),
     (Panel::Usage, "Usage"),
     (Panel::Jobs, "Jobs"),
     (Panel::Delegation, "Delegation"),
@@ -125,13 +203,18 @@ impl Workspace {
         )
         .detach();
         let board = board::Board::new(&project, cx);
+        let branch = zest_core::worktree_chat::chat_git_baseline(&project.path).and_then(|(_, b)| b);
         let mut ws = Self {
             board,
+            projects: projects::ProjectPanels::default(),
+            extras: extras::Extras::default(),
             project,
             chats: HashMap::new(),
             draft_ids: vec![],
             active: String::new(),
-            second: None,
+            layout: None,
+            saved_layouts: Vec::new(),
+            alerts: Vec::new(),
             history: Arc::default(),
             loading_history: None,
             panel: Panel::Chat,
@@ -148,9 +231,15 @@ impl Workspace {
             search_term: String::new(),
             search_task: None,
             search_cancel: zest_core::CancelToken::new(),
+            nav: Vec::new(),
+            nav_index: 0,
+            sidebar_open: true,
+            project_open: true,
+            branch,
         };
         ws.new_chat(window, cx);
         ws.load_history(cx);
+        ws.load_extras(cx);
         ws
     }
 
@@ -305,22 +394,82 @@ impl Workspace {
                 .lock()
                 .unwrap()
                 .summary();
+            this.alerts
+                .retain(|(id, kind, _)| *id != summary.id || kind.pending(view.read(cx)));
             this.update_history(summary, cx);
         })
         .detach();
+        let chat_id = id.clone();
+        cx.subscribe_in(
+            &view,
+            window,
+            move |ws, chat, event: &ChatAttention, w, cx| {
+                if !event.pending(chat.read(cx)) {
+                    return;
+                }
+                let visible = ws.panel == Panel::Chat
+                    && (ws.active == chat_id
+                        || ws
+                            .layout
+                            .as_ref()
+                            .is_some_and(|l| l.ids().contains(&chat_id) && l.visible(&chat_id)));
+                let route = chat_alert_route(w.is_window_active(), visible);
+                if route == AlertRoute::Quiet {
+                    return;
+                }
+                let native = chat.read(cx).native.as_ref().unwrap();
+                let title = native
+                    .thread
+                    .lock()
+                    .unwrap()
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "New chat".into());
+                let label = format!("{} · {title}", event.title());
+                if route == AlertRoute::System {
+                    cx.show_system_notification(SystemNotification {
+                        tag: format!("{}/{}", cx.entity_id().as_u64(), chat_id).into(),
+                        title: event.title().into(),
+                        body: title.into(),
+                        actions: Vec::new(),
+                    });
+                } else if !ws
+                    .alerts
+                    .iter()
+                    .any(|(id, kind, _)| *id == chat_id && kind == event)
+                {
+                    ws.alerts.push((chat_id.clone(), *event, label));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let owner = id.clone();
         cx.subscribe(&view, move |ws, _, _: &native_view::ChooseModel, cx| {
-            if ws.second.as_deref() == Some(&owner) {
-                ws.second = Some(ws.active.clone());
-            }
-            ws.active = owner.clone();
+            ws.select_chat(&owner);
             ws.panel = Panel::Settings;
             cx.notify();
         })
         .detach();
         window.focus(&view.read(cx).composer.read(cx).focus.clone(), cx);
+        let focused = id.clone();
+        cx.on_focus_in(
+            &view.read(cx).composer.read(cx).focus.clone(),
+            window,
+            move |ws, _, cx| {
+                if ws.active != focused
+                    && ws.layout.as_ref().is_some_and(|layout| {
+                        layout.ids().contains(&focused) && layout.visible(&focused)
+                    })
+                {
+                    ws.active = focused.clone();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         self.chats.insert(id.clone(), view);
-        self.active = id;
+        self.select_chat(&id);
         self.panel = Panel::Chat;
         cx.notify();
     }
@@ -329,11 +478,8 @@ impl Workspace {
         if id != self.active && self.chats[&self.active].read(cx).side.open {
             self.chats[&self.active].update(cx, |r, cx| r.close_side(cx));
         }
-        if self.second.as_deref() == Some(id) {
-            self.second = Some(self.active.clone());
-        }
-        if let Some(chat) = self.chats.get(id) {
-            self.active = id.into();
+        if let Some(chat) = self.chats.get(id).cloned() {
+            self.select_chat(id);
             self.panel = Panel::Chat;
             window.focus(&chat.read(cx).composer.read(cx).focus.clone(), cx);
         } else {
@@ -348,11 +494,19 @@ impl Workspace {
         cx.notify();
     }
 
+    fn select_chat(&mut self, id: &str) {
+        if let Some(layout) = &mut self.layout {
+            layout.open(&self.active, id);
+        }
+        self.alerts.retain(|(owner, _, _)| owner != id);
+        self.active = id.into();
+    }
+
     fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.second.take().is_none() {
-            let previous = self.active.clone();
-            self.new_chat(window, cx);
-            self.second = Some(previous);
+        if let Some(group) = self.layout.take() {
+            self.saved_layouts.push(group);
+        } else {
+            self.add_pane(Direction::Across, window, cx);
         }
         self.panel = Panel::Chat;
         cx.notify();
@@ -381,6 +535,7 @@ impl Workspace {
     fn page(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = panel;
         self.report_epoch += 1;
+        self.projects.refresh_task = None;
         self.report.clear();
         match panel {
             Panel::Rename | Panel::Search => {
@@ -470,6 +625,19 @@ impl Workspace {
                 })
                 .detach();
             }
+            Panel::Worktrees => self.load_worktrees(cx),
+            Panel::PullRequests => {
+                self.filter.update(cx, |field, cx| {
+                    field.placeholder = "Filter pull requests";
+                    field.text.clear();
+                    field.sel = 0..0;
+                    field.marked = None;
+                    field.reversed = false;
+                    cx.notify();
+                });
+                self.load_pull_requests(cx);
+            }
+            Panel::Extras => self.load_extras(cx),
             Panel::Delegation => self.load_board(true, cx),
             Panel::Jobs => {
                 let thread = &self.active;
@@ -568,11 +736,14 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p_4()
+            .pb_6()
             .flex()
             .flex_col()
             .gap_2();
         match self.panel {
+            Panel::Worktrees => body = body.child(self.worktrees_body(cx)),
+            Panel::PullRequests => body = body.child(self.pull_requests_body(cx)),
+            Panel::Extras => body = body.child(self.extras_body(cx)),
             Panel::Search => {
                 let query = self.filter.read(cx).text.to_lowercase();
                 body = body.child(self.filter.clone());
@@ -612,10 +783,10 @@ impl Workspace {
                 let selected = chat.options.lock().unwrap().clone();
                 let busy = self.chats[&self.active].read(cx).turn_active;
                 if busy {
-                    body = body.child("Model changes are available when this turn finishes.");
+                    body = body.child(crate::ui::hint("Model changes are available when this turn finishes."));
                 }
                 let owner = chat.thread.lock().unwrap().provider_id.clone();
-                body = body.child("Provider");
+                body = body.child(crate::ui::section_title("Provider"));
                 let mut providers = div().flex().flex_wrap().gap_1();
                 for id in self
                     .project
@@ -674,7 +845,7 @@ impl Workspace {
                             }),
                         ));
                     }
-                    body = body.child("Model").child(models);
+                    body = body.child(crate::ui::section_title("Model")).child(models);
                     if let Some(spec) = descriptor.models.iter().find(|m| m.id == current) {
                         let mut efforts = div().flex().flex_wrap();
                         for e in &spec.efforts {
@@ -693,12 +864,12 @@ impl Workspace {
                                 }),
                             ));
                         }
-                        body = body.child("Reasoning effort").child(efforts);
+                        body = body.child(crate::ui::section_title("Reasoning effort")).child(efforts);
                     }
                 } else if self.project.demo {
-                    body = body.child("Offline demo provider");
+                    body = body.child(crate::ui::hint("Offline demo provider"));
                 } else {
-                    body = body.child("Configure a provider in zest.toml to start a turn.");
+                    body = body.child(crate::ui::hint("Configure a provider in zest.toml to start a turn."));
                 }
                 let mode = chat.policy.lock().unwrap().mode();
                 let mut modes = div().flex().flex_wrap();
@@ -717,7 +888,7 @@ impl Workspace {
                         }),
                     ));
                 }
-                body = body.child("Tool permissions").child(modes);
+                body = body.child(crate::ui::section_title("Tool permissions")).child(modes);
             }
             Panel::Files => {
                 if !self.directory.is_empty() || self.preview.is_some() {
@@ -779,7 +950,7 @@ impl Workspace {
                 let commands =
                     zest_core::list_slash_commands(&self.project.skills, &self.project.mcp);
                 if commands.is_empty() {
-                    body = body.child("No skills or MCP commands configured.");
+                    body = body.child(crate::ui::hint("No skills or MCP commands configured."));
                 }
                 for (i, cmd) in commands.into_iter().enumerate() {
                     let name = cmd.name;
@@ -817,7 +988,7 @@ impl Workspace {
                     ));
                 }
                 if t.checkpoints.is_empty() {
-                    body = body.child("This chat has no checkpoints.");
+                    body = body.child(crate::ui::hint("This chat has no checkpoints."));
                 }
                 for cp in t.checkpoints.iter().rev() {
                     let id = cp.id.clone();
@@ -841,20 +1012,31 @@ impl Workspace {
                     ));
                 }
                 if !self.report.is_empty() {
-                    body = body
-                        .child(button(
-                            "copy-report",
-                            "Copy",
-                            cx.listener(|ws, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(ws.report.clone()));
-                            }),
-                        ))
-                        .child(
-                            div()
-                                .font_family(MONO)
-                                .text_size(px(13.))
-                                .child(self.report.clone()),
-                        );
+                    body = body.child(
+                        div()
+                            .relative()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(rgb(crate::theme::BORDER))
+                            .bg(rgb(0x17181b))
+                            .p(px(10.))
+                            .pr_10()
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .line_height(px(19.))
+                            .text_color(rgb(crate::theme::SECONDARY_FOREGROUND))
+                            .child(self.report.clone())
+                            .child(
+                                div().absolute().top_1().right_1().child(crate::ui::icon_button(
+                                    "copy-report",
+                                    crate::theme::Icon::Copy,
+                                    "Copy",
+                                    cx.listener(|ws, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(ws.report.clone()));
+                                    }),
+                                )),
+                            ),
+                    );
                 }
             }
         }
@@ -1093,205 +1275,43 @@ fn mark(s: &str, selected: bool) -> String {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let chat = self.chat(cx);
-        let t = chat.thread.lock().unwrap();
-        let title = t.title.clone().unwrap_or_else(|| "New chat".into());
-        let pinned = t.pinned;
-        let saved = !t.messages.is_empty();
-        drop(t);
-        let history = uniform_list(
-            "history",
-            self.draft_ids.len() + self.history.len(),
-            cx.processor(|ws, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .filter_map(|index| {
-                        let (id, label) = if let Some(id) = ws.draft_ids.get(index) {
-                            let chat = ws.chats.get(id)?.read(cx);
-                            let line = first_line(&chat.composer.read(cx).text);
-                            (
-                                id,
-                                if line.is_empty() {
-                                    "New chat".into()
-                                } else {
-                                    format!("Draft · {line}")
-                                },
-                            )
-                        } else {
-                            let row = ws.history.get(index - ws.draft_ids.len())?;
-                            let busy = ws
-                                .chats
-                                .get(&row.id)
-                                .is_some_and(|c| c.read(cx).turn_active);
-                            let prefix = if busy {
-                                "Working · "
-                            } else if row.pinned {
-                                "Pinned · "
-                            } else {
-                                ""
-                            };
-                            (&row.id, format!("{prefix}{}", chat_title(row)))
-                        };
-                        let selected = &ws.active == id;
-                        let id = id.clone();
-                        Some(
-                            div()
-                                .h(px(28.))
-                                .w_full()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .when(selected, |d| d.bg(rgb(0x293342)))
-                                .rounded_md()
-                                .child(button(
-                                    SharedString::from(id.clone()),
-                                    label,
-                                    cx.listener(move |ws, _, w, cx| ws.open(&id, w, cx)),
-                                )),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .flex_1()
-        .min_h_0();
-        let mut nav = div().flex().flex_col().gap_1();
-        for &(panel, name) in PAGES {
-            nav = nav.child(button(
-                name,
-                name,
-                cx.listener(move |ws, _, w, cx| ws.page(panel, w, cx)),
-            ));
-        }
-        let sidebar = div()
-            .w(px(220.))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .bg(rgb(PANEL))
-            .child(div().text_size(px(18.)).child("Zest"))
-            .child(button(
-                "project",
-                self.project
-                    .path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-                cx.listener(|ws, _, _, cx| ws.pick_project(cx)),
-            ))
-            .child(button(
-                "new",
-                "+ New chat",
-                cx.listener(|ws, _, w, cx| ws.new_chat(w, cx)),
-            ))
-            .child(history)
-            .child(nav);
-        let mut header = div()
-            .px_3()
-            .py_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(if self.panel == Panel::Chat {
-                        title
-                    } else {
-                        PAGES
-                            .iter()
-                            .find(|(p, _)| *p == self.panel)
-                            .map(|(_, s)| s.to_string())
-                            .unwrap_or_else(|| "Rename chat".into())
-                    }),
-            );
-        if self.panel == Panel::Chat {
-            if saved {
-                header = header
-                    .child(button(
-                        "pin",
-                        if pinned { "Unpin" } else { "Pin" },
-                        cx.listener(|ws, _, _, cx| {
-                            if let Err(e) = ws.chat(cx).edit(|t| Ok(t.set_pinned(!t.pinned))) {
-                                ws.note = e.to_string();
-                            }
-                            ws.refresh(cx);
-                        }),
-                    ))
-                    .child(button(
-                        "rename",
-                        "Rename",
-                        cx.listener(|ws, _, w, cx| ws.page(Panel::Rename, w, cx)),
-                    ))
-                    .child(button(
-                        "fork",
-                        "Fork",
-                        cx.listener(|ws, _, w, cx| ws.fork(None, w, cx)),
-                    ));
-            }
-            header = header.child(button(
-                "split",
-                if self.second.is_some() {
-                    "Single view"
-                } else {
-                    "Split"
-                },
-                cx.listener(|ws, _, w, cx| ws.split(w, cx)),
-            ));
+        self.track_navigation();
+        let main = if self.panel == Panel::Chat {
+            chrome::canvas_frame(self.panes(cx)).into_any_element()
         } else {
-            header = header.child(button(
-                "back",
-                "Back to chat",
-                cx.listener(|ws, _, w, cx| ws.page(Panel::Chat, w, cx)),
-            ));
-        }
-        let content = if self.panel == Panel::Chat {
-            let mut panes = div().flex().flex_1().min_h_0();
-            if let Some(id) = &self.second {
-                let id = id.clone();
-                let title = self.chats[&id]
-                    .read(cx)
-                    .native
-                    .as_ref()
-                    .unwrap()
-                    .thread
-                    .lock()
-                    .unwrap()
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "New chat".into());
-                panes = panes.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .border_r_1()
-                        .border_color(rgb(BORDER))
-                        .child(button(
-                            "select-pane",
-                            format!("{title}  ·  Select pane"),
-                            cx.listener(move |ws, _, w, cx| ws.open(&id, w, cx)),
-                        ))
-                        .child(self.chats[self.second.as_ref().unwrap()].clone()),
-                );
-            }
-            panes
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(self.chats[&self.active].clone()),
-                )
-                .into_any_element()
-        } else {
-            self.panel_body(cx)
+            self.page_frame(self.panel_body(cx), cx)
         };
+        let alerts = self.alerts.iter().enumerate().map(|(i, (id, _, label))| {
+            let target = id.clone();
+            crate::ui::button(
+                SharedString::from(format!("alert-{i}")),
+                crate::ui::Variant::Outline,
+                Some(crate::theme::Icon::Bell),
+                format!("Open · {label}"),
+                cx.listener(move |ws, _, w, cx| ws.open(&target, w, cx)),
+            )
+        }).collect::<Vec<_>>();
+        let notice = (!self.note.is_empty()).then(|| {
+            div()
+                .mx_4()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(rgb(crate::theme::BORDER))
+                .bg(rgb(crate::theme::CARD))
+                .text_size(px(13.))
+                .child(crate::theme::icon(crate::theme::Icon::CircleAlert, 14.).text_color(rgb(crate::theme::WARNING)))
+                .child(div().flex_1().min_w_0().child(self.note.clone()))
+                .child(crate::ui::icon_button_xs("dismiss", crate::theme::Icon::X, "Dismiss", cx.listener(|ws, _, _, cx| {
+                    ws.note.clear();
+                    cx.notify();
+                })))
+        });
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1301,37 +1321,50 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &NewChat, w, cx| ws.new_chat(w, cx)))
             .on_action(cx.listener(|ws, _: &FindChat, w, cx| ws.page(Panel::Search, w, cx)))
             .on_action(cx.listener(|ws, _: &OpenFolder, _, cx| ws.pick_project(cx)))
+            .on_action(cx.listener(|ws, _: &ZoomPane, _, cx| ws.zoom_active(cx)))
+            .on_action(cx.listener(|ws, _: &MinimizePane, w, cx| ws.minimize_active(w, cx)))
             .on_action(cx.listener(|ws, _: &ToggleSplit, w, cx| ws.split(w, cx)))
             .on_action(cx.listener(|ws, _: &ClosePanel, w, cx| ws.page(Panel::Chat, w, cx)))
-            .bg(rgb(BG))
+            .bg(rgb(crate::theme::HEADER))
             .font_family(SANS)
             .text_color(rgb(FG))
             .text_size(px(14.))
-            .child(sidebar)
+            .relative()
+            .when_some(self.extras.image.clone(), |d, image| {
+                d.child(
+                    img(image)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(0.25),
+                )
+            })
+            .child(self.sidebar(cx))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .child(header)
-                    .when(!self.note.is_empty(), |d| {
-                        d.child(div().p_2().child(self.note.clone()).child(button(
-                            "dismiss",
-                            "Dismiss",
-                            cx.listener(|ws, _, _, cx| {
-                                ws.note.clear();
-                                cx.notify();
-                            }),
-                        )))
-                    })
-                    .child(content),
+                    .child(self.header(cx))
+                    .when(!self.alerts.is_empty(), |d| d.child(div().px_4().pt_2().flex().flex_wrap().gap_2().children(alerts)))
+                    .children(notice)
+                    .child(main),
             )
     }
 }
 
 fn open_window(path: PathBuf, demo: bool, test: bool, cx: &mut App) -> Result<(), String> {
     let project = Project::open(path, demo).map_err(|e| e.to_string())?;
+    open_project_window(project, test, cx).map(|_| ())
+}
+
+fn open_project_window(
+    project: Project,
+    test: bool,
+    cx: &mut App,
+) -> Result<WindowHandle<Workspace>, String> {
     for existing in cx.windows() {
         if let Some(handle) = existing.downcast::<Workspace>() {
             if handle
@@ -1345,7 +1378,7 @@ fn open_window(path: PathBuf, demo: bool, test: bool, cx: &mut App) -> Result<()
                 })
                 .unwrap_or(false)
             {
-                return Ok(());
+                return Ok(handle);
             }
         }
     }
@@ -1370,6 +1403,89 @@ fn open_window(path: PathBuf, demo: bool, test: bool, cx: &mut App) -> Result<()
         })
         .detach();
     }
+    Ok(window)
+}
+
+struct ProjectPicker {
+    error: String,
+}
+
+impl Render for ProjectPicker {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(rgb(crate::theme::CANVAS))
+            .font_family(SANS)
+            .text_color(rgb(FG))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .gap_3()
+            .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Zest"))
+            .child(crate::ui::hint("Open a project folder to start chatting."))
+            .child(crate::ui::button(
+                "pick-project",
+                crate::ui::Variant::Primary,
+                Some(crate::theme::Icon::FolderOpen),
+                "Open project folder",
+                cx.listener(|_, _, window, cx| {
+                    let picker = window.window_handle();
+                    let paths = cx.prompt_for_paths(PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: false,
+                        prompt: Some("Open project".into()),
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let result = match paths.await {
+                            Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                                Some(path) => cx.update(|cx| open_window(path, false, false, cx)),
+                                None => return,
+                            },
+                            Ok(Err(err)) => Err(err.to_string()),
+                            _ => return,
+                        };
+                        match result {
+                            Ok(()) => {
+                                let _ = picker.update(cx, |_, w, _| w.remove_window());
+                            }
+                            Err(error) => {
+                                let _ = this.update(cx, |view, cx| {
+                                    view.error = error;
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }),
+            ))
+            .when(!self.error.is_empty(), |d| {
+                d.child(div().text_size(px(12.)).text_color(rgb(crate::theme::DESTRUCTIVE)).child(self.error.clone()))
+            })
+    }
+}
+
+fn launch_picker(cx: &mut App) -> Result<(), String> {
+    let bounds = Bounds::centered(None, size(px(460.), px(220.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Zest".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        |_, cx| {
+            cx.new(|_| ProjectPicker {
+                error: String::new(),
+            })
+        },
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1379,7 +1495,9 @@ pub fn launch_if_requested() -> bool {
     let mut demo = false;
     let mut test = false;
     while let Some(arg) = args.next() {
-        if arg == "--project" {
+        if arg == "--launcher" {
+            continue;
+        } else if arg == "--project" {
             path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
                 eprintln!("--project needs a directory");
                 std::process::exit(2)
@@ -1391,7 +1509,7 @@ pub fn launch_if_requested() -> bool {
             test = true;
         } else if arg == "--help" || arg == "-h" {
             println!(
-                "Zest native workspace\n  --project DIRECTORY    Open a project (default: current directory)\n  --demo                 Open a temporary offline project\n  --selftest-workspace   Exercise the native workspace offline\n  --selftest-queue       Exercise the original stream fixture"
+                "Zest native workspace\n  --project DIRECTORY    Open a project (default: choose a folder)\n  --demo                 Open a temporary offline project\n  --selftest-workspace   Exercise the native workspace offline\n  --selftest-queue       Exercise the original stream fixture"
             );
             return true;
         } else if arg.to_str().is_some_and(|s| {
@@ -1427,11 +1545,7 @@ pub fn launch_if_requested() -> bool {
         }
     }
     let temp = demo.then(|| tempfile::tempdir().expect("demo workspace"));
-    let root = temp
-        .as_ref()
-        .map(|d| d.path().to_owned())
-        .or(path)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let root = temp.as_ref().map(|d| d.path().to_owned()).or(path);
     if !demo {
         zest_core::load_env();
         if let Err(e) = zest_core::ensure_user_config() {
@@ -1439,18 +1553,51 @@ pub fn launch_if_requested() -> bool {
         }
     }
     if test {
-        workspace_test::init_repository(&root);
+        workspace_test::init_repository(root.as_deref().expect("temporary test directory"));
     }
-    gpui_platform::application().run(move |cx| {
+    crate::theme::application().run(move |cx| {
+        crate::theme::load_fonts(cx);
+        cx.set_app_identity("dev.zest.app", "Zest");
+        cx.on_system_notification_response(|response, cx| {
+            let Some((owner, chat)) = response.tag.split_once('/') else {
+                return;
+            };
+            for window in cx.windows() {
+                if let Some(handle) = window.downcast::<Workspace>() {
+                    let opened = handle
+                        .update(cx, |ws, w, cx| {
+                            if owner != cx.entity_id().as_u64().to_string()
+                                || !ws.chats.contains_key(chat)
+                            {
+                                return false;
+                            }
+                            ws.open(chat, w, cx);
+                            w.activate_window();
+                            cx.activate(true);
+                            true
+                        })
+                        .unwrap_or(false);
+                    if opened {
+                        break;
+                    }
+                }
+            }
+        });
         composer::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-n", NewChat, Some("Workspace")),
             KeyBinding::new("ctrl-k", FindChat, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-enter", ZoomPane, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-h", MinimizePane, Some("Workspace")),
             KeyBinding::new("ctrl-o", OpenFolder, Some("Workspace")),
             KeyBinding::new("ctrl-\\", ToggleSplit, Some("Workspace")),
             KeyBinding::new("escape", ClosePanel, Some("Workspace")),
         ]);
-        if let Err(e) = open_window(root, demo, test, cx) {
+        let result = match root {
+            Some(path) => open_window(path, demo, test, cx),
+            None => launch_picker(cx),
+        };
+        if let Err(e) = result {
             eprintln!("Could not open project: {e}");
             std::process::exit(1);
         }

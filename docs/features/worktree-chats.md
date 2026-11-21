@@ -2,6 +2,8 @@
 title: Worktree chats
 summary: Start parallel coding chats in separate Git branches and checkouts, using any configured provider.
 paths:
+  - crates/core/src/worktree_registry.rs
+  - spikes/gpui/src/workspace/projects.rs
   - crates/core/src/worktree_chat.rs
   - crates/core/src/prompt.rs
   - crates/desktop/src/lib.rs

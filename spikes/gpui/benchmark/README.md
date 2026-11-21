@@ -1,6 +1,6 @@
 # Should Zest replace Tauri with GPUI?
 
-**Keep Tauri as the default desktop app.** GPUI used roughly one third of Tauri's memory while streaming a normal chat and stayed smooth with 5,000 messages open. Replacing Tauri today would remove the integrated agent browser, interactive HTML artifacts, pull-request review controls, plugin management and the Windows and Linux installer pipeline. The native workspace also exposed 14 buttons without accessible names on Windows.
+**Releases still ship Tauri; `npm run dev` now opens GPUI.** GPUI used roughly one third of Tauri's memory while streaming a normal chat and stayed smooth with 5,000 messages open. When these measurements were taken, replacing Tauri would have removed the integrated agent browser, interactive HTML artifacts, pull-request review controls, plugin management and the Windows and Linux installer pipeline, and the native workspace exposed 14 buttons without accessible names on Windows. The native port has since added each of these. The [coverage table](COVERAGE.md) records what remains, and the release workflow still builds Tauri.
 
 ## Windows results, 21 November 2026
 
@@ -25,6 +25,8 @@ In a separate GPU counter pass at 75 tokens/s with 20 messages, Tauri used 85 Mi
 ## What a switch would cost
 
 Windows UI Automation found **37 of 37 buttons named in Tauri and 0 of 14 in GPUI** in the empty workspaces. Both exposed the message editor. Tauri exposed Text and Value patterns and accepted a write/read round trip. GPUI exposed Value, and the write/read probe did not succeed. The probe used one UI Automation client. Narrator, NVDA and real CJK input still need end-user tests.
+
+After the native port, the GPUI demo named 18 of 18 buttons. Its message editor exposed Text and Value patterns, accepted the write/read round trip and returned the written text through TextPattern. Windows CI runs this probe with `accessibility.ps1 -Check`.
 
 The native window's offline scenario covers sending, queue recovery, approvals, a typed question, attachments, a side chat, split, search, fork, committed diffs after reopening, file preview and the delegation worker/reviewer/apply path. The React fixture and CLI checks cover their respective frontends. Live provider/network speed, GPU energy, multi-hour memory growth, macOS and Linux graphics were outside this Windows run. The [feature-by-feature comparison](COVERAGE.md) accounts for all 38 feature-map entries.
 

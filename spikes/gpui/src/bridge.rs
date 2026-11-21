@@ -29,6 +29,7 @@ pub struct Ev {
 
 pub enum EvKind {
     Notice(String),
+    Failure(String),
     SessionInfo(String),
     Activity { id: String, title: String, status: String },
     Card(crate::interaction::Card),
@@ -36,7 +37,7 @@ pub enum EvKind {
     Thinking(String),
     Text(String),
     ToolStart { id: String, name: String },
-    ToolResult { id: String, summary: String, diff: Option<String>, is_error: bool },
+    ToolResult { id: String, summary: String, diff: Option<String>, is_error: bool, artifact: Option<Arc<zest_core::html::HtmlDocument>> },
     End { tokens: usize, cancelled: bool },
 }
 
@@ -218,7 +219,8 @@ mod mock {
                     StreamEvent::ToolCallStart { name, id } => {
                         EvKind::ToolStart { id: id.to_string(), name: name.to_string() }
                     }
-                    StreamEvent::ToolCallResult { id, summary, is_error, diff, .. } => EvKind::ToolResult {
+                    StreamEvent::ToolCallResult { id, summary, is_error, diff, metadata, .. } => EvKind::ToolResult {
+                        artifact: crate::artifact::metadata_document(metadata.as_ref()),
                         id: id.to_string(),
                         summary: summary.to_string(),
                         diff: diff.map(str::to_string),
@@ -259,6 +261,7 @@ mod mock {
                 Piece::Think(t) => EvKind::Thinking(t.to_string()),
                 Piece::ToolStart { name, id } => EvKind::ToolStart { id: id.to_string(), name: name.to_string() },
                 Piece::ToolResult { id, summary, diff, is_error, .. } => EvKind::ToolResult {
+                    artifact: None,
                     id: id.to_string(),
                     summary: summary.to_string(),
                     diff: diff.map(str::to_string),

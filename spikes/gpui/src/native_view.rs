@@ -7,7 +7,18 @@ pub struct ChatChanged;
 
 #[cfg(test)]
 mod tests {
-    use super::{HashMap, StoredMessage, append_saved_rows};
+    use super::{HashMap, StoredMessage, append_saved_rows, session_parts};
+
+    #[test]
+    fn session_line_splits_into_model_and_context() {
+        assert_eq!(session_parts("demo  ·  offline  ·  high"), ("offline".into(), None));
+        assert_eq!(
+            session_parts("demo  ·  offline  ·  1% context  ·  127330 tokens left (estimated)"),
+            ("offline".into(), Some(("1%".into(), "127K".into())))
+        );
+        assert_eq!(session_parts("openai"), ("openai".into(), None));
+        assert_eq!(session_parts(""), ("Model".into(), None));
+    }
     use serde_json::json;
 
     #[test]
@@ -47,19 +58,51 @@ pub fn button(
     label: impl Into<SharedString>,
     click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    use crate::theme;
+    let label = label.into();
+    // Panels mark the current choice with a leading check (see `workspace::mark`); draw it
+    // as the React UI's selected chip.
+    let selected = label.strip_prefix("✓ ").map(|s| SharedString::from(s.to_string()));
     div()
         .id(id)
         .role(Role::Button)
+        .aria_label(label.clone())
         .tab_index(0)
         .cursor_pointer()
-        .rounded_md()
+        .flex()
+        .items_center()
+        .gap_1()
+        .rounded(px(6.))
         .px_2()
         .py_1()
         .text_size(px(13.))
-        .hover(|s| s.bg(rgb(0x303641)))
-        .focus_visible(|s| s.bg(rgb(0x36465a)))
-        .child(label.into())
+        .text_color(rgb(theme::SECONDARY_FOREGROUND))
+        .hover(|s| s.bg(rgb(theme::SECONDARY)).text_color(rgb(theme::FOREGROUND)))
+        .focus_visible(|s| s.bg(rgb(theme::ACCENT)).text_color(rgb(theme::FOREGROUND)))
+        .when(selected.is_some(), |d| {
+            d.bg(theme::alpha(theme::PRIMARY, 0.18))
+                .text_color(rgb(theme::FOREGROUND))
+                .child(theme::icon(theme::Icon::Check, 12.).text_color(rgb(theme::PRIMARY_HOVER)))
+        })
+        .child(selected.unwrap_or(label))
         .on_click(click)
+}
+
+/// Splits the session line ("provider · model · effort", or "provider · model · N% context ·
+/// T tokens left (source)") into the model and, when known, the context use and tokens left.
+fn session_parts(label: &str) -> (String, Option<(String, String)>) {
+    let parts: Vec<&str> = label.split('·').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let model = parts.get(1).or(parts.first()).map_or("Model".to_string(), |m| m.to_string());
+    let percent = parts.iter().find_map(|p| p.strip_suffix(" context"));
+    let left = parts.iter().find_map(|p| p.split_once(" tokens left").map(|(n, _)| n));
+    let context = percent.zip(left).map(|(percent, left)| {
+        let left = match left.parse::<u64>() {
+            Ok(n) if n >= 1000 => format!("{}K", n / 1000),
+            _ => left.to_string(),
+        };
+        (percent.to_string(), left)
+    });
+    (model, context)
 }
 
 fn recorded(label: &str, status: &str, title: String, body: Doc) -> Msg {
@@ -100,12 +143,14 @@ fn append_saved_rows(
                 let think = |s: &str| recorded("Thought", "", String::new(), Doc::plain(s));
                 let tool = |t: &zest_core::ThreadToolPart| {
                     let summary = t.summary.as_deref().unwrap_or_default();
-                    recorded(
+                    let mut row = recorded(
                         &t.name,
                         &t.status,
                         first_line(summary),
                         tool_body(summary, t.diff.as_deref()),
-                    )
+                    );
+                    row.artifacts.extend(crate::artifact::metadata_document(t.metadata.as_ref()));
+                    row
                 };
                 let activity = |a: &zest_core::thread::ActivityPart| {
                     recorded("Provider", &a.status, a.title.clone(), Doc::default())
@@ -138,7 +183,9 @@ fn append_saved_rows(
                 }
                 if !text.is_empty() {
                     text_rows.insert(id.clone(), rows.len());
-                    rows.push(Msg::assistant(md::parse(text)));
+                    let mut row = Msg::assistant(md::parse(text));
+                    row.artifacts = crate::artifact::fenced_documents(text);
+                    rows.push(row);
                 }
                 if let Some(message) = error {
                     rows.push(Msg::assistant(Doc::plain(message)));
@@ -376,41 +423,44 @@ impl Root {
     }
 
     pub fn native_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut panel = div().px_4().flex().flex_col().gap_1();
+        use crate::theme::{self, Icon};
+        use crate::ui::{self, Variant};
+        let mut panel = div().flex().flex_col().gap_2();
         if let Some(card) = self.cards.front() {
-            let mut box_ = div()
-                .rounded_md()
-                .bg(rgb(PANEL))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .p_2();
+            let mut box_ = ui::card().p_3().flex().flex_col().gap_2().text_size(px(13.));
             match &card.request {
                 Request::Approval { title, preview } => {
                     box_ = box_
-                        .child(title.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(theme::icon(Icon::ShieldCheck, 14.).text_color(rgb(theme::WARNING)))
+                                .child(title.clone()),
+                        )
                         .child(
                             div()
                                 .id("approval-preview")
                                 .max_h(px(210.))
                                 .overflow_y_scroll()
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(rgb(theme::BORDER))
+                                .bg(rgb(0x17181b))
+                                .p(px(10.))
                                 .font_family(MONO)
                                 .text_size(px(12.))
+                                .text_color(rgb(theme::SECONDARY_FOREGROUND))
                                 .child(preview.clone()),
                         )
                         .child(
                             div()
                                 .flex()
                                 .gap_2()
-                                .child(button(
-                                    "allow-once",
-                                    "Allow once",
-                                    cx.listener(|r, _, _, cx| r.respond(Response::Allow, cx)),
-                                ))
-                                .child(button(
-                                    "deny",
-                                    "Deny",
-                                    cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)),
-                                )),
+                                .child(ui::button("allow-once", Variant::Primary, Some(Icon::Check), "Allow once", cx.listener(|r, _, _, cx| r.respond(Response::Allow, cx))))
+                                .child(ui::button("deny", Variant::Ghost, Some(Icon::X), "Deny", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)))),
                         );
                 }
                 Request::Question {
@@ -418,18 +468,25 @@ impl Root {
                     choices,
                     multiple,
                 } => {
-                    box_ = box_.child(prompt.clone());
-                    let mut buttons = div().flex().flex_wrap().gap_1();
+                    box_ = box_.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(theme::icon(Icon::CircleQuestionMark, 14.).text_color(rgb(theme::LINK)))
+                            .child(prompt.clone()),
+                    );
+                    let mut buttons = div().flex().flex_wrap().gap(px(6.));
                     for (index, choice) in choices.iter().enumerate() {
                         let choice = choice.clone();
                         let multi = *multiple;
-                        let label = if card.selected.contains(&choice) {
-                            format!("✓ {choice}")
-                        } else {
-                            choice.clone()
-                        };
-                        buttons = buttons.child(button(
+                        let picked = card.selected.contains(&choice);
+                        let label = if picked { format!("✓ {choice}") } else { choice.clone() };
+                        buttons = buttons.child(ui::button(
                             ("choice", index),
+                            if picked { Variant::Secondary } else { Variant::Outline },
+                            None,
                             label,
                             cx.listener(move |r, _, _, cx| {
                                 if multi {
@@ -447,77 +504,200 @@ impl Root {
                         ));
                     }
                     if *multiple && !card.selected.is_empty() {
-                        buttons = buttons.child(button(
-                            "answer",
-                            "Submit choices",
-                            cx.listener(|r, _, _, cx| {
-                                let answers = r.cards.front().unwrap().selected.clone();
-                                r.respond(Response::Answer(answers), cx);
-                            }),
-                        ));
+                        buttons = buttons.child(ui::button("answer", Variant::Primary, None, "Submit choices", cx.listener(|r, _, _, cx| {
+                            let answers = r.cards.front().unwrap().selected.clone();
+                            r.respond(Response::Answer(answers), cx);
+                        })));
                     }
                     box_ = box_
                         .child(buttons)
                         .child(self.decision_input.clone())
-                        .child(button(
-                            "dismiss-question",
-                            "Dismiss",
-                            cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)),
-                        ));
+                        .child(div().flex().child(ui::button("dismiss-question", Variant::Ghost, None, "Dismiss", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)))));
                 }
             }
             panel = panel.child(box_);
         }
         if !self.note.is_empty() {
             panel = panel.child(
-                div()
+                ui::card()
+                    .px_3()
+                    .py_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(self.note.clone()))
-                    .child(button(
-                        "dismiss-notice",
-                        "Dismiss",
-                        cx.listener(|r, _, _, cx| {
-                            r.note.clear();
-                            cx.notify();
-                        }),
-                    )),
+                    .text_size(px(13.))
+                    .child(theme::icon(Icon::CircleAlert, 14.).text_color(rgb(theme::WARNING)))
+                    .child(div().flex_1().min_w_0().child(self.note.clone()))
+                    .child(ui::icon_button_xs("dismiss-notice", Icon::X, "Dismiss", cx.listener(|r, _, _, cx| {
+                        r.note.clear();
+                        cx.notify();
+                    }))),
             );
         }
-        let mut bar = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_1()
-            .child(button(
-                "pick-files",
-                "Attach files",
-                cx.listener(|r, _, _, cx| r.pick_files(cx)),
-            ));
+        panel
+    }
+
+    /// The row under the composer's text: attach, attached files, model, send or stop.
+    pub fn composer_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::theme::{self, Icon, alpha};
+        use crate::ui;
+        let busy = self.turn_active;
+        let empty = {
+            let c = self.composer.read(cx);
+            c.text.trim().is_empty() && c.images.is_empty() && self.files.is_empty()
+        };
+        let mut left = div().flex().flex_1().min_w_0().flex_wrap().items_center().gap_1().child(ui::icon_button(
+            "pick-files",
+            Icon::Plus,
+            "Attach files",
+            cx.listener(|r, _, _, cx| r.pick_files(cx)),
+        ));
         for (i, file) in self.files.iter().enumerate() {
-            bar = bar.child(button(
-                ("file", i),
-                format!("{} ×", file.name),
-                cx.listener(move |r, _, _, cx| {
-                    if i < r.files.len() {
-                        r.files.remove(i);
-                    }
-                    r.composer.update(cx, |c, cx| {
-                        c.has_files = !r.files.is_empty();
-                        cx.notify();
-                    });
-                    cx.notify();
-                }),
-            ));
-        }
-        panel.child(
-            bar.child(
+            left = left.child(
                 div()
-                    .text_color(rgb(MUTED))
-                    .text_size(px(12.))
-                    .child(self.session_label.clone()),
-            ),
-        )
+                    .id(("file", i))
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("Remove {}", file.name)))
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .child(ui::pill(Some(Icon::Paperclip), format!("{} ×", file.name)))
+                    .on_click(cx.listener(move |r, _, _, cx| {
+                        if i < r.files.len() {
+                            r.files.remove(i);
+                        }
+                        r.composer.update(cx, |c, cx| {
+                            c.has_files = !r.files.is_empty();
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })),
+            );
+        }
+        let model = session_parts(&self.session_label).0;
+        left = left.child(
+            div()
+                .id("choose-model")
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Model: {model}")))
+                .tab_index(0)
+                .cursor_pointer()
+                .min_h(px(28.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .gap_1()
+                .rounded(px(6.))
+                .text_size(px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(0xd5d6d6))
+                .hover(|s| s.bg(alpha(theme::SECONDARY, 0.5)))
+                .child(theme::icon(Icon::Sparkles, 14.).text_color(rgb(theme::SECONDARY_FOREGROUND)))
+                .child(div().max_w(px(220.)).truncate().child(model))
+                .child(theme::icon(Icon::ChevronDown, 12.).opacity(0.6))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ChooseModel))),
+        );
+        let send = div()
+            .id(if busy { "stop-turn" } else { "send" })
+            .role(Role::Button)
+            .aria_label(if busy { "Stop response" } else { "Send" })
+            .tab_index(0)
+            .cursor_pointer()
+            .size(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(rgb(theme::PRIMARY))
+            .hover(|s| s.bg(alpha(theme::PRIMARY, 0.8)))
+            .when(!busy && empty, |d| d.opacity(0.5))
+            .child(theme::icon(if busy { Icon::Square } else { Icon::ArrowUp }, 14.).text_color(rgb(0xffffff)))
+            .on_click(cx.listener(move |r, _, w, cx| {
+                if r.turn_active {
+                    r.stop(cx);
+                } else {
+                    r.composer.update(cx, |c, cx| c.send(w, cx));
+                }
+                w.focus(&r.composer.read(cx).focus.clone(), cx);
+            }));
+        div()
+            .px(px(10.))
+            .pb(px(10.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(left)
+            .child(send)
+    }
+
+    /// The muted line under the composer card: project, branch, model and approval mode.
+    pub fn status_row(&self) -> impl IntoElement {
+        use crate::theme::{self, Icon};
+        let mut left = div().flex().items_center().gap_2().min_w_0();
+        let mut right = div().flex().items_center().gap_1();
+        if let Some(chat) = &self.native {
+            let name = chat.project.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            left = left.child(
+                div().flex().items_center().gap_1().child(theme::icon(Icon::FolderOpen, 12.).opacity(0.7)).child(name),
+            );
+            let thread = chat.thread.lock().unwrap();
+            if let Some(git) = &thread.git_context {
+                if let Some(branch) = &git.branch {
+                    left = left.child(div().flex().items_center().gap_1().child(theme::icon(Icon::GitBranch, 12.)).child(branch.clone()));
+                }
+                if let Some(pr) = &git.pull_request {
+                    left = left.child(
+                        div().flex().items_center().gap_1().child(theme::icon(Icon::GitPullRequest, 12.)).child(format!("#{}", pr.number)),
+                    );
+                }
+            }
+            drop(thread);
+            let mode = chat.policy.lock().unwrap().mode();
+            let (label, color) = match mode {
+                zest_core::ApprovalMode::Manual => ("Ask".to_string(), theme::MUTED_FOREGROUND),
+                zest_core::ApprovalMode::AcceptEdits => ("Edits".to_string(), theme::MUTED_FOREGROUND),
+                zest_core::ApprovalMode::Plan => ("Plan".to_string(), theme::LINK),
+                other => (format!("{other:?}"), theme::MUTED_FOREGROUND),
+            };
+            right = right.child(
+                div()
+                    .min_h(px(24.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded(px(6.))
+                    .text_color(rgb(color))
+                    .child(theme::icon(Icon::Shield, 12.).text_color(rgb(color)))
+                    .child(label),
+            );
+        }
+        let (model, context) = session_parts(&self.session_label);
+        if !self.session_label.is_empty() {
+            left = left.child(format!("· {model}"));
+        }
+        if let Some((percent, remaining)) = context {
+            right = right.child(
+                div()
+                    .min_h(px(24.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(theme::icon(Icon::CircleDot, 12.).text_color(rgb(theme::PRIMARY)))
+                    .child(format!("{percent} · {remaining} left")),
+            );
+        }
+        div()
+            .mt_2()
+            .px_1()
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(11.))
+            .text_color(rgb(crate::theme::MUTED_FOREGROUND))
+            .child(left)
+            .child(right)
     }
 }

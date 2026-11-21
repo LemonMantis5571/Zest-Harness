@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][int]$AppProcessId)
+param([Parameter(Mandatory)][int]$AppProcessId, [switch]$Check)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -18,6 +18,7 @@ $textPattern = $false
 $valuePattern = $false
 $editRoundTrip = $false
 $editMilliseconds = $null
+$textRoundTrip = $false
 foreach ($node in $nodes) {
     $role = $node.Current.ControlType.ProgrammaticName
     $name = $node.Current.Name
@@ -43,6 +44,10 @@ foreach ($node in $nodes) {
                     }
                     $editRoundTrip = $value.Current.Value -eq 'Zest benchmark input'
                     if ($editRoundTrip) { $editMilliseconds = $timer.Elapsed.TotalMilliseconds }
+                    if ($editRoundTrip -and $textPattern) {
+                        $text = $node.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                        $textRoundTrip = $text.DocumentRange.GetText(-1) -eq 'Zest benchmark input'
+                    }
                 } catch [System.InvalidOperationException] {
                     $editRoundTrip = $false
                 } finally {
@@ -52,4 +57,7 @@ foreach ($node in $nodes) {
         }
     }
 }
-[ordered]@{ elements=$nodes.Count; buttons=$buttons; namedButtons=$namedButtons; messageEdit=$message; messageTextPattern=$textPattern; messageValuePattern=$valuePattern; editRoundTrip=$editRoundTrip; editMilliseconds=$editMilliseconds } | ConvertTo-Json -Compress
+[ordered]@{ elements=$nodes.Count; buttons=$buttons; namedButtons=$namedButtons; messageEdit=$message; messageTextPattern=$textPattern; messageValuePattern=$valuePattern; editRoundTrip=$editRoundTrip; editMilliseconds=$editMilliseconds; textRoundTrip=$textRoundTrip } | ConvertTo-Json -Compress
+if ($Check -and (!$buttons -or $buttons -ne $namedButtons -or !$editRoundTrip -or !$textRoundTrip)) {
+    throw 'The workspace must expose named buttons and an editable Message field with readable text to Windows UI Automation.'
+}

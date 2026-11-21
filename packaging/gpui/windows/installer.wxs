@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <!-- Existing x64 Zest MSI upgrade family, taken from the released v0.3.0 package. -->
+  <Product Id="*" Name="Zest" Manufacturer="zest" Language="1033"
+           Version="$(var.NumericVersion)" UpgradeCode="7A4E724E-07D5-524F-A355-7CB6E6CBC26E">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"/>
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Zest is already installed."/>
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high"/>
+    <Icon Id="ZestIcon.exe" SourceFile="$(var.Art)/icons/icon.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="ZestIcon.exe"/>
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR"/>
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)"/>
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.Art)/installer/wix-banner.bmp"/>
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.Art)/installer/wix-dialog.bmp"/>
+    <UIRef Id="WixUI_InstallDir"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="Zest">
+          <Component Id="Program" Guid="*" Win64="yes">
+            <File Id="ZestExe" Source="$(var.Binary)" Name="zest-desktop.exe" KeyPath="yes">
+              <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Zest" Arguments="--launcher" Advertise="yes" Icon="ZestIcon.exe"/>
+              <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="Zest" Arguments="--launcher" Advertise="yes" Icon="ZestIcon.exe"/>
+            </File>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="DesktopFolder"/>
+      <Directory Id="ProgramMenuFolder"/>
+    </Directory>
+    <Feature Id="Application" Title="Zest" Level="1"><ComponentRef Id="Program"/></Feature>
+  </Product>
+</Wix>

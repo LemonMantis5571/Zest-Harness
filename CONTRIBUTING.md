@@ -114,7 +114,7 @@ The dev server runs on port 1420 unless `ZEST_UI_PORT` names another; set a
 different port in each worktree that runs browser tests or zest-control at the
 same time. Outside CI, Playwright and zest-control reuse a server on that port
 only when it serves the same checkout, and refuse one that belongs to another.
-The Tauri dev app (`npm run dev`) always uses 1420.
+The Tauri dev app (`npm run desktop:dev`) always uses 1420.
 
 `scripts/zest-control.mjs` drives the same fixture UI one command at a time
 (`start`, `send`, `inspect`, `errors`, `snapshot`, `stop`; `help` lists them)

@@ -2,6 +2,7 @@
 title: Linked pull requests
 summary: Zest detects the GitHub pull request for a chat's branch, lists linked pull requests across projects, and opens their diff in the review pane.
 paths:
+  - crates/core/src/pull_request.rs
   - crates/desktop/ui/src/components/PullRequestsPanel.tsx
   - crates/desktop/ui/src/lib/pullRequestLink.ts
   - crates/desktop/ui/src/components/BranchChangesBar.tsx

@@ -2,6 +2,8 @@
 title: Verification gates and release tooling
 summary: The local and CI gates (npm run verify, release-verify), the output-artifact and feature-map checks, git hooks, UI lint rules, and the release packaging scripts.
 paths:
+  - scripts/package-gpui.mjs
+  - packaging/**
   - crates/desktop/build.rs
   - crates/desktop/windows-common-controls.rc
   - crates/desktop/windows-common-controls.manifest

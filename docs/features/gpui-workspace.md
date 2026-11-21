@@ -16,6 +16,11 @@ paths:
   - spikes/gpui/src/composer.rs
   - spikes/gpui/src/md.rs
   - spikes/gpui/src/view.rs
+  - spikes/gpui/src/theme.rs
+  - spikes/gpui/src/ui.rs
+  - spikes/gpui/src/icons_generated.rs
+  - spikes/gpui/src/workspace/chrome.rs
+  - spikes/gpui/assets/**
   - spikes/gpui/benchmark/**
   - spikes/gpui/examples/workbench_io.rs
   - crates/desktop/src/attachments.rs
@@ -33,7 +38,7 @@ verify:
 
 # Native GPUI workspace
 
-From this checkout, run `npm run gpui -- --project "D:\Code\MyProject"` to open a project. With no arguments, the native window opens the current directory. It reads Zest's provider configuration, project chat store and usage ledger. This is a source build on Windows and requires the Rust toolchain, MSVC and the Windows SDK shader compiler described in [the rendering spike](../../spikes/gpui/FINDINGS.md).
+From this checkout, run `npm run gpui -- --project "D:\Code\MyProject"` to open a project. With no arguments, the native window opens a folder picker. It reads Zest's provider configuration, project chat store and usage ledger. This is a source build on Windows and requires the Rust toolchain, MSVC and the Windows SDK shader compiler described in [the rendering spike](../../spikes/gpui/FINDINGS.md).
 
 Run `npm run gpui -- --demo` for a temporary offline workspace. Send `Demo: write` to review an actual file-write request or `Demo: question` to answer a choice. Files and chats live in the temporary project for the duration of the demo.
 
@@ -57,8 +62,19 @@ The sidebar reads saved summaries in the background at startup and when opening 
 
 `npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary Git repository. Windows CI runs the same scenario in a GPUI test window through `cargo test`, including an approved edit that is committed and reviewed after reopening, then the delegation board's worker, reviewer and apply sequence. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
 
+### Native desktop port
+
+The native window uses the React UI's default "zest" theme. `spikes/gpui/src/theme.rs` holds its color tokens from `crates/desktop/ui/src/index.css`, embeds the Geist font, and serves Lucide icons generated from the UI's own `lucide-react` package (`node spikes/gpui/assets/generate-icons.mjs` adds icons and regenerates `icons_generated.rs`). `ui.rs` has the shared controls. `workspace/chrome.rs` draws the sidebar (back and forward, New chat, Search, Pull requests, Customize, the project's chats and the account row), the chat header and the page frame. Settings-type panels are tabs under Customize, and project tools (Changes, Files, Jobs, Checkpoints, Delegation, Worktrees) are tabs under Workbench, opened from the header. Chats sit in a rounded canvas with a centered 720 px transcript and the composer card, toolbar and status line below it.
+
+
+The default source launcher, `npm run dev`, opens GPUI. Split right and Split down add independently running chats. A divider supports dragging, arrow keys, Home, End and double-click to reset. Single view keeps the split group in the sidebar so its chats and drafts can be reopened during the session.
+
+Worktrees, Pull requests and Add-ons have native sidebar entries. Browser actions use a private system webview for each chat. HTML cards expose source and export, and on Windows they can open an isolated interactive document. Run `node spikes/gpui/benchmark/web-windows.mjs PATH_TO_BINARY` to drive the real web windows against a local fixture.
+
+Buttons have accessible names. The composer exposes its text as AccessKit text runs with the caret and selection, so Windows UI Automation offers TextPattern as well as ValuePattern. Windows CI launches the demo and runs `spikes/gpui/benchmark/accessibility.ps1 -Check` to fail on an unnamed button or an unreadable composer.
+
+`npm run gpui:package` builds local x64 installers (MSI and NSIS on Windows, DEB, RPM and AppImage on Linux). The Linux AppImage uses the host GTK 3, WebKitGTK 4.1 and Vulkan runtime. The release workflow still ships Tauri.
+
 ## Remaining desktop coverage
 
 The [Windows desktop comparison](../../spikes/gpui/benchmark/README.md) measures both frontends on matched offline transcripts and records the status of each desktop workflow.
-
-The integrated agent browser, interactive HTML artifacts, advanced Git/worktree and pull-request actions, plugin management, native installers, and full accessibility and cross-platform verification remain open. The existing desktop launcher still runs Tauri.

@@ -2,6 +2,9 @@
 title: Local browser and web search
 summary: The agent can drive a Zest browser window (open, read, click, type) behind approvals, and search the public web through DuckDuckGo without an API key.
 paths:
+  - crates/core/src/tools/browser_dom.rs
+  - spikes/gpui/src/web_content.rs
+  - spikes/gpui/src/web_window.rs
   - crates/core/src/tools/browser.rs
   - crates/core/src/tools/web_search.rs
   - crates/desktop/src/browser.rs
