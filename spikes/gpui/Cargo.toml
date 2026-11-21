@@ -7,6 +7,9 @@ publish = false
 # Standalone: never joins Zest's workspace or touches the root Cargo.lock.
 [workspace]
 
+[build-dependencies]
+embed-resource = "3.0.11"
+
 [dependencies]
 accesskit = "0.24"
 # crates.io only has gpui 0.2.2 (2025-10-22) and no gpui_platform/gpui_windows, so pin Zed.

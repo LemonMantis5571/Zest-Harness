@@ -1,6 +1,6 @@
 # Should Zest replace Tauri with GPUI?
 
-**Releases still ship Tauri; `npm run dev` now opens GPUI.** GPUI used roughly one third of Tauri's memory while streaming a normal chat and stayed smooth with 5,000 messages open. When these measurements were taken, replacing Tauri would have removed the integrated agent browser, interactive HTML artifacts, pull-request review controls, plugin management and the Windows and Linux installer pipeline, and the native workspace exposed 14 buttons without accessible names on Windows. The native port has since added each of these. The [coverage table](COVERAGE.md) records what remains, and the release workflow still builds Tauri.
+**Releases and `npm run dev` now ship the GPUI app.** GPUI used roughly one third of Tauri's memory while streaming a normal chat and stayed smooth with 5,000 messages open. When these measurements were taken, replacing Tauri would have removed the integrated agent browser, interactive HTML artifacts, pull-request review controls, plugin management and the Windows and Linux installer pipeline, and the native workspace exposed 14 buttons without accessible names on Windows. The native port has since added each of these. The [coverage table](COVERAGE.md) records what remains.
 
 ## Windows results, 21 November 2026
 

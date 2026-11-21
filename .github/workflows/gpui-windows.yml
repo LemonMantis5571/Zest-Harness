@@ -6,6 +6,7 @@ on:
       - 'spikes/gpui/**'
       - 'packaging/gpui/**'
       - 'scripts/package-gpui.mjs'
+      - 'scripts/install-installer-tools.ps1'
       - 'crates/plugin-api/**'
       - 'crates/desktop/src/plugins.rs'
       - 'Cargo.toml'
@@ -55,6 +56,11 @@ jobs:
           } finally {
             Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
           }
+      - name: Install WiX 3 and NSIS
+        shell: pwsh
+        run: ./scripts/install-installer-tools.ps1
+      - name: Build the Windows installers
+        run: npm run gpui:package
 
   linux:
     name: GPUI Linux build, test and packages

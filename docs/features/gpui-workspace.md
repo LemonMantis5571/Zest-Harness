@@ -3,6 +3,8 @@ title: Native GPUI workspace
 summary: Open a project, run Zest agent turns, and review saved conversations and project files in a Windows GPUI window.
 paths:
   - spikes/gpui/Cargo.toml
+  - spikes/gpui/build.rs
+  - spikes/gpui/zest.rc
   - spikes/gpui/src/main.rs
   - spikes/gpui/src/workspace.rs
   - spikes/gpui/src/workspace/board.rs
@@ -75,7 +77,7 @@ Worktrees, Pull requests and Add-ons have native sidebar entries. Browser action
 
 Buttons have accessible names. The composer exposes its text as AccessKit text runs with the caret and selection, so Windows UI Automation offers TextPattern as well as ValuePattern. Windows CI launches the demo and runs `spikes/gpui/benchmark/accessibility.ps1 -Check` to fail on an unnamed button or an unreadable composer.
 
-`npm run gpui:package` builds local x64 installers (MSI and NSIS on Windows, DEB, RPM and AppImage on Linux). The Linux AppImage uses the host GTK 3, WebKitGTK 4.1 and Vulkan runtime. The release workflow still ships Tauri.
+`npm run gpui:package` builds local x64 installers (MSI and NSIS on Windows, DEB, RPM and AppImage on Linux). The Linux AppImage uses the host GTK 3, WebKitGTK 4.1 and Vulkan runtime. Tagged releases ship these installers instead of the Tauri app. `spikes/gpui/build.rs` embeds Zest's icon and version into the Windows executable (`zest.rc`); GPUI also uses that icon for its windows.
 
 ## Remaining desktop coverage
 
