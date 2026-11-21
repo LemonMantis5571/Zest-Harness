@@ -16,6 +16,8 @@ paths:
   - spikes/gpui/src/composer.rs
   - spikes/gpui/src/md.rs
   - spikes/gpui/src/view.rs
+  - spikes/gpui/benchmark/**
+  - spikes/gpui/examples/workbench_io.rs
   - crates/desktop/src/attachments.rs
   - crates/desktop/src/context_meter.rs
   - crates/desktop/src/workspace_files.rs
@@ -56,5 +58,7 @@ The sidebar reads saved summaries in the background at startup and when opening 
 `npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary Git repository. Windows CI runs the same scenario in a GPUI test window through `cargo test`, including an approved edit that is committed and reviewed after reopening, then the delegation board's worker, reviewer and apply sequence. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
 
 ## Remaining desktop coverage
+
+The [Windows desktop comparison](../../spikes/gpui/benchmark/README.md) measures both frontends on matched offline transcripts and records the status of each desktop workflow.
 
 The integrated agent browser, interactive HTML artifacts, advanced Git/worktree and pull-request actions, plugin management, native installers, and full accessibility and cross-platform verification remain open. The existing desktop launcher still runs Tauri.

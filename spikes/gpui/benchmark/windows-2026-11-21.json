@@ -1,0 +1,2173 @@
+{
+  "desktopRevision": "85a876c",
+  "platform": "Windows 11 Pro 26200, Ryzen 7 8700G, 60 Hz",
+  "trials": [
+    {
+      "engine": "tauri",
+      "mode": "idle",
+      "history": 20,
+      "rate": 0,
+      "repetition": 1,
+      "firstWindowMs": 247,
+      "sampleCount": 111,
+      "cpuCores": 0.0,
+      "privateMiB": 375.3,
+      "peakPrivateMiB": 376.2,
+      "workingSetMiB": 453.0,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12,
+        "history": 20
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "idle",
+      "history": 20,
+      "rate": 0,
+      "repetition": 1,
+      "firstWindowMs": 835,
+      "sampleCount": 113,
+      "cpuCores": 0.01,
+      "privateMiB": 128.7,
+      "peakPrivateMiB": 128.7,
+      "workingSetMiB": 100.2,
+      "processes": 1,
+      "renderer": {}
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 303,
+      "sampleCount": 112,
+      "cpuCores": 0.119,
+      "privateMiB": 131.6,
+      "peakPrivateMiB": 132.2,
+      "workingSetMiB": 103.4,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.255043,
+        "tok_per_s": 73.4391548034552,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.07,
+          "p50": 1.05,
+          "p95": 1.44,
+          "p99": 1.64,
+          "max": 2.1
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.61,
+          "p50": 9.66,
+          "p95": 16.51,
+          "p99": 16.86,
+          "max": 17.12
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 769,
+          "p50": 0.073,
+          "p95": 0.153,
+          "max": 1.098
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.096,
+          "p95": 0.601,
+          "max": 1.712
+        }
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 0.409,
+      "privateMiB": 399.3,
+      "peakPrivateMiB": 413.8,
+      "workingSetMiB": 476.6,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.02,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 722,
+        "fps": 60.06655574043261,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.200000000000728,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 500,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 1.319,
+      "privateMiB": 755.1,
+      "peakPrivateMiB": 776.5,
+      "workingSetMiB": 856.5,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.04090000000596,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 702,
+        "fps": 58.30128977066934,
+        "p95FrameMs": 17.100000000000364,
+        "p99FrameMs": 33.399999999999636,
+        "over25ms": 18,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 500
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 500,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 318,
+      "sampleCount": 112,
+      "cpuCores": 0.108,
+      "privateMiB": 133.4,
+      "peakPrivateMiB": 135.7,
+      "workingSetMiB": 105.1,
+      "processes": 1.0,
+      "renderer": {
+        "history": 500,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2515929,
+        "tok_per_s": 73.45983557778841,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.07,
+          "p50": 1.05,
+          "p95": 1.4,
+          "p99": 1.64,
+          "max": 1.83
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.5,
+          "p50": 9.55,
+          "p95": 16.46,
+          "p99": 16.81,
+          "max": 17.14
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 771,
+          "p50": 0.074,
+          "p95": 0.152,
+          "max": 1.106
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.116,
+          "p95": 0.524,
+          "max": 1.785
+        }
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 200,
+      "repetition": 1,
+      "firstWindowMs": 299,
+      "sampleCount": 112,
+      "cpuCores": 0.147,
+      "privateMiB": 132.1,
+      "peakPrivateMiB": 134.2,
+      "workingSetMiB": 104.6,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 200,
+        "tokens": 2401,
+        "stream_secs": 12.2586851,
+        "tok_per_s": 195.8611368522714,
+        "live_chars": 13532,
+        "draw_ms": {
+          "n": 728,
+          "mean": 1.58,
+          "p50": 1.56,
+          "p95": 2.35,
+          "p99": 2.75,
+          "max": 3.04
+        },
+        "dirty_to_present_ms": {
+          "n": 728,
+          "mean": 9.95,
+          "p50": 10.03,
+          "p95": 16.56,
+          "p99": 16.96,
+          "max": 17.48
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 729,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 771,
+          "p50": 0.123,
+          "p95": 0.246,
+          "max": 1.302
+        },
+        "event_wake_latency_ms": {
+          "n": 2411,
+          "p50": 0.065,
+          "p95": 0.911,
+          "max": 2.364
+        }
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 200,
+      "repetition": 1,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 0.476,
+      "privateMiB": 398.7,
+      "peakPrivateMiB": 425.8,
+      "workingSetMiB": 478.0,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.022700000002981,
+        "tokens": 2400,
+        "bytes": 13528,
+        "frames": 721,
+        "fps": 59.96989029085157,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.19999999999709,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "scroll",
+      "history": 500,
+      "rate": 0,
+      "repetition": 1,
+      "firstWindowMs": 102,
+      "sampleCount": 112,
+      "cpuCores": 0.705,
+      "privateMiB": 765.7,
+      "peakPrivateMiB": 800.1,
+      "workingSetMiB": 875.5,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12.016900000005961,
+        "tokens": 0,
+        "bytes": 0,
+        "frames": 721,
+        "fps": 59.99883497404841,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.19999999999709,
+        "over25ms": 0,
+        "scrollPixels": 41940,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 500
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "scroll",
+      "history": 500,
+      "rate": 0,
+      "repetition": 1,
+      "firstWindowMs": 312,
+      "sampleCount": 112,
+      "cpuCores": 0.045,
+      "privateMiB": 130.5,
+      "peakPrivateMiB": 133.2,
+      "workingSetMiB": 102.2,
+      "processes": 1.0,
+      "renderer": {
+        "frames": 435.0,
+        "meanDrawMs": 0.79,
+        "p50DrawMs": 0.75,
+        "p95DrawMs": 0.99,
+        "p99DrawMs": 1.17
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "idle",
+      "history": 20,
+      "rate": 0,
+      "repetition": 2,
+      "firstWindowMs": 200,
+      "sampleCount": 113,
+      "cpuCores": 0.007,
+      "privateMiB": 128.8,
+      "peakPrivateMiB": 128.8,
+      "workingSetMiB": 100.0,
+      "processes": 1,
+      "renderer": {}
+    },
+    {
+      "engine": "tauri",
+      "mode": "idle",
+      "history": 20,
+      "rate": 0,
+      "repetition": 2,
+      "firstWindowMs": 101,
+      "sampleCount": 112,
+      "cpuCores": 0.0,
+      "privateMiB": 359.0,
+      "peakPrivateMiB": 359.1,
+      "workingSetMiB": 434.4,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12,
+        "history": 20
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 0.399,
+      "privateMiB": 386.0,
+      "peakPrivateMiB": 404.7,
+      "workingSetMiB": 475.3,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.0135,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 721,
+        "fps": 60.01581554084987,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.200000000000728,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 308,
+      "sampleCount": 112,
+      "cpuCores": 0.114,
+      "privateMiB": 131.1,
+      "peakPrivateMiB": 132.0,
+      "workingSetMiB": 103.0,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 75,
+        "tokens": 901,
+        "stream_secs": 12.2587851,
+        "tok_per_s": 73.49831101941741,
+        "live_chars": 5164,
+        "draw_ms": {
+          "n": 728,
+          "mean": 1.07,
+          "p50": 1.04,
+          "p95": 1.43,
+          "p99": 1.6,
+          "max": 1.79
+        },
+        "dirty_to_present_ms": {
+          "n": 728,
+          "mean": 9.53,
+          "p50": 9.55,
+          "p95": 16.47,
+          "p99": 16.88,
+          "max": 17.29
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 729,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 770,
+          "p50": 0.075,
+          "p95": 0.148,
+          "max": 1.14
+        },
+        "event_wake_latency_ms": {
+          "n": 911,
+          "p50": 0.11,
+          "p95": 0.53,
+          "max": 1.514
+        }
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 500,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 298,
+      "sampleCount": 112,
+      "cpuCores": 0.084,
+      "privateMiB": 133.0,
+      "peakPrivateMiB": 133.7,
+      "workingSetMiB": 104.7,
+      "processes": 1.0,
+      "renderer": {
+        "history": 500,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2491378,
+        "tok_per_s": 73.47455916448259,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.1,
+          "p50": 1.07,
+          "p95": 1.47,
+          "p99": 1.67,
+          "max": 1.9
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.69,
+          "p50": 9.59,
+          "p95": 16.47,
+          "p99": 16.89,
+          "max": 17.96
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 771,
+          "p50": 0.072,
+          "p95": 0.151,
+          "max": 1.129
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.116,
+          "p95": 0.616,
+          "max": 1.709
+        }
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 500,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 109,
+      "sampleCount": 111,
+      "cpuCores": 1.287,
+      "privateMiB": 745.9,
+      "peakPrivateMiB": 791.0,
+      "workingSetMiB": 854.7,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.05239999999106,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 704,
+        "fps": 58.41160266839154,
+        "p95FrameMs": 17.100000000000364,
+        "p99FrameMs": 33.399999999999636,
+        "over25ms": 17,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 500
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 200,
+      "repetition": 2,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 0.435,
+      "privateMiB": 402.7,
+      "peakPrivateMiB": 428.1,
+      "workingSetMiB": 475.7,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.02460000000894,
+        "tokens": 2400,
+        "bytes": 13528,
+        "frames": 721,
+        "fps": 59.96041448359729,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.19999999999709,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 200,
+      "repetition": 2,
+      "firstWindowMs": 308,
+      "sampleCount": 112,
+      "cpuCores": 0.134,
+      "privateMiB": 132.7,
+      "peakPrivateMiB": 134.7,
+      "workingSetMiB": 104.5,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 200,
+        "tokens": 2402,
+        "stream_secs": 12.2572317,
+        "tok_per_s": 195.9659455568585,
+        "live_chars": 13537,
+        "draw_ms": {
+          "n": 728,
+          "mean": 1.58,
+          "p50": 1.55,
+          "p95": 2.41,
+          "p99": 2.84,
+          "max": 3.12
+        },
+        "dirty_to_present_ms": {
+          "n": 728,
+          "mean": 10.0,
+          "p50": 10.07,
+          "p95": 16.6,
+          "p99": 16.99,
+          "max": 17.96
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 729,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 771,
+          "p50": 0.125,
+          "p95": 0.248,
+          "max": 1.245
+        },
+        "event_wake_latency_ms": {
+          "n": 2412,
+          "p50": 0.063,
+          "p95": 0.719,
+          "max": 2.391
+        }
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "scroll",
+      "history": 500,
+      "rate": 0,
+      "repetition": 2,
+      "firstWindowMs": 297,
+      "sampleCount": 112,
+      "cpuCores": 0.043,
+      "privateMiB": 130.4,
+      "peakPrivateMiB": 132.0,
+      "workingSetMiB": 102.2,
+      "processes": 1.0,
+      "renderer": {
+        "frames": 434.0,
+        "meanDrawMs": 0.82,
+        "p50DrawMs": 0.77,
+        "p95DrawMs": 1.05,
+        "p99DrawMs": 1.3
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "scroll",
+      "history": 500,
+      "rate": 0,
+      "repetition": 2,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 0.682,
+      "privateMiB": 788.2,
+      "peakPrivateMiB": 820.8,
+      "workingSetMiB": 875.6,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.0185,
+        "tokens": 0,
+        "bytes": 0,
+        "frames": 721,
+        "fps": 59.99084744352457,
+        "p95FrameMs": 16.900000000001455,
+        "p99FrameMs": 17.100000000002183,
+        "over25ms": 0,
+        "scrollPixels": 41820,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 500
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "idle",
+      "history": 20,
+      "rate": 0,
+      "repetition": 3,
+      "firstWindowMs": 102,
+      "sampleCount": 112,
+      "cpuCores": 0.001,
+      "privateMiB": 384.4,
+      "peakPrivateMiB": 384.9,
+      "workingSetMiB": 445.0,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12,
+        "history": 20
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "idle",
+      "history": 20,
+      "rate": 0,
+      "repetition": 3,
+      "firstWindowMs": 307,
+      "sampleCount": 113,
+      "cpuCores": 0.004,
+      "privateMiB": 128.8,
+      "peakPrivateMiB": 128.8,
+      "workingSetMiB": 100.0,
+      "processes": 1,
+      "renderer": {}
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 3,
+      "firstWindowMs": 201,
+      "sampleCount": 112,
+      "cpuCores": 0.108,
+      "privateMiB": 131.6,
+      "peakPrivateMiB": 132.5,
+      "workingSetMiB": 103.3,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2568106,
+        "tok_per_s": 73.42856387125701,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.06,
+          "p50": 1.03,
+          "p95": 1.45,
+          "p99": 1.63,
+          "max": 1.8
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.51,
+          "p50": 9.43,
+          "p95": 16.47,
+          "p99": 16.83,
+          "max": 17.66
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 771,
+          "p50": 0.074,
+          "p95": 0.145,
+          "max": 1.284
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.129,
+          "p95": 0.507,
+          "max": 1.491
+        }
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 3,
+      "firstWindowMs": 101,
+      "sampleCount": 112,
+      "cpuCores": 0.431,
+      "privateMiB": 394.6,
+      "peakPrivateMiB": 434.2,
+      "workingSetMiB": 482.1,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12.01370000000298,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 721,
+        "fps": 60.01481641790798,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.200000000000728,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 500,
+      "rate": 75,
+      "repetition": 3,
+      "firstWindowMs": 101,
+      "sampleCount": 112,
+      "cpuCores": 1.336,
+      "privateMiB": 755.5,
+      "peakPrivateMiB": 788.5,
+      "workingSetMiB": 861.8,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12.01020000000298,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 700,
+        "fps": 58.28379211002534,
+        "p95FrameMs": 17.100000000000364,
+        "p99FrameMs": 33.29999999999927,
+        "over25ms": 20,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 500
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 500,
+      "rate": 75,
+      "repetition": 3,
+      "firstWindowMs": 306,
+      "sampleCount": 112,
+      "cpuCores": 0.11,
+      "privateMiB": 133.0,
+      "peakPrivateMiB": 134.9,
+      "workingSetMiB": 105.0,
+      "processes": 1.0,
+      "renderer": {
+        "history": 500,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2542932,
+        "tok_per_s": 73.44364830441629,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.08,
+          "p50": 1.05,
+          "p95": 1.43,
+          "p99": 1.66,
+          "max": 1.8
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.68,
+          "p50": 9.75,
+          "p95": 16.54,
+          "p99": 16.91,
+          "max": 17.25
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 770,
+          "p50": 0.078,
+          "p95": 0.158,
+          "max": 1.145
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.106,
+          "p95": 0.557,
+          "max": 1.715
+        }
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 200,
+      "repetition": 3,
+      "firstWindowMs": 300,
+      "sampleCount": 112,
+      "cpuCores": 0.124,
+      "privateMiB": 133.0,
+      "peakPrivateMiB": 134.9,
+      "workingSetMiB": 104.7,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 200,
+        "tokens": 2402,
+        "stream_secs": 12.2608447,
+        "tok_per_s": 195.90819872304556,
+        "live_chars": 13537,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.6,
+          "p50": 1.56,
+          "p95": 2.45,
+          "p99": 2.7,
+          "max": 3.45
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.92,
+          "p50": 9.95,
+          "p95": 16.61,
+          "p99": 17.07,
+          "max": 17.38
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 770,
+          "p50": 0.125,
+          "p95": 0.244,
+          "max": 1.102
+        },
+        "event_wake_latency_ms": {
+          "n": 2412,
+          "p50": 0.064,
+          "p95": 0.932,
+          "max": 2.541
+        }
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 200,
+      "repetition": 3,
+      "firstWindowMs": 101,
+      "sampleCount": 111,
+      "cpuCores": 0.412,
+      "privateMiB": 413.5,
+      "peakPrivateMiB": 450.7,
+      "workingSetMiB": 479.0,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.020899999991059,
+        "tokens": 2400,
+        "bytes": 13528,
+        "frames": 721,
+        "fps": 59.97887013456033,
+        "p95FrameMs": 17.099999999998545,
+        "p99FrameMs": 17.299999999999272,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "scroll",
+      "history": 500,
+      "rate": 0,
+      "repetition": 3,
+      "firstWindowMs": 106,
+      "sampleCount": 112,
+      "cpuCores": 0.721,
+      "privateMiB": 788.7,
+      "peakPrivateMiB": 821.7,
+      "workingSetMiB": 873.9,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12.01389999999106,
+        "tokens": 0,
+        "bytes": 0,
+        "frames": 721,
+        "fps": 60.0138173283061,
+        "p95FrameMs": 16.899999999999636,
+        "p99FrameMs": 17.100000000000364,
+        "over25ms": 0,
+        "scrollPixels": 41940,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 500
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "scroll",
+      "history": 500,
+      "rate": 0,
+      "repetition": 3,
+      "firstWindowMs": 313,
+      "sampleCount": 112,
+      "cpuCores": 0.048,
+      "privateMiB": 130.3,
+      "peakPrivateMiB": 133.0,
+      "workingSetMiB": 101.9,
+      "processes": 1.0,
+      "renderer": {
+        "frames": 434.0,
+        "meanDrawMs": 0.81,
+        "p50DrawMs": 0.76,
+        "p95DrawMs": 1.03,
+        "p99DrawMs": 1.2
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "workspace",
+      "history": 0,
+      "rate": 0,
+      "repetition": 1,
+      "firstWindowMs": 104,
+      "sampleCount": 51,
+      "cpuCores": 0.0,
+      "privateMiB": 299.1,
+      "peakPrivateMiB": 299.1,
+      "workingSetMiB": 399.0,
+      "processes": 7,
+      "renderer": {
+        "seconds": 6,
+        "history": 0,
+        "shell": true
+      },
+      "accessibility": {
+        "elements": 93,
+        "buttons": 37,
+        "namedButtons": 37,
+        "messageEdit": true,
+        "messageTextPattern": true,
+        "messageValuePattern": true,
+        "editRoundTrip": true,
+        "editMilliseconds": 37.7599
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "workspace",
+      "history": 0,
+      "rate": 0,
+      "repetition": 1,
+      "firstWindowMs": 310,
+      "sampleCount": 51,
+      "cpuCores": 0.0,
+      "privateMiB": 88.2,
+      "peakPrivateMiB": 88.2,
+      "workingSetMiB": 61.0,
+      "processes": 1,
+      "renderer": {},
+      "accessibility": {
+        "elements": 17,
+        "buttons": 14,
+        "namedButtons": 0,
+        "messageEdit": true,
+        "messageTextPattern": false,
+        "messageValuePattern": true,
+        "editRoundTrip": false,
+        "editMilliseconds": null
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "workspace",
+      "history": 0,
+      "rate": 0,
+      "repetition": 2,
+      "firstWindowMs": 300,
+      "sampleCount": 51,
+      "cpuCores": 0.0,
+      "privateMiB": 88.4,
+      "peakPrivateMiB": 88.4,
+      "workingSetMiB": 61.0,
+      "processes": 1,
+      "renderer": {},
+      "accessibility": {
+        "elements": 17,
+        "buttons": 14,
+        "namedButtons": 0,
+        "messageEdit": true,
+        "messageTextPattern": false,
+        "messageValuePattern": true,
+        "editRoundTrip": false,
+        "editMilliseconds": null
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "workspace",
+      "history": 0,
+      "rate": 0,
+      "repetition": 2,
+      "firstWindowMs": 103,
+      "sampleCount": 50,
+      "cpuCores": 0.003,
+      "privateMiB": 305.4,
+      "peakPrivateMiB": 305.4,
+      "workingSetMiB": 396.6,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 6,
+        "history": 0,
+        "shell": true
+      },
+      "accessibility": {
+        "elements": 93,
+        "buttons": 37,
+        "namedButtons": 37,
+        "messageEdit": true,
+        "messageTextPattern": true,
+        "messageValuePattern": true,
+        "editRoundTrip": true,
+        "editMilliseconds": 36.6986
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "workspace",
+      "history": 0,
+      "rate": 0,
+      "repetition": 3,
+      "firstWindowMs": 102,
+      "sampleCount": 51,
+      "cpuCores": 0.0,
+      "privateMiB": 305.4,
+      "peakPrivateMiB": 305.4,
+      "workingSetMiB": 396.2,
+      "processes": 7,
+      "renderer": {
+        "seconds": 6,
+        "history": 0,
+        "shell": true
+      },
+      "accessibility": {
+        "elements": 93,
+        "buttons": 37,
+        "namedButtons": 37,
+        "messageEdit": true,
+        "messageTextPattern": true,
+        "messageValuePattern": true,
+        "editRoundTrip": true,
+        "editMilliseconds": 38.894800000000004
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "workspace",
+      "history": 0,
+      "rate": 0,
+      "repetition": 3,
+      "firstWindowMs": 310,
+      "sampleCount": 51,
+      "cpuCores": 0.013,
+      "privateMiB": 88.5,
+      "peakPrivateMiB": 88.5,
+      "workingSetMiB": 61.1,
+      "processes": 1,
+      "renderer": {},
+      "accessibility": {
+        "elements": 17,
+        "buttons": 14,
+        "namedButtons": 0,
+        "messageEdit": true,
+        "messageTextPattern": false,
+        "messageValuePattern": true,
+        "editRoundTrip": false,
+        "editMilliseconds": null
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 103,
+      "sampleCount": 110,
+      "cpuCores": 2.182,
+      "privateMiB": 2484.7,
+      "peakPrivateMiB": 2931.9,
+      "workingSetMiB": 2541.9,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12.46120000000298,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 60,
+        "fps": 4.814945591113669,
+        "p95FrameMs": 400.09999999999854,
+        "p99FrameMs": 666.5999999999985,
+        "over25ms": 60,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 5000
+      },
+      "accessibility": null
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 309,
+      "sampleCount": 111,
+      "cpuCores": 0.113,
+      "privateMiB": 148.2,
+      "peakPrivateMiB": 149.1,
+      "workingSetMiB": 119.3,
+      "processes": 1,
+      "renderer": {
+        "history": 5000,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2498615,
+        "tok_per_s": 73.47021841838783,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.12,
+          "p50": 1.09,
+          "p95": 1.57,
+          "p99": 1.7,
+          "max": 2.11
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.8,
+          "p50": 9.77,
+          "p95": 16.49,
+          "p99": 16.83,
+          "max": 17.17
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 768,
+          "p50": 0.073,
+          "p95": 0.149,
+          "max": 1.158
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.104,
+          "p95": 0.618,
+          "max": 1.627
+        }
+      },
+      "accessibility": null
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 299,
+      "sampleCount": 112,
+      "cpuCores": 0.111,
+      "privateMiB": 147.3,
+      "peakPrivateMiB": 150.2,
+      "workingSetMiB": 118.4,
+      "processes": 1.0,
+      "renderer": {
+        "history": 5000,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2559381,
+        "tok_per_s": 73.43379124932102,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.07,
+          "p50": 1.06,
+          "p95": 1.45,
+          "p99": 1.58,
+          "max": 1.79
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.6,
+          "p50": 9.66,
+          "p95": 16.47,
+          "p99": 16.81,
+          "max": 17.37
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 770,
+          "p50": 0.075,
+          "p95": 0.157,
+          "max": 1.18
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.118,
+          "p95": 0.585,
+          "max": 1.505
+        }
+      },
+      "accessibility": null
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 102,
+      "sampleCount": 111,
+      "cpuCores": 2.154,
+      "privateMiB": 2438.3,
+      "peakPrivateMiB": 2741.7,
+      "workingSetMiB": 2507.5,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.59420000000298,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 59,
+        "fps": 4.684696129963479,
+        "p95FrameMs": 416.59999999999854,
+        "p99FrameMs": 716.6999999999971,
+        "over25ms": 59,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 5000
+      },
+      "accessibility": null
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 3,
+      "firstWindowMs": 105,
+      "sampleCount": 111,
+      "cpuCores": 2.223,
+      "privateMiB": 2458.8,
+      "peakPrivateMiB": 2763.1,
+      "workingSetMiB": 2527.4,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.605600000008941,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 61,
+        "fps": 4.839119121656782,
+        "p95FrameMs": 400,
+        "p99FrameMs": 633.5,
+        "over25ms": 61,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 5000
+      },
+      "accessibility": null
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 3,
+      "firstWindowMs": 300,
+      "sampleCount": 111,
+      "cpuCores": 0.095,
+      "privateMiB": 147.4,
+      "peakPrivateMiB": 148.4,
+      "workingSetMiB": 118.7,
+      "processes": 1,
+      "renderer": {
+        "history": 5000,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2505441,
+        "tok_per_s": 73.46612465972021,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.07,
+          "p50": 1.06,
+          "p95": 1.42,
+          "p99": 1.6,
+          "max": 1.85
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.56,
+          "p50": 9.55,
+          "p95": 16.51,
+          "p99": 16.89,
+          "max": 18.56
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 770,
+          "p50": 0.076,
+          "p95": 0.156,
+          "max": 1.44
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.114,
+          "p95": 0.535,
+          "max": 1.643
+        }
+      },
+      "accessibility": null
+    }
+  ],
+  "sharedRust": [
+    {
+      "thread_bytes": 16445067,
+      "save_ms": 58.7019,
+      "reopen_ms": 87.313,
+      "project_window_ms": 0.1582,
+      "list_100_chats_ms": 12.9992,
+      "build_index_and_find_ms": 1202.6993,
+      "repeat_find_ms": 6.526,
+      "diff_summary_100_files_ms": 0.1472
+    },
+    {
+      "thread_bytes": 16445067,
+      "save_ms": 57.414100000000005,
+      "reopen_ms": 106.3699,
+      "project_window_ms": 0.0493,
+      "list_100_chats_ms": 13.6457,
+      "build_index_and_find_ms": 1204.0322999999999,
+      "repeat_find_ms": 6.1567,
+      "diff_summary_100_files_ms": 0.1044
+    },
+    {
+      "thread_bytes": 16445068,
+      "save_ms": 56.5446,
+      "reopen_ms": 87.1618,
+      "project_window_ms": 0.0853,
+      "list_100_chats_ms": 12.7413,
+      "build_index_and_find_ms": 1192.5142,
+      "repeat_find_ms": 5.9409,
+      "diff_summary_100_files_ms": 0.1065
+    }
+  ],
+  "gpuiAgentFixture": {
+    "history": 5000,
+    "rate_target": 75,
+    "tokens": 900,
+    "stream_secs": 12.9880457,
+    "tok_per_s": 69.29448977839675,
+    "live_chars": 5158,
+    "draw_ms": {
+      "n": 742,
+      "mean": 1.1,
+      "p50": 1.08,
+      "p95": 1.42,
+      "p99": 1.63,
+      "max": 1.82
+    },
+    "dirty_to_present_ms": {
+      "n": 742,
+      "mean": 9.62,
+      "p50": 9.54,
+      "p95": 16.54,
+      "p99": 16.99,
+      "max": 17.89
+    },
+    "present_interval_ms": {
+      "n": 0,
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max": 0.0
+    },
+    "refresh_interval_ms": [
+      16.666667
+    ],
+    "frames_on_time": 743,
+    "frames_late": 0,
+    "missed_refreshes": 0,
+    "md_parse_ms": {
+      "n": 771,
+      "p50": 0.074,
+      "p95": 0.147,
+      "max": 1.126
+    },
+    "event_wake_latency_ms": {
+      "n": 1044,
+      "p50": 0.085,
+      "p95": 0.536,
+      "max": 1.622
+    }
+  },
+  "reactGrowingCodeFixture": {
+    "browser": "153.0.8010.12",
+    "cadenceMs": 25,
+    "chunks": 40,
+    "samples": [
+      {
+        "run": 0,
+        "kib": 20,
+        "elapsed": 1472.6000000089407,
+        "longTasks": 1,
+        "longTaskMs": 72,
+        "maxEventLoopLagMs": 73.90000000596046
+      },
+      {
+        "run": 1,
+        "kib": 20,
+        "elapsed": 1424.0999999940395,
+        "longTasks": 1,
+        "longTaskMs": 68,
+        "maxEventLoopLagMs": 74
+      },
+      {
+        "run": 2,
+        "kib": 20,
+        "elapsed": 1441.300000011921,
+        "longTasks": 1,
+        "longTaskMs": 68,
+        "maxEventLoopLagMs": 60.900000005960464
+      },
+      {
+        "run": 3,
+        "kib": 20,
+        "elapsed": 1409.0999999940395,
+        "longTasks": 1,
+        "longTaskMs": 68,
+        "maxEventLoopLagMs": 68.1000000089407
+      },
+      {
+        "run": 4,
+        "kib": 20,
+        "elapsed": 1440.5999999940395,
+        "longTasks": 1,
+        "longTaskMs": 71,
+        "maxEventLoopLagMs": 65.5
+      },
+      {
+        "run": 0,
+        "kib": 100,
+        "elapsed": 2153.5999999940395,
+        "longTasks": 2,
+        "longTaskMs": 403,
+        "maxEventLoopLagMs": 355.79999999701977
+      },
+      {
+        "run": 1,
+        "kib": 100,
+        "elapsed": 2098.2000000029802,
+        "longTasks": 2,
+        "longTaskMs": 412,
+        "maxEventLoopLagMs": 383.40000000596046
+      },
+      {
+        "run": 2,
+        "kib": 100,
+        "elapsed": 2142,
+        "longTasks": 2,
+        "longTaskMs": 421,
+        "maxEventLoopLagMs": 393.5
+      },
+      {
+        "run": 3,
+        "kib": 100,
+        "elapsed": 2175.9000000059605,
+        "longTasks": 2,
+        "longTaskMs": 413,
+        "maxEventLoopLagMs": 360.20000000298023
+      },
+      {
+        "run": 4,
+        "kib": 100,
+        "elapsed": 2171.5,
+        "longTasks": 2,
+        "longTaskMs": 413,
+        "maxEventLoopLagMs": 393.30000001192093
+      }
+    ]
+  },
+  "gpuTrials": [
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 106,
+      "sampleCount": 112,
+      "cpuCores": 0.423,
+      "privateMiB": 394.6,
+      "peakPrivateMiB": 413.2,
+      "workingSetMiB": 474.8,
+      "processes": 7.0,
+      "renderer": {
+        "seconds": 12.00129999999702,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 720,
+        "fps": 59.99350070410529,
+        "p95FrameMs": 17,
+        "p99FrameMs": 17.200000000000728,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 3.76,
+        "dedicatedMiB": 84.99,
+        "sharedMiB": 2.22,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 311,
+      "sampleCount": 112,
+      "cpuCores": 0.129,
+      "privateMiB": 131.4,
+      "peakPrivateMiB": 132.4,
+      "workingSetMiB": 103.1,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2597206,
+        "tok_per_s": 73.41113467137252,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.07,
+          "p50": 1.05,
+          "p95": 1.45,
+          "p99": 1.68,
+          "max": 1.86
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.57,
+          "p50": 9.57,
+          "p95": 16.5,
+          "p99": 16.83,
+          "max": 17.53
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 771,
+          "p50": 0.075,
+          "p95": 0.15,
+          "max": 1.662
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.094,
+          "p95": 0.651,
+          "max": 1.602
+        }
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 2.59,
+        "dedicatedMiB": 24.72,
+        "sharedMiB": 1.51,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 304,
+      "sampleCount": 112,
+      "cpuCores": 0.093,
+      "privateMiB": 147.5,
+      "peakPrivateMiB": 148.6,
+      "workingSetMiB": 118.6,
+      "processes": 1.0,
+      "renderer": {
+        "history": 5000,
+        "rate_target": 75,
+        "tokens": 901,
+        "stream_secs": 12.2621457,
+        "tok_per_s": 73.47816785442372,
+        "live_chars": 5164,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.07,
+          "p50": 1.04,
+          "p95": 1.44,
+          "p99": 1.57,
+          "max": 1.74
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.53,
+          "p50": 9.56,
+          "p95": 16.47,
+          "p99": 16.99,
+          "max": 17.48
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 772,
+          "p50": 0.078,
+          "p95": 0.155,
+          "max": 1.46
+        },
+        "event_wake_latency_ms": {
+          "n": 911,
+          "p50": 0.085,
+          "p95": 0.635,
+          "max": 1.638
+        }
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 2.55,
+        "dedicatedMiB": 24.72,
+        "sharedMiB": 1.51,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 1,
+      "firstWindowMs": 102,
+      "sampleCount": 111,
+      "cpuCores": 2.215,
+      "privateMiB": 2450.5,
+      "peakPrivateMiB": 2765.1,
+      "workingSetMiB": 2518.9,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.86289999999106,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 61,
+        "fps": 4.742320938516384,
+        "p95FrameMs": 400,
+        "p99FrameMs": 716.9000000000015,
+        "over25ms": 61,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 5000
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 0.63,
+        "dedicatedMiB": 70.66,
+        "sharedMiB": 2.11,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 315,
+      "sampleCount": 112,
+      "cpuCores": 0.096,
+      "privateMiB": 131.1,
+      "peakPrivateMiB": 132.0,
+      "workingSetMiB": 103.2,
+      "processes": 1.0,
+      "renderer": {
+        "history": 20,
+        "rate_target": 75,
+        "tokens": 900,
+        "stream_secs": 12.2575528,
+        "tok_per_s": 73.42411774069618,
+        "live_chars": 5158,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.06,
+          "p50": 1.04,
+          "p95": 1.39,
+          "p99": 1.57,
+          "max": 1.69
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.49,
+          "p50": 9.58,
+          "p95": 16.53,
+          "p99": 17.1,
+          "max": 17.38
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 770,
+          "p50": 0.074,
+          "p95": 0.153,
+          "max": 1.298
+        },
+        "event_wake_latency_ms": {
+          "n": 910,
+          "p50": 0.104,
+          "p95": 0.61,
+          "max": 1.727
+        }
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 2.52,
+        "dedicatedMiB": 24.72,
+        "sharedMiB": 1.51,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 20,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 102,
+      "sampleCount": 111,
+      "cpuCores": 0.394,
+      "privateMiB": 397.8,
+      "peakPrivateMiB": 413.0,
+      "workingSetMiB": 472.7,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.013,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 721,
+        "fps": 60.01831349371514,
+        "p95FrameMs": 17.099999999998545,
+        "p99FrameMs": 17.200000000000728,
+        "over25ms": 0,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 20
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 3.66,
+        "dedicatedMiB": 85.94,
+        "sharedMiB": 2.49,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "tauri",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 102,
+      "sampleCount": 111,
+      "cpuCores": 2.243,
+      "privateMiB": 2458.2,
+      "peakPrivateMiB": 2765.1,
+      "workingSetMiB": 2519.6,
+      "processes": 7,
+      "renderer": {
+        "seconds": 12.545599999994039,
+        "tokens": 900,
+        "bytes": 5158,
+        "frames": 61,
+        "fps": 4.862262466524438,
+        "p95FrameMs": 383.5,
+        "p99FrameMs": 683.1000000000022,
+        "over25ms": 61,
+        "scrollPixels": 0,
+        "viewport": [
+          1000,
+          900
+        ],
+        "history": 5000
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 0.67,
+        "dedicatedMiB": 62.66,
+        "sharedMiB": 2.3,
+        "samples": 9
+      }
+    },
+    {
+      "engine": "gpui",
+      "mode": "stream",
+      "history": 5000,
+      "rate": 75,
+      "repetition": 2,
+      "firstWindowMs": 309,
+      "sampleCount": 112,
+      "cpuCores": 0.122,
+      "privateMiB": 147.5,
+      "peakPrivateMiB": 151.9,
+      "workingSetMiB": 118.7,
+      "processes": 1.0,
+      "renderer": {
+        "history": 5000,
+        "rate_target": 75,
+        "tokens": 899,
+        "stream_secs": 12.2490939,
+        "tok_per_s": 73.39318380112998,
+        "live_chars": 5153,
+        "draw_ms": {
+          "n": 727,
+          "mean": 1.06,
+          "p50": 1.04,
+          "p95": 1.39,
+          "p99": 1.56,
+          "max": 1.86
+        },
+        "dirty_to_present_ms": {
+          "n": 727,
+          "mean": 9.57,
+          "p50": 9.62,
+          "p95": 16.45,
+          "p99": 16.86,
+          "max": 17.45
+        },
+        "present_interval_ms": {
+          "n": 0,
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "refresh_interval_ms": [
+          16.666667
+        ],
+        "frames_on_time": 728,
+        "frames_late": 0,
+        "missed_refreshes": 0,
+        "md_parse_ms": {
+          "n": 769,
+          "p50": 0.079,
+          "p95": 0.159,
+          "max": 1.1
+        },
+        "event_wake_latency_ms": {
+          "n": 909,
+          "p50": 0.118,
+          "p95": 0.563,
+          "max": 1.659
+        }
+      },
+      "accessibility": null,
+      "gpu": {
+        "busiestEnginePercent": 2.45,
+        "dedicatedMiB": 24.72,
+        "sharedMiB": 1.51,
+        "samples": 9
+      }
+    }
+  ],
+  "environment": {
+    "windows": "11 Pro 26200",
+    "cpu": "Ryzen 7 8700G",
+    "usableRamGiB": 27.6,
+    "adapters": [
+      "RTX 3060 Ti",
+      "Radeon 780M"
+    ],
+    "webview2": "158.0.4370.33",
+    "node": "24.16.0",
+    "rust": "1.97.1",
+    "python": "3.13.5",
+    "psutil": "7.2.2",
+    "pywin32": "312",
+    "gpuReactRevision": "f3abad2"
+  }
+}
