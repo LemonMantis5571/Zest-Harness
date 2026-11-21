@@ -70,6 +70,21 @@ fn is_object_id(candidate: &str) -> bool {
     matches!(candidate.len(), 40 | 64) && candidate.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// The commit and optional branch a new chat starts on. A detached HEAD
+/// still has a usable commit. An unborn or non-Git project has no baseline.
+pub fn chat_git_baseline(root: &Path) -> Option<(String, Option<String>)> {
+    let reply = query(root, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"])?;
+    let mut lines = reply.lines();
+    let commit = lines.next()?.trim();
+    let branch = lines.next()?.trim();
+    is_object_id(commit).then(|| {
+        (
+            commit.to_string(),
+            (!branch.is_empty() && branch != "HEAD").then(|| branch.to_string()),
+        )
+    })
+}
+
 /// The commit to count ahead/behind against: the tip of the branch the source
 /// project is on, else the commit the worktree was created from.
 fn comparison_point(source: &Path, base_commit: Option<&str>) -> Option<String> {
@@ -280,6 +295,21 @@ mod tests {
         std::fs::write(source.join("shared.txt"), "base\n").unwrap();
         commit_all(&source, "base");
         source
+    }
+
+    #[test]
+    fn a_detached_checkout_still_has_a_chat_baseline() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source_repository(temp.path());
+        let branch = git(&source, &["branch", "--show-current"]).unwrap();
+        let commit = git(&source, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(
+            chat_git_baseline(&source),
+            Some((commit.clone(), Some(branch)))
+        );
+        run(&source, &["checkout", "--detach", "-q"]);
+        assert_eq!(chat_git_baseline(&source), Some((commit, None)));
+        assert_eq!(chat_git_baseline(temp.path()), None);
     }
 
     #[test]
