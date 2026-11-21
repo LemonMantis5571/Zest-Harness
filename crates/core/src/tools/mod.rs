@@ -5,6 +5,7 @@ pub mod capture;
 pub mod consult_advisor;
 pub mod delegate_feature;
 pub mod edit_file;
+mod edit_match;
 pub mod external_agent;
 pub mod glob_files;
 pub mod grep;

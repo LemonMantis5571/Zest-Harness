@@ -9,6 +9,7 @@ paths:
   - crates/core/src/tools/read_file.rs
   - crates/core/src/tools/write_file.rs
   - crates/core/src/tools/edit_file.rs
+  - crates/core/src/tools/edit_match.rs
   - crates/core/src/tools/glob_files.rs
   - crates/core/src/tools/grep.rs
   - crates/core/src/tools/list_dir.rs
@@ -28,6 +29,7 @@ verify:
   - cargo test -p zest-core --lib -- tools::read_file
   - cargo test -p zest-core --lib -- tools::write_file
   - cargo test -p zest-core --lib -- tools::edit_file
+  - cargo test -p zest-core --lib -- tools::edit_match
   - cargo test -p zest-core --lib -- tools::grep
   - cargo test -p zest-core --lib -- tools::spill
   - npm run ui:test
@@ -61,7 +63,19 @@ verify:
   `grep` 100 matches, 64 KiB output, 256 KiB per file, 400 chars per line, binary
   files skipped; `list_dir` 500 entries; write/edit bodies 1 MiB.
 - `edit_file` only changes an existing UTF-8 file; `old_string` must be non-empty
-  and match exactly once unless `replace_all` is true.
+  and match exactly once unless `replace_all` is true. Matching ignores CRLF versus
+  LF, because `read_file` hides carriage returns. The replacement is written in the
+  line ending of the text it replaces, and every byte outside the match is kept, so
+  CRLF, LF and mixed files stay as they were.
+- When no exact match exists, `edit_file` tries two looser matches in order:
+  first it also ignores curly quotes, Unicode dashes and non-breaking spaces, then
+  it also ignores trailing whitespace. A loose match is used only when it hits
+  exactly one place (even with `replace_all`), and the approval summary says what
+  it ignored. `new_string` is written exactly as given. An edit that would leave
+  the file unchanged is refused.
+- When nothing matches, the error quotes the closest lines of the file with
+  read_file-style numbers. It leaves them out for a sensitive path or a path
+  `read_file` would refuse.
 - `write_file` / `edit_file` are Write risk. The prepared call binds the path and a
   BLAKE3 pre-image; if the file was created, removed, changed, or re-pointed
   between approval and commit, the write aborts with "fresh approval required".
@@ -95,6 +109,10 @@ verify:
    conversation, removed with the thread via `remove_thread_dir`).
 4. Both write tools commit through `commit_prepared_write` in write_file.rs;
    diffs come from `bounded_unified_diff` (48 lines / 6000 chars / 8 hunks).
+   `edit_file` builds its new body at prepare time: `locate` in edit_match.rs
+   folds the file for each match kind and maps every hit back to raw byte
+   ranges, and `splice` writes the replacement into them. The pre-image hash and
+   the diff therefore cover the real bytes that will be written.
 5. Tool events become `tool_call_*` chat events; the UI builds `ToolPart`s,
    `buildTrace` (assistantTrace.ts) folds them with `summarizeTools`
    (toolRuns.ts), and `ToolRunGroup` / `ToolLine` (ToolCallRow.tsx) render them.
@@ -112,6 +130,10 @@ covered by toolRuns.test.ts and assistantTrace.test.ts. In `?fixture=1` a sent m
   the byte cap.
 - Two edits to one file in one batch share a stale pre-image; the agent
   re-prepares later calls after the first write lands (`should_reprepare`).
+- `edit_file` used to compare raw bytes, so a multi-line `old_string` quoted from
+  `read_file` could never match a CRLF file and the agent retried in a loop. Keep
+  matching on folded text, and keep a CRLF pair as one unit in the fold so a
+  match never splits a line ending.
 - Registration order is part of the cached prompt prefix; reordering tools
   invalidates the prompt cache.
 - Keep secret writes on `write_risk`: they were once ordinary Write risk, so Auto
