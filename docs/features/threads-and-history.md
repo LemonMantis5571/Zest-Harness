@@ -3,6 +3,7 @@ title: Threads, history, and recovery
 summary: Chats are saved per project, listed in the sidebar, reopened a page at a time, rewound or forked from checkpoints, and recovered safely after an interrupted run.
 paths:
   - crates/core/src/thread.rs
+  - crates/core/src/thread_search.rs
   - crates/core/src/thread_window.rs
   - crates/core/src/chat_persistence.rs
   - crates/core/src/fsutil.rs
@@ -39,6 +40,7 @@ verify:
   - npm run ui:e2e -- compact-sidebar
   - npm run ui:e2e -- sidebar-status
   - cargo test -p zest-core --lib -- thread::characterization
+  - cargo test -p zest-core --lib -- thread_search::tests
   - cargo test -p zest-core --lib -- thread_window::tests
   - cargo test -p zest-core --lib -- chat_persistence::tests
   - cargo test -p zest-core --lib -- fsutil::tests
@@ -78,7 +80,8 @@ verify:
 - An assistant `StoredMessage` keeps `tools`, `providerActivity` (what a provider-owned loop such as Claude Code reported, with an optional `parentId`) and `steps`, the order thinking blocks, tools and activities arrived in. Tools and activities carry `startedAt`/`finishedAt` (Unix ms). All of these are optional, so older threads load unchanged and show in the old fixed order.
 - Live cancellation or failure records the end time of interrupted tools and provider activity. Restart recovery closes unfinished rows without inventing when the old process stopped; missing end times remain missing on subsequent reopens, and terminal subagent rows with an unknown end hide their duration.
 - Unread: `threadUnread.ts` folds every chat event using `App.tsx`'s `isChatOnScreen`, which reads all actually visible panes rather than the single backend-active session. `visibleChatThreads` also drives clearing with `markThreadSeen` whenever the visible set changes, including split-group reentry. `ThreadSummary` has no seen marker; `updatedAt` moves on every saved message and cannot say which chat was on screen. The sidebar reads the set with `useSyncExternalStore`.
-- Listing: Tauri `list_chat_projects` / `list_cached_threads` (`crates/desktop/src/lib.rs`) read summaries through a per-file mtime cache, hide zero-message chats, sort pinned then `updated_at`. `search_chats` scans titles and transcripts (24 hits max). `ChatHistorySidebar.tsx` reloads on open, focus, chat changes, and whenever a chat leaves the busy set, so a turn that ended in the background brings its new `updatedAt` and title.
+- Listing: Tauri `list_chat_projects` / `list_cached_threads` (`crates/desktop/src/lib.rs`) read summaries through a per-file mtime cache, hide zero-message chats, sort pinned then `updated_at`. `ChatHistorySidebar.tsx` reloads on open, focus, chat changes, and whenever a chat leaves the busy set, so a turn that ended in the background brings its new `updatedAt` and title.
+- Search: both desktop clients use `ThreadStore::search_chats`. Each workspace keeps a rebuildable SQLite trigram index in `.zest/threads/chat-search-v1.sqlite3`. A search backfills existing threads, refreshes files that changed, and removes externally deleted files. Streaming saves do not write the index. There is no thread-size cutoff. The index covers titles, visible user/assistant text, and legacy standalone thinking rows. Results retain their message IDs, with one hit per chat and a limit of 24. Deleting a chat also removes its indexed rows.
 - Status grouping: `groupChatsByStatus` (`chatStatusGroups.ts`) flattens `ProjectChats` into the three sections from `ThreadActivityMap`; `chatProjectLabel` names the row's project. The toggle is saved by `saveChatGrouping` in `chatView.ts`.
 - Delegation children: `ChatScreen.tsx` passes its `delegationJobs` (App's list for the open project, kept live by `handleDelegationEvent`) to the sidebar; `delegationChildrenByThread` (`delegationChildren.ts`) files and caps them, and `delegationChildStatus` words each state. A child click calls `openDelegationJob`, which opens the Workbench with `focusDelegationJob`. The row's hover actions belong to the row (`group/thread` is on the row, not the list item), so hovering a child does not reveal them.
 - Windows: `MessageWindow::{tail, around, before, after}` (`thread_window.rs`) cut on user-turn boundaries; `load_older_thread_messages` / `load_newer_thread_messages` serve pages from the live turn or idle session. `threadWindow.ts` mirrors the constants and merges pages in `App.tsx`; `ChatScreen.tsx` preserves scroll offset when prepending.

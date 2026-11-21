@@ -46,6 +46,7 @@ pub mod reading_diff;
 pub mod runtime;
 pub mod skills;
 pub mod thread;
+pub mod thread_search;
 pub mod thread_window;
 pub mod tools;
 pub mod transcripts;

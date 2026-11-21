@@ -2057,6 +2057,7 @@ impl ThreadStore {
             if let Some(zest_dir) = self.dir.parent() {
                 crate::tools::spill::remove_thread_dir(zest_dir, &tid);
             }
+            crate::thread_search::forget(self, &tid)?;
         }
         result
     }

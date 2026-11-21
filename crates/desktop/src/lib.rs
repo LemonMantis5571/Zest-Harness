@@ -43,11 +43,11 @@ use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    can_start_login, codex_cli_on_path, compose_system_with_docs, contains_ignore_ascii_case,
-    derive_profile_stats, descriptor_for_picker_id, descriptor_from_config, detect_all,
-    detect_claude_code, detect_codex_cli, detect_codex_oauth, detect_cursor_cli, display_path,
-    driver_for, env_context, load_custom_system, load_project_docs, new_id, open_http_url, probe,
-    save_custom_system, start_claude_code_login as core_start_claude_code_login,
+    can_start_login, codex_cli_on_path, compose_system_with_docs, derive_profile_stats,
+    descriptor_for_picker_id, descriptor_from_config, detect_all, detect_claude_code,
+    detect_codex_cli, detect_codex_oauth, detect_cursor_cli, display_path, driver_for, env_context,
+    load_custom_system, load_project_docs, new_id, open_http_url, probe, save_custom_system,
+    start_claude_code_login as core_start_claude_code_login,
     start_codex_cli_login as core_start_codex_cli_login,
     start_codex_oauth_login as core_start_codex_oauth_login, start_login as core_start_login,
     thread_provider_handoff, thread_summary_from_json, truncate_chars, ApprovalDecision,
@@ -63,7 +63,7 @@ use zest_core::{
     ThreadGitContext, ThreadInput, ThreadInputAttachment, ThreadInputTarget, ThreadLoadError,
     ThreadProviderHandoff, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
     UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_CODEX_MODEL, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION, THREAD_OLDER_USER_TURNS, THREAD_WINDOW_USER_TURNS,
+    THREAD_OLDER_USER_TURNS, THREAD_WINDOW_USER_TURNS,
 };
 
 use attachments::{
@@ -5588,16 +5588,17 @@ struct ChatSearchHit {
     message_id: Option<String>,
 }
 
-const CHAT_SEARCH_LIMIT: usize = 24;
-const CHAT_SEARCH_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const CHAT_SEARCH_LIMIT: usize = zest_core::thread_search::SEARCH_LIMIT;
 
 /// Scan known project chats and the free-chat bucket for a keyword in titles
 /// or transcript text. Used by the command palette; empty queries return
 /// nothing so the UI can show recents from `list_chat_projects` instead.
 #[tauri::command]
-fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSearchHit>, String> {
-    let query = query.trim();
-    if query.is_empty() {
+async fn search_chats(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<ChatSearchHit>, String> {
+    if query.trim().is_empty() {
         return Ok(Vec::new());
     }
 
@@ -5616,7 +5617,16 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
         }
     }
     let free_root = free_chats_root()?;
+    tokio::task::spawn_blocking(move || search_chat_roots(roots, free_root, &query))
+        .await
+        .map_err(|e| e.to_string())?
+}
 
+fn search_chat_roots(
+    roots: Vec<PathBuf>,
+    free_root: PathBuf,
+    query: &str,
+) -> Result<Vec<ChatSearchHit>, String> {
     let mut hits = Vec::new();
     for root in roots {
         if !root.is_dir() {
@@ -5630,10 +5640,15 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
             &project_display_name(&root),
             Some(display_path(&root)),
             query,
-        ));
+        )?);
     }
     if let Ok(store) = open_store(&free_root) {
-        hits.extend(search_threads_in_store(&store, "No workspace", None, query));
+        hits.extend(search_threads_in_store(
+            &store,
+            "No workspace",
+            None,
+            query,
+        )?);
     }
 
     hits.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
@@ -5641,111 +5656,28 @@ fn search_chats(state: State<'_, AppState>, query: String) -> Result<Vec<ChatSea
     Ok(hits)
 }
 
-#[derive(Deserialize)]
-struct ThreadSearchMessage {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    role: String,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    thinking: Option<String>,
-}
-
-impl ThreadSearchMessage {
-    fn searchable_text(&self) -> &str {
-        if self.role == "thinking" {
-            self.thinking.as_deref().unwrap_or(self.text.as_str())
-        } else {
-            self.text.as_str()
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct ThreadSearchDocument {
-    #[serde(default)]
-    version: u32,
-    id: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    updated_at: u64,
-    #[serde(default)]
-    messages: Vec<ThreadSearchMessage>,
-}
-
 fn search_threads_in_store(
     store: &ThreadStore,
     project_name: &str,
     project_path: Option<String>,
     query: &str,
-) -> Vec<ChatSearchHit> {
-    let mut hits = Vec::new();
-    let Ok(entries) = std::fs::read_dir(store.dir()) else {
-        return hits;
-    };
-    let mut files = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".json") || name.contains(".corrupt") {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if meta.len() > CHAT_SEARCH_MAX_BYTES {
-            continue;
-        }
-        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        files.push((modified, path));
-    }
-    files.sort_by_key(|b| std::cmp::Reverse(b.0));
-    for (_mtime, path) in files {
-        if hits.len() >= CHAT_SEARCH_LIMIT {
-            break;
-        }
-        let Ok(body) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if !contains_ignore_ascii_case(&body, query) {
-            continue;
-        }
-        let Ok(thread) = serde_json::from_str::<ThreadSearchDocument>(&body) else {
-            continue;
-        };
-        if thread.version > THREAD_FORMAT_VERSION {
-            continue;
-        }
-        let found = thread.messages.iter().find_map(|msg| {
-            zest_core::match_excerpt(msg.searchable_text(), query)
-                .map(|snippet| (msg.id.clone(), snippet))
-        });
-        let (message_id, snippet) = match found {
-            Some((id, snippet)) => (Some(id), Some(snippet)),
-            None => (None, None),
-        };
-        hits.push(ChatSearchHit {
-            id: thread.id,
-            title: thread
-                .title
-                .as_deref()
-                .map(str::trim)
-                .filter(|title| !title.is_empty())
-                .unwrap_or("Untitled chat")
-                .to_string(),
-            project_name: project_name.to_string(),
-            project_path: project_path.clone(),
-            updated_at: thread.updated_at,
-            snippet,
-            message_id,
-        });
-    }
-    hits
+) -> Result<Vec<ChatSearchHit>, String> {
+    store
+        .search_chats(query, true, &zest_core::CancelToken::new())
+        .map(|hits| {
+            hits.into_iter()
+                .map(|hit| ChatSearchHit {
+                    id: hit.thread_id,
+                    title: hit.title,
+                    updated_at: hit.updated_at,
+                    project_name: project_name.to_string(),
+                    project_path: project_path.clone(),
+                    snippet: hit.excerpt,
+                    message_id: hit.message_id,
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -10085,7 +10017,8 @@ mod chat_search_tests {
         );
         store.save(&thread).unwrap();
 
-        let hits = search_threads_in_store(&store, "zest", Some("/code/zest".into()), "git pu");
+        let hits =
+            search_threads_in_store(&store, "zest", Some("/code/zest".into()), "git pu").unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, thread.id);
         let snippet = hits[0].snippet.as_deref().expect("snippet");
@@ -10103,7 +10036,7 @@ mod chat_search_tests {
         thread.apply_user("u1", "Hello from a webring sketch.");
         store.save(&thread).unwrap();
 
-        let hits = search_threads_in_store(&store, "zest", None, "git pu");
+        let hits = search_threads_in_store(&store, "zest", None, "git pu").unwrap();
         assert!(hits.is_empty(), "{hits:?}");
     }
 
@@ -10132,7 +10065,7 @@ mod chat_search_tests {
             newer_ids.push(thread.id);
         }
 
-        let hits = search_threads_in_store(&store, "zest", None, "git pu");
+        let hits = search_threads_in_store(&store, "zest", None, "git pu").unwrap();
         assert_eq!(hits.len(), CHAT_SEARCH_LIMIT);
         assert!(
             !hits.iter().any(|hit| hit.id == old.id),

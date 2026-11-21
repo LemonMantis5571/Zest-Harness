@@ -241,7 +241,6 @@ impl Workspace {
         self.search_cancel = zest_core::CancelToken::new();
         let cancel = self.search_cancel.clone();
         let store = self.project.store.clone();
-        let history = self.history.clone();
         self.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(180))
@@ -249,11 +248,14 @@ impl Workspace {
             let query = term.clone();
             let hits = cx
                 .background_executor()
-                .spawn(async move { search::search(&store, &history, &query, &cancel) })
+                .spawn(async move { search::search(&store, &query, &cancel) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 if ws.search_term == term && ws.panel == Panel::Search {
-                    ws.hits = hits;
+                    match hits {
+                        Ok(hits) => ws.hits = hits,
+                        Err(e) => ws.note = e.to_string(),
+                    }
                     cx.notify();
                 }
             });
