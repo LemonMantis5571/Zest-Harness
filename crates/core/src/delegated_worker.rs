@@ -151,12 +151,22 @@ async fn run_auto_check(
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
 ) -> Result<AcceptanceCheckResult> {
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-    if tokens.is_empty() {
-        return Ok(skipped_check(command, "empty command"));
-    }
+    // The same argv parser `bash` uses for auto-run commands: quotes group an
+    // argument, and anything shell-shaped was already refused by `classify`.
+    let Some(tokens) = crate::tools::bash::parse_auto_argv(command) else {
+        return Ok(AcceptanceCheckResult {
+            command: command.to_string(),
+            status: CheckStatus::Failed,
+            output: format!(
+                "could not run `{command}`: it is not a plain argument list (use quotes only to group arguments, without backslashes)"
+            ),
+        });
+    };
     let timeout = Duration::from_millis(timeout_ms.clamp(1, crate::tools::bash::MAX_TIMEOUT_MS));
-    let mut child = tokio::process::Command::new(tokens[0]);
+    // `npm`, `npx` and `pnpm` are `.cmd` shims on Windows, which
+    // `CreateProcessW` never finds from a bare name.
+    let mut child =
+        tokio::process::Command::new(crate::tools::external_agent::resolve_program(&tokens[0]));
     child
         .args(&tokens[1..])
         .current_dir(root)
@@ -544,6 +554,33 @@ mod tests {
             .unwrap()
             .stdout;
         assert_eq!(before, after, "acceptance checks must clean their worktree");
+    }
+
+    #[tokio::test]
+    async fn acceptance_check_keeps_quoted_arguments_together() {
+        let temp = tempfile::tempdir().unwrap();
+        // Split on spaces, rustc received `"2021"` with its quotes and
+        // rejected the edition.
+        let result = run_auto_check(
+            temp.path(),
+            r#"rustc --edition "2021" --version"#,
+            30_000,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, CheckStatus::Passed, "{}", result.output);
+
+        let result = run_auto_check(temp.path(), r#"rustc "--version"#, 30_000, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(result.status, CheckStatus::Failed);
+        assert!(
+            result.output.contains("not a plain argument list"),
+            "{}",
+            result.output
+        );
     }
 
     #[tokio::test]

@@ -1529,7 +1529,16 @@ fn resolve_windows_program(program: &str) -> Option<std::ffi::OsString> {
     // shim for the same name.
     let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     let search = effective_search_path()?;
-    for dir in std::env::split_paths(&search) {
+    resolve_windows_program_in(program, &search, &extensions)
+}
+
+#[cfg(windows)]
+fn resolve_windows_program_in(
+    program: &str,
+    search: &std::ffi::OsStr,
+    extensions: &str,
+) -> Option<std::ffi::OsString> {
+    for dir in std::env::split_paths(search) {
         if dir.as_os_str().is_empty() {
             continue;
         }
@@ -3348,6 +3357,32 @@ mod tests {
         let profile = std::env::var("USERPROFILE").expect("Windows user profile");
         let expanded = expand_windows_environment(r"%USERPROFILE%\bin");
         assert_eq!(expanded, format!(r"{profile}\bin"));
+    }
+
+    /// `npm`, `npx` and `pnpm` install a `.cmd` shim and no `.exe`. The
+    /// resolved path must spawn and keep each argument whole.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_bare_name_resolves_to_a_cmd_shim_that_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("zest-shim.cmd"), "@echo shim:%~1\r\n").unwrap();
+        let resolved =
+            resolve_windows_program_in("zest-shim", temp.path().as_os_str(), ".EXE;.CMD")
+                .expect("the shim is found through PATHEXT");
+        assert!(resolved
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with("zest-shim.cmd"));
+        let output = tokio::process::Command::new(&resolved)
+            .arg("two words")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "shim:two words"
+        );
     }
 
     #[test]
