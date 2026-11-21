@@ -205,6 +205,11 @@ pub struct DelegationOrigin {
     pub idempotency_key: Option<String>,
 }
 
+/// The hash `reviewable_diff` records for a worker diff.
+pub fn worker_diff_hash(diff: &str) -> String {
+    blake3::hash(diff.as_bytes()).to_hex().to_string()
+}
+
 /// Proof that a human already approved dispatch for this exact card and target.
 ///
 /// The interactive tool gate writes this after `y`. The coordinator may then
@@ -779,6 +784,14 @@ pub struct DelegationJob {
     pub dispatch_receipt: Option<DispatchReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Hash of the saved `worker.diff` while it still awaits a verdict. A
+    /// card that blocked or failed during review can then be reviewed again
+    /// without rerunning the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewable_diff: Option<String>,
+    /// The queued run skips the worker and reviews `worker.diff` again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_only: bool,
 }
 
 /// Explain why a queued job cannot proceed because one of its prerequisites
@@ -960,6 +973,9 @@ impl DelegationJob {
                 DelegationStatus::AwaitingApproval
             ) | (DelegationStatus::AwaitingApproval, DelegationStatus::Queued)
                 | (DelegationStatus::Queued, DelegationStatus::WorkerRunning)
+                | (DelegationStatus::Queued, DelegationStatus::ReviewRunning)
+                | (DelegationStatus::Blocked, DelegationStatus::Queued)
+                | (DelegationStatus::Failed, DelegationStatus::Queued)
                 | (DelegationStatus::Queued, DelegationStatus::AwaitingApproval)
                 | (
                     DelegationStatus::WorkerRunning,
@@ -1006,12 +1022,42 @@ impl DelegationJob {
                 "delegation job requires an approval record before queuing".into(),
             ));
         }
+        // Leaving `blocked` or `failed` for the queue only reviews the saved
+        // diff again; a new worker attempt goes through a fresh approval.
+        if next == DelegationStatus::Queued
+            && matches!(
+                self.status,
+                DelegationStatus::Blocked | DelegationStatus::Failed
+            )
+            && !self.review_only
+        {
+            return Err(HarnessError::Other(
+                "only a review of the saved worker diff can be queued from here; retry for a new worker attempt".into(),
+            ));
+        }
+        if next == DelegationStatus::ReviewRunning
+            && self.status == DelegationStatus::Queued
+            && !self.review_only
+        {
+            return Err(HarnessError::Other(
+                "a queued job reaches review through its worker".into(),
+            ));
+        }
         if next == DelegationStatus::AwaitingApproval {
             self.dispatch_receipt = None;
             self.approved_at = None;
             self.approval_fingerprint = None;
             self.resolved_worker_target = None;
             self.resolved_reviewer_target = None;
+            self.reviewable_diff = None;
+            self.review_only = false;
+        }
+        if matches!(
+            next,
+            DelegationStatus::ReadyToApply | DelegationStatus::ChangesRequested
+        ) {
+            // A verdict exists; asking another reviewer is reviewer shopping.
+            self.reviewable_diff = None;
         }
         self.status = next;
         self.apply_pending = false;
@@ -1022,6 +1068,44 @@ impl DelegationJob {
             format!("delegation status changed to {next:?}"),
         );
         Ok(true)
+    }
+
+    /// Queue a fresh reviewer for the saved worker diff of a card that
+    /// blocked or failed before any verdict. `saved_diff` is the current
+    /// `worker.diff`; it must be the diff the worker attempt produced.
+    pub fn queue_review_again(&mut self, saved_diff: &str) -> Result<()> {
+        if !matches!(
+            self.status,
+            DelegationStatus::Blocked | DelegationStatus::Failed
+        ) {
+            return Err(HarnessError::Other(
+                "only a blocked or failed card can be reviewed again".into(),
+            ));
+        }
+        if self.reviewable_diff.as_deref() != Some(worker_diff_hash(saved_diff).as_str()) {
+            return Err(HarnessError::Other(
+                "this card has no worker diff awaiting a verdict; retry for a new worker attempt"
+                    .into(),
+            ));
+        }
+        if !self.is_approved() {
+            return Err(HarnessError::Other(
+                "this card is no longer approved; retry and approve it again".into(),
+            ));
+        }
+        self.review_only = true;
+        if let Err(error) = self.transition(DelegationStatus::Queued) {
+            self.review_only = false;
+            return Err(error);
+        }
+        self.error = None;
+        self.orchestration.add_message(
+            MessageKind::Decision,
+            "user",
+            "Review again requested; the saved worker diff is reviewed by a fresh reviewer",
+            self.updated_at,
+        );
+        Ok(())
     }
 
     pub fn block_interrupted_apply(&mut self) -> Result<bool> {
@@ -1851,6 +1935,8 @@ impl DelegationStore {
             orchestration,
             dispatch_receipt: None,
             idempotency_key: None,
+            reviewable_diff: None,
+            review_only: false,
         };
         if self.load(&job_id)?.is_some() {
             return Err(HarnessError::Other(
@@ -2437,6 +2523,8 @@ mod tests {
             orchestration: OrchestrationState::default(),
             dispatch_receipt: None,
             idempotency_key: None,
+            reviewable_diff: None,
+            review_only: false,
         };
         assert!(job.transition(DelegationStatus::AwaitingApproval).unwrap());
         assert!(!job.transition(DelegationStatus::AwaitingApproval).unwrap());
@@ -2603,6 +2691,43 @@ Here is the JSON verdict:
     }
 
     #[test]
+    fn only_an_unjudged_saved_diff_can_be_reviewed_again() {
+        let root = scratch("review-again");
+        let store = DelegationStore::open(&root).unwrap();
+        let mut job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        job.approve().unwrap();
+        job.transition(DelegationStatus::Queued).unwrap();
+        job.transition(DelegationStatus::WorkerRunning).unwrap();
+        job.reviewable_diff = Some(worker_diff_hash("diff-1"));
+        job.transition(DelegationStatus::ReviewRunning).unwrap();
+        job.transition(DelegationStatus::Blocked).unwrap();
+
+        // Without the flag, a blocked card cannot jump back into the queue.
+        assert!(job.transition(DelegationStatus::Queued).is_err());
+        // A different diff on disk is not the one that awaits review.
+        assert!(job.queue_review_again("diff-2").is_err());
+        assert_eq!(job.status, DelegationStatus::Blocked);
+
+        job.queue_review_again("diff-1").unwrap();
+        assert_eq!(job.status, DelegationStatus::Queued);
+        assert!(job.review_only);
+        job.transition(DelegationStatus::ReviewRunning).unwrap();
+        job.transition(DelegationStatus::ChangesRequested).unwrap();
+        // A verdict closes the door: no reviewer shopping.
+        assert_eq!(job.reviewable_diff, None);
+
+        // A queued job without the flag still has to run its worker first.
+        let mut fresh = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        fresh.approve().unwrap();
+        fresh.transition(DelegationStatus::Queued).unwrap();
+        assert!(fresh.transition(DelegationStatus::ReviewRunning).is_err());
+    }
+
+    #[test]
     fn changes_requested_creates_a_fresh_worker_attempt() {
         let root = scratch("fresh-attempt");
         let now = now_millis();
@@ -2640,6 +2765,8 @@ Here is the JSON verdict:
             orchestration: OrchestrationState::default(),
             dispatch_receipt: None,
             idempotency_key: None,
+            reviewable_diff: None,
+            review_only: false,
         };
         job.approve().unwrap();
         job.transition(DelegationStatus::Queued).unwrap();

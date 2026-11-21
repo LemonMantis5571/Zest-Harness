@@ -235,6 +235,7 @@ fn serve_completes_create_approve_review_and_apply() {
         "delegation_update",
         "delegation_approve",
         "delegation_retry",
+        "delegation_review_again",
         "delegation_cancel",
         "delegation_apply",
     ] {

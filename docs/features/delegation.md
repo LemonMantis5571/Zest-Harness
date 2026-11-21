@@ -92,6 +92,15 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   clears its approval and takes a new workspace snapshot. Only one approval
   follows. The next worker attempt also gets the previous diff and review report
   as evidence.
+- **Review again.** While a saved `worker.diff` has no verdict yet, the job
+  records its hash (`reviewable_diff`). If the card then blocks or fails (the
+  reviewer kept failing, edited files, or timed out), `canReviewAgain` is
+  true and `review_again` (desktop **Review again**, MCP
+  `delegation_review_again`) queues a fresh reviewer on that same diff with
+  `review_only` set. The worker does not run, the approval still covers it,
+  and a config change still sends the card back to `awaiting_approval`. A
+  verdict (`ready_to_apply` or `changes_requested`) clears the hash, so a
+  rejected diff cannot be sent to another reviewer.
 - `accepted` and `cancelled` are final. Provider credentials are never written
   to a job. External worker processes run with secret-looking environment
   variables and the configured provider key names removed.
@@ -113,6 +122,7 @@ awaiting_approval -> queued -> worker_running -> review_running -> ready_to_appl
                                                      |-> changes_requested       |-> apply_conflict
 non-final -> blocked | failed | cancelled
 blocked | failed | changes_requested | apply_conflict | queued -> awaiting_approval  (retry, edit, config drift)
+blocked | failed -> queued -> review_running  (review again, same worker diff)
 ```
 
 ## How it works
@@ -126,7 +136,7 @@ Entry points:
    `crates/desktop/src/lib.rs`: `list_delegation_jobs` (runs `reconcile`
    first), `list_delegation_targets`, `create_delegation_job`,
    `update_delegation_job`, `approve_delegation_job`, `cancel_delegation_job`,
-   `retry_delegation_job`, `apply_delegation_job`, `get_delegation_job` and
+   `retry_delegation_job`, `review_delegation_job_again`, `apply_delegation_job`, `get_delegation_job` and
    `prepare_delegation_handoff`. Each one calls `DelegationCoordinator`.
    Coordinator events reach the UI through `TauriDelegationNotifier` (in
    `crates/desktop/src/delegation.rs`) as `delegation-event`, which `App.tsx`

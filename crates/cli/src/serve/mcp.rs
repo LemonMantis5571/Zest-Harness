@@ -237,6 +237,7 @@ fn is_mutating_tool(name: &str) -> bool {
             | "delegation_update"
             | "delegation_approve"
             | "delegation_retry"
+            | "delegation_review_again"
             | "delegation_cancel"
             | "delegation_apply"
     )
@@ -343,6 +344,14 @@ fn call_tool_inner(state: &AppState, params: &Value) -> Result<Value, (i64, Stri
             json!(state
                 .coordinator
                 .retry(&state.root, &job_id, expected)
+                .map_err(tool_err)?)
+        }
+        "delegation_review_again" => {
+            let job_id = required_str(&arguments, "jobId")?;
+            let expected = optional_u64(&arguments, "expectedUpdatedAt");
+            json!(state
+                .coordinator
+                .review_again(&state.root, &job_id, expected)
                 .map_err(tool_err)?)
         }
         "delegation_cancel" => {
@@ -468,6 +477,11 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
         tool(
             "delegation_retry",
             "Return a blocked or failed card to awaiting_approval. A new approval is required.",
+            object_with(&["jobId"]),
+        ),
+        tool(
+            "delegation_review_again",
+            "Review the saved worker diff of a blocked or failed card again with a fresh reviewer (canReviewAgain). The worker does not run again; the card's approval still applies.",
             object_with(&["jobId"]),
         ),
         tool(

@@ -19,9 +19,9 @@ use zest_core::{
     acceptance_check_skip_reason, apply_diff_checked, capture_workspace_snapshot,
     capture_worktree_lineage, dependency_blocker, diff_paths, resolve_provider_target,
     run_acceptance_checks, run_delegation_reviewer, run_delegation_worker, run_provider_reviewer,
-    run_provider_worker, validate_diff_scope, AttemptRole, AttemptUsage, CheckStatus, Config,
-    DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus, DelegationStore,
-    DelegationTarget, ExternalUsageReport, NativeTaskUsageContext, ProviderConfig,
+    run_provider_worker, validate_diff_scope, worker_diff_hash, AttemptRole, AttemptUsage,
+    CheckStatus, Config, DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus,
+    DelegationStore, DelegationTarget, ExternalUsageReport, NativeTaskUsageContext, ProviderConfig,
     ResolvedTargetMetadata, ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget,
     WorkerResult,
 };
@@ -720,6 +720,9 @@ pub struct DelegationJobView {
     pub changed_file_count: usize,
     pub acceptance_checks: Vec<AcceptanceCheckView>,
     pub reviewer_findings: Vec<ReviewFinding>,
+    /// A blocked or failed card whose saved worker diff never got a verdict:
+    /// `review_again` runs a fresh reviewer on it without a new worker run.
+    pub can_review_again: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub worker_summary: Option<String>,
@@ -985,6 +988,11 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_default();
     let changed_files = diff_paths(&diff);
+    let can_review_again = matches!(
+        job.status,
+        CoreDelegationStatus::Blocked | CoreDelegationStatus::Failed
+    ) && job.is_approved()
+        && job.reviewable_diff.as_deref() == Some(worker_diff_hash(&diff).as_str());
     let report = report_from_store(store, job);
     let acceptance_checks = job
         .card
@@ -1062,6 +1070,7 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         changed_files,
         acceptance_checks,
         reviewer_findings,
+        can_review_again,
         worker_summary,
         error: job.error.clone(),
         created_at: job.created_at,
@@ -1778,6 +1787,43 @@ impl DelegationCoordinator {
         Ok(job_view(&store, &job))
     }
 
+    /// Review the saved worker diff of a card that blocked or failed before a
+    /// verdict (a reviewer that kept failing, edited files, or timed out)
+    /// with a fresh reviewer, without rerunning the worker. The existing
+    /// approval still covers it: the diff and targets are the approved ones,
+    /// and a config change still sends the card back for approval.
+    pub fn review_again(
+        self: &Arc<Self>,
+        root: &Path,
+        job_id: &str,
+        expected_updated_at: Option<u64>,
+    ) -> ResultView {
+        self.require_lock(root)?;
+        let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
+        let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
+        let mut job = store
+            .load(job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "delegation job was not found".to_string())?;
+        if job.status == CoreDelegationStatus::Queued && job.review_only {
+            return Ok(job_view(&store, &job));
+        }
+        job.require_updated_at(expected_updated_at)
+            .map_err(|error| error.to_string())?;
+        let saved_diff = store
+            .read_artifact(job_id, "worker.diff")
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
+        job.queue_review_again(&saved_diff)
+            .map_err(|error| error.to_string())?;
+        let job = store.update(job).map_err(|error| error.to_string())?;
+        self.emit(&store, &job, EventKind::Queued);
+        self.enqueue(root.to_path_buf(), job.job_id.clone());
+        Ok(job_view(&store, &job))
+    }
+
     pub fn reconcile(self: &Arc<Self>, root: &Path) -> Result<Vec<DelegationJobView>, String> {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
@@ -2100,6 +2146,33 @@ impl DelegationCoordinator {
             self.emit(&store, &job, EventKind::ApprovalRequired);
             return Ok(());
         }
+        if job.review_only {
+            let worker_diff = store
+                .read_artifact(job_id, "worker.diff")
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .filter(|diff| {
+                    job.reviewable_diff.as_deref() == Some(worker_diff_hash(diff).as_str())
+                })
+                .ok_or_else(|| {
+                    "the saved worker diff changed; retry for a new worker attempt".to_string()
+                })?;
+            let worker_result = worker_result_from_store(&store, &job).ok_or_else(|| {
+                "the saved worker result is missing; retry for a new worker attempt".to_string()
+            })?;
+            return self
+                .run_review_phase(
+                    root,
+                    &store,
+                    job,
+                    &config,
+                    &resolved_targets.reviewer,
+                    &worker_diff,
+                    &worker_result,
+                    cancel,
+                )
+                .await;
+        }
         job.transition(CoreDelegationStatus::WorkerRunning)
             .map_err(|error| error.to_string())?;
         let worker_agent = resolved_targets.worker.target.identity().to_string();
@@ -2232,6 +2305,7 @@ impl DelegationCoordinator {
             job.set_attempt_usage(&worker_attempt, usage)
                 .map_err(|e| e.to_string())?;
         }
+        job.reviewable_diff = Some(worker_diff_hash(&worker_diff));
         if let Some(evidence) = worker_evidence.take() {
             job.orchestration.attach_external_session(evidence);
         }
@@ -2273,6 +2347,7 @@ impl DelegationCoordinator {
     ) -> Result<(), String> {
         job.transition(CoreDelegationStatus::ReviewRunning)
             .map_err(|error| error.to_string())?;
+        job.review_only = false;
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
@@ -2967,6 +3042,73 @@ mod tests {
             .inbox
             .iter()
             .any(|message| message.body.contains("Starting one fresh reviewer")));
+    }
+
+    #[tokio::test]
+    async fn review_again_reuses_the_worker_diff_after_reviewers_keep_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let counter = tempfile::tempdir().unwrap();
+        let counter = counter.path().join("reviews");
+        let root = temp.path();
+        // Both automatic reviewer rounds answer prose; the third reviewer works.
+        write_fixture_project_with(
+            root,
+            &fixture_agent(
+                "flaky",
+                &["delegation_flaky_reviewer", &counter.to_string_lossy(), "2"],
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Review again", "flaky"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let blocked = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Blocked,
+        )
+        .await;
+        assert!(blocked.error.as_deref().unwrap().contains("malformed JSON"));
+        assert!(blocked.can_review_again);
+        assert_eq!(attempts_by_role(&blocked, "reviewer"), 2);
+        let diff_before = coordinator
+            .artifact_page(root, &created.job_id, "worker.diff", 0)
+            .unwrap()
+            .content;
+
+        let queued = coordinator
+            .review_again(root, &created.job_id, Some(blocked.updated_at))
+            .unwrap();
+        assert_eq!(queued.status, DelegationStatus::Queued);
+        assert!(queued.approved, "no fresh approval is needed");
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(
+            attempts_by_role(&ready, "worker"),
+            1,
+            "the worker did not run again"
+        );
+        assert_eq!(attempts_by_role(&ready, "reviewer"), 3);
+        assert!(!ready.can_review_again);
+        assert_eq!(
+            coordinator
+                .artifact_page(root, &created.job_id, "worker.diff", 0)
+                .unwrap()
+                .content,
+            diff_before
+        );
+        // A verdict exists now; asking another reviewer is refused.
+        let error = coordinator
+            .review_again(root, &created.job_id, None)
+            .unwrap_err();
+        assert!(error.contains("blocked or failed"), "{error}");
     }
 
     #[tokio::test]

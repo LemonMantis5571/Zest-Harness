@@ -3192,6 +3192,23 @@ export default function App() {
     [replaceDelegationJob]
   );
 
+  const onReviewDelegationAgain = useCallback(
+    async (jobId: string) => {
+      try {
+        const job = await backend.reviewDelegationJobAgain(jobId);
+        replaceDelegationJob(job);
+      } catch (err) {
+        toast.add({
+          type: "error",
+          title: "Could not review feature card again",
+          description: formatInvokeError(err),
+        });
+        throw err;
+      }
+    },
+    [replaceDelegationJob]
+  );
+
   const onApplyDelegation = useCallback(
     async (jobId: string) => {
       // This click confirms itself below, so its `applied` event stays quiet.
@@ -3575,6 +3592,7 @@ export default function App() {
             onApproveDelegation={onApproveDelegation}
             onCancelDelegation={onCancelDelegation}
             onRetryDelegation={onRetryDelegation}
+            onReviewDelegationAgain={onReviewDelegationAgain}
             onApplyDelegation={onApplyDelegation}
             settingsRequest={settingsRequest}
             sessionWarning={sessionWarning}

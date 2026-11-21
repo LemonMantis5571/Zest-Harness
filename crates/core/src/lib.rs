@@ -91,7 +91,7 @@ pub use delegated_worker::{
 };
 pub use delegation::{
     apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
-    diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths,
+    diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths, worker_diff_hash,
     AcceptanceCheckResult, AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts,
     DelegationAttempt, DelegationJob, DelegationOrigin, DelegationStatus, DelegationStore,
     DelegationTarget, DispatchReceipt, FeatureCard, ResolvedTargetMetadata, ReviewDecision,
