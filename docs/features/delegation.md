@@ -70,8 +70,10 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   sensitive paths. Otherwise the job fails.
 - Zest runs the acceptance checks itself, in a separate worktree with the worker
   diff applied. It only runs a command that classifies as auto-run under
-  `[tools.bash]`. Any other command is recorded as `skipped`. The reviewer must
-  report these results exactly as Zest recorded them.
+  `[tools.bash]`. Any other command is recorded as `skipped`. The reviewer sees
+  these results as evidence and only returns a verdict and findings; the
+  coordinator writes its own results into `review-result.json`, whatever the
+  reviewer said about them.
 - `ready_to_apply` needs all of the following: a review report that parses,
   decision `accepted`, evidence with `passed` for every required check, and no
   `blocking` finding. A reviewer that edits files sends the job to `blocked`,
@@ -175,9 +177,10 @@ The pipeline is `DelegationCoordinator::run_job` in `scheduler.rs`:
 5. The job moves to `review_running`. `run_acceptance_checks` runs the checks.
 6. The reviewer runs through `run_delegation_reviewer` or
    `run_provider_reviewer`. The reviewer role has no write tools.
-7. `ReviewReport::parse`, `validate_review_paths` and
-   `validate_authoritative_checks` run. `can_accept` then chooses
-   `ready_to_apply` or `changes_requested`.
+7. `ReviewReport::parse_verdict` reads the verdict and attaches the recorded
+   check results, then `validate_review_paths` runs. `can_accept` chooses
+   `ready_to_apply` or `changes_requested`; an accepted verdict over a failed
+   or skipped check names that check in the error (`unmet_check`).
 
 `orchestration.rs` keeps an `OrchestrationState` projection inside each job.
 It holds the phase log (at most 128 entries), the decision gates (`approval`,

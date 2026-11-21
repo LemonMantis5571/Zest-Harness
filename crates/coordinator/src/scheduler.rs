@@ -939,31 +939,6 @@ fn attempt_usage_from_external(report: &ExternalUsageReport) -> AttemptUsage {
     }
 }
 
-fn validate_authoritative_checks(
-    expected: &[zest_core::AcceptanceCheckResult],
-    report: &ReviewReport,
-) -> Result<(), String> {
-    for expected_check in expected {
-        let Some(actual) = report
-            .checks
-            .iter()
-            .find(|check| check.command == expected_check.command)
-        else {
-            return Err(format!(
-                "reviewer omitted authoritative acceptance check `{}`",
-                expected_check.command
-            ));
-        };
-        if actual.status != expected_check.status || actual.output != expected_check.output {
-            return Err(format!(
-                "reviewer changed authoritative result for `{}`",
-                expected_check.command
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobView {
     let diff = store
         .read_artifact(&job.job_id, "worker.diff")
@@ -2243,8 +2218,9 @@ impl DelegationCoordinator {
         )
         .await
         .map_err(|error| format!("acceptance checks failed: {error}"))?;
-        let check_evidence = serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?;
-        let review_prompt = format!("{}\n\n# Authoritative acceptance-check results\n```json\n{}\n```\nReport these exact command/status/output values in your checks array.", job.card.review_prompt(root, &snapshot, &worker_result), check_evidence);
+        let review_prompt = job
+            .card
+            .review_prompt(root, &snapshot, &worker_result, &checks);
         let mut reviewer_evidence = None;
         let review = match &reviewer_target {
             DelegationTarget::ExternalAgent { agent_id } => {
@@ -2329,7 +2305,7 @@ impl DelegationCoordinator {
             self.emit(&store, &job, EventKind::Blocked);
             return Ok(());
         }
-        let report = match ReviewReport::parse(&review.0, &job.card.acceptance_checks) {
+        let report = match ReviewReport::parse_verdict(&review.0, checks.clone()) {
             Ok(report) => report,
             Err(error) => {
                 let malformed = serde_json::json!({"error": error.to_string(), "raw": review.0});
@@ -2374,33 +2350,6 @@ impl DelegationCoordinator {
             self.emit(&store, &job, EventKind::Blocked);
             return Ok(());
         }
-        if let Err(error) = validate_authoritative_checks(&checks, &report) {
-            store
-                .write_artifact(
-                    job_id,
-                    "review-result.json",
-                    &serde_json::to_vec_pretty(&serde_json::json!({
-                        "error": error,
-                        "report": report,
-                        "authoritativeChecks": checks,
-                    }))
-                    .map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            job.finish_attempt(&reviewer_attempt);
-            if let Some(usage) = review.2 {
-                job.set_attempt_usage(&reviewer_attempt, usage)
-                    .map_err(|e| e.to_string())?;
-            }
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.set_error(error);
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::Blocked);
-            return Ok(());
-        }
         store
             .write_artifact(
                 job_id,
@@ -2428,7 +2377,19 @@ impl DelegationCoordinator {
         } else {
             job.transition(CoreDelegationStatus::ChangesRequested)
                 .map_err(|error| error.to_string())?;
-            job.set_error("Reviewer requested changes before this diff can be applied.");
+            let reason = match report.decision {
+                zest_core::ReviewDecision::Accepted => report
+                    .unmet_check(&job.card.acceptance_checks)
+                    .map(|reason| format!("The reviewer accepted the diff, but {reason}."))
+                    .unwrap_or_else(|| {
+                        "The reviewer reported a blocking finding before this diff can be applied."
+                            .into()
+                    }),
+                zest_core::ReviewDecision::ChangesRequested => {
+                    "Reviewer requested changes before this diff can be applied.".into()
+                }
+            };
+            job.set_error(reason);
             store
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
@@ -2620,6 +2581,12 @@ mod tests {
     }
 
     fn write_fixture_project(root: &Path) {
+        write_fixture_project_with(root, "");
+    }
+
+    /// The fixture project with extra `zest.toml` text appended after the
+    /// default `[agents.worker]` entry.
+    fn write_fixture_project_with(root: &Path, extra_config: &str) {
         git(root, &["init", "--quiet"]);
         git(root, &["config", "user.name", "Zest Test"]);
         git(root, &["config", "user.email", "zest-test@localhost"]);
@@ -2634,7 +2601,7 @@ mod tests {
         std::fs::write(
             root.join("zest.toml"),
             format!(
-                "[agents.worker]\nmode = \"headless\"\ncommand = {command}\nargs = [\"delegation\", \"{{prompt}}\"]\nworkspace = \"isolated\"\ntimeout_secs = 30\n"
+                "[agents.worker]\nmode = \"headless\"\ncommand = {command}\nargs = [\"delegation\", \"{{prompt}}\"]\nworkspace = \"isolated\"\ntimeout_secs = 30\n{extra_config}"
             ),
         )
         .unwrap();
@@ -2732,6 +2699,35 @@ mod tests {
                 .unwrap()
                 .replace("\r\n", "\n"),
             "fixture worker change\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_that_omits_check_output_still_reaches_ready_to_apply() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, "\n[tools.bash]\nextra_allowlist = [[\"rustc\"]]\n");
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let mut request = create_request("Checked delegation");
+        request.acceptance_checks = vec!["rustc --version".into()];
+        let created = coordinator.create_job(root, request).unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        // The fixture reviewer answers `"checks":[]`; the coordinator's own
+        // result is what the report records.
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(ready.acceptance_checks.len(), 1);
+        let check = &ready.acceptance_checks[0];
+        assert!(matches!(check.status, AcceptanceCheckStatus::Passed));
+        assert!(
+            check.output.starts_with("$ rustc --version\nexit 0"),
+            "{}",
+            check.output
         );
     }
 

@@ -481,21 +481,21 @@ impl FeatureCard {
         root: &Path,
         snapshot: &WorkspaceSnapshot,
         worker_result: &WorkerResult,
+        checks: &[AcceptanceCheckResult],
     ) -> String {
         let context = bounded_context(root, &self.context);
         let card = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into());
         let worker = serde_json::to_string_pretty(worker_result).unwrap_or_else(|_| "{}".into());
-        let checks = if self.acceptance_checks.is_empty() {
+        let checks = if checks.is_empty() {
             "(none declared)".to_string()
         } else {
-            self.acceptance_checks
-                .iter()
-                .map(|check| format!("- {check}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            format!(
+                "Zest ran these commands itself, in a separate workspace with the worker diff applied. Treat them as evidence. Zest adds them to the final report, so leave them out of your reply.\n```json\n{}\n```",
+                serde_json::to_string_pretty(checks).unwrap_or_else(|_| "[]".into())
+            )
         };
         format!(
-            "You are a fresh, independent Zest reviewer. Inspect the current isolated workspace and the applied worker diff. You may read files and run checks, but you must not edit files and you must not create delegation jobs. Any reviewer-side edits are discarded. Do not address the end user.\n\n# Feature card\n{card}\n\n# Selected context\n{context}\n\n# Worker result\n{worker}\n\n# Required acceptance checks\n{checks}\n\n# Workspace snapshot\nhead={:?}\nfingerprint={}\n\nReply with one JSON object and nothing else. Do not wrap it in markdown or prose. Shape: {{\"decision\":\"accepted\" or \"changes_requested\",\"summary\":\"…\",\"findings\":[{{\"severity\":\"blocking\" or \"advisory\",\"path\":\"relative/path\",\"message\":\"…\"}}],\"checks\":[{{\"command\":\"…\",\"status\":\"passed\" or \"failed\" or \"skipped\",\"output\":\"…\"}}]}}. Include evidence for every required check; never claim a check passed without running it.",
+            "You are a fresh, independent Zest reviewer. Inspect the current isolated workspace and the applied worker diff. You may read files and run checks, but you must not edit files and you must not create delegation jobs. Any reviewer-side edits are discarded. Do not address the end user.\n\n# Feature card\n{card}\n\n# Selected context\n{context}\n\n# Worker result\n{worker}\n\n# Acceptance-check results\n{checks}\n\n# Workspace snapshot\nhead={:?}\nfingerprint={}\n\nReply with one JSON object and nothing else. Do not wrap it in markdown or prose. Shape: {{\"decision\":\"accepted\" or \"changes_requested\",\"summary\":\"…\",\"findings\":[{{\"severity\":\"blocking\" or \"advisory\",\"path\":\"relative/path\",\"message\":\"…\"}}]}}. Judge the diff against the objective, the scope and the acceptance-check results.",
             snapshot.head, snapshot.fingerprint
         )
     }
@@ -1294,9 +1294,46 @@ impl ReviewReport {
         if value.chars().count() > MAX_REVIEW_REPORT_CHARS {
             return Err(HarnessError::Other("reviewer report is too large".into()));
         }
-        let report = parse_review_json(value)?;
+        let report: Self = parse_review_json(value)?;
         report.validate(required_checks)?;
         Ok(report)
+    }
+
+    /// Parse a reviewer's verdict and attach the acceptance-check results the
+    /// coordinator recorded itself. Any `checks` the reviewer wrote are
+    /// ignored: the reviewer judges, it does not transcribe command output.
+    pub fn parse_verdict(raw: &str, checks: Vec<AcceptanceCheckResult>) -> Result<Self> {
+        let value = raw.trim();
+        if value.chars().count() > MAX_REVIEW_REPORT_CHARS {
+            return Err(HarnessError::Other("reviewer report is too large".into()));
+        }
+        let verdict: ReviewVerdict = parse_review_json(value)?;
+        let report = Self {
+            decision: verdict.decision,
+            summary: verdict.summary,
+            findings: verdict.findings,
+            checks,
+        };
+        report.validate(&[])?;
+        Ok(report)
+    }
+
+    /// Why an accepted verdict still cannot be applied, naming the first
+    /// acceptance check that did not pass.
+    pub fn unmet_check(&self, required_checks: &[String]) -> Option<String> {
+        required_checks.iter().find_map(|required| {
+            match self.checks.iter().find(|check| check.command == *required) {
+                None => Some(format!("acceptance check `{required}` has no result")),
+                Some(check) if check.status == CheckStatus::Failed => {
+                    Some(format!("acceptance check `{required}` failed"))
+                }
+                Some(check) if check.status == CheckStatus::Skipped => Some(format!(
+                    "acceptance check `{required}` was not run: {}",
+                    check.output
+                )),
+                Some(_) => None,
+            }
+        })
     }
 
     pub fn validate(&self, required_checks: &[String]) -> Result<()> {
@@ -1359,9 +1396,18 @@ impl ReviewReport {
     }
 }
 
-fn parse_review_json(raw: &str) -> Result<ReviewReport> {
+/// The part of a review report the reviewer owns.
+#[derive(Debug, Deserialize)]
+struct ReviewVerdict {
+    decision: ReviewDecision,
+    summary: String,
+    #[serde(default)]
+    findings: Vec<ReviewFinding>,
+}
+
+fn parse_review_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let mut last_error = None;
-    let mut consider = |payload: &str| -> Option<ReviewReport> {
+    let mut consider = |payload: &str| -> Option<T> {
         match deserialize_review_prefix(payload) {
             Ok(report) => Some(report),
             Err(error) => {
@@ -1417,7 +1463,9 @@ fn parse_review_json(raw: &str) -> Result<ReviewReport> {
     )))
 }
 
-fn deserialize_review_prefix(raw: &str) -> std::result::Result<ReviewReport, serde_json::Error> {
+fn deserialize_review_prefix<T: serde::de::DeserializeOwned>(
+    raw: &str,
+) -> std::result::Result<T, serde_json::Error> {
     let trimmed = raw.trim_start();
     match deserialize_report_or_normalized(trimmed) {
         Ok(report) => Ok(report),
@@ -1432,11 +1480,11 @@ fn deserialize_review_prefix(raw: &str) -> std::result::Result<ReviewReport, ser
     }
 }
 
-fn deserialize_report_or_normalized(
+fn deserialize_report_or_normalized<T: serde::de::DeserializeOwned>(
     raw: &str,
-) -> std::result::Result<ReviewReport, serde_json::Error> {
+) -> std::result::Result<T, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(raw);
-    match ReviewReport::deserialize(&mut de) {
+    match T::deserialize(&mut de) {
         Ok(report) => Ok(report),
         Err(error) => {
             let mut de = serde_json::Deserializer::from_str(raw);
@@ -2463,6 +2511,53 @@ Thanks."#;
             checks: vec![],
         };
         assert!(validate_review_paths(&scratch("review-paths"), &report).is_err());
+    }
+
+    #[test]
+    fn verdict_takes_check_results_from_the_coordinator_not_the_reviewer() {
+        let required = vec!["cargo test".to_string()];
+        let recorded = vec![AcceptanceCheckResult {
+            command: "cargo test".into(),
+            status: CheckStatus::Passed,
+            output: "$ cargo test\nexit 0\n\ntest result: ok".into(),
+        }];
+        // The reviewer left the checks out entirely: still a usable verdict.
+        let report = ReviewReport::parse_verdict(
+            r#"{"decision":"accepted","summary":"Looks good","findings":[]}"#,
+            recorded.clone(),
+        )
+        .unwrap();
+        assert_eq!(report.checks, recorded);
+        assert!(report.can_accept(&required));
+        assert_eq!(report.unmet_check(&required), None);
+
+        // A reviewer that paraphrases or misreports a check cannot change it.
+        let report = ReviewReport::parse_verdict(
+            r#"{"decision":"accepted","summary":"Looks good","checks":[{"command":"cargo test","status":"PASS","output":"trust me"}]}"#,
+            recorded,
+        )
+        .unwrap();
+        assert_eq!(
+            report.checks[0].output,
+            "$ cargo test\nexit 0\n\ntest result: ok"
+        );
+
+        // An accepted verdict over a failed check is not applicable, and says why.
+        let failed = vec![AcceptanceCheckResult {
+            command: "cargo test".into(),
+            status: CheckStatus::Failed,
+            output: "$ cargo test\nexit 101".into(),
+        }];
+        let report = ReviewReport::parse_verdict(
+            r#"{"decision":"accepted","summary":"Looks good"}"#,
+            failed,
+        )
+        .unwrap();
+        assert!(!report.can_accept(&required));
+        assert_eq!(
+            report.unmet_check(&required).as_deref(),
+            Some("acceptance check `cargo test` failed")
+        );
     }
 
     #[test]
