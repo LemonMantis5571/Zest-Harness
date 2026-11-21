@@ -2775,6 +2775,17 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
         unavailable: false,
       };
     },
+    async pullRequestStatus(number) {
+      const merged = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("fixturePrMerged");
+      return {
+        state: merged ? "MERGED" : "OPEN",
+        url: "https://github.com/zest/app/pull/" + number,
+        checks: [
+          { name: "Linux verify", status: merged ? "SUCCESS" : "FAILURE", url: "https://github.com/zest/app/actions/runs/42" },
+          { name: "Windows verify", status: merged ? "SUCCESS" : "IN_PROGRESS", url: null },
+        ],
+      };
+    },
     async pullRequestDiff(number = 13): Promise<WorkspaceChange> {
       if (scenario === "pull-request-delayed") {
         if (options.pullRequestDiffReady) {

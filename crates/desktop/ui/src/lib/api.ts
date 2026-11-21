@@ -568,6 +568,10 @@ export function workspaceChanges() {
   return invoke<WorkspaceChange>("workspace_changes");
 }
 
+export function pullRequestStatus(number: number) {
+  return invoke<import("./generated/PullRequestStatus").PullRequestStatus>("pull_request_status", { number });
+}
+
 export function pullRequestDiff(number?: number) {
   return invoke<WorkspaceChange>("pull_request_diff", {
     number: number ?? null,

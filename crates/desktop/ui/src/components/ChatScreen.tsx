@@ -1007,29 +1007,23 @@ export function ChatScreen({
         diff: "",
         source: "pull_request",
         changeId: `pr:${link.number}`,
+        pullRequest: link,
         loading: true,
       };
       setDiffTarget(loadingTarget);
       try {
         const change = await getBackend().pullRequestDiff(link.number);
         if (requestId !== pullRequestLoadRef.current) return;
-        if (
-          change.unavailable ||
-          (!change.changedFiles.length && !change.diff.trim())
-        ) {
-          await openExternalUrl(link.url);
-          return;
-        }
         setDiffTarget({
           ...loadingTarget,
           loading: false,
+          diffUnavailable: change.unavailable,
           diff: change.diff,
         });
       } catch (error) {
         if (requestId !== pullRequestLoadRef.current) return;
         ignoreExpectedFailure(error, "open pull request diff");
-        setDiffTarget(null);
-        await openExternalUrl(link.url);
+        setDiffTarget({ ...loadingTarget, loading: false, diffUnavailable: true });
       }
     },
     [session.isFreeChat]

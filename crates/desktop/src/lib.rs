@@ -14,6 +14,7 @@ mod html;
 #[cfg(debug_assertions)]
 mod html_native_check;
 mod plugins;
+mod pr_checks;
 #[cfg(test)]
 mod scratch_dir;
 mod session;
@@ -8921,6 +8922,7 @@ enum PullRequestLookup {
 }
 
 struct CachedPullRequest {
+    checked: std::time::Instant,
     root: PathBuf,
     branch: String,
     lookup: PullRequestLookup,
@@ -8932,7 +8934,10 @@ async fn lookup_pull_request_cached(root: &Path, branch: Option<&str>) -> PullRe
     if let Some(branch) = branch.filter(|name| !name.is_empty()) {
         if let Ok(guard) = PULL_REQUEST_CACHE.lock() {
             if let Some(cached) = guard.as_ref() {
-                if cached.root == root && cached.branch == branch {
+                if cached.root == root
+                    && cached.branch == branch
+                    && cached.checked.elapsed() < Duration::from_secs(30)
+                {
                     return cached.lookup.clone();
                 }
             }
@@ -8940,6 +8945,7 @@ async fn lookup_pull_request_cached(root: &Path, branch: Option<&str>) -> PullRe
         let lookup = lookup_pull_request(root).await;
         if let Ok(mut guard) = PULL_REQUEST_CACHE.lock() {
             *guard = Some(CachedPullRequest {
+                checked: std::time::Instant::now(),
                 root: root.to_path_buf(),
                 branch: branch.to_string(),
                 lookup: lookup.clone(),
@@ -9921,6 +9927,7 @@ pub fn run() {
                 git_branch,
                 git_context,
                 pull_request_diff,
+                pr_checks::pull_request_status,
                 workspace_changes,
                 verify_workspace,
                 context_usage,
@@ -10339,6 +10346,7 @@ mod export_bindings {
         WorkspaceReview::export_all(&config).expect("export WorkspaceReview bindings");
         WorkspaceFileChangeView::export_all(&config).expect("export WorkspaceFileChange bindings");
         WorkspaceChangeView::export_all(&config).expect("export WorkspaceChange bindings");
+        pr_checks::PullRequestStatus::export_all(&config).expect("export PR status bindings");
         PullRequestView::export_all(&config).expect("export PullRequestView bindings");
         GitContextView::export_all(&config).expect("export GitContext bindings");
         WorktreeChatStatusView::export_all(&config).expect("export WorktreeChatStatus bindings");
