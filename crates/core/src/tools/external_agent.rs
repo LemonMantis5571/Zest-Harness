@@ -108,6 +108,9 @@ pub struct ExternalAgentResult {
     pub malformed_lines: usize,
     pub usage: Option<ExternalUsageReport>,
     pub session_evidence: Option<ExternalSessionEvidence>,
+    /// For a feature-card worker, the snapshot commit its worktree started
+    /// from (see `isolated_workspace::prepare_reviewer`).
+    pub base_commit: Option<String>,
 }
 
 impl ExternalAgentRun {
@@ -123,6 +126,7 @@ impl ExternalAgentRun {
             malformed_lines: self.malformed_lines,
             usage,
             session_evidence: self.session_evidence,
+            base_commit: None,
         }
     }
 }
@@ -1014,6 +1018,7 @@ pub async fn run_delegation_reviewer(
     root: &Path,
     config: &ExternalAgentConfig,
     worker_diff: &str,
+    worker_base: Option<&str>,
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
@@ -1027,7 +1032,7 @@ pub async fn run_delegation_reviewer(
         crate::delegation::validate_diff_paths(root, worker_diff)
             .map_err(|error| format!("worker diff is unsafe: {error}"))?;
     }
-    let mut workspace = isolated_workspace::prepare_reviewer(root, worker_diff)
+    let mut workspace = isolated_workspace::prepare_reviewer(root, worker_diff, worker_base)
         .await
         .map_err(|error| {
             if error.contains("worker diff is unsafe") {
@@ -1074,6 +1079,7 @@ async fn run_isolated_with_cancel(
         .await
         .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
     let workspace_path = workspace.path().to_path_buf();
+    let base_commit = workspace.baseline().to_string();
     let result = spawn_and_run_with_cancel(
         workspace.path(),
         config,
@@ -1101,7 +1107,9 @@ async fn run_isolated_with_cancel(
             path: "isolated worktree".into(),
         });
     }
-    Ok(run.into_public())
+    let mut result = run.into_public();
+    result.base_commit = Some(base_commit);
+    Ok(result)
 }
 
 async fn spawn_and_run(

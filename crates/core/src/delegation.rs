@@ -792,6 +792,10 @@ pub struct DelegationJob {
     /// The queued run skips the worker and reviews `worker.diff` again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review_only: bool,
+    /// The snapshot commit the last worker attempt started from. Checks and
+    /// reviewers start there too, not from the checkout as it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_base: Option<String>,
 }
 
 /// Explain why a queued job cannot proceed because one of its prerequisites
@@ -1939,6 +1943,7 @@ impl DelegationStore {
             idempotency_key: None,
             reviewable_diff: None,
             review_only: false,
+            worker_base: None,
         };
         if self.load(&job_id)?.is_some() {
             return Err(HarnessError::Other(
@@ -2528,6 +2533,7 @@ mod tests {
             idempotency_key: None,
             reviewable_diff: None,
             review_only: false,
+            worker_base: None,
         };
         assert!(job.transition(DelegationStatus::AwaitingApproval).unwrap());
         assert!(!job.transition(DelegationStatus::AwaitingApproval).unwrap());
@@ -2770,6 +2776,7 @@ Here is the JSON verdict:
             idempotency_key: None,
             reviewable_diff: None,
             review_only: false,
+            worker_base: None,
         };
         job.approve().unwrap();
         job.transition(DelegationStatus::Queued).unwrap();

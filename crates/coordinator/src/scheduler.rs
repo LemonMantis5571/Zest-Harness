@@ -17,11 +17,11 @@ use crate::runtime::{
 use ts_rs::TS;
 use zest_core::{
     acceptance_check_skip_reason, apply_diff_checked, capture_workspace_snapshot,
-    capture_worktree_lineage, delegation_limits, dependency_blocker, diff_paths,
+    capture_worktree_lineage, delegation_limits, dependency_blocker, diff_paths, pin_worker_base,
     resolve_provider_target, run_acceptance_checks, run_delegation_reviewer, run_delegation_worker,
-    run_provider_reviewer, run_provider_worker, validate_diff_scope, worker_diff_hash, AttemptRole,
-    AttemptUsage, CheckStatus, Config, DelegationJob, DelegationOrigin,
-    DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
+    run_provider_reviewer, run_provider_worker, unpin_worker_base, validate_diff_scope,
+    worker_diff_hash, AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob,
+    DelegationOrigin, DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
     ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
     ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerActivity,
     WorkerLimits, WorkerResult,
@@ -1785,6 +1785,7 @@ impl DelegationCoordinator {
                 Ok(job) => job,
                 Err(error) => return Err(error.to_string()),
             };
+            unpin_worker_base(root, job_id);
             self.emit(&store, &job, EventKind::Cancelled);
             self.kick_pending(root, &store);
             return Ok(job_view(&store, &job));
@@ -2010,6 +2011,7 @@ impl DelegationCoordinator {
         job.transition(CoreDelegationStatus::Accepted)
             .map_err(|error| error.to_string())?;
         job.error = None;
+        unpin_worker_base(root, job_id);
         let job = store.update(job).map_err(|error| error.to_string())?;
         self.emit(&store, &job, EventKind::Applied);
         self.kick_pending(root, &store);
@@ -2317,7 +2319,13 @@ impl DelegationCoordinator {
                         evidence.preview = Some(parsed.summary.clone());
                         worker_evidence = Some(evidence);
                     }
-                    Ok((parsed, result.diff, result.text, attempt_usage))
+                    Ok((
+                        parsed,
+                        result.diff,
+                        result.text,
+                        attempt_usage,
+                        result.base_commit,
+                    ))
                 }
                 DelegationTarget::Provider { .. } => {
                     let result = run_provider_worker(
@@ -2339,6 +2347,7 @@ impl DelegationCoordinator {
                         result.diff,
                         result.final_text,
                         Some(result.usage),
+                        Some(result.base_commit),
                     ))
                 }
             }
@@ -2348,7 +2357,7 @@ impl DelegationCoordinator {
         if cancel.is_cancelled() {
             return self.cancelled(&store, job).await;
         }
-        let (worker_result, worker_diff, worker_text, worker_usage) = match worker {
+        let (worker_result, worker_diff, worker_text, worker_usage, worker_base) = match worker {
             Ok(worker) => worker,
             Err(error) => {
                 let mut error = format!("worker failed: {error}");
@@ -2392,6 +2401,12 @@ impl DelegationCoordinator {
                 .map_err(|e| e.to_string())?;
         }
         job.reviewable_diff = Some(worker_diff_hash(&worker_diff));
+        // Keep the worker's snapshot commit reachable so the checks and every
+        // reviewer, including a later review again, start from it.
+        job.worker_base = match worker_base {
+            Some(base) if pin_worker_base(root, job_id, &base).await.is_ok() => Some(base),
+            _ => None,
+        };
         if let Some(evidence) = worker_evidence.take() {
             job.orchestration.attach_external_session(evidence);
         }
@@ -2480,6 +2495,7 @@ impl DelegationCoordinator {
             root,
             config.clone(),
             worker_diff,
+            job.worker_base.as_deref(),
             &job.card.acceptance_checks,
             Some(cancel),
         )
@@ -2511,6 +2527,7 @@ impl DelegationCoordinator {
                     config,
                     &reviewer.target,
                     worker_diff,
+                    job.worker_base.as_deref(),
                     &review_prompt,
                     &job_id,
                     cancel,
@@ -2598,6 +2615,7 @@ impl DelegationCoordinator {
         config: &Config,
         target: &DelegationTarget,
         worker_diff: &str,
+        worker_base: Option<&str>,
         prompt: &str,
         job_id: &str,
         cancel: &zest_core::CancelToken,
@@ -2614,6 +2632,7 @@ impl DelegationCoordinator {
                     root,
                     agent,
                     worker_diff,
+                    worker_base,
                     prompt,
                     Some(cancel),
                     &parent_secret_envs,
@@ -2640,6 +2659,7 @@ impl DelegationCoordinator {
                     config.clone(),
                     target,
                     worker_diff,
+                    worker_base,
                     prompt,
                     NativeTaskUsageContext {
                         ledger: Some(self.ledger.clone()),

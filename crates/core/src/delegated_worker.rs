@@ -51,6 +51,8 @@ pub struct NativeWorkerResult {
     pub final_text: String,
     pub diff: String,
     pub usage: AttemptUsage,
+    /// The snapshot commit the worker started from.
+    pub base_commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -71,10 +73,11 @@ pub async fn run_acceptance_checks(
     root: &Path,
     config: Config,
     worker_diff: &str,
+    worker_base: Option<&str>,
     commands: &[String],
     cancel: Option<&CancelToken>,
 ) -> Result<Vec<AcceptanceCheckResult>> {
-    let mut workspace = prepare_reviewer(root, worker_diff)
+    let mut workspace = prepare_reviewer(root, worker_diff, worker_base)
         .await
         .map_err(HarnessError::Other)?;
     let parent_secret_envs = config.provider_key_env_names();
@@ -337,6 +340,7 @@ pub async fn run_provider_worker(
                     final_text: clip(&final_text),
                     diff,
                     usage,
+                    base_commit: workspace.baseline().to_string(),
                 }
             }),
         Err(error) => {
@@ -364,13 +368,14 @@ pub async fn run_provider_reviewer(
     config: Config,
     target: &DelegationTarget,
     worker_diff: &str,
+    worker_base: Option<&str>,
     prompt: &str,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
     activity: &WorkerActivity,
 ) -> Result<NativeReviewerResult> {
     let target = provider_target(root, &config, target)?;
-    let mut workspace = prepare_reviewer(root, worker_diff)
+    let mut workspace = prepare_reviewer(root, worker_diff, worker_base)
         .await
         .map_err(HarnessError::Other)?;
     let result = run_in_workspace(
@@ -589,6 +594,7 @@ mod tests {
             root,
             config,
             "",
+            None,
             &[
                 "rustc --version".into(),
                 "rustc --definitely-not-a-real-flag".into(),

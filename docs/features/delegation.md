@@ -82,6 +82,13 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   `git worktree` that holds the current dirty snapshot (tracked diff plus
   untracked files), with sensitive files removed and `.zest/` left out. What
   comes back is a diff.
+- The worker's snapshot is a commit in the project's object store. The job
+  records it (`worker_base`) and pins it as `refs/zest/delegations/<jobId>`
+  (`pin_worker_base`) until the job is accepted or cancelled. The acceptance
+  checks and every reviewer start from that commit plus the worker diff
+  (`prepare_reviewer` with a base), so they see exactly the files the worker
+  saw, even if the checkout changed meanwhile. A missing or malformed base
+  falls back to snapshotting the current checkout.
 - The worker diff must be non-empty, and every path in it must be inside the
   card `scope` (`.` means the whole project) and outside `.git`, `.zest` and
   sensitive paths. Otherwise the job fails.
