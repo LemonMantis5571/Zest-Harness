@@ -114,13 +114,13 @@ impl TurnAccumulator {
             "content_block_stop" => {
                 let idx = block_index(ev);
                 if let Some(buf) = self.json_bufs.remove(&idx) {
+                    // Text that is not JSON stays text. The agent repairs it or
+                    // answers the call with an error (`tool_input_repair`); it
+                    // never reaches a tool as `{}`.
                     let parsed = if buf.trim().is_empty() {
                         json!({})
                     } else {
-                        serde_json::from_str(&buf).map_err(|e| HarnessError::Stream {
-                            kind: "malformed_tool_input".into(),
-                            message: format!("{e} — accumulated: {buf}"),
-                        })?
+                        serde_json::from_str(&buf).unwrap_or(Value::String(buf))
                     };
                     if let Some(block) = self.blocks.get_mut(&idx) {
                         block["input"] = parsed;
@@ -438,7 +438,7 @@ data: {"type":"message_stop"}
     }
 
     #[test]
-    fn rejects_tool_input_that_never_became_valid_json() {
+    fn tool_input_that_never_became_valid_json_is_kept_as_text() {
         let stream = r#"event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_x","name":"t","input":{}}}
 
@@ -448,24 +448,10 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 "#;
-        let mut parser = SseParser::default();
-        let mut acc = TurnAccumulator::new();
-        let mut sink = |_: StreamEvent<'_>| {};
-        let mut result = Ok(());
-
-        for payload in parser.feed(stream.as_bytes()) {
-            let ev: Value = serde_json::from_str(&payload).unwrap();
-            result = acc.push(&ev, &mut sink);
-            if result.is_err() {
-                break;
-            }
-        }
-
-        // Truncated input must fail loudly rather than reach a tool as `{}`.
-        assert!(matches!(
-            result,
-            Err(HarnessError::Stream { ref kind, .. }) if kind == "malformed_tool_input"
-        ));
+        let (completion, _) = replay(stream);
+        // Truncated input must not reach a tool as `{}`: the agent sees the
+        // raw text and answers the call with an error instead.
+        assert_eq!(completion.content[0]["input"], json!("{\"a\": "));
     }
 
     /// A gateway can route a request anywhere, so the model named in

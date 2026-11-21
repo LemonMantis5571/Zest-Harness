@@ -563,23 +563,11 @@ impl OpenAiAccumulator {
                     message: "OpenAI-compatible stream ended with an incomplete tool call".into(),
                 });
             }
-            if !tool.saw_arguments || tool.arguments.trim().is_empty() {
-                return Err(HarnessError::Stream {
-                    kind: "incomplete_tool_call".into(),
-                    message: "OpenAI-compatible stream ended before tool arguments arrived".into(),
-                });
-            }
-            let input: Value =
-                serde_json::from_str(&tool.arguments).map_err(|error| HarnessError::Stream {
-                    kind: "malformed_tool_input".into(),
-                    message: format!("OpenAI-compatible tool arguments are invalid JSON: {error}"),
-                })?;
-            if !input.is_object() {
-                return Err(HarnessError::Stream {
-                    kind: "malformed_tool_input".into(),
-                    message: "OpenAI-compatible tool arguments must be a JSON object".into(),
-                });
-            }
+            // Arguments that are missing or not a JSON object stay as they
+            // came. The agent repairs them or answers the call with an error
+            // (`tool_input_repair`); they never reach a tool as `{}`.
+            let input = serde_json::from_str::<Value>(&tool.arguments)
+                .unwrap_or_else(|_| Value::String(tool.arguments.clone()));
             content.push(json!({"type":"tool_use", "id":tool.id, "name":tool.name, "input":input}));
         }
         Ok(Completion {
@@ -1128,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_tool_arguments_fail_instead_of_becoming_an_empty_object() {
+    fn malformed_tool_arguments_stay_text_instead_of_becoming_an_empty_object() {
         let mut accumulator = OpenAiAccumulator::default();
         let mut sink = |_: StreamEvent<'_>| {};
         accumulator
@@ -1138,10 +1126,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            accumulator.finish(None),
-            Err(HarnessError::Stream { kind, .. }) if kind == "malformed_tool_input"
-        ));
+        let completion = accumulator.finish(None).unwrap();
+        assert_eq!(completion.content[0]["input"], json!("{"));
     }
 
     #[test]
@@ -1180,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_missing_tool_arguments_are_incomplete() {
+    fn empty_or_missing_tool_arguments_stay_empty_text() {
         for arguments in [None, Some("")] {
             let mut accumulator = OpenAiAccumulator::default();
             let mut sink = |_: StreamEvent<'_>| {};
@@ -1196,10 +1182,8 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(matches!(
-                accumulator.finish(None),
-                Err(HarnessError::Stream { kind, .. }) if kind == "incomplete_tool_call"
-            ));
+            let completion = accumulator.finish(None).unwrap();
+            assert_eq!(completion.content[0]["input"], json!(""));
         }
     }
 }

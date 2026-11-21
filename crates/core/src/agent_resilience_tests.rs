@@ -260,3 +260,36 @@ async fn a_response_that_keeps_getting_cut_off_stops_the_turn() {
     assert!(matches!(error, HarnessError::StoppedEarly(_)));
     assert_eq!(provider.requests().len() as u32, MAX_CONTINUATIONS + 1);
 }
+
+#[tokio::test]
+async fn malformed_tool_arguments_go_back_to_the_model_as_a_tool_error() {
+    let provider = ScriptedProvider::new(vec![
+        reply(
+            vec![
+                tool_call("bad", "echo", json!("{\"n\": ")),
+                tool_call("good", "echo", json!("{\"n\": \"2\"}")),
+            ],
+            "tool_use",
+        ),
+        reply(vec![text("Retried the call.")], "end_turn"),
+    ]);
+    let mut agent = agent_with_echo(provider.clone(), None);
+    let mut sink = |_ev: StreamEvent<'_>| {};
+
+    agent.send("go", &mut sink).await.unwrap();
+
+    let second = &provider.requests()[1].messages;
+    // The echoed call carries an object, never the broken text.
+    assert_eq!(second[1].content[0]["input"], json!({}));
+    let results = &second[2].content;
+    assert_eq!(results[0]["tool_use_id"], "bad");
+    assert_eq!(results[0]["is_error"], true);
+    assert!(results[0]["content"]
+        .to_string()
+        .contains("Call the tool again"));
+    // The repaired call ran with its number unquoted.
+    assert_eq!(results[1]["is_error"], false);
+    assert!(results[1]["content"]
+        .to_string()
+        .contains("echoed {\\\"n\\\":2}"));
+}

@@ -4,6 +4,7 @@ summary: Send a message, watch the answer and reasoning stream in, stop it, and 
 paths:
   - spikes/gpui/src/main.rs
   - crates/core/src/agent.rs
+  - crates/core/src/tool_input_repair.rs
   - crates/core/src/runtime.rs
   - crates/core/src/prompt.rs
   - crates/core/src/cancel.rs
@@ -42,6 +43,7 @@ verify:
   - npm run ui:e2e -- conversation-scroll
   - cargo test -p zest-core --lib -- agent::tests
   - cargo test -p zest-core --lib -- inbox::tests
+  - cargo test -p zest-core --lib -- tool_input_repair::
   - cargo test -p zest-core --lib -- persist::tests
   - cargo test -p zest-core --lib -- prompt::tests
   - cargo test -p zest-core --lib -- runtime::tests
@@ -64,6 +66,7 @@ verify:
 - Text from separate provider rounds (split by a tool call) is separated by a blank line, never glued together.
 - Each assistant turn records its steps in the order they happened: a thinking block, a tool call, a provider activity, then another thinking block if the model thought again. Provider activity is saved with the message, so a reopened Claude Code chat still shows what it did. A subagent (a delegation or a Claude Code `Agent`) streams as its own line that opens while it runs, with its steps arriving under it.
 - A failed or cancelled turn keeps its partial transcript and marks running/awaiting-approval tool rows as interrupted. The model's wire history keeps the user message and every completed provider round and tool result, closes any tool call that never ran with an error result, and ends with an `[Zest: this turn was interrupted ...]` note. Tools may already have changed files, so the next turn has to know what was done.
+- Tool-call arguments that are not a JSON object do not end the turn. `tool_input_repair.rs` repairs unambiguous cases against the tool's schema (arguments sent as a JSON string, even twice encoded; `"5"` for an integer, `"true"` for a boolean, quoted JSON for an object or array property). Anything else, such as JSON cut off mid-object, is not run: the call gets an error result ("Invalid arguments for `read_file`: ... Call the tool again ...") and the model tries again. Providers keep unparseable argument text as a string in `input`; the agent always replaces it with an object before the history is sent back.
 - Auth failures show "Reconnect <provider>" / "Choose provider or API key" buttons on the error bubble. A served model that differs from the requested one raises a "Model changed" warning.
 - A turn belongs to its chat: switching chats lets it finish in the background; a second turn on the same chat is refused as busy.
 - When task tracing is enabled, the agent uses the desktop turn ID as its run

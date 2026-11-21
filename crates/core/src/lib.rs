@@ -50,6 +50,7 @@ pub mod skills;
 pub mod thread;
 pub mod thread_search;
 pub mod thread_window;
+pub mod tool_input_repair;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;

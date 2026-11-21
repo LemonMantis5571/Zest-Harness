@@ -85,6 +85,11 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
   provider returns it with stop reason `stream_interrupted`, and the agent asks
   the model to continue from where it stopped. Thinking and unfinished tool calls
   from that response are dropped. After 3 such rounds in a row the turn stops.
+- Tool-call arguments that do not parse as JSON are kept as a JSON string in the
+  `tool_use` block's `input` (Anthropic and OpenAI-compatible) rather than
+  failing the turn; the agent repairs or rejects them (see
+  [chat turns](chat-turns-and-streaming.md)). A call with no id or name is still
+  a stream error.
 - Prompt caching (Anthropic only): long-TTL breakpoint on the last tool, a
   breakpoint splitting the cacheable system prompt from the volatile environment
   block, and two rolling breakpoints on the two messages before the last.

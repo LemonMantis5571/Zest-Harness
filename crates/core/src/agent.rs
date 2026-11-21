@@ -1007,8 +1007,15 @@ impl Agent {
                 .record(&completion.usage, completion.usage_available);
             *last_usage = Some(completion.usage.clone());
 
+            // Arguments a model got almost right are repaired here; the rest
+            // are answered with an error result below instead of running.
+            let mut content = completion.content.clone();
+            let invalid_calls = crate::tool_input_repair::repair_tool_calls(&mut content, |name| {
+                self.tools.input_schema(name)
+            });
+
             if matches!(completion.stop_reason.as_deref(), Some("end_turn") | None)
-                && !Self::has_assistant_output(&completion.content)
+                && !Self::has_assistant_output(&content)
             {
                 Self::check_cancel(cancel)?;
                 return Err(HarnessError::Other(
@@ -1020,7 +1027,7 @@ impl Agent {
             // tool_use blocks both have to survive intact. Staged before the
             // cancel check: this response was paid for, and an interrupted turn
             // still commits it.
-            staged.push(Message::assistant(completion.content.clone()));
+            staged.push(Message::assistant(content.clone()));
             publish_side_context(self, staged, turn_sensitive, on_side_context);
             Self::check_cancel(cancel)?;
 
@@ -1066,12 +1073,7 @@ impl Agent {
 
                 Some("tool_use") => {
                     continuations = 0;
-                    if Self::has_malformed_tool_input(&completion.content) {
-                        return Err(HarnessError::Other(
-                            "provider returned non-object arguments for a tool call".into(),
-                        ));
-                    }
-                    let calls = tool_uses(&completion.content);
+                    let calls = tool_uses(&content);
                     if calls.is_empty() {
                         return Err(HarnessError::Other(
                             "stop_reason was tool_use but no tool_use block was present".into(),
@@ -1098,7 +1100,24 @@ impl Agent {
                     // Cancellation is honored after the results are staged:
                     // a tool that ran may have changed files, and an
                     // interrupted turn commits what it did.
-                    let outcomes = self.execute_tool_calls(&calls, on_event, cancel).await;
+                    let runnable: Vec<_> = calls
+                        .iter()
+                        .filter(|call| !invalid_calls.contains_key(&call.id))
+                        .cloned()
+                        .collect();
+                    let mut ran = self
+                        .execute_tool_calls(&runnable, on_event, cancel)
+                        .await
+                        .into_iter();
+                    let outcomes: Vec<ToolCallOutcome> = calls
+                        .iter()
+                        .map(|call| match invalid_calls.get(&call.id) {
+                            Some(error) => ToolCallOutcome::failed(error.clone(), ToolRisk::Read),
+                            None => ran.next().unwrap_or_else(|| {
+                                ToolCallOutcome::failed("tool did not report", ToolRisk::Read)
+                            }),
+                        })
+                        .collect();
 
                     // Emission and wire order both follow the order the model
                     // asked in, never completion order.
@@ -1267,13 +1286,6 @@ impl Agent {
                 Some(_) => true,
             },
         )
-    }
-
-    fn has_malformed_tool_input(content: &[serde_json::Value]) -> bool {
-        content.iter().any(|block| {
-            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
-                && !block.get("input").is_some_and(|input| input.is_object())
-        })
     }
 
     /// Return only the tools the selected model advertises support for.
@@ -2162,21 +2174,6 @@ mod tests {
         assert!(Agent::has_assistant_output(&[
             json!({"type":"server_tool_use"})
         ]));
-    }
-
-    #[test]
-    fn tool_calls_require_object_arguments() {
-        assert!(Agent::has_malformed_tool_input(&[json!({
-            "type": "tool_use",
-            "input": null
-        })]));
-        assert!(Agent::has_malformed_tool_input(&[
-            json!({"type":"tool_use"})
-        ]));
-        assert!(!Agent::has_malformed_tool_input(&[json!({
-            "type": "tool_use",
-            "input": {}
-        })]));
     }
 
     struct FakeProvider {

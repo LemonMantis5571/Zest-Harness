@@ -29,7 +29,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 | [Attachments](attachments.md) | Attach files, PDFs, and images to a message from the file picker or by pasting, within per-image and per-message limits. | 2 test files, 2 commands |
 | [Local browser and web search](browser-and-web.md) | The agent can drive a Zest browser window (open, read, click, type) behind approvals, and search the public web through DuckDuckGo without an API key. | 3 commands |
 | [BTW side questions](btw-side-questions.md) | Ask a quick question about the current conversation in a side panel with /btw, without adding it to the main chat or interrupting a running task. | 1 test file, 3 commands |
-| [Chat turns and streaming](chat-turns-and-streaming.md) | Send a message, watch the answer and reasoning stream in, stop it, and queue follow-ups while a turn is still running. | 10 test files, 10 commands |
+| [Chat turns and streaming](chat-turns-and-streaming.md) | Send a message, watch the answer and reasoning stream in, stop it, and queue follow-ups while a turn is still running. | 10 test files, 11 commands |
 | [CLI agent providers](cli-agent-providers.md) | Use Claude Code, the Codex CLI, or Cursor as the main chat provider, with their own sign-in and agent loop and Zest's approval cards. | 10 commands |
 | [Command palette and keyboard shortcuts](command-palette-and-shortcuts.md) | Mod+K search over chats, actions, commands, and settings; rebindable shortcuts; Escape closing whatever is on top. | 5 test files, 3 commands |
 | [Context budget and compaction](context-budget.md) | The composer shows how full the model's context window is, and Zest trims or summarizes the conversation automatically when it passes 80%. | 3 test files, 6 commands |
