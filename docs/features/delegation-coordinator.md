@@ -59,10 +59,13 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
   existing job. MCP sets the origin to `inbound_mcp`.
 - **Heartbeat.** While a worker or reviewer runs, a heartbeat every 15 s updates
   `orchestration.heartbeatAt` and emits `heartbeat`.
-- **`reconcile`** does three things:
+- **`reconcile`**:
   - approves jobs that have a valid dispatch receipt (`ingest_inner`);
   - marks `worker_running`/`review_running` jobs with no live task as `blocked`
     ("external delegation process was interrupted");
+  - blocks a card with an unfinished apply intent. Manual Apply and the trusted
+    scanner perform the same check before touching the working tree. Inspect
+    the checkout against the saved diff to determine what Git applied;
   - calls `kick_pending`.
 - **`shutdown`** stops new enqueues, cancels in-flight tokens and waits up to
   8 s. It then marks jobs that are still running as `blocked`, not `cancelled`.
@@ -110,6 +113,11 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
 - the exclusive lock, and both retention modes (an idle desktop project is
   released; a queued job keeps the lock until its worker finishes);
 - restart blocking an interrupted job and resuming queued ones;
+- interruption before and after Git apply, preserving subsequent user edits,
+  and requiring a new approval on retry;
+- a process exiting after Git apply but before either the card or the MCP
+  command receipt records completion. The same command ID still reports an
+  incomplete receipt after restart;
 - cancel idempotency and dependencies;
 - concurrent approve.
 

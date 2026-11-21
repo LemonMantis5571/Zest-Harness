@@ -1776,17 +1776,21 @@ impl DelegationCoordinator {
             .unwrap_or_default();
         let mut changed = Vec::new();
         for mut job in store.list().map_err(|error| error.to_string())? {
-            let interrupted = matches!(
+            if matches!(
                 job.status,
                 CoreDelegationStatus::WorkerRunning | CoreDelegationStatus::ReviewRunning
-            ) && !live_jobs.contains(&job.job_id);
-            if !interrupted {
+            ) && !live_jobs.contains(&job.job_id)
+            {
+                job.transition(CoreDelegationStatus::Blocked)
+                    .map_err(|error| error.to_string())?;
+                job.finish_active_attempts();
+                job.set_error("external delegation process was interrupted; review and retry");
+            } else if !job
+                .block_interrupted_apply()
+                .map_err(|error| error.to_string())?
+            {
                 continue;
             }
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.finish_active_attempts();
-            job.set_error("external delegation process was interrupted; review and retry");
             store
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
@@ -1856,12 +1860,23 @@ impl DelegationCoordinator {
         }
         job.require_updated_at(expected_updated_at)
             .map_err(|error| error.to_string())?;
+        if job
+            .block_interrupted_apply()
+            .map_err(|error| error.to_string())?
+        {
+            let job = store.update(job).map_err(|error| error.to_string())?;
+            self.emit(&store, &job, EventKind::Blocked);
+            return Ok(job_view(&store, &job));
+        }
         let diff = String::from_utf8(
             store
                 .read_artifact(job_id, "worker.diff")
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|_| "worker diff is not valid UTF-8".to_string())?;
+        store
+            .begin_apply(&mut job)
+            .map_err(|error| error.to_string())?;
         if let Err(error) = validate_diff_scope(root, &diff, &job.card.scope)
             .and_then(|()| apply_diff_checked(root, &diff))
         {
@@ -2717,6 +2732,142 @@ mod tests {
                 .unwrap()
                 .replace("\r\n", "\n"),
             "fixture worker change\n"
+        );
+    }
+
+    const INTERRUPTED_DIFF: &str = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-fixture project\n+reviewed change\n";
+
+    fn reviewed_job(root: &Path) -> (DelegationStore, DelegationJob) {
+        write_fixture_project(root);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let card = coordinator
+            .create_job(root, create_request("Interrupted apply"))
+            .unwrap();
+        let store = DelegationStore::open(root).unwrap();
+        let mut job = store.load(&card.job_id).unwrap().unwrap();
+        job.grant_dispatch_receipt("delegate_feature");
+        job.status = CoreDelegationStatus::ReadyToApply;
+        store
+            .write_artifact(&card.job_id, "worker.diff", INTERRUPTED_DIFF.as_bytes())
+            .unwrap();
+        store.save(&job).unwrap();
+        (store, job)
+    }
+
+    fn interrupted_apply(root: &Path) -> String {
+        let (store, mut job) = reviewed_job(root);
+        store.begin_apply(&mut job).unwrap();
+        job.job_id
+    }
+
+    #[tokio::test]
+    async fn interrupted_apply_before_git_is_not_replayed_by_trusted_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let id = interrupted_apply(root);
+        let restarted = Arc::new(DelegationCoordinator::new());
+        let scanned = restarted.apply_ready_jobs(root).unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].job_id, id);
+        assert_eq!(scanned[0].status, DelegationStatus::Blocked);
+        assert!(scanned[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Inspect the project changes"));
+        assert!(restarted.apply_ready_jobs(root).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(root.join("README.md")).unwrap(),
+            b"fixture project\n"
+        );
+        let retry = restarted.retry(root, &id, None).unwrap();
+        assert_eq!(retry.status, DelegationStatus::AwaitingApproval);
+        assert!(!retry.approved);
+        restarted.reconcile(root).unwrap();
+        assert_eq!(
+            get_view(root, &id).unwrap().status,
+            DelegationStatus::AwaitingApproval
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_apply_after_git_preserves_work_on_reconcile_or_direct_apply() {
+        for reconcile_first in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let id = interrupted_apply(root);
+            apply_diff_checked(root, INTERRUPTED_DIFF).unwrap();
+            std::fs::write(root.join("README.md"), "reviewed change\nuser edit\n").unwrap();
+            let restarted = Arc::new(DelegationCoordinator::new());
+            let recovered = if reconcile_first {
+                restarted.reconcile(root).unwrap().pop().unwrap()
+            } else {
+                restarted.apply(root, &id, None).unwrap()
+            };
+            assert_eq!(recovered.job_id, id);
+            assert_eq!(recovered.status, DelegationStatus::Blocked);
+            assert_eq!(
+                get_view(root, &id).unwrap().status,
+                DelegationStatus::Blocked
+            );
+            assert!(restarted.apply_ready_jobs(root).unwrap().is_empty());
+            assert_eq!(
+                std::fs::read(root.join("README.md")).unwrap(),
+                b"reviewed change\nuser edit\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn command_id_after_interrupted_apply_does_not_replay_git() {
+        use zest_core::command_receipts::{CommandReceiptError, CommandReceiptStore};
+
+        const CHILD_ROOT: &str = "ZEST_TEST_INTERRUPTED_APPLY_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let store = DelegationStore::open(&root).unwrap();
+            let mut job = store.list().unwrap().pop().unwrap();
+            let args = serde_json::json!({"jobId": job.job_id});
+            CommandReceiptStore::new(&root)
+                .execute::<(), _>("apply-1", "delegation_apply", &args, || {
+                    store.begin_apply(&mut job).unwrap();
+                    apply_diff_checked(&root, INTERRUPTED_DIFF).unwrap();
+                    std::process::exit(99);
+                })
+                .unwrap();
+            panic!("the fixture should exit after Git updates the checkout");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let (_, job) = reviewed_job(root);
+        let args = serde_json::json!({"jobId": job.job_id});
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "scheduler::tests::command_id_after_interrupted_apply_does_not_replay_git",
+            ])
+            .env(CHILD_ROOT, root)
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(99), "{child:?}");
+        let restarted = Arc::new(DelegationCoordinator::new());
+        let recovered = restarted.reconcile(root).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, DelegationStatus::Blocked);
+        let replay = CommandReceiptStore::new(root).execute::<(), _>(
+            "apply-1",
+            "delegation_apply",
+            &args,
+            || panic!("replayed apply"),
+        );
+        assert!(matches!(replay, Err(CommandReceiptError::Incomplete)));
+        assert!(restarted.apply_ready_jobs(root).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "reviewed change\n"
         );
     }
 

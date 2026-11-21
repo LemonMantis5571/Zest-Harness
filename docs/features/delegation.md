@@ -78,8 +78,11 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   and its edits are discarded.
 - Apply checks the scope again and runs `git apply --check` before `git apply`.
   If either fails, the job becomes `apply_conflict` and the checkout is left
-  untouched. A successful apply leaves the job `accepted`. There is no
-  `applied` status.
+  untouched. A successful apply leaves the job `accepted`. Zest saves an
+  apply intent before Git touches the checkout. If the coordinator stops
+  before recording the outcome, the card becomes `blocked` on reconciliation
+  or the next Apply. Inspect the checkout against `worker.diff` before
+  requesting a fresh attempt. This also applies to trusted daemons.
 - Retry is always manual. `retry` moves a job back to `awaiting_approval`,
   clears its approval and takes a new workspace snapshot. Only one approval
   follows. The next worker attempt also gets the previous diff and review report
