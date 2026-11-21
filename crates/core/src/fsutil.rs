@@ -202,17 +202,26 @@ fn replace_windows(temp: &Path, target: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    // A Windows reader can hold the destination open without FILE_SHARE_DELETE.
+    // Retry the same completed temp file so readers always see a whole revision.
+    let mut backoff_ms = [4, 8, 16, 32, 64, 128].into_iter();
+    loop {
+        let ok = unsafe {
+            MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if let (Some(5 | 32 | 33), Some(delay)) = (err.raw_os_error(), backoff_ms.next()) {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            continue;
+        }
+        return Err(err);
     }
 }
 
@@ -324,6 +333,27 @@ mod tests {
         let completed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(completed, serde_json::json!({"state":"completed"}));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_survives_a_temporary_reader_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = scratch("transient-reader");
+        let path = dir.join("thread.json");
+        atomic_write(&path, b"first").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(35));
+            drop(reader);
+        });
+        atomic_write(&path, b"second").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"second");
     }
 
     #[test]

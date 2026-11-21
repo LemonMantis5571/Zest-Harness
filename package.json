@@ -26,6 +26,8 @@
     "desktop:dev": "npm run dev -w zest-desktop",
     "desktop:build": "npm run build -w zest-desktop",
     "desktop:smoke": "node ./scripts/desktop-smoke.mjs",
+    "gpui": "cargo run --locked --release --manifest-path spikes/gpui/Cargo.toml --",
+    "gpui:test": "cargo run --locked --release --manifest-path spikes/gpui/Cargo.toml -- --selftest-workspace",
     "verify": "node ./scripts/dev-verify.mjs",
     "output-policy:check": "node ./scripts/check-output-artifacts.mjs",
     "output-policy:test": "node --test ./scripts/check-output-artifacts.test.mjs",

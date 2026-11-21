@@ -85,6 +85,7 @@ verify:
 - Fixture boot: `npm run ui:dev`, open `http://127.0.0.1:1420/?fixture=1`.
 
 ## Pitfalls
+- The GPUI and Tauri windows use `HarnessError::turn_message` for provider failures so raw HTTP bodies and internal stream diagnostics stay out of the transcript.
 - Adding a command takes five edits: the `#[tauri::command]` fn, the `generate_handler!` entry, the `api.ts` wrapper, the `DesktopBackend` type plus `createTauriBackend` in `backend.ts`, and `createFixtureBackend`. TypeScript flags the last two; a missing `generate_handler!` entry only fails at runtime ("unknown command").
 - Never hand-edit `lib/generated/`; it is exempt from feature-map coverage because the owning feature is the Rust type.
 - `HarnessError::provider_user_message` only trusts `Stream` errors whose kind starts with `provider:`. `Other` and plain `Stream` text are internal and must not reach a chat bubble.

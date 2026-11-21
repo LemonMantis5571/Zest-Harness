@@ -1,0 +1,32 @@
+name: Native GPUI
+
+on:
+  pull_request:
+    paths:
+      - 'spikes/gpui/**'
+      - 'crates/core/**'
+      - 'crates/coordinator/**'
+      - 'crates/desktop/src/attachments.rs'
+      - 'crates/desktop/src/context_meter.rs'
+      - 'crates/desktop/src/workspace_files.rs'
+      - '.github/workflows/gpui-windows.yml'
+
+concurrency:
+  group: gpui-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: GPUI Windows build and tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/gpui -> target
+          save-if: false
+      - run: cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
+      - run: cargo build --locked --release --manifest-path spikes/gpui/Cargo.toml

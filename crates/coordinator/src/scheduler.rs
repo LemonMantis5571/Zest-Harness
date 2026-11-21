@@ -1932,7 +1932,9 @@ impl DelegationCoordinator {
     }
 
     fn mark_interrupted_blocked(&self, root: &Path) -> Result<Vec<DelegationJobView>, String> {
+        self.require_lock(root)?;
         let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let live_jobs = self
             .running
@@ -2855,6 +2857,8 @@ mod tests {
         let second = Arc::new(DelegationCoordinator::new());
         let error = second.ensure_lock(root).unwrap_err();
         assert!(error.contains("already owns this project"), "{error}");
+        let error = second.mark_interrupted_blocked(root).unwrap_err();
+        assert!(crate::is_lock_held_error(&error));
     }
 
     #[tokio::test]

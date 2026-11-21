@@ -95,6 +95,7 @@ verify:
   for command receipts that must survive a system crash before a side effect.
 
 ## Pitfalls
+- Atomic saves on Windows briefly retry a locked destination while retaining the completed temporary file. A persistent lock returns an error and leaves the previous revision available.
 - A user message can be edited only while its checkpoint survives; once pruned past the 24/64 MiB cap, `edit_message` fails with "rewind checkpoint is missing".
 - Forks drop `pending_inputs` and start unpinned.
 - Rewind/edit clear the provider session cursor on purpose; the next turn replays history.

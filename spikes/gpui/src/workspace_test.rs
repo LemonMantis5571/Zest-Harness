@@ -1,0 +1,342 @@
+use super::*;
+
+pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+    settle(cx, 300).await;
+    let (first, root) = handle
+        .update(cx, |ws, _, _| {
+            (ws.active.clone(), ws.chats[&ws.active].clone())
+        })
+        .unwrap();
+    let composer = root.read_with(cx, |r, _| r.composer.clone());
+    for prompt in ["First native turn", "Second native turn"] {
+        cx.update_window(handle.into(), |_, w, cx| {
+            composer.update(cx, |c, cx| c.replace_text_in_range(None, prompt, w, cx));
+            w.dispatch_keystroke(key("enter"), cx);
+        })
+        .unwrap();
+    }
+    for _ in 0..150 {
+        if root.read_with(cx, |r, _| r.turns_done == 2) {
+            break;
+        }
+        settle(cx, 75).await;
+    }
+    handle
+        .update(cx, |ws, w, cx| {
+            let saved = ws.project.store.load(&first).unwrap();
+            assert_eq!(
+                saved.messages.len(),
+                4,
+                "two saved turns: {:?}",
+                root.read(cx).note
+            );
+            assert_eq!(saved.agent_messages.len(), 4);
+            assert!(saved.pending_inputs.is_empty());
+            assert_eq!(saved.checkpoints.len(), 2);
+            assert!(
+                saved.messages[3]
+                    .searchable_text()
+                    .contains("3 wire messages")
+            );
+            ws.split(w, cx);
+            assert_eq!(ws.second.as_ref(), Some(&first));
+            ws.open(&first, w, cx);
+            assert_eq!(ws.active, first);
+            ws.fork(Some(&saved.checkpoints[1].id), w, cx);
+            assert_ne!(ws.active, first);
+            assert_eq!(ws.chat(cx).thread.lock().unwrap().messages.len(), 2);
+            for page in [
+                Panel::Settings,
+                Panel::Search,
+                Panel::Usage,
+                Panel::Commands,
+                Panel::Checkpoints,
+                Panel::Jobs,
+            ] {
+                ws.page(page, w, cx);
+                let _ = ws.panel_body(cx);
+            }
+            ws.page(Panel::Changes, w, cx);
+        })
+        .unwrap();
+    for _ in 0..150 {
+        settle(cx, 50).await;
+        if handle
+            .update(cx, |ws, _, _| !ws.report.contains("Reading Git"))
+            .unwrap()
+        {
+            break;
+        }
+    }
+    handle
+        .update(cx, |ws, _, _| assert!(!ws.report.contains("Reading Git")))
+        .unwrap();
+    handle
+        .update(cx, |ws, w, cx| ws.open(&first, w, cx))
+        .unwrap();
+    for (prompt, response, count) in [
+        ("Demo: write", interaction::Response::Deny, 3),
+        ("Demo: write", interaction::Response::Allow, 4),
+        (
+            "Demo: question",
+            interaction::Response::Answer(vec!["Second".into()]),
+            5,
+        ),
+    ] {
+        root.update(cx, |r, cx| r.submit_native(prompt, &[], cx));
+        for _ in 0..150 {
+            if root.read_with(cx, |r, _| !r.cards.is_empty()) {
+                break;
+            }
+            settle(cx, 50).await;
+        }
+        root.update(cx, |r, cx| {
+            let card = r
+                .cards
+                .front()
+                .unwrap_or_else(|| panic!("{prompt} expected a decision, busy={}, queued={}, turns={}, status={}", r.turn_active, r.pending.len(), r.turns_done, r.note));
+            match &card.request {
+                interaction::Request::Approval { preview, .. } => {
+                    assert!(preview.contains("demo.txt"))
+                }
+                interaction::Request::Question { choices, .. } => {
+                    assert_eq!(choices, &["First", "Second"])
+                }
+            }
+            r.respond(response, cx);
+        });
+        for _ in 0..150 {
+            if root.read_with(cx, |r, _| r.turns_done == count) {
+                break;
+            }
+            settle(cx, 50).await;
+        }
+        handle
+            .update(cx, |ws, _, cx| {
+                assert_eq!(root.read(cx).turns_done, count);
+                assert_eq!(ws.project.path.join("demo.txt").is_file(), count >= 4);
+            })
+            .unwrap();
+    }
+    handle
+        .update(cx, |ws, w, cx| {
+            let saved = ws.project.store.load(&first).unwrap();
+            assert!(
+                serde_json::to_string(&saved.agent_messages)
+                    .unwrap()
+                    .contains("Second")
+            );
+            ws.add(Thread::new(), w, cx);
+            ws.chats.remove(&first);
+            ws.open(&first, w, cx);
+            assert_eq!(
+                ws.chat(cx).thread.lock().unwrap().agent_messages.len(),
+                saved.agent_messages.len()
+            );
+            let view = ws.chats[&first].clone();
+            let attachment = attachments::prepare_paths(&[ws.project.path.join("demo.txt")])
+                .pop()
+                .unwrap();
+            assert_eq!(attachment.status, "done");
+            view.update(cx, |r, cx| {
+                r.files.push(native::prepared(attachment));
+                r.submit_native("Read attachment", &[], cx);
+            });
+        })
+        .unwrap();
+    let reopened = handle
+        .update(cx, |ws, _, _| ws.chats[&first].clone())
+        .unwrap();
+    for _ in 0..150 {
+        if reopened.read_with(cx, |r, _| r.turns_done == 1) {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    let n = reopened.update(cx, |r, cx| {
+        let chat = r.native.clone().unwrap();
+        let t = chat.project.store.load(&first).unwrap();
+        let input = &t.agent_messages[t.agent_messages.len() - 2];
+        assert!(
+            serde_json::to_string(input)
+                .unwrap()
+                .contains("Approved in GPUI")
+        );
+        r.submit_native("/btw side question", &[], cx);
+        t.messages.len()
+    });
+    for _ in 0..150 {
+        if reopened.read_with(cx, |r, _| r.side.finished_answer()) {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    reopened.update(cx, |r, cx| {
+        assert!(r.side.finished_answer());
+        assert_eq!(
+            r.native
+                .as_ref()
+                .unwrap()
+                .project
+                .store
+                .load(&first)
+                .unwrap()
+                .messages
+                .len(),
+            n
+        );
+        r.close_side(cx);
+    });
+    handle
+        .update(cx, |ws, w, cx| ws.page(Panel::Files, w, cx))
+        .unwrap();
+    for _ in 0..100 {
+        if handle
+            .update(cx, |ws, _, _| {
+                ws.entries.iter().any(|e| e.path == "demo.txt")
+            })
+            .unwrap()
+        {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    handle
+        .update(cx, |ws, _, cx| {
+            assert!(ws.entries.iter().any(|e| e.path == "demo.txt"));
+            ws.browse("demo.txt".into(), false, cx);
+        })
+        .unwrap();
+    for _ in 0..100 {
+        if handle.update(cx, |ws, _, _| ws.preview.is_some()).unwrap() {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    handle
+        .update(cx, |ws, w, cx| {
+            assert!(
+                ws.preview
+                    .as_ref()
+                    .unwrap()
+                    .content
+                    .contains("Approved in GPUI")
+            );
+            ws.page(Panel::Search, w, cx);
+            ws.filter.update(cx, |f, cx| {
+                f.replace_text_in_range(None, "Second native turn", w, cx)
+            });
+        })
+        .unwrap();
+    for _ in 0..100 {
+        if handle.update(cx, |ws, _, _| !ws.hits.is_empty()).unwrap() {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    handle
+        .update(cx, |ws, w, cx| {
+            let hit = ws.hits.iter().find(|h| h.thread == first).unwrap().clone();
+            ws.open_hit(&hit, w, cx);
+        })
+        .unwrap();
+    let wire_len = reopened.update(cx, |r, cx| {
+        let n = r
+            .native
+            .as_ref()
+            .unwrap()
+            .thread
+            .lock()
+            .unwrap()
+            .agent_messages
+            .len();
+        r.submit_native("Demo: write", &[], cx);
+        n
+    });
+    for _ in 0..100 {
+        if reopened.read_with(cx, |r, _| !r.cards.is_empty()) {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    reopened.update(cx, |r, cx| {
+        assert!(!r.cards.is_empty());
+        r.submit_native("Pending after stop", &[], cx);
+        r.stop(cx);
+    });
+    for _ in 0..100 {
+        if reopened.read_with(cx, |r, _| !r.turn_active) {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    let restored = handle
+        .update(cx, |ws, w, cx| {
+            let t = ws.project.store.load(&first).unwrap();
+            assert_eq!(t.agent_messages.len(), wire_len);
+            assert_eq!(t.pending_inputs.len(), 1);
+            let runs = zest_core::ChatPersistence::open(&ws.project.path)
+                .unwrap()
+                .runs
+                .list_by_thread(&first)
+                .unwrap();
+            assert!(
+                runs.iter()
+                    .any(|r| r.status == zest_core::RunStatus::Aborted)
+            );
+            assert!(
+                runs.iter()
+                    .any(|r| r.status == zest_core::RunStatus::Completed)
+            );
+            ws.add(Thread::new(), w, cx);
+            ws.chats.remove(&first);
+            ws.open(&first, w, cx);
+            ws.chats[&first].clone()
+        })
+        .unwrap();
+    handle
+        .update(cx, |_, w, cx| {
+            restored.update(cx, |r, cx| {
+                assert!(!r.turn_active);
+                let key = r.pending[0].saved_id.clone().unwrap();
+                r.edit_queued(&key, w, cx);
+                r.queue_input.update(cx, |c, cx| {
+                    c.replace_text_in_range(None, "Edited after restart", w, cx);
+                });
+            });
+        })
+        .unwrap();
+    settle(cx, 75).await;
+    handle
+        .update(cx, |_, w, cx| {
+            w.dispatch_keystroke(key("enter"), cx);
+        })
+        .unwrap();
+    settle(cx, 75).await;
+    restored.update(cx, |r, cx| {
+        assert_eq!(&r.pending[0].text, "Edited after restart");
+        r.start_next();
+        cx.notify();
+    });
+    for _ in 0..150 {
+        if restored.read_with(cx, |r, _| r.turns_done == 1) {
+            break;
+        }
+        settle(cx, 50).await;
+    }
+    restored.read_with(cx, |r, _| {
+        let chat = r.native.as_ref().unwrap();
+        let t = chat.project.store.load(&first).unwrap();
+        assert!(t.pending_inputs.is_empty());
+        assert_eq!(t.agent_messages.len(), wire_len + 2);
+        assert_eq!(
+            t.messages[t.messages.len() - 2].searchable_text(),
+            "Edited after restart"
+        );
+    });
+    println!(
+        "SELFTEST native_workspace: PASS chat, queue edit and resume after reopen, run records, wire context, checkpoint fork, split, disk reopen, deny/allow, question, file attachment, file preview, transcript search, side chat isolation and workbench"
+    );
+    board::selftest::check(handle, cx).await;
+    cx.update(|cx| cx.quit());
+}

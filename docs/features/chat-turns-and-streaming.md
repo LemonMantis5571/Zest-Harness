@@ -2,6 +2,7 @@
 title: Chat turns and streaming
 summary: Send a message, watch the answer and reasoning stream in, stop it, and queue follow-ups while a turn is still running.
 paths:
+  - spikes/gpui/src/main.rs
   - crates/core/src/agent.rs
   - crates/core/src/runtime.rs
   - crates/core/src/prompt.rs
@@ -26,6 +27,7 @@ paths:
   - crates/desktop/ui/src/lib/serialActions.ts
   - crates/desktop/ui/src/lib/invokeErrors.ts
 tests:
+  - spikes/gpui/src/selftest.rs
   - crates/desktop/ui/src/lib/chatReducer.test.ts
   - crates/desktop/ui/src/lib/sendTurn.test.ts
   - crates/desktop/ui/src/lib/thinkingSummary.test.ts
@@ -75,6 +77,7 @@ verify:
 6. UI: `App.tsx` `handleChatEvent` batches `text_delta`/`thinking_delta` per animation frame (`reduceChatEvents`); other events flush the batch first, then `reduceChatEvent` (`chatReducer.ts`). Queue events update `threadQueue.ts` maps, not the transcript. `ChatScreen` renders rows in `MessageScroller`; `WorkingIndicator` shows while sending with no pending approval/question.
 
 ## Verify
+- In the [native GPUI workspace](gpui-workspace.md), run `npm run gpui:test` to exercise chat and durable follow-ups through the shared agent. The rendering fixture has a separate in-memory queue test, available with `npm run gpui -- --selftest-queue`.
 - `npm run ui:dev`, open `http://127.0.0.1:1420/?fixture=1`: the fixture boots with a streaming turn (Stop visible). `?fixture=1&scenario=cancel` holds a turn open to test Stop; `approval`, `question`, `tool-error` exercise the other terminal paths. Typing while busy should add a queued message.
 - Rust tests above cover transactional history, inbox claiming, coalesced persistence, and turn event order.
 
