@@ -8589,51 +8589,9 @@ async fn read_git_head(root: &Path) -> Option<String> {
     (!commit.is_empty()).then_some(commit)
 }
 
-#[derive(Debug, Default)]
-struct GitDiffStats {
-    additions: u64,
-    deletions: u64,
-    changed_files: u64,
-}
-
-fn parse_git_numstat(output: &[u8]) -> GitDiffStats {
-    let mut stats = GitDiffStats::default();
-    for line in String::from_utf8_lossy(output).lines() {
-        let mut fields = line.split('\t');
-        let additions = fields.next().and_then(|value| value.parse::<u64>().ok());
-        let deletions = fields.next().and_then(|value| value.parse::<u64>().ok());
-        // Binary diffs report `-` for both counts. They still represent one
-        // changed file, but do not have meaningful line statistics.
-        if additions.is_some() || deletions.is_some() || line.contains("\t-\t") {
-            stats.changed_files = stats.changed_files.saturating_add(1);
-        }
-        stats.additions = stats.additions.saturating_add(additions.unwrap_or(0));
-        stats.deletions = stats.deletions.saturating_add(deletions.unwrap_or(0));
-    }
-    stats
-}
-
-async fn read_git_diff_stats(root: &Path, start_commit: Option<&str>) -> GitDiffStats {
-    let start_commit = start_commit.map(str::trim);
-    let mut command = Command::new("git");
-    command.args(["diff", "--numstat"]);
-    if let Some(start_commit) = start_commit {
-        if !zest_core::workspace_changes::is_safe_commit_id(start_commit) {
-            return GitDiffStats::default();
-        }
-        command.arg(start_commit);
-    }
-    command.arg("--");
-    command
-        .current_dir(root)
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
-        Ok(Ok(output)) if output.status.success() => output,
-        _ => return GitDiffStats::default(),
-    };
-    parse_git_numstat(&output.stdout)
-}
+use zest_core::workspace_changes::diff_stats as read_git_diff_stats;
+#[cfg(test)]
+use zest_core::workspace_changes::parse_git_numstat;
 
 use zest_core::pull_request::{lookup_pull_request_cached, PullRequestLookup};
 
