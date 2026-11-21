@@ -26,6 +26,25 @@ fn delegation(prompt: &str) {
     send(r#"{"type":"result","response":"{\"summary\":\"fixture worker changed delegated.txt\",\"changedFiles\":[\"delegated.txt\"],\"checksAttempted\":[],\"blockers\":[]}"}"#);
 }
 
+/// Like `delegation`, but the first `failures` reviewer runs answer prose
+/// instead of a JSON verdict. `counter` is a file outside the worktrees that
+/// counts reviewer runs across processes.
+fn delegation_flaky_reviewer(counter: &str, failures: &str, prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        let runs = std::fs::read_to_string(counter)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            + 1;
+        std::fs::write(counter, runs.to_string()).expect("count reviewer runs");
+        if runs <= failures.parse::<u32>().expect("failure count") {
+            send(r#"{"type":"result","response":"I looked at it and it seems fine overall."}"#);
+            return;
+        }
+    }
+    delegation(prompt);
+}
+
 fn stream() {
     send(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}}"#);
     send(r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"Read"}}}"#);
@@ -128,6 +147,11 @@ fn main() {
         Some("ask_then_result") => ask_then_result(),
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
+        Some("delegation_flaky_reviewer") => {
+            let counter = args.next().expect("counter file");
+            let failures = args.next().expect("failure count");
+            delegation_flaky_reviewer(&counter, &failures, &args.next().unwrap_or_default())
+        }
         other => panic!("unknown external-agent fixture mode: {other:?}"),
     }
 }

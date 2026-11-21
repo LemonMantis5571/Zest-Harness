@@ -931,6 +931,31 @@ fn resolve_job_targets(
     Ok(ResolvedDelegationTargets { worker, reviewer })
 }
 
+/// A reviewer that fails or returns an unreadable report gets one fresh
+/// replacement before the card blocks.
+const MAX_REVIEWER_ATTEMPTS: u32 = 2;
+
+/// What one reviewer process returned.
+struct ReviewOutput {
+    text: String,
+    /// Edits the reviewer made in its worktree; never applied.
+    diff: String,
+    usage: Option<AttemptUsage>,
+    evidence: Option<zest_core::ExternalSessionEvidence>,
+}
+
+fn write_json_artifact(
+    store: &DelegationStore,
+    job_id: &str,
+    name: &str,
+    value: &impl Serialize,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    store
+        .write_artifact(job_id, name, &bytes)
+        .map_err(|error| error.to_string())
+}
+
 /// The first acceptance check Zest would skip instead of run, as a card error.
 /// A skipped required check can never pass, so this stops the job before a
 /// worker spends a full attempt on it.
@@ -2218,41 +2243,199 @@ impl DelegationCoordinator {
         if cancel.is_cancelled() {
             return self.cancelled(&store, job).await;
         }
+        self.run_review_phase(
+            root,
+            &store,
+            job,
+            &config,
+            &resolved_targets.reviewer,
+            &worker_diff,
+            &worker_result,
+            cancel,
+        )
+        .await
+    }
+
+    /// Run the acceptance checks once, then the reviewer, retrying the
+    /// reviewer once when it fails in a way a fresh process may not repeat:
+    /// the process failed or timed out, or its report did not parse.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_review_phase(
+        self: &Arc<Self>,
+        root: &Path,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        config: &Config,
+        reviewer: &ResolvedTargetMetadata,
+        worker_diff: &str,
+        worker_result: &WorkerResult,
+        cancel: &zest_core::CancelToken,
+    ) -> Result<(), String> {
         job.transition(CoreDelegationStatus::ReviewRunning)
-            .map_err(|error| error.to_string())?;
-        let reviewer_target = resolved_targets.reviewer.target.clone();
-        let reviewer_agent = reviewer_target.identity().to_string();
-        let reviewer_attempt = job
-            .start_attempt_with_metadata(
-                AttemptRole::Reviewer,
-                &reviewer_agent,
-                resolved_targets.reviewer.clone(),
-            )
             .map_err(|error| error.to_string())?;
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
-        self.emit(&store, &job, EventKind::ReviewerStarted);
-        let reviewer_heartbeat = self.start_heartbeat_loop(
+        let heartbeat = self.start_heartbeat_loop(
             root.to_path_buf(),
-            job_id.to_string(),
+            job.job_id.clone(),
             cancel.clone(),
             "review dispatch is still active".into(),
         );
+        let result = self
+            .review_attempts(
+                root,
+                store,
+                job,
+                config,
+                reviewer,
+                worker_diff,
+                worker_result,
+                cancel,
+            )
+            .await;
+        heartbeat.abort();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn review_attempts(
+        self: &Arc<Self>,
+        root: &Path,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        config: &Config,
+        reviewer: &ResolvedTargetMetadata,
+        worker_diff: &str,
+        worker_result: &WorkerResult,
+        cancel: &zest_core::CancelToken,
+    ) -> Result<(), String> {
+        let job_id = job.job_id.clone();
         let checks = run_acceptance_checks(
             root,
             config.clone(),
-            &worker_diff,
+            worker_diff,
             &job.card.acceptance_checks,
             Some(cancel),
         )
         .await
         .map_err(|error| format!("acceptance checks failed: {error}"))?;
+        let snapshot = job.base_workspace_snapshot.clone();
         let review_prompt = job
             .card
-            .review_prompt(root, &snapshot, &worker_result, &checks);
-        let mut reviewer_evidence = None;
-        let review = match &reviewer_target {
+            .review_prompt(root, &snapshot, worker_result, &checks);
+        let reviewer_agent = reviewer.target.identity().to_string();
+        for round in 1..=MAX_REVIEWER_ATTEMPTS {
+            let last_round = round == MAX_REVIEWER_ATTEMPTS;
+            let reviewer_attempt = job
+                .start_attempt_with_metadata(
+                    AttemptRole::Reviewer,
+                    &reviewer_agent,
+                    reviewer.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(store, &job, EventKind::ReviewerStarted);
+            let outcome = self
+                .run_reviewer(
+                    root,
+                    config,
+                    &reviewer.target,
+                    worker_diff,
+                    &review_prompt,
+                    &job_id,
+                    cancel,
+                )
+                .await;
+            if cancel.is_cancelled() {
+                return self.cancelled(store, job).await;
+            }
+            let review = match outcome {
+                Ok(review) => review,
+                Err(error) if !last_round => {
+                    self.retry_reviewer(store, &mut job, &format!("reviewer failed: {error}"))?;
+                    continue;
+                }
+                Err(error) => return Err(format!("reviewer failed: {error}")),
+            };
+            if let Some(mut evidence) = review.evidence {
+                evidence.preview = Some(review.text.chars().take(8_000).collect());
+                job.orchestration.attach_external_session(evidence);
+            }
+            if let Some(usage) = review.usage {
+                job.set_attempt_usage(&reviewer_attempt, usage)
+                    .map_err(|e| e.to_string())?;
+            }
+            if !review.diff.trim().is_empty() {
+                let discarded = serde_json::json!({
+                    "error": "reviewer produced edits; the reviewer diff was discarded",
+                    "raw": review.text,
+                });
+                return self.block_review(
+                    store,
+                    job,
+                    &reviewer_attempt,
+                    &discarded,
+                    "Reviewer produced edits. They were discarded, and a fresh reviewer is required.",
+                );
+            }
+            let report = match ReviewReport::parse_verdict(&review.text, checks.clone()) {
+                Ok(report) => report,
+                Err(error) => {
+                    let malformed =
+                        serde_json::json!({"error": error.to_string(), "raw": review.text});
+                    if !last_round {
+                        write_json_artifact(store, &job_id, "review-result.json", &malformed)?;
+                        job.finish_attempt(&reviewer_attempt);
+                        self.retry_reviewer(store, &mut job, &error.to_string())?;
+                        continue;
+                    }
+                    return self.block_review(
+                        store,
+                        job,
+                        &reviewer_attempt,
+                        &malformed,
+                        &error.to_string(),
+                    );
+                }
+            };
+            if let Err(error) = zest_core::validate_review_paths(root, &report) {
+                let report = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+                return self.block_review(
+                    store,
+                    job,
+                    &reviewer_attempt,
+                    &report,
+                    &error.to_string(),
+                );
+            }
+            write_json_artifact(store, &job_id, "review-result.json", &report)?;
+            job.finish_attempt(&reviewer_attempt);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(store, &job, EventKind::ReviewerCompleted);
+            return self.record_verdict(store, job, &report);
+        }
+        unreachable!("the last reviewer round always returns")
+    }
+
+    /// One reviewer process in a fresh worktree with the worker diff applied.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_reviewer(
+        &self,
+        root: &Path,
+        config: &Config,
+        target: &DelegationTarget,
+        worker_diff: &str,
+        prompt: &str,
+        job_id: &str,
+        cancel: &zest_core::CancelToken,
+    ) -> Result<ReviewOutput, String> {
+        let parent_secret_envs = config.provider_key_env_names();
+        match target {
             DelegationTarget::ExternalAgent { agent_id } => {
                 let agent = config
                     .agents
@@ -2261,30 +2444,33 @@ impl DelegationCoordinator {
                 let result = run_delegation_reviewer(
                     root,
                     agent,
-                    &worker_diff,
-                    &review_prompt,
+                    worker_diff,
+                    prompt,
                     Some(cancel),
                     &parent_secret_envs,
                 )
-                .await
-                .map_err(|error| format!("reviewer failed: {error}"))?;
+                .await?;
                 if let Ok(mut ledger) = self.ledger.lock() {
                     ledger.record_external(agent_id, result.usage.as_ref());
                 }
-                let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
-                if let Some(mut evidence) = result.session_evidence {
+                let evidence = result.session_evidence.map(|mut evidence| {
                     evidence.worker_id = agent_id.clone();
-                    reviewer_evidence = Some(evidence);
-                }
-                (result.text, result.diff, attempt_usage)
+                    evidence
+                });
+                Ok(ReviewOutput {
+                    usage: result.usage.as_ref().map(attempt_usage_from_external),
+                    text: result.text,
+                    diff: result.diff,
+                    evidence,
+                })
             }
             DelegationTarget::Provider { .. } => {
                 let result = run_provider_reviewer(
                     root,
                     config.clone(),
-                    &reviewer_target,
-                    &worker_diff,
-                    &review_prompt,
+                    target,
+                    worker_diff,
+                    prompt,
                     NativeTaskUsageContext {
                         ledger: Some(self.ledger.clone()),
                         correlation_id: Some(job_id.to_string()),
@@ -2292,110 +2478,65 @@ impl DelegationCoordinator {
                     Some(cancel),
                 )
                 .await
-                .map_err(|error| format!("reviewer failed: {error}"))?;
-                (result.final_text, result.reviewer_diff, Some(result.usage))
+                .map_err(|error| error.to_string())?;
+                Ok(ReviewOutput {
+                    text: result.final_text,
+                    diff: result.reviewer_diff,
+                    usage: Some(result.usage),
+                    evidence: None,
+                })
             }
-        };
-        reviewer_heartbeat.abort();
-        if let Some(mut evidence) = reviewer_evidence.take() {
-            evidence.preview = Some(review.0.chars().take(8_000).collect());
-            job.orchestration.attach_external_session(evidence);
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
         }
-        if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
-        }
-        if !review.1.trim().is_empty() {
-            let discarded = serde_json::json!({
-                "error": "reviewer produced edits; the reviewer diff was discarded",
-                "raw": review.0,
-            });
-            store
-                .write_artifact(
-                    job_id,
-                    "review-result.json",
-                    &serde_json::to_vec_pretty(&discarded).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            job.finish_attempt(&reviewer_attempt);
-            if let Some(usage) = review.2 {
-                job.set_attempt_usage(&reviewer_attempt, usage)
-                    .map_err(|e| e.to_string())?;
-            }
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.set_error(
-                "Reviewer produced edits. They were discarded, and a fresh reviewer is required.",
-            );
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::Blocked);
-            return Ok(());
-        }
-        let report = match ReviewReport::parse_verdict(&review.0, checks.clone()) {
-            Ok(report) => report,
-            Err(error) => {
-                let malformed = serde_json::json!({"error": error.to_string(), "raw": review.0});
-                store
-                    .write_artifact(
-                        job_id,
-                        "review-result.json",
-                        &serde_json::to_vec_pretty(&malformed)
-                            .map_err(|error| error.to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-                job.finish_attempt(&reviewer_attempt);
-                if let Some(usage) = review.2.clone() {
-                    job.set_attempt_usage(&reviewer_attempt, usage)
-                        .map_err(|e| e.to_string())?;
-                }
-                job.transition(CoreDelegationStatus::Blocked)
-                    .map_err(|error| error.to_string())?;
-                job.set_error(error.to_string());
-                store
-                    .update(job.clone())
-                    .map_err(|error| error.to_string())?;
-                self.emit(&store, &job, EventKind::Blocked);
-                return Ok(());
-            }
-        };
-        if let Err(error) = zest_core::validate_review_paths(root, &report) {
-            store
-                .write_artifact(
-                    job_id,
-                    "review-result.json",
-                    &serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            job.finish_attempt(&reviewer_attempt);
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.set_error(error.to_string());
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::Blocked);
-            return Ok(());
-        }
-        store
-            .write_artifact(
-                job_id,
-                "review-result.json",
-                &serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-        job.finish_attempt(&reviewer_attempt);
-        if let Some(usage) = review.2 {
-            job.set_attempt_usage(&reviewer_attempt, usage)
-                .map_err(|e| e.to_string())?;
-        }
+    }
+
+    /// Close a failed reviewer attempt and say on the card that a fresh
+    /// reviewer is starting.
+    fn retry_reviewer(
+        &self,
+        store: &DelegationStore,
+        job: &mut DelegationJob,
+        reason: &str,
+    ) -> Result<(), String> {
+        job.finish_active_attempts_with_status(zest_core::DispatchStatus::Failed, reason);
+        let now = unix_millis();
+        job.orchestration.add_message(
+            zest_core::MessageKind::Info,
+            "coordinator",
+            format!("{reason}. Starting one fresh reviewer automatically."),
+            now,
+        );
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
-        self.emit(&store, &job, EventKind::ReviewerCompleted);
+        Ok(())
+    }
+
+    fn block_review(
+        &self,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        reviewer_attempt: &str,
+        artifact: &serde_json::Value,
+        error: &str,
+    ) -> Result<(), String> {
+        write_json_artifact(store, &job.job_id, "review-result.json", artifact)?;
+        job.finish_attempt(reviewer_attempt);
+        job.transition(CoreDelegationStatus::Blocked)
+            .map_err(|error| error.to_string())?;
+        job.set_error(error);
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        self.emit(store, &job, EventKind::Blocked);
+        Ok(())
+    }
+
+    fn record_verdict(
+        self: &Arc<Self>,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        report: &ReviewReport,
+    ) -> Result<(), String> {
         if report.can_accept(&job.card.acceptance_checks) {
             job.transition(CoreDelegationStatus::ReadyToApply)
                 .map_err(|error| error.to_string())?;
@@ -2403,28 +2544,28 @@ impl DelegationCoordinator {
             store
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::ReadyToApply);
-        } else {
-            job.transition(CoreDelegationStatus::ChangesRequested)
-                .map_err(|error| error.to_string())?;
-            let reason = match report.decision {
-                zest_core::ReviewDecision::Accepted => report
-                    .unmet_check(&job.card.acceptance_checks)
-                    .map(|reason| format!("The reviewer accepted the diff, but {reason}."))
-                    .unwrap_or_else(|| {
-                        "The reviewer reported a blocking finding before this diff can be applied."
-                            .into()
-                    }),
-                zest_core::ReviewDecision::ChangesRequested => {
-                    "Reviewer requested changes before this diff can be applied.".into()
-                }
-            };
-            job.set_error(reason);
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::ChangesRequested);
+            self.emit(store, &job, EventKind::ReadyToApply);
+            return Ok(());
         }
+        job.transition(CoreDelegationStatus::ChangesRequested)
+            .map_err(|error| error.to_string())?;
+        let reason = match report.decision {
+            zest_core::ReviewDecision::Accepted => report
+                .unmet_check(&job.card.acceptance_checks)
+                .map(|reason| format!("The reviewer accepted the diff, but {reason}."))
+                .unwrap_or_else(|| {
+                    "The reviewer reported a blocking finding before this diff can be applied."
+                        .into()
+                }),
+            zest_core::ReviewDecision::ChangesRequested => {
+                "Reviewer requested changes before this diff can be applied.".into()
+            }
+        };
+        job.set_error(reason);
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        self.emit(store, &job, EventKind::ChangesRequested);
         Ok(())
     }
 
@@ -2759,6 +2900,73 @@ mod tests {
             "{}",
             check.output
         );
+    }
+
+    /// An `[agents.<name>]` entry that runs the fixture with `args` before
+    /// the prompt.
+    fn fixture_agent(name: &str, args: &[&str]) -> String {
+        let command =
+            serde_json::to_string(&fixture_binary().to_string_lossy().to_string()).unwrap();
+        let mut all: Vec<String> = args
+            .iter()
+            .map(|arg| serde_json::to_string(arg).unwrap())
+            .collect();
+        all.push("\"{prompt}\"".into());
+        format!(
+            "\n[agents.{name}]\nmode = \"headless\"\ncommand = {command}\nargs = [{}]\nworkspace = \"isolated\"\ntimeout_secs = 30\n",
+            all.join(", ")
+        )
+    }
+
+    fn worker_request(title: &str, agent_id: &str) -> CreateDelegationJobRequest {
+        let mut request = create_request(title);
+        request.worker = DelegationTargetView::ExternalAgent {
+            agent_id: agent_id.into(),
+        };
+        request
+    }
+
+    fn attempts_by_role(view: &DelegationJobView, role: &str) -> usize {
+        view.attempts
+            .iter()
+            .filter(|attempt| attempt.role == role)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_review_gets_one_fresh_reviewer() {
+        let temp = tempfile::tempdir().unwrap();
+        let counter = tempfile::tempdir().unwrap();
+        let counter = counter.path().join("reviews");
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &fixture_agent(
+                "flaky",
+                &["delegation_flaky_reviewer", &counter.to_string_lossy(), "1"],
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Flaky review", "flaky"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(attempts_by_role(&ready, "worker"), 1);
+        assert_eq!(attempts_by_role(&ready, "reviewer"), 2);
+        assert!(ready
+            .orchestration
+            .as_ref()
+            .unwrap()
+            .inbox
+            .iter()
+            .any(|message| message.body.contains("Starting one fresh reviewer")));
     }
 
     #[tokio::test]

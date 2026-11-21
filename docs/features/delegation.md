@@ -77,7 +77,10 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
 - `ready_to_apply` needs all of the following: a review report that parses,
   decision `accepted`, evidence with `passed` for every required check, and no
   `blocking` finding. A reviewer that edits files sends the job to `blocked`,
-  and its edits are discarded.
+  and its edits are discarded. A reviewer whose process fails or times out,
+  or whose report does not parse, is replaced once by a fresh reviewer
+  (`MAX_REVIEWER_ATTEMPTS`); the card inbox says so. The checks are not run
+  again for that second reviewer.
 - Apply checks the scope again and runs `git apply --check` before `git apply`.
   If either fails, the job becomes `apply_conflict` and the checkout is left
   untouched. A successful apply leaves the job `accepted`. Zest saves an
@@ -247,8 +250,9 @@ Code and Gemini presets.
   record shapes.
 - **Clipped external diffs.** External worker diffs are cut in the middle at
   512 KiB (`clip_diff`). A clipped diff will not apply.
-- **No automatic retries.** A failed, blocked or rejected job waits for a
-  manual `retry`, which needs a new approval. Keep the README saying so.
+- **No automatic worker retries.** A failed, blocked or rejected job waits
+  for a manual `retry`, which needs a new approval. Only the reviewer is
+  retried automatically, once. Keep the README saying so.
 - **Isolation needs a real repository.** It requires a Git repository with a
   HEAD commit. A folder that only contains repositories gets
   `no_repository_error`. ACP agents cannot use `workspace = "current"`.
