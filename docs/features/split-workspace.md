@@ -64,7 +64,9 @@ verify:
    Approval decisions and question answers go through App's shared per-chat
    handlers, so optimistic resolution and retryable rollback update the same
    state used by pending-request guards. Applying external navigation does not
-   echo the old snapshot back to App.
+   echo the old snapshot back to App. The split view initializes from the saved
+   layout on mount and applies explicit sidebar navigation while open. Saving a
+   previous layout cannot undo a newer zoom, restore or draft edit.
 
 ## Verify
 - `npm run ui:test`: tree edits and the zoom/minimize overrides (`splitLayout.test.ts`: restore keeps the tree and ratios, the last visible pane stays, closing and chat deletion prune, wake leaves zoom alone), strip status (`splitPaneStatus.test.ts`), and the serial queue after a failure (`serialActions.test.ts`).

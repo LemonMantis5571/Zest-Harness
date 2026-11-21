@@ -91,7 +91,8 @@ type Props = {
   initial: SessionInfo;
   initialDraft: string;
   states: ReadonlyMap<string, ChatUiState>;
-  snapshot?: SplitWorkspaceSnapshot | null;
+  initialSnapshot: SplitWorkspaceSnapshot | null;
+  navigation: SplitWorkspaceSnapshot | null;
   startNewGroup?: boolean;
   onOpen: (target: SplitChatTarget, fork?: boolean) => Promise<SessionInfo>;
   onSend: (
@@ -161,7 +162,8 @@ export function SplitWorkspace({
   initial,
   initialDraft,
   states,
-  snapshot,
+  initialSnapshot,
+  navigation,
   startNewGroup = false,
   onOpen,
   onSend,
@@ -178,10 +180,10 @@ export function SplitWorkspace({
 }: Props) {
   const initialWorkspaceRef = useRef<SplitWorkspaceSnapshot | null>(null);
   if (!initialWorkspaceRef.current) {
-    initialWorkspaceRef.current = initialWorkspace(snapshot, initial, initialDraft, startNewGroup);
+    initialWorkspaceRef.current = initialWorkspace(initialSnapshot, initial, initialDraft, startNewGroup);
   }
   const initialState = initialWorkspaceRef.current;
-  const receivedSnapshotRef = useRef(snapshot);
+  const appliedNavigationRef = useRef(navigation);
   const [workspace, setWorkspace] = useState(initialState);
   const [projects, setProjects] = useState<ProjectChats[]>([]);
   const [choosing, setChoosing] = useState<string | null>(() => {
@@ -232,17 +234,17 @@ export function SplitWorkspace({
   }, [projects]);
 
   useEffect(() => {
-    if (snapshot !== receivedSnapshotRef.current) {
-      receivedSnapshotRef.current = snapshot;
-      if (snapshot && snapshot !== workspace) {
-        setWorkspace(snapshot);
+    if (navigation !== appliedNavigationRef.current) {
+      appliedNavigationRef.current = navigation;
+      if (navigation && navigation !== workspace) {
+        setWorkspace(navigation);
         setChoosing(null);
         // Do not echo the old workspace while applying external navigation.
         return;
       }
     }
     onStateChange?.(workspace, choosing);
-  }, [choosing, onStateChange, snapshot, workspace]);
+  }, [choosing, onStateChange, navigation, workspace]);
 
   // A minimized pane whose chat now waits on an approval or an answer comes
   // back by itself, without taking focus. Zoom is left alone: its strips show
