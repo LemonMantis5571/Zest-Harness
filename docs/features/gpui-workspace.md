@@ -67,6 +67,10 @@ Buttons have accessible names. The composer exposes its text as AccessKit text r
 
 `npm run gpui:package` builds local x64 installers (MSI and NSIS on Windows, DEB, RPM and AppImage on Linux). The Linux AppImage uses the host GTK 3, WebKitGTK 4.1 and Vulkan runtime. Tagged releases ship these installers. `crates/desktop/build.rs` embeds Zest's icon and version into the Windows executable (`zest.rc`); GPUI also uses that icon for its windows.
 
+### Testing pitfall
+
+`offline_workspace_smoke` closes its window and drains pending work before `quit`. Each chat's bridge task wakes the window from a Tokio thread when it ends, and if that happens while GPUI's test scheduler is shutting down the two deadlock (it hung the Linux job until #74).
+
 ## History
 
 `docs/gpui-spike/` keeps the rendering spike's findings and the [Windows desktop comparison](../gpui-spike/benchmark/README.md), which measured GPUI against the former WebView frontend on matched offline transcripts. Its WebView runner needed the removed React UI and no longer runs.
