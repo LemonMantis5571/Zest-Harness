@@ -40,6 +40,9 @@ verify:
   files **and** non-zero +/- counts, no diff pane is open, no turn is running,
   and this exact `changeId` was not dismissed. Dismissing hides it until the
   change id moves. It also links the branch's pull request when one is known.
+  Its +/- counts come from `zest_core::workspace_changes::diff_stats`
+  (`git diff --numstat` since the chat's start commit), which the native GPUI
+  strip uses too.
 - The review pane (`DiffViewer`) opens from the bar, from a tool row's diff, or
   from a pull request. It shows per-file sections with +/- counts, collapsible,
   resizable 360-760 px, Esc closes. View choice (Clean / Raw) is remembered per

@@ -69,7 +69,7 @@ verify:
 ## How it works
 1. `main.rs` calls `zest_desktop_lib::run()` in `lib.rs`: `ensure_user_config`, `load_env`, `remove_implicit_internal_workspace`, then `tauri::Builder` with the notification plugin, a managed `AppState` (session controller, browser host, approval policy, job registry, ledger, `config_edit` mutex, delegation coordinator), a `setup` hook (browser attach, delegation binding, `forward_job_events`, `remove_retired_spaces_state`), and one `generate_handler!` list that is the entire UI-callable surface.
 2. Commands return `Result<_, String>`; structured failures are JSON from `desktop_err` (`code`, `message`, `details`). Streaming reaches the UI as the `chat-event` and `delegation-event` Tauri events.
-   `create_worktree_chat` is a desktop command for opt-in isolated chats; its Git and lifecycle rules are in [worktree-chats](worktree-chats.md).
+   `create_worktree_chat` is a desktop command for opt-in isolated chats; its Git and lifecycle rules are in [worktree-chats](worktree-chats.md). The command and the worktree-record helpers in `lib.rs` delegate to `zest_core::worktree_registry`, and pull-request lookup and diffs to `zest_core::pull_request`, so the Tauri shell and the [native GPUI workspace](gpui-workspace.md) share one implementation.
 3. `build.rs` runs `npm run build --prefix ui` (`npm.cmd` on Windows) when `ui/dist/index.html` is missing, so a bare `cargo build -p zest-desktop` needs Node installed.
 4. UI: `main.tsx` installs the context-menu guard (`shouldPreserveNativeContextMenu`), external-link handling, and renders `<ErrorBoundary><App/></ErrorBoundary>` under StrictMode.
 5. `App.tsx` gets the process-wide backend from `getBackend()` (`backend.ts`). `createTauriBackend` wraps the `invoke` calls in `api.ts`; under `?fixture` in a dev build `selectBackend` returns the offline fixture instead (see [offline-fixture-mode](offline-fixture-mode.md)). The boot effect loads providers, last provider, workspace folder, and profile in parallel, then `pickReadyProvider` decides between `enterChat` and the picker.
@@ -83,6 +83,7 @@ verify:
 - `cargo test -p zest-core --lib -- error::` covers error classification, including that retries (`Exhausted`) keep the original classification.
 - Regenerate bindings after changing a DTO: `cargo test -p zest-desktop --features export-bindings --lib export_bindings`, then commit `lib/generated/`. `scripts/release-verify.*` fails on drift ("binding drift (ts-rs)" step).
 - Fixture boot: `npm run ui:dev`, open `http://127.0.0.1:1420/?fixture=1`.
+- Launch this Tauri shell with `npm run desktop:dev`. `npm run dev` now opens the native GPUI workspace instead.
 
 ## Pitfalls
 - The GPUI and Tauri windows use `HarnessError::turn_message` for provider failures so raw HTTP bodies and internal stream diagnostics stay out of the transcript.

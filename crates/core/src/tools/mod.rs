@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod bash;
 pub mod browser;
+pub mod browser_dom;
 pub mod capture;
 pub mod consult_advisor;
 pub mod delegate_feature;

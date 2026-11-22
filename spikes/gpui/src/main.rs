@@ -15,12 +15,20 @@ mod native;
 mod native_view;
 mod side;
 mod search;
+#[path = "../../../crates/desktop/src/plugins.rs"]
+mod plugins;
 mod workspace;
 mod composer;
 mod md;
 mod seed;
 mod view;
 mod wv;
+mod web_content;
+mod web_window;
+mod artifact;
+mod icons_generated;
+mod theme;
+mod ui;
 
 use bridge::{Bridge, Cmd, EvKind};
 use composer::{Composer, ComposerEvent, CopySel};
@@ -94,6 +102,7 @@ fn parse_args() -> Args {
 }
 
 struct Msg {
+    artifacts: Vec<std::sync::Arc<zest_core::html::HtmlDocument>>,
     user: bool,
     doc: Rc<Doc>,
     attachments: usize,
@@ -103,13 +112,13 @@ struct Msg {
 
 impl Msg {
     fn user(text: &str, attachments: usize) -> Self {
-        Msg { user: true, doc: Rc::new(Doc::plain(text)), attachments, trace: None }
+        Msg { user: true, doc: Rc::new(Doc::plain(text)), attachments, trace: None, artifacts: Vec::new() }
     }
     fn assistant(doc: Doc) -> Self {
-        Msg { user: false, doc: Rc::new(doc), attachments: 0, trace: None }
+        Msg { user: false, doc: Rc::new(doc), attachments: 0, trace: None, artifacts: Vec::new() }
     }
     fn trace(trace: Trace, doc: Doc) -> Self {
-        Msg { user: false, doc: Rc::new(doc), attachments: 0, trace: Some(trace) }
+        Msg { user: false, doc: Rc::new(doc), attachments: 0, trace: Some(trace), artifacts: Vec::new() }
     }
 }
 
@@ -144,6 +153,7 @@ struct QueuedPrompt {
 }
 
 struct Root {
+    artifact_source: Option<(usize, usize)>,
     native_start: Option<(usize, usize)>,
     native_text_rows: std::collections::HashMap<String, usize>,
     compacting: bool,
@@ -179,6 +189,12 @@ struct Root {
     args: Args,
     window: AnyWindowHandle,
     last_link: Option<String>,
+    /// Line counts since the chat's start commit, for the strip above the composer.
+    git_stats: Option<zest_core::workspace_changes::GitDiffStats>,
+    /// The checkout's current branch, for chats that have not recorded one.
+    checkout_branch: Option<String>,
+    /// The counts the user dismissed the branch strip at; it returns when they change.
+    strip_hidden: Option<zest_core::workspace_changes::GitDiffStats>,
 }
 
 fn pct(v: &mut Vec<u64>, p: f64) -> f64 {
@@ -307,6 +323,7 @@ impl Root {
             queue_input,
             editing: None,
             note: String::new(),
+            artifact_source: None,
             session_label: String::new(),
             files: Vec::new(),
             msgs,
@@ -328,6 +345,9 @@ impl Root {
             args,
             window,
             last_link: None,
+            git_stats: None,
+            checkout_branch: None,
+            strip_hidden: None,
         }
     }
 
@@ -388,7 +408,20 @@ impl Root {
             match ev.kind {
                 EvKind::Notice(note) => { self.note = note; dirty = true; }
                 EvKind::SessionInfo(info) => { self.session_label = info; dirty = true; }
-                EvKind::Card(card) => { self.cards.push_back(card); dirty = true; }
+                EvKind::Card(card) => {
+                    let title = match card.request {
+                        interaction::Request::Approval { .. } => workspace::ChatAttention::Approval,
+                        interaction::Request::Question { .. } => workspace::ChatAttention::Question,
+                    };
+                    self.cards.push_back(card);
+                    cx.emit(title);
+                    dirty = true;
+                }
+                EvKind::Failure(message) => {
+                    self.note = message;
+                    cx.emit(workspace::ChatAttention::Failed);
+                    dirty = true;
+                }
                 EvKind::Activity { id, title, status } => {
                     self.update_activity(id, title, status);
                     dirty = true;
@@ -436,10 +469,11 @@ impl Root {
                     self.tools.push((id, ix, Instant::now()));
                     dirty = true;
                 }
-                EvKind::ToolResult { id, summary, diff, is_error } => {
+                EvKind::ToolResult { id, summary, diff, is_error, artifact } => {
                     if let Some(pos) = self.tools.iter().position(|t| t.0 == id) {
                         let (_, ix, started) = self.tools.remove(pos);
                         let m = &mut self.msgs[ix];
+                        m.artifacts.extend(artifact);
                         m.doc = Rc::new(tool_body(&summary, diff.as_deref()));
                         if let Some(Trace { kind: TraceKind::Tool { status, secs, .. }, title, .. }) = m.trace.as_mut() {
                             *status = if is_error { ToolStatus::Error } else { ToolStatus::Ok };
@@ -462,6 +496,7 @@ impl Root {
                 }
                 EvKind::End { tokens, cancelled } => {
                     dirty = true;
+                    self.refresh_git_stats(cx);
                     self.finish_think();
                     self.turn_active = false;
                     self.turns_done += 1;
@@ -471,6 +506,10 @@ impl Root {
                     // Stop can cross an already-emitted successful End on its way to the UI.
                     let stopped = std::mem::take(&mut self.stop_requested);
                     self.cards.clear();
+                    if self.native.is_some() && !cancelled && !stopped && !self.compacting
+                        && self.stats.stream_started.is_some_and(|t| t.elapsed().as_secs() >= 10) {
+                        cx.emit(workspace::ChatAttention::Ready);
+                    }
                     if self.native.is_some() {
                         self.restore_native();
                         cx.emit(ChatChanged);
@@ -746,7 +785,8 @@ impl Root {
             .when(!self.turn_active && !self.cmd_tx.is_closed(), |d| {
                 d.child(
                     div().id("resume-queue").tab_index(0).role(Role::Button)
-                        .cursor_pointer().text_color(rgb(LINK)).child("Resume queued")
+                        .aria_label("Resume queued")
+                        .cursor_pointer().text_color(rgb(link())).child("Resume queued")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.start_next();
                             window.focus(&this.composer.read(cx).focus.clone(), cx);
@@ -777,7 +817,7 @@ impl Root {
                 }))))
                 .child(
                     div().id(("remove-queued", id)).tab_index(0).role(Role::Button)
-                        .aria_label(remove_label).cursor_pointer().text_color(rgb(LINK)).child("Remove")
+                        .aria_label(remove_label).cursor_pointer().text_color(rgb(link())).child("Remove")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.editing = None;
                             this.remove_queued(id, cx);
@@ -790,6 +830,37 @@ impl Root {
             .when(self.editing.is_some(), |d| d.child(self.queue_input.clone()))
     }
 
+    /// Saves a reply as Markdown where the user chooses, like the React UI's download action.
+    fn save_message(&mut self, text: String, cx: &mut Context<Self>) {
+        let directory = self
+            .native
+            .as_ref()
+            .map(|chat| chat.project.path.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&directory, Some("zest-reply.md"));
+        cx.spawn(async move |this, cx| {
+            let result: Result<(), String> = async {
+                let Some(mut path) = picker.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())? else {
+                    return Ok(());
+                };
+                if path.extension().is_none() {
+                    path.set_extension("md");
+                }
+                cx.background_executor()
+                    .spawn(async move { zest_core::atomic_write(&path, text.as_bytes()).map_err(|e| e.to_string()) })
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |root, cx| {
+                    root.note = format!("Could not save the reply: {error}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(m) = self.msgs.get(ix) else { return div().into_any_element() };
         let el = if let Some(tr) = &m.trace {
@@ -800,6 +871,63 @@ impl Root {
         } else {
             render_assistant(&m.doc, ix, &self.shared, self.live == Some(ix))
         };
+        let el = if m.artifacts.is_empty() { el } else {
+            div().child(el).children(m.artifacts.iter().enumerate().map(|(index, doc)| {
+                artifact::card(ix, index, doc.clone(), self.artifact_source == Some((ix, index)), cx)
+            })).into_any_element()
+        };
+        // Lay the row out like the React transcript: a centered column, "Zest" above each
+        // assistant turn, and copy under a finished answer.
+        let first_of_turn = !m.user && (ix == 0 || self.msgs.get(ix - 1).is_some_and(|p| p.user));
+        let answer = !m.user && m.trace.is_none() && self.live != Some(ix);
+        let copy_text = answer.then(|| m.doc.units.iter().map(|u| u.text.as_ref()).collect::<Vec<_>>().join("
+
+"));
+        let el = div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(theme::CHAT_MAX))
+                    .pl_8()
+                    .pr_4()
+                    .pt(px(if m.trace.is_some() && !first_of_turn { 4. } else { 12. }))
+                    .pb(px(if m.trace.is_some() { 4. } else { 12. }))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .when(first_of_turn, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(crate::theme::label()))
+                                .child("Zest"),
+                        )
+                    })
+                    .child(el)
+                    .when_some(copy_text, |d, text| {
+                        let saved = text.clone();
+                        d.child(
+                            div()
+                                .flex()
+                                .gap(px(2.))
+                                .opacity(0.7)
+                                .child(ui::icon_button(("copy-message", ix), theme::Icon::Copy, "Copy message", move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                                }))
+                                .child(ui::icon_button(
+                                    ("download-message", ix),
+                                    theme::Icon::Download,
+                                    "Download message",
+                                    cx.listener(move |root, _, _, cx| root.save_message(saved.clone(), cx)),
+                                )),
+                        )
+                    }),
+            )
+            .into_any_element();
         if self.args.a11y {
             let text: String = m.doc.units.first().map(|u| u.text.chars().take(120).collect()).unwrap_or_default();
             div()
@@ -834,18 +962,42 @@ impl Render for Root {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(BG))
-            .text_color(rgb(FG))
-            .font_family(SANS)
+            .when(self.native.is_none(), |d| d.bg(rgb(bg())))
+            .text_color(rgb(fg()))
+            .font_family(sans())
             .text_size(px(14.))
             .child(
                 div().id("transcript").when(self.args.a11y, |d| d.role(Role::List).aria_label("Conversation")).flex_1().min_h_0().relative().child(
                     gpui::list(self.list.clone(), cx.processor(|this, ix, _w, cx| this.render_item(ix, cx)))
                         .size_full(),
                 )
-                .child(self.mouse_layer(cx)),
+                .child(self.mouse_layer(cx))
+                .child(
+                    div().absolute().bottom_2().left_0().right_0().flex().justify_center().child(
+                        div()
+                            .id("jump")
+                            .role(Role::Button).aria_label("Jump to latest").tab_index(0)
+                            .cursor_pointer()
+                            .when(following, |d| d.invisible())
+                            .h(px(28.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .bg(rgb(theme::popover()))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .hover(|s| s.bg(rgb(theme::accent())))
+                            .child(theme::icon(theme::Icon::ArrowDown, 14.).text_color(rgb(theme::foreground())))
+                            .child("Jump to latest")
+                            .on_click(move |_, _, _| list.set_follow_mode(FollowMode::Tail)),
+                    ),
+                ),
             )
-            .child(
+            .when(self.native.is_none(), |d| d.child(
                 div()
                     .flex()
                     .flex_row()
@@ -853,38 +1005,68 @@ impl Render for Root {
                     .px_4()
                     .py_1()
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .when(self.native.is_none(), |d| d.child(format!(
+                    .text_color(rgb(muted()))
+                    .child(format!(
                         "{n} messages \u{2022} {} \u{2022} {}",
                         if self.cmd_tx.is_closed() { "backend disconnected" } else if self.stop_requested { "stopping" } else if busy { "streaming" } else { "idle" },
                         if following { "following tail" } else { "scrolled up (tail released)" }
-                    )))
-                    .when(self.native.is_some(), |d| d.child(if self.stop_requested { "Stopping…" } else if busy { "Working…" } else { "" }))
+                    ))
                     .when(busy, |d| d.child(
-                        div().id("stop-turn").tab_index(0).role(Role::Button).cursor_pointer().text_color(rgb(LINK))
+                        div().id("stop-turn").tab_index(0).role(Role::Button).cursor_pointer().text_color(rgb(link()))
+                            .aria_label("Stop response")
                             .child("Stop").on_click(cx.listener(|this, _, window, cx| {
                                 this.stop(cx);
                                 window.focus(&this.composer.read(cx).focus.clone(), cx);
                             })),
-                    ))
-                    .child(
-                        div()
-                            .id("jump")
-                            .cursor_pointer()
-                            .when(following, |d| d.invisible())
-                            .text_color(rgb(LINK))
-                            .child("Jump to latest \u{2193}")
-                            .on_click(move |_, _, _| list.set_follow_mode(FollowMode::Tail)),
-                    ),
+                    )),
+            ))
+            .child(
+                div().w_full().flex().justify_center().px_4().pb_3().child(
+                    div()
+                        .w_full()
+                        .max_w(px(theme::CHAT_MAX))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .when(self.native.is_some() && busy, |d| d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_1()
+                                .text_size(px(12.))
+                                .text_color(rgb(theme::muted_foreground()))
+                                .child(theme::icon(theme::Icon::LoaderCircle, 14.).text_color(rgb(theme::primary())))
+                                .child(if self.stop_requested { "Stopping…" } else { "Working…" }),
+                        ))
+                        .when(!self.pending.is_empty(), |d| d.child(self.render_queue(cx)))
+                        .when(self.native.is_some(), |d| d.child(self.native_controls(cx)))
+                        .when(self.side.open, |d| d.child(self.render_side(cx)))
+                        .children(self.branch_strip(cx))
+                        .child(
+                            div()
+                                .rounded(px(14.4))
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .bg(rgb(theme::card()))
+                                .shadow(vec![BoxShadow {
+                                    color: hsla(0., 0., 0., if theme::palette().dark { 0.55 } else { 0.12 }),
+                                    offset: point(px(0.), px(16.)),
+                                    blur_radius: px(48.),
+                                    spread_radius: px(0.),
+                                    inset: false,
+                                }])
+                                .child(self.composer.clone())
+                                .when(self.native.is_some(), |d| d.child(self.composer_toolbar(cx))),
+                        )
+                        .when(self.native.is_some(), |d| d.child(self.status_row())),
+                ),
             )
-            .when(!self.pending.is_empty(), |d| d.child(self.render_queue(cx)))
-            .when(self.native.is_some(), |d| d.child(self.native_controls(cx)))
-            .when(self.side.open, |d| d.child(self.render_side(cx)))
-            .child(div().px_4().pb_3().child(self.composer.clone()))
     }
 }
 
 fn main() {
+    if web_window::dispatch() { return; }
     if workspace::launch_if_requested() { return; }
     let args = parse_args();
     let hl = md::init_highlighter();
@@ -905,7 +1087,8 @@ fn main() {
         return;
     }
     let bridge = bridge::start();
-    gpui_platform::application().run(move |cx: &mut App| {
+    theme::application().run(move |cx: &mut App| {
+        theme::load_fonts(cx);
         composer::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1000.), px(900.)), cx);
         let a2 = args.clone();

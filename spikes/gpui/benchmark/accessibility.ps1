@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][int]$AppProcessId)
+param([Parameter(Mandatory)][int]$AppProcessId, [switch]$Check)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -18,6 +18,8 @@ $textPattern = $false
 $valuePattern = $false
 $editRoundTrip = $false
 $editMilliseconds = $null
+$textRoundTrip = $false
+$retried = $false
 foreach ($node in $nodes) {
     $role = $node.Current.ControlType.ProgrammaticName
     $name = $node.Current.Name
@@ -38,11 +40,17 @@ foreach ($node in $nodes) {
                 try {
                     $timer = [Diagnostics.Stopwatch]::StartNew()
                     $value.SetValue('Zest benchmark input')
-                    while ($timer.ElapsedMilliseconds -lt 1000 -and $value.Current.Value -ne 'Zest benchmark input') {
+                    # A cold start can still be building its accessibility tree; retry once.
+                    while ($timer.ElapsedMilliseconds -lt 3000 -and $value.Current.Value -ne 'Zest benchmark input') {
+                        if ($timer.ElapsedMilliseconds -gt 1500 -and -not $retried) { $retried = $true; $value.SetValue('Zest benchmark input') }
                         Start-Sleep -Milliseconds 10
                     }
                     $editRoundTrip = $value.Current.Value -eq 'Zest benchmark input'
                     if ($editRoundTrip) { $editMilliseconds = $timer.Elapsed.TotalMilliseconds }
+                    if ($editRoundTrip -and $textPattern) {
+                        $text = $node.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                        $textRoundTrip = $text.DocumentRange.GetText(-1) -eq 'Zest benchmark input'
+                    }
                 } catch [System.InvalidOperationException] {
                     $editRoundTrip = $false
                 } finally {
@@ -52,4 +60,7 @@ foreach ($node in $nodes) {
         }
     }
 }
-[ordered]@{ elements=$nodes.Count; buttons=$buttons; namedButtons=$namedButtons; messageEdit=$message; messageTextPattern=$textPattern; messageValuePattern=$valuePattern; editRoundTrip=$editRoundTrip; editMilliseconds=$editMilliseconds } | ConvertTo-Json -Compress
+[ordered]@{ elements=$nodes.Count; buttons=$buttons; namedButtons=$namedButtons; messageEdit=$message; messageTextPattern=$textPattern; messageValuePattern=$valuePattern; editRoundTrip=$editRoundTrip; editMilliseconds=$editMilliseconds; textRoundTrip=$textRoundTrip } | ConvertTo-Json -Compress
+if ($Check -and (!$buttons -or $buttons -ne $namedButtons -or !$editRoundTrip -or !$textRoundTrip)) {
+    throw 'The workspace must expose named buttons and an editable Message field with readable text to Windows UI Automation.'
+}

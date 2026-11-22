@@ -3645,116 +3645,21 @@ fn persist_workspace(root: &Path) -> Result<(), String> {
 const KNOWN_WORKSPACES_FILE: &str = "known-workspaces.json";
 const MAX_KNOWN_WORKSPACES: usize = 40;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WorktreeChatRecord {
-    path: PathBuf,
-    source_root: PathBuf,
-    branch: String,
-    #[serde(default = "worktree_visible_default")]
-    visible: bool,
-    /// The commit the checkout started from. Absent in records written before
-    /// worktree status existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    base_commit: Option<String>,
-}
+use zest_core::worktree_registry::{self, load_worktree_chat_records_from, WorktreeChatRecord};
+#[cfg(test)]
+use zest_core::worktree_registry::{
+    canonical_managed_worktree_path, save_worktree_chat_record_at,
+    worktree_config_root_from_records, worktree_record_path, worktree_storage_root,
+};
 
-fn worktree_visible_default() -> bool {
-    true
-}
-
-fn worktree_storage_root(config_dir: &Path) -> PathBuf {
-    let storage = config_dir.join("worktrees");
-    storage.canonicalize().unwrap_or(storage)
-}
-
-fn canonical_managed_worktree_path(config_dir: &Path, path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() {
-        return None;
-    }
-    let storage = worktree_storage_root(config_dir);
-    let canonical = path.canonicalize().ok()?;
-    (canonical != storage && canonical.starts_with(&storage)).then_some(canonical)
-}
-
-fn worktree_record_path(config_dir: &Path, root: &Path) -> PathBuf {
-    let key = display_path(root);
-    let key = if cfg!(windows) {
-        key.to_ascii_lowercase()
-    } else {
-        key
-    };
-    config_dir
-        .join("worktree-chat-records")
-        .join(format!("{}.json", blake3::hash(key.as_bytes()).to_hex()))
-}
-
-fn save_worktree_chat_record_at(
-    config_dir: &Path,
-    record: &WorktreeChatRecord,
-) -> Result<(), String> {
-    let path = worktree_record_path(config_dir, &record.path);
-    std::fs::create_dir_all(path.parent().expect("record path has a parent"))
-        .map_err(|error| format!("cannot prepare worktree chat registry: {error}"))?;
-    zest_core::fsutil::atomic_write_json(&path, record)
-        .map_err(|error| format!("cannot save worktree chat registry: {error}"))
-}
-
-fn load_worktree_chat_records_from(config_dir: &Path) -> Vec<WorktreeChatRecord> {
-    let mut by_path = BTreeMap::<PathBuf, WorktreeChatRecord>::new();
-    // Older builds wrote one shared array. Keep reading it, but a bad array
-    // cannot prevent ordinary projects or independently saved records opening.
-    if let Ok(body) = std::fs::read_to_string(config_dir.join("worktree-chats.json")) {
-        if let Ok(records) = serde_json::from_str::<Vec<WorktreeChatRecord>>(&body) {
-            for mut record in records {
-                if let Some(canonical_path) =
-                    canonical_managed_worktree_path(config_dir, &record.path)
-                {
-                    let sidecar = worktree_record_path(config_dir, &canonical_path);
-                    let sidecar_is_missing = std::fs::symlink_metadata(sidecar)
-                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-                    if sidecar_is_missing {
-                        record.path = canonical_path.clone();
-                        by_path.insert(canonical_path, record);
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(config_dir.join("worktree-chat-records")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(record) = serde_json::from_str::<WorktreeChatRecord>(&body) else {
-                continue;
-            };
-            let Some(canonical_path) = canonical_managed_worktree_path(config_dir, &record.path)
-            else {
-                continue;
-            };
-            if canonical_path == record.path
-                && path == worktree_record_path(config_dir, &canonical_path)
-            {
-                by_path.insert(canonical_path, record);
-            }
-        }
-    }
-    by_path.into_values().collect()
+fn set_worktree_chat_visible(root: &Path, visible: bool) -> Result<(), String> {
+    worktree_registry::set_visibility(&zest_config_dir()?, root, visible)
 }
 
 fn load_worktree_chat_records() -> Vec<WorktreeChatRecord> {
     zest_config_dir()
         .map(|config_dir| load_worktree_chat_records_from(&config_dir))
         .unwrap_or_default()
-}
-
-fn save_worktree_chat_record(record: &WorktreeChatRecord) -> Result<(), String> {
-    save_worktree_chat_record_at(&zest_config_dir()?, record)
 }
 
 fn sidebar_workspaces_from(known: Vec<PathBuf>, records: &[WorktreeChatRecord]) -> Vec<PathBuf> {
@@ -3779,52 +3684,7 @@ fn sidebar_workspaces() -> Vec<PathBuf> {
 }
 
 fn worktree_config_root(root: &Path) -> Result<PathBuf, String> {
-    let storage = worktree_storage_root(&zest_config_dir()?);
-    worktree_config_root_from_records(root, &load_worktree_chat_records(), &storage)
-}
-
-fn set_worktree_chat_visible(root: &Path, visible: bool) -> Result<(), String> {
-    let config_dir = zest_config_dir()?;
-    if !root.starts_with(worktree_storage_root(&config_dir)) {
-        return Ok(());
-    }
-    let mut record = load_worktree_chat_records_from(&config_dir)
-        .into_iter()
-        .find(|record| record.path == root)
-        .ok_or_else(|| {
-            format!(
-                "This Zest worktree has no provider mapping: {}",
-                display_path(root)
-            )
-        })?;
-    if record.visible != visible {
-        record.visible = visible;
-        save_worktree_chat_record_at(&config_dir, &record)?;
-    }
-    Ok(())
-}
-
-fn worktree_config_root_from_records(
-    root: &Path,
-    records: &[WorktreeChatRecord],
-    storage: &Path,
-) -> Result<PathBuf, String> {
-    if !root.starts_with(storage) {
-        return Ok(root.to_path_buf());
-    }
-    let Some(record) = records.iter().find(|record| record.path == root) else {
-        return Err(format!(
-            "This Zest worktree has no provider mapping: {}. Restore its worktree chat record before opening it.",
-            display_path(root)
-        ));
-    };
-    if !record.source_root.is_dir() {
-        return Err(format!(
-            "The original project for this worktree is missing: {}",
-            display_path(&record.source_root)
-        ));
-    }
-    Ok(record.source_root.clone())
+    worktree_registry::config_root(&zest_config_dir()?, root)
 }
 
 #[cfg(test)]
@@ -4091,28 +3951,11 @@ mod worktree_chat_tests {
 #[tauri::command]
 async fn create_worktree_chat(project_path: String) -> Result<String, String> {
     let source = require_known_workspace(Path::new(project_path.trim()))?;
-    let config_root = worktree_config_root(&source)?;
-    let storage = zest_config_dir()?.join("worktrees");
-    let created = tokio::task::spawn_blocking(move || {
-        zest_core::worktree_chat::create_chat_worktree(&source, &storage)
-    })
-    .await
-    .map_err(|error| format!("Worktree creation stopped: {error}"))??;
-    let path = canonicalize_dir(created.path)?;
-    let record = WorktreeChatRecord {
-        path: path.clone(),
-        source_root: config_root,
-        branch: created.branch,
-        visible: true,
-        base_commit: Some(created.base_commit),
-    };
-    save_worktree_chat_record(&record).map_err(|error| {
-        format!(
-            "Worktree created at {} but could not be registered: {error}",
-            display_path(&path)
-        )
-    })?;
-    Ok(display_path(&path))
+    let config = zest_config_dir()?;
+    let record = tokio::task::spawn_blocking(move || worktree_registry::create(&config, &source))
+        .await
+        .map_err(|error| format!("Worktree creation stopped: {error}"))??;
+    Ok(display_path(&record.path))
 }
 
 /// Counts only, so the sidebar can show a worktree chat's Git state without
@@ -6873,25 +6716,6 @@ fn resolve_pull_request_number(requested: Option<u64>, stored: Option<u64>) -> O
         .find(|&number| zest_core::workspace_changes::is_safe_pr_number(number))
 }
 
-async fn fetch_github_pull_request_diff(root: &Path, number: u64) -> Option<Vec<u8>> {
-    let output = match tokio::time::timeout(
-        Duration::from_secs(30),
-        Command::new("gh")
-            .args(["pr", "diff", &number.to_string()])
-            .current_dir(root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(_)) | Err(_) => return None,
-    };
-    output.status.success().then_some(output.stdout)
-}
-
 /// Read the pull request patch for the active chat. Prefer `gh pr diff`; if
 /// that is missing, compare the stored base branch against HEAD.
 #[tauri::command]
@@ -6912,30 +6736,9 @@ async fn pull_request_diff(
     let Some(number) = resolve_pull_request_number(number, stored) else {
         return Ok(zest_core::WorkspaceChangeSet::unavailable("pull_request").into());
     };
-    if let Some(raw) = fetch_github_pull_request_diff(&root, number).await {
-        return Ok(zest_core::snapshot_from_unified_diff(
-            "pull_request",
-            &raw,
-            context
-                .as_ref()
-                .and_then(|context| context.base_branch.as_deref()),
-            context
-                .as_ref()
-                .and_then(|context| context.branch.as_deref()),
-        )
-        .into());
-    }
-    let Some(base_branch) = context
-        .as_ref()
-        .and_then(|context| context.base_branch.as_deref())
-        .filter(|value| zest_core::workspace_changes::is_safe_git_ref(value))
-    else {
-        return Ok(zest_core::WorkspaceChangeSet::unavailable("pull_request").into());
-    };
-    zest_core::inspect_merge_base(&root, base_branch)
+    zest_core::pull_request::diff(&root, number, context.as_ref())
         .await
-        .map(WorkspaceChangeView::from)
-        .map_err(|error| error.to_string())
+        .map(Into::into)
 }
 
 /// Remove a user message and its later branch so the UI can submit an edited
@@ -8786,148 +8589,11 @@ async fn read_git_head(root: &Path) -> Option<String> {
     (!commit.is_empty()).then_some(commit)
 }
 
-#[derive(Debug, Default)]
-struct GitDiffStats {
-    additions: u64,
-    deletions: u64,
-    changed_files: u64,
-}
+use zest_core::workspace_changes::diff_stats as read_git_diff_stats;
+#[cfg(test)]
+use zest_core::workspace_changes::parse_git_numstat;
 
-fn parse_git_numstat(output: &[u8]) -> GitDiffStats {
-    let mut stats = GitDiffStats::default();
-    for line in String::from_utf8_lossy(output).lines() {
-        let mut fields = line.split('\t');
-        let additions = fields.next().and_then(|value| value.parse::<u64>().ok());
-        let deletions = fields.next().and_then(|value| value.parse::<u64>().ok());
-        // Binary diffs report `-` for both counts. They still represent one
-        // changed file, but do not have meaningful line statistics.
-        if additions.is_some() || deletions.is_some() || line.contains("\t-\t") {
-            stats.changed_files = stats.changed_files.saturating_add(1);
-        }
-        stats.additions = stats.additions.saturating_add(additions.unwrap_or(0));
-        stats.deletions = stats.deletions.saturating_add(deletions.unwrap_or(0));
-    }
-    stats
-}
-
-async fn read_git_diff_stats(root: &Path, start_commit: Option<&str>) -> GitDiffStats {
-    let start_commit = start_commit.map(str::trim);
-    let mut command = Command::new("git");
-    command.args(["diff", "--numstat"]);
-    if let Some(start_commit) = start_commit {
-        if !zest_core::workspace_changes::is_safe_commit_id(start_commit) {
-            return GitDiffStats::default();
-        }
-        command.arg(start_commit);
-    }
-    command.arg("--");
-    command
-        .current_dir(root)
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
-        Ok(Ok(output)) if output.status.success() => output,
-        _ => return GitDiffStats::default(),
-    };
-    parse_git_numstat(&output.stdout)
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubPullRequest {
-    number: u64,
-    title: String,
-    state: String,
-    #[serde(rename = "isDraft")]
-    is_draft: bool,
-    url: String,
-    additions: u64,
-    deletions: u64,
-    #[serde(rename = "changedFiles")]
-    changed_files: u64,
-}
-
-#[derive(Clone)]
-enum PullRequestLookup {
-    Found(PullRequestLink),
-    NotFound,
-    Unavailable,
-}
-
-struct CachedPullRequest {
-    checked: std::time::Instant,
-    root: PathBuf,
-    branch: String,
-    lookup: PullRequestLookup,
-}
-
-static PULL_REQUEST_CACHE: Mutex<Option<CachedPullRequest>> = Mutex::new(None);
-
-async fn lookup_pull_request_cached(root: &Path, branch: Option<&str>) -> PullRequestLookup {
-    if let Some(branch) = branch.filter(|name| !name.is_empty()) {
-        if let Ok(guard) = PULL_REQUEST_CACHE.lock() {
-            if let Some(cached) = guard.as_ref() {
-                if cached.root == root
-                    && cached.branch == branch
-                    && cached.checked.elapsed() < Duration::from_secs(30)
-                {
-                    return cached.lookup.clone();
-                }
-            }
-        }
-        let lookup = lookup_pull_request(root).await;
-        if let Ok(mut guard) = PULL_REQUEST_CACHE.lock() {
-            *guard = Some(CachedPullRequest {
-                checked: std::time::Instant::now(),
-                root: root.to_path_buf(),
-                branch: branch.to_string(),
-                lookup: lookup.clone(),
-            });
-        }
-        return lookup;
-    }
-    lookup_pull_request(root).await
-}
-
-async fn lookup_pull_request(root: &Path) -> PullRequestLookup {
-    let output = match tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("gh")
-            .args([
-                "pr",
-                "view",
-                "--json",
-                "number,title,state,isDraft,url,additions,deletions,changedFiles",
-            ])
-            .current_dir(root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(_)) | Err(_) => return PullRequestLookup::Unavailable,
-    };
-
-    if !output.status.success() {
-        return PullRequestLookup::NotFound;
-    }
-    let Ok(pr) = serde_json::from_slice::<GitHubPullRequest>(&output.stdout) else {
-        return PullRequestLookup::Unavailable;
-    };
-    PullRequestLookup::Found(PullRequestLink {
-        repository: None,
-        number: pr.number,
-        title: pr.title,
-        url: pr.url,
-        state: pr.state,
-        is_draft: pr.is_draft,
-        additions: pr.additions,
-        deletions: pr.deletions,
-        changed_files: pr.changed_files,
-    })
-}
+use zest_core::pull_request::{lookup_pull_request_cached, PullRequestLookup};
 
 struct GitContextInspection {
     thread_context: ThreadGitContext,

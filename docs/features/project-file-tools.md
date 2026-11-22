@@ -116,6 +116,11 @@ verify:
 5. Tool events become `tool_call_*` chat events; the UI builds `ToolPart`s,
    `buildTrace` (assistantTrace.ts) folds them with `summarizeTools`
    (toolRuns.ts), and `ToolRunGroup` / `ToolLine` (ToolCallRow.tsx) render them.
+   The native GPUI window draws the same rows with `render_trace` and picks the
+   React UI's icon for each tool in `trace_icon` (spikes/gpui/src/view.rs).
+6. `tools/mod.rs` lists every tool module. The browser modules registered
+   there (`browser`, `browser_dom`) are covered in
+   [browser-and-web](browser-and-web.md).
 
 ## Verify
 Rust unit tests above; `a_real_grep_spill_can_be_read_back_through_its_locator`

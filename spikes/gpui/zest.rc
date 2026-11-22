@@ -1,0 +1,27 @@
+// Windows resources for the native Zest executable; build.rs supplies the version macros.
+1 ICON "../../crates/desktop/icons/icon.ico"
+
+1 VERSIONINFO
+FILEVERSION ZEST_VERSION_NUMBERS
+PRODUCTVERSION ZEST_VERSION_NUMBERS
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "zest"
+      VALUE "FileDescription", "Zest"
+      VALUE "FileVersion", ZEST_VERSION_TEXT
+      VALUE "InternalName", "zest-desktop"
+      VALUE "OriginalFilename", "zest-desktop.exe"
+      VALUE "ProductName", "Zest"
+      VALUE "ProductVersion", ZEST_VERSION_TEXT
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

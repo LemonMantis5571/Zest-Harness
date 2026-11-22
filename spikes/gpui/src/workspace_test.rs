@@ -114,7 +114,29 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
                     .contains("3 wire messages")
             );
             ws.split(w, cx);
-            assert_eq!(ws.second.as_ref(), Some(&first));
+            assert_eq!(
+                ws.layout.as_ref().unwrap().ids(),
+                [first.clone(), ws.active.clone()]
+            );
+            let second = ws.active.clone();
+            ws.add_pane(Direction::Down, w, cx);
+            let third = ws.active.clone();
+            ws.zoom_active(cx);
+            assert!(!ws.layout.as_ref().unwrap().visible(&second));
+            ws.zoom_active(cx);
+            ws.minimize_active(w, cx);
+            assert!(!ws.layout.as_ref().unwrap().visible(&third));
+            ws.split(w, cx);
+            assert!(ws.layout.is_none());
+            ws.reopen_group(ws.saved_layouts.len() - 1, w, cx);
+            assert_eq!(
+                ws.layout.as_ref().unwrap().ids(),
+                [first.clone(), second.clone(), third.clone()]
+            );
+            ws.open(&third, w, cx);
+            assert!(ws.layout.as_ref().unwrap().visible(&third));
+            ws.close_pane(&third, w, cx);
+            assert_eq!(ws.layout.as_ref().unwrap().ids(), [first.clone(), second]);
             ws.open(&first, w, cx);
             assert_eq!(ws.active, first);
             ws.fork(Some(&saved.checkpoints[1].id), w, cx);
@@ -208,7 +230,7 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     // A split opened after the commit has its own baseline, independent of the first chat.
     handle
         .update(cx, |ws, w, cx| {
-            if ws.second.is_some() {
+            if ws.layout.is_some() {
                 ws.split(w, cx);
             }
             ws.split(w, cx);
@@ -441,4 +463,13 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     );
     board::selftest::check(handle, cx).await;
     cx.update(|cx| cx.quit());
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn attention_route_follows_window_and_chat_visibility() {
+    assert_eq!(chat_alert_route(true, true), AlertRoute::Quiet);
+    assert_eq!(chat_alert_route(true, false), AlertRoute::Banner);
+    assert_eq!(chat_alert_route(false, true), AlertRoute::System);
+    assert_eq!(chat_alert_route(false, false), AlertRoute::System);
 }

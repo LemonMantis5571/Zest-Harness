@@ -98,7 +98,7 @@ and [provider quota](docs/QUOTA.md).
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pinned toolchain, Linux packages, and local verification gate.
 
-On Windows, `npm run gpui -- --demo` opens the native GPUI workbench in a temporary offline project. To use an existing repository, run `npm run gpui -- --project "D:\Code\MyProject"`. See the [native workspace feature map](docs/features/gpui-workspace.md) for supported workflows and verification.
+Run `npm run dev` to choose a project in the native GPUI workbench. Releases ship this native app. `npm run desktop:dev` still runs the older Tauri app. On Windows and Linux, `npm run gpui -- --demo` opens the native GPUI workbench in a temporary offline project. To use an existing repository, run `npm run gpui -- --project "D:\Code\MyProject"`. See the [native workspace feature map](docs/features/gpui-workspace.md) for supported workflows and verification.
 
 ## Platforms
 
