@@ -15,6 +15,9 @@ use tokio::process::Command;
 use super::sensitive::is_sensitive_path;
 
 const MAX_ERROR_CHARS: usize = 2_000;
+/// Largest file a worker may create. Bigger output is refused by name
+/// instead of being left out of the diff.
+pub(crate) const MAX_NEW_FILE_BYTES: u64 = 2_000_000;
 
 /// A prepared isolated worktree and the baseline used to distinguish worker
 /// edits from the user's pre-existing dirty state.
@@ -31,6 +34,13 @@ impl PreparedWorkspace {
         &self.root
     }
 
+    /// The commit holding the snapshot this workspace started from. It lives
+    /// in the project's object store, so a later reviewer can start from the
+    /// same files with [`prepare_reviewer`] even after the checkout moved on.
+    pub(crate) fn baseline(&self) -> &str {
+        &self.baseline
+    }
+
     pub(crate) async fn collect_diff(&self) -> Result<String, String> {
         collect_git_diff_with_untracked(&self.root, &self.source_root, &self.baseline).await
     }
@@ -40,10 +50,74 @@ impl PreparedWorkspace {
     }
 }
 
+const WORKTREE_DIR_PREFIX: &str = "zest-wt-";
+
+/// A temporary directory for a delegation worktree. Its name carries this
+/// process id, so a later coordinator can tell a crashed run's leftovers
+/// (see [`prune_stale_worktrees`]) from a live run's.
+pub(crate) fn worktree_tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(&format!("{WORKTREE_DIR_PREFIX}{}-", std::process::id()))
+        .tempdir()
+}
+
+/// Remove delegation worktrees of `root` whose owning process is gone,
+/// left behind when Zest crashed or was killed mid-run, then let Git forget
+/// worktrees whose directories no longer exist. Returns the removed paths.
+pub fn prune_stale_worktrees(root: &Path) -> Vec<String> {
+    let Ok(output) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut removed = Vec::new();
+    for path in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+    {
+        let path = Path::new(path);
+        let Some(owner) = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(WORKTREE_DIR_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if owner == std::process::id() || crate::process_job::process_is_running(owner) {
+            continue;
+        }
+        let gone = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .current_dir(root)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if gone {
+            removed.push(path.display().to_string());
+        }
+    }
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(root)
+        .output();
+    removed
+}
+
 /// Prepare a worker from the current project snapshot.
 pub(crate) async fn prepare(root: &Path) -> Result<PreparedWorkspace, String> {
     let base = git_output(root, &["rev-parse", "HEAD"]).await?;
-    let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
+    let temp = worktree_tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
     let worktree = temp.path().join("workspace");
     git_output_args(
         root,
@@ -80,18 +154,85 @@ pub(crate) async fn prepare(root: &Path) -> Result<PreparedWorkspace, String> {
     })
 }
 
+/// Prepare a workspace at `base`, a baseline commit an earlier worker
+/// workspace recorded. It already holds the snapshot (sensitive files
+/// removed, `.zest` left out), so nothing is copied from the checkout.
+async fn prepare_at_base(root: &Path, base: &str) -> Result<PreparedWorkspace, String> {
+    let temp = worktree_tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
+    let worktree = temp.path().join("workspace");
+    git_output_args(
+        root,
+        &["worktree", "add", "--detach", "--quiet"],
+        Some(&worktree),
+        Some(base),
+    )
+    .await
+    .map_err(|error| format!("create isolated worktree: {error}"))?;
+    Ok(PreparedWorkspace {
+        _temp: temp,
+        guard: WorktreeGuard::new(root, &worktree),
+        root: worktree,
+        source_root: root.to_path_buf(),
+        baseline: base.to_string(),
+    })
+}
+
+/// Whether `base` names a commit this repository still has. Anything that is
+/// not a plain object id is refused before it reaches Git's argument list.
+async fn has_commit(root: &Path, base: &str) -> bool {
+    let plain_id =
+        matches!(base.len(), 40 | 64) && base.bytes().all(|byte| byte.is_ascii_hexdigit());
+    plain_id
+        && git_output(root, &["cat-file", "-e", &format!("{base}^{{commit}}")])
+            .await
+            .is_ok()
+}
+
+/// Keep a worker's baseline commit reachable for as long as the job may
+/// still be reviewed, so `git gc` cannot prune it.
+pub async fn pin_worker_base(root: &Path, job_id: &str, base: &str) -> Result<(), String> {
+    if !has_commit(root, base).await {
+        return Err(format!("worker baseline {base} is not a commit here"));
+    }
+    git_output(root, &["update-ref", &worker_base_ref(job_id), base])
+        .await
+        .map(|_| ())
+}
+
+/// Drop the ref [`pin_worker_base`] created, once the job can no longer be
+/// reviewed. Missing refs are fine.
+pub fn unpin_worker_base(root: &Path, job_id: &str) {
+    let _ = std::process::Command::new("git")
+        .args(["update-ref", "-d", &worker_base_ref(job_id)])
+        .current_dir(root)
+        .output();
+}
+
+fn worker_base_ref(job_id: &str) -> String {
+    format!("refs/zest/delegations/{job_id}")
+}
+
 /// Prepare a reviewer workspace and apply the worker patch before taking the
 /// reviewer baseline. Reviewer edits are returned separately from the worker
 /// patch and can be discarded safely.
+///
+/// `base` is the baseline commit of the worker workspace that produced the
+/// patch. Starting there, the reviewer and the checks see exactly the files
+/// the worker saw, whatever the user changed in the checkout since. Without a
+/// usable base the current checkout is snapshotted instead.
 pub(crate) async fn prepare_reviewer(
     root: &Path,
     worker_diff: &str,
+    base: Option<&str>,
 ) -> Result<PreparedWorkspace, String> {
     if !worker_diff.trim().is_empty() {
         crate::delegation::validate_diff_paths(root, worker_diff)
             .map_err(|error| format!("worker diff is unsafe: {error}"))?;
     }
-    let mut workspace = prepare(root).await?;
+    let mut workspace = match base {
+        Some(base) if has_commit(root, base).await => prepare_at_base(root, base).await?,
+        _ => prepare(root).await?,
+    };
     if !worker_diff.trim().is_empty() {
         if let Err(error) = apply_diff_to_workspace(workspace.path(), worker_diff).await {
             let _ = workspace.cleanup().await;
@@ -320,9 +461,13 @@ async fn collect_git_diff_with_untracked(
             Ok(metadata) if metadata.file_type().is_file() => metadata,
             _ => continue,
         };
-        if metadata.len() > 2_000_000 {
-            diff.push_str(&format!("\nBinary or large untracked file: {relative}\n"));
-            continue;
+        if metadata.len() > MAX_NEW_FILE_BYTES {
+            // A note in the diff looked like a change but applied as nothing:
+            // `git apply` skips lines that are not part of a patch.
+            return Err(format!(
+                "the worker created {relative} ({} bytes), larger than the {MAX_NEW_FILE_BYTES}-byte limit for a file in a delegated diff",
+                metadata.len()
+            ));
         }
         let source = source_root.join(&relative);
         let output = if source.is_file() {
@@ -408,7 +553,7 @@ async fn git_no_index_diff(
     relative: &str,
 ) -> Result<String, String> {
     let output = Command::new("git")
-        .args(["diff", "--no-index", "--no-ext-diff", "--"])
+        .args(["diff", "--no-index", "--no-ext-diff", "--binary", "--"])
         .arg(left)
         .arg(right)
         .current_dir(cwd)
@@ -542,6 +687,12 @@ mod tests {
         temp
     }
 
+    async fn has_commit_ref(root: &Path, name: &str) -> bool {
+        git_output(root, &["rev-parse", "--verify", "--quiet", name])
+            .await
+            .is_ok()
+    }
+
     async fn committed_repo() -> tempfile::TempDir {
         let temp = repo();
         git_ok(temp.path(), &["init", "--quiet"]).await;
@@ -591,10 +742,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_binary_file_survives_the_diff_round_trip() {
+        let temp = committed_repo().await;
+        let mut worker = prepare(temp.path()).await.unwrap();
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        std::fs::write(worker.path().join("image.bin"), &bytes).unwrap();
+        let diff = worker.collect_diff().await.unwrap();
+        worker.cleanup().await.unwrap();
+        assert!(diff.contains("GIT binary patch"), "{diff}");
+
+        let mut reviewer = prepare_reviewer(temp.path(), &diff, None).await.unwrap();
+        assert_eq!(
+            std::fs::read(reviewer.path().join("image.bin")).unwrap(),
+            bytes
+        );
+        reviewer.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_starts_from_the_worker_snapshot_not_the_live_checkout() {
+        let temp = committed_repo().await;
+        std::fs::write(temp.path().join("tracked.txt"), "dirty at dispatch\n").unwrap();
+        let mut worker = prepare(temp.path()).await.unwrap();
+        std::fs::write(worker.path().join("new.txt"), "from the worker\n").unwrap();
+        let diff = worker.collect_diff().await.unwrap();
+        let base = worker.baseline().to_string();
+        worker.cleanup().await.unwrap();
+        pin_worker_base(temp.path(), "job-1", &base).await.unwrap();
+
+        // The user keeps working after the worker finished.
+        std::fs::write(temp.path().join("tracked.txt"), "edited later\n").unwrap();
+
+        let mut reviewer = prepare_reviewer(temp.path(), &diff, Some(&base))
+            .await
+            .unwrap();
+        let read = |name: &str| {
+            std::fs::read_to_string(reviewer.path().join(name))
+                .unwrap()
+                .replace("\r\n", "\n")
+        };
+        assert_eq!(read("tracked.txt"), "dirty at dispatch\n");
+        assert_eq!(read("new.txt"), "from the worker\n");
+        assert!(!reviewer.path().join(".env").exists());
+        reviewer.cleanup().await.unwrap();
+
+        // An unknown or malformed base falls back to the current checkout.
+        let mut fallback = prepare_reviewer(temp.path(), &diff, Some("--help"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(fallback.path().join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "edited later\n"
+        );
+        fallback.cleanup().await.unwrap();
+        unpin_worker_base(temp.path(), "job-1");
+        assert!(!has_commit_ref(temp.path(), "refs/zest/delegations/job-1").await);
+    }
+
+    #[tokio::test]
+    async fn stale_worktrees_of_dead_processes_are_pruned() {
+        let temp = committed_repo().await;
+        let parent = tempfile::tempdir().unwrap();
+        let add = |owner: u32| {
+            let dir = parent
+                .path()
+                .join(format!("{WORKTREE_DIR_PREFIX}{owner}-abc"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let worktree = dir.join("workspace");
+            let output = std::process::Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(&worktree)
+                .arg("HEAD")
+                .current_dir(temp.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            worktree
+        };
+        // No process has this id; this test process is alive.
+        let stale = add(u32::MAX - 7);
+        let live = add(std::process::id());
+        let removed = prune_stale_worktrees(temp.path());
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert!(!stale.exists());
+        assert!(live.exists());
+        let list = git_output(temp.path(), &["worktree", "list", "--porcelain"])
+            .await
+            .unwrap();
+        assert!(!list.contains(&format!("{}-abc", u32::MAX - 7)), "{list}");
+        let _ = remove_worktree(temp.path(), &live).await;
+    }
+
+    #[tokio::test]
+    async fn an_oversized_new_file_is_refused_by_name() {
+        let temp = committed_repo().await;
+        let mut worker = prepare(temp.path()).await.unwrap();
+        std::fs::write(
+            worker.path().join("huge.txt"),
+            vec![b'a'; MAX_NEW_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = worker.collect_diff().await.unwrap_err();
+        worker.cleanup().await.unwrap();
+        assert!(error.contains("huge.txt"), "{error}");
+        assert!(error.contains("limit"), "{error}");
+    }
+
+    #[tokio::test]
     async fn reviewer_rejects_unsafe_diff_before_creating_a_worktree() {
         let temp = committed_repo().await;
 
-        let error = match prepare_reviewer(temp.path(), "diff --git a/.env b/.env\n").await {
+        let error = match prepare_reviewer(temp.path(), "diff --git a/.env b/.env\n", None).await {
             Ok(_) => panic!("sensitive worker diff unexpectedly accepted"),
             Err(error) => error,
         };

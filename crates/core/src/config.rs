@@ -124,6 +124,14 @@ pub struct ToolsConfig {
     /// requests, one extra round when a tool is first needed. Off by default.
     #[serde(default)]
     pub mcp_discovery: bool,
+    /// Provider rounds one turn may take before the model is asked to wrap up
+    /// without tools. `0` means no limit.
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u32,
+}
+
+fn default_max_steps() -> u32 {
+    crate::agent::DEFAULT_MAX_STEPS
 }
 
 /// Hand-written rather than derived: a derived `usize` default is `0`, which this
@@ -135,6 +143,7 @@ impl Default for ToolsConfig {
             bash: BashConfig::default(),
             max_result_bytes: default_max_result_bytes(),
             mcp_discovery: false,
+            max_steps: default_max_steps(),
         }
     }
 }
@@ -468,6 +477,11 @@ pub struct ExternalAgentConfig {
     /// a turn wait indefinitely.
     #[serde(default = "default_external_timeout_secs")]
     pub timeout_secs: u64,
+    /// A delegated feature-card worker or reviewer that prints nothing for
+    /// this long is stopped, even if `timeout_secs` has not run out.
+    /// Defaults to 900 seconds; capped like `timeout_secs`.
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]

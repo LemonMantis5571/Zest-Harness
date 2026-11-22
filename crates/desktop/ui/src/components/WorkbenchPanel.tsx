@@ -61,6 +61,8 @@ type PanelProps = {
   onApproveDelegation: (jobId: string) => Promise<void>;
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
+  /** Review a saved worker diff again with a fresh reviewer (`canReviewAgain`). */
+  onReviewDelegationAgain?: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
   onReconnectProvider?: (providerId: string) => void;
   /** Show this job on the Delegation tab; a new `request` repeats the jump. */
@@ -394,6 +396,7 @@ function WorkbenchBody({
   onApproveDelegation,
   onCancelDelegation,
   onRetryDelegation,
+  onReviewDelegationAgain,
   onApplyDelegation,
   onReconnectProvider,
   focusDelegationJob,
@@ -1236,6 +1239,17 @@ function WorkbenchBody({
                           >
                             <GitMergeIcon data-icon="inline-start" />
                             Apply accepted changes
+                          </Button>
+                        ) : null}
+                        {job.canReviewAgain && onReviewDelegationAgain ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={busyAction !== null}
+                            onClick={() => void runDelegationAction(job.jobId, onReviewDelegationAgain)}
+                          >
+                            <RefreshCwIcon data-icon="inline-start" />
+                            Review again
                           </Button>
                         ) : null}
                         {job.status === "changes_requested" || job.status === "apply_conflict" || job.status === "blocked" || job.status === "failed" ? (

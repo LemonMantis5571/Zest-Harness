@@ -357,6 +357,7 @@ impl ClaudeCodeProvider {
             model: Some(model.to_string()),
             workspace: ExternalWorkspace::Current,
             timeout_secs: self.timeout_secs,
+            idle_timeout_secs: None,
         }
     }
 }

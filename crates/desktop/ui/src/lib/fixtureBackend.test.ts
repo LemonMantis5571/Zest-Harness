@@ -310,6 +310,8 @@ describe("fixture delegation lifecycle", () => {
     assert.equal(initial.status, "awaiting_approval");
     assert.equal(initial.changedFileCount, 0);
 
+    assert.equal(initial.canReviewAgain, false);
+    await assert.rejects(backend.reviewDelegationJobAgain(initial.jobId), /no worker diff awaiting a verdict/);
     const retried = await backend.retryDelegationJob(initial.jobId);
     assert.equal(retried.status, "awaiting_approval");
     const ready = await backend.approveDelegationJob(initial.jobId);

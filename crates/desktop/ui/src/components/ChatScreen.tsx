@@ -266,6 +266,7 @@ export type ChatScreenProps = {
   onApproveDelegation: (jobId: string) => Promise<void>;
   onCancelDelegation: (jobId: string) => Promise<void>;
   onRetryDelegation: (jobId: string) => Promise<void>;
+  onReviewDelegationAgain?: (jobId: string) => Promise<void>;
   onApplyDelegation: (jobId: string) => Promise<void>;
   splitGroups?: ReadonlyArray<SplitSidebarGroup>;
   activeSplitGroupId?: string | null;
@@ -749,6 +750,7 @@ export function ChatScreen({
   onApproveDelegation,
   onCancelDelegation,
   onRetryDelegation,
+  onReviewDelegationAgain,
   onApplyDelegation,
   splitGroups = [],
   activeSplitGroupId = null,
@@ -2166,6 +2168,7 @@ export function ChatScreen({
             onApproveDelegation={onApproveDelegation}
             onCancelDelegation={onCancelDelegation}
             onRetryDelegation={onRetryDelegation}
+            onReviewDelegationAgain={onReviewDelegationAgain}
             onApplyDelegation={onApplyDelegation}
             onReconnectProvider={onReconnectProvider}
             focusDelegationJob={workbenchJobFocus}

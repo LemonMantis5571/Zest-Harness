@@ -658,6 +658,7 @@ impl RuntimeBuilder {
         }
         agent.model = model.clone();
         agent.effort = effort.clone();
+        agent.max_steps = config.tools.max_steps;
 
         Ok(RuntimeSession {
             root,

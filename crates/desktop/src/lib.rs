@@ -6822,7 +6822,10 @@ async fn compact_context_inner(state: &AppState) -> Result<CompactionResultView,
             }
             _ => None,
         });
-    let result = session.agent.compact_context_for_run(run_id).await;
+    let result = session
+        .agent
+        .compact_context_for_run(run_id, Some(&turn.cancel))
+        .await;
     let output = match result {
         // Both paths rewrote history, so both need the same persistence handling.
         // The checkpoint written above is kept either way: the UI transcript
@@ -8908,6 +8911,15 @@ fn retry_delegation_job(
 }
 
 #[tauri::command]
+fn review_delegation_job_again(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.review_again(&root, &job_id, None)
+}
+
+#[tauri::command]
 fn apply_delegation_job(
     state: State<'_, AppState>,
     job_id: String,
@@ -9540,6 +9552,7 @@ pub fn run() {
                 get_delegation_job,
                 cancel_delegation_job,
                 retry_delegation_job,
+                review_delegation_job_again,
                 apply_delegation_job
             ];
             handler(invoke)

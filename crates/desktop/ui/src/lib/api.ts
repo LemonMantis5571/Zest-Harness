@@ -693,6 +693,10 @@ export function retryDelegationJob(jobId: string) {
   return invoke<DelegationJob>("retry_delegation_job", { jobId });
 }
 
+export function reviewDelegationJobAgain(jobId: string) {
+  return invoke<DelegationJob>("review_delegation_job_again", { jobId });
+}
+
 export function applyDelegationJob(jobId: string) {
   return invoke<DelegationJob>("apply_delegation_job", { jobId });
 }

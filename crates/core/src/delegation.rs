@@ -205,6 +205,11 @@ pub struct DelegationOrigin {
     pub idempotency_key: Option<String>,
 }
 
+/// The hash `reviewable_diff` records for a worker diff.
+pub fn worker_diff_hash(diff: &str) -> String {
+    blake3::hash(diff.as_bytes()).to_hex().to_string()
+}
+
 /// Proof that a human already approved dispatch for this exact card and target.
 ///
 /// The interactive tool gate writes this after `y`. The coordinator may then
@@ -481,21 +486,21 @@ impl FeatureCard {
         root: &Path,
         snapshot: &WorkspaceSnapshot,
         worker_result: &WorkerResult,
+        checks: &[AcceptanceCheckResult],
     ) -> String {
         let context = bounded_context(root, &self.context);
         let card = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into());
         let worker = serde_json::to_string_pretty(worker_result).unwrap_or_else(|_| "{}".into());
-        let checks = if self.acceptance_checks.is_empty() {
+        let checks = if checks.is_empty() {
             "(none declared)".to_string()
         } else {
-            self.acceptance_checks
-                .iter()
-                .map(|check| format!("- {check}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            format!(
+                "Zest ran these commands itself, in a separate workspace with the worker diff applied. Treat them as evidence. Zest adds them to the final report, so leave them out of your reply.\n```json\n{}\n```",
+                serde_json::to_string_pretty(checks).unwrap_or_else(|_| "[]".into())
+            )
         };
         format!(
-            "You are a fresh, independent Zest reviewer. Inspect the current isolated workspace and the applied worker diff. You may read files and run checks, but you must not edit files and you must not create delegation jobs. Any reviewer-side edits are discarded. Do not address the end user.\n\n# Feature card\n{card}\n\n# Selected context\n{context}\n\n# Worker result\n{worker}\n\n# Required acceptance checks\n{checks}\n\n# Workspace snapshot\nhead={:?}\nfingerprint={}\n\nReply with one JSON object and nothing else. Do not wrap it in markdown or prose. Shape: {{\"decision\":\"accepted\" or \"changes_requested\",\"summary\":\"…\",\"findings\":[{{\"severity\":\"blocking\" or \"advisory\",\"path\":\"relative/path\",\"message\":\"…\"}}],\"checks\":[{{\"command\":\"…\",\"status\":\"passed\" or \"failed\" or \"skipped\",\"output\":\"…\"}}]}}. Include evidence for every required check; never claim a check passed without running it.",
+            "You are a fresh, independent Zest reviewer. Inspect the current isolated workspace and the applied worker diff. You may read files and run checks, but you must not edit files and you must not create delegation jobs. Any reviewer-side edits are discarded. Do not address the end user.\n\n# Feature card\n{card}\n\n# Selected context\n{context}\n\n# Worker result\n{worker}\n\n# Acceptance-check results\n{checks}\n\n# Workspace snapshot\nhead={:?}\nfingerprint={}\n\nReply with one JSON object and nothing else. Do not wrap it in markdown or prose. Shape: {{\"decision\":\"accepted\" or \"changes_requested\",\"summary\":\"…\",\"findings\":[{{\"severity\":\"blocking\" or \"advisory\",\"path\":\"relative/path\",\"message\":\"…\"}}]}}. Judge the diff against the objective, the scope and the acceptance-check results.",
             snapshot.head, snapshot.fingerprint
         )
     }
@@ -779,6 +784,18 @@ pub struct DelegationJob {
     pub dispatch_receipt: Option<DispatchReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Hash of the saved `worker.diff` while it still awaits a verdict. A
+    /// card that blocked or failed during review can then be reviewed again
+    /// without rerunning the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewable_diff: Option<String>,
+    /// The queued run skips the worker and reviews `worker.diff` again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_only: bool,
+    /// The snapshot commit the last worker attempt started from. Checks and
+    /// reviewers start there too, not from the checkout as it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_base: Option<String>,
 }
 
 /// Explain why a queued job cannot proceed because one of its prerequisites
@@ -960,6 +977,9 @@ impl DelegationJob {
                 DelegationStatus::AwaitingApproval
             ) | (DelegationStatus::AwaitingApproval, DelegationStatus::Queued)
                 | (DelegationStatus::Queued, DelegationStatus::WorkerRunning)
+                | (DelegationStatus::Queued, DelegationStatus::ReviewRunning)
+                | (DelegationStatus::Blocked, DelegationStatus::Queued)
+                | (DelegationStatus::Failed, DelegationStatus::Queued)
                 | (DelegationStatus::Queued, DelegationStatus::AwaitingApproval)
                 | (
                     DelegationStatus::WorkerRunning,
@@ -1006,12 +1026,42 @@ impl DelegationJob {
                 "delegation job requires an approval record before queuing".into(),
             ));
         }
+        // Leaving `blocked` or `failed` for the queue only reviews the saved
+        // diff again; a new worker attempt goes through a fresh approval.
+        if next == DelegationStatus::Queued
+            && matches!(
+                self.status,
+                DelegationStatus::Blocked | DelegationStatus::Failed
+            )
+            && !self.review_only
+        {
+            return Err(HarnessError::Other(
+                "only a review of the saved worker diff can be queued from here; retry for a new worker attempt".into(),
+            ));
+        }
+        if next == DelegationStatus::ReviewRunning
+            && self.status == DelegationStatus::Queued
+            && !self.review_only
+        {
+            return Err(HarnessError::Other(
+                "a queued job reaches review through its worker".into(),
+            ));
+        }
         if next == DelegationStatus::AwaitingApproval {
             self.dispatch_receipt = None;
             self.approved_at = None;
             self.approval_fingerprint = None;
             self.resolved_worker_target = None;
             self.resolved_reviewer_target = None;
+            self.reviewable_diff = None;
+            self.review_only = false;
+        }
+        if matches!(
+            next,
+            DelegationStatus::ReadyToApply | DelegationStatus::ChangesRequested
+        ) {
+            // A verdict exists; asking another reviewer is reviewer shopping.
+            self.reviewable_diff = None;
         }
         self.status = next;
         self.apply_pending = false;
@@ -1022,6 +1072,44 @@ impl DelegationJob {
             format!("delegation status changed to {next:?}"),
         );
         Ok(true)
+    }
+
+    /// Queue a fresh reviewer for the saved worker diff of a card that
+    /// blocked or failed before any verdict. `saved_diff` is the current
+    /// `worker.diff`; it must be the diff the worker attempt produced.
+    pub fn queue_review_again(&mut self, saved_diff: &str) -> Result<()> {
+        if !matches!(
+            self.status,
+            DelegationStatus::Blocked | DelegationStatus::Failed
+        ) {
+            return Err(HarnessError::Other(
+                "only a blocked or failed card can be reviewed again".into(),
+            ));
+        }
+        if self.reviewable_diff.as_deref() != Some(worker_diff_hash(saved_diff).as_str()) {
+            return Err(HarnessError::Other(
+                "this card has no worker diff awaiting a verdict; retry for a new worker attempt"
+                    .into(),
+            ));
+        }
+        if !self.is_approved() {
+            return Err(HarnessError::Other(
+                "this card is no longer approved; retry and approve it again".into(),
+            ));
+        }
+        self.review_only = true;
+        if let Err(error) = self.transition(DelegationStatus::Queued) {
+            self.review_only = false;
+            return Err(error);
+        }
+        self.error = None;
+        self.orchestration.add_message(
+            MessageKind::Decision,
+            "user",
+            "Review again requested; the saved worker diff is reviewed by a fresh reviewer",
+            self.updated_at,
+        );
+        Ok(())
     }
 
     pub fn block_interrupted_apply(&mut self) -> Result<bool> {
@@ -1294,9 +1382,46 @@ impl ReviewReport {
         if value.chars().count() > MAX_REVIEW_REPORT_CHARS {
             return Err(HarnessError::Other("reviewer report is too large".into()));
         }
-        let report = parse_review_json(value)?;
+        let report: Self = parse_review_json(value)?;
         report.validate(required_checks)?;
         Ok(report)
+    }
+
+    /// Parse a reviewer's verdict and attach the acceptance-check results the
+    /// coordinator recorded itself. Any `checks` the reviewer wrote are
+    /// ignored: the reviewer judges, it does not transcribe command output.
+    pub fn parse_verdict(raw: &str, checks: Vec<AcceptanceCheckResult>) -> Result<Self> {
+        let value = raw.trim();
+        if value.chars().count() > MAX_REVIEW_REPORT_CHARS {
+            return Err(HarnessError::Other("reviewer report is too large".into()));
+        }
+        let verdict: ReviewVerdict = parse_review_json(value)?;
+        let report = Self {
+            decision: verdict.decision,
+            summary: verdict.summary,
+            findings: verdict.findings,
+            checks,
+        };
+        report.validate(&[])?;
+        Ok(report)
+    }
+
+    /// Why an accepted verdict still cannot be applied, naming the first
+    /// acceptance check that did not pass.
+    pub fn unmet_check(&self, required_checks: &[String]) -> Option<String> {
+        required_checks.iter().find_map(|required| {
+            match self.checks.iter().find(|check| check.command == *required) {
+                None => Some(format!("acceptance check `{required}` has no result")),
+                Some(check) if check.status == CheckStatus::Failed => {
+                    Some(format!("acceptance check `{required}` failed"))
+                }
+                Some(check) if check.status == CheckStatus::Skipped => Some(format!(
+                    "acceptance check `{required}` was not run: {}",
+                    check.output
+                )),
+                Some(_) => None,
+            }
+        })
     }
 
     pub fn validate(&self, required_checks: &[String]) -> Result<()> {
@@ -1359,9 +1484,18 @@ impl ReviewReport {
     }
 }
 
-fn parse_review_json(raw: &str) -> Result<ReviewReport> {
+/// The part of a review report the reviewer owns.
+#[derive(Debug, Deserialize)]
+struct ReviewVerdict {
+    decision: ReviewDecision,
+    summary: String,
+    #[serde(default)]
+    findings: Vec<ReviewFinding>,
+}
+
+fn parse_review_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let mut last_error = None;
-    let mut consider = |payload: &str| -> Option<ReviewReport> {
+    let mut consider = |payload: &str| -> Option<T> {
         match deserialize_review_prefix(payload) {
             Ok(report) => Some(report),
             Err(error) => {
@@ -1417,7 +1551,9 @@ fn parse_review_json(raw: &str) -> Result<ReviewReport> {
     )))
 }
 
-fn deserialize_review_prefix(raw: &str) -> std::result::Result<ReviewReport, serde_json::Error> {
+fn deserialize_review_prefix<T: serde::de::DeserializeOwned>(
+    raw: &str,
+) -> std::result::Result<T, serde_json::Error> {
     let trimmed = raw.trim_start();
     match deserialize_report_or_normalized(trimmed) {
         Ok(report) => Ok(report),
@@ -1432,11 +1568,11 @@ fn deserialize_review_prefix(raw: &str) -> std::result::Result<ReviewReport, ser
     }
 }
 
-fn deserialize_report_or_normalized(
+fn deserialize_report_or_normalized<T: serde::de::DeserializeOwned>(
     raw: &str,
-) -> std::result::Result<ReviewReport, serde_json::Error> {
+) -> std::result::Result<T, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(raw);
-    match ReviewReport::deserialize(&mut de) {
+    match T::deserialize(&mut de) {
         Ok(report) => Ok(report),
         Err(error) => {
             let mut de = serde_json::Deserializer::from_str(raw);
@@ -1638,6 +1774,13 @@ pub fn validate_review_paths(root: &Path, report: &ReviewReport) -> Result<()> {
     Ok(())
 }
 
+/// A job file in the store that [`DelegationStore::list_all`] could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableJob {
+    pub job_id: String,
+    pub error: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct DelegationStore {
     root: PathBuf,
@@ -1668,7 +1811,11 @@ impl DelegationStore {
     fn artifact_path(&self, job_id: &str, name: &str) -> Result<PathBuf> {
         let job_id = validate_id(job_id, "delegation job")?;
         let name = match name {
-            "worker.diff" | "worker-result.json" | "review-result.json" => name,
+            "worker.diff"
+            | "worker-result.json"
+            | "review-result.json"
+            | "worker-partial.diff"
+            | "worker-transcript.jsonl" => name,
             _ => return Err(HarnessError::Other("unknown delegation artifact".into())),
         };
         let path = self.dir().join(job_id).join(name);
@@ -1803,6 +1950,9 @@ impl DelegationStore {
             orchestration,
             dispatch_receipt: None,
             idempotency_key: None,
+            reviewable_diff: None,
+            review_only: false,
+            worker_base: None,
         };
         if self.load(&job_id)?.is_some() {
             return Err(HarnessError::Other(
@@ -1824,9 +1974,19 @@ impl DelegationStore {
             .find(|job| job.idempotency_key.as_deref() == Some(key)))
     }
 
+    /// Every readable job, newest first. A job file that cannot be read is
+    /// left out (see [`Self::list_all`]), so one corrupt card cannot hide the
+    /// board or stall the queue.
     pub fn list(&self) -> Result<Vec<DelegationJob>> {
+        Ok(self.list_all()?.0)
+    }
+
+    /// Every readable job, newest first, and the job files that could not be
+    /// read with the reason.
+    pub fn list_all(&self) -> Result<(Vec<DelegationJob>, Vec<UnreadableJob>)> {
         let _guard = state_lock()?;
         let mut jobs: Vec<DelegationJob> = Vec::new();
+        let mut unreadable = Vec::new();
         let entries = fs::read_dir(self.dir())
             .map_err(|error| HarnessError::Other(format!("list delegation jobs: {error}")))?;
         for entry in entries {
@@ -1838,8 +1998,13 @@ impl DelegationStore {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if let Some(job) = read_job(&path, id)? {
-                jobs.push(job);
+            match read_job(&path, id) {
+                Ok(Some(job)) => jobs.push(job),
+                Ok(None) => {}
+                Err(error) => unreadable.push(UnreadableJob {
+                    job_id: id.to_string(),
+                    error: error.to_string(),
+                }),
             }
         }
         jobs.sort_by(|left, right| {
@@ -1848,7 +2013,7 @@ impl DelegationStore {
                 .cmp(&left.updated_at)
                 .then_with(|| left.job_id.cmp(&right.job_id))
         });
-        Ok(jobs)
+        Ok((jobs, unreadable))
     }
 
     pub fn write_artifact(&self, job_id: &str, name: &str, data: &[u8]) -> Result<()> {
@@ -2227,18 +2392,195 @@ fn nearest_existing(path: &Path) -> PathBuf {
 /// Apply an accepted diff without ever asking Git to accept partial hunks.
 /// The caller should persist the returned job after this function succeeds.
 pub fn apply_diff_checked(root: &Path, diff: &str) -> Result<()> {
+    apply_worker_diff(root, diff, None).map(|_| ())
+}
+
+/// How [`apply_worker_diff`] brought a diff into the checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// The diff applied as it is.
+    Clean,
+    /// The checkout had changed around the worker's edits; a three-way merge
+    /// from the worker's base placed the same changes.
+    ThreeWay,
+}
+
+/// Apply a reviewed worker diff. When it no longer applies as it is and
+/// `base` (the commit the worker started from) is known, merge it three
+/// ways in temporary worktrees and apply the result only if that merge is
+/// clean. Either way Git never leaves a partial apply or conflict markers in
+/// the checkout.
+pub fn apply_worker_diff(root: &Path, diff: &str, base: Option<&str>) -> Result<ApplyOutcome> {
     validate_diff_paths(root, diff)?;
     let _guard = apply_lock()?;
-    let check = Command::new("git")
-        .args(["apply", "--check", "--binary", "--whitespace=nowarn", "-"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| HarnessError::Other(format!("start git apply --check: {error}")))?;
-    apply_to_child(check, diff, "check")?;
+    let plain = match git_apply_patch(root, diff, true) {
+        Ok(()) => {
+            git_apply_patch(root, diff, false)?;
+            return Ok(ApplyOutcome::Clean);
+        }
+        Err(error) => error,
+    };
+    let Some(base) = base else {
+        return Err(plain);
+    };
+    let merged = three_way_patch(root, diff, base).map_err(|error| {
+        HarnessError::Other(format!(
+            "{plain}; a three-way merge from the worker's base did not apply either: {error}"
+        ))
+    })?;
+    if merged.trim().is_empty() {
+        return Err(HarnessError::Other(format!(
+            "{plain}; a three-way merge found nothing left to change, so the changes may already be in the checkout"
+        )));
+    }
+    let allowed = diff_paths(diff);
+    if let Some(extra) = diff_paths(&merged)
+        .into_iter()
+        .find(|path| !allowed.contains(path))
+    {
+        return Err(HarnessError::Other(format!(
+            "{plain}; a three-way merge touched {extra}, which the reviewed diff does not"
+        )));
+    }
+    validate_diff_paths(root, &merged)?;
+    git_apply_patch(root, &merged, true)?;
+    git_apply_patch(root, &merged, false)?;
+    Ok(ApplyOutcome::ThreeWay)
+}
 
+/// Worktrees created for a three-way merge, removed when dropped.
+struct MergeWorktrees<'a> {
+    root: &'a Path,
+    paths: Vec<PathBuf>,
+}
+
+impl Drop for MergeWorktrees<'_> {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(path)
+                .current_dir(self.root)
+                .output();
+        }
+    }
+}
+
+fn git_checked(cwd: &Path, args: &[&std::ffi::OsStr]) -> std::result::Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    if !output.status.success() {
+        return Err(clip_chars(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            2_000,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The worker's change (base -> base + diff), replayed onto a snapshot of
+/// the checkout as it is now, as a patch against the checkout.
+fn three_way_patch(root: &Path, diff: &str, base: &str) -> std::result::Result<String, String> {
+    use std::ffi::OsStr;
+    if !(matches!(base.len(), 40 | 64) && base.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+        return Err("the worker's base is not a commit id".into());
+    }
+    let identity = [
+        OsStr::new("-c"),
+        OsStr::new("user.name=Zest"),
+        OsStr::new("-c"),
+        OsStr::new("user.email=zest@localhost"),
+        OsStr::new("-c"),
+        OsStr::new("commit.gpgSign=false"),
+    ];
+    // `stash create` records tracked changes as a commit without touching
+    // the checkout, the index or any ref.
+    let ours = match git_checked(root, &[OsStr::new("stash"), OsStr::new("create")])?.trim() {
+        "" => git_checked(root, &[OsStr::new("rev-parse"), OsStr::new("HEAD")])?
+            .trim()
+            .to_string(),
+        stash => stash.to_string(),
+    };
+    let temp = crate::tools::isolated_workspace::worktree_tempdir()
+        .map_err(|error| format!("create merge directory: {error}"))?;
+    let theirs_dir = temp.path().join("theirs");
+    let ours_dir = temp.path().join("ours");
+    let mut worktrees = MergeWorktrees {
+        root,
+        paths: Vec::new(),
+    };
+    let add = |dir: &Path, commit: &str| {
+        git_checked(
+            root,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                OsStr::new("--quiet"),
+                dir.as_os_str(),
+                OsStr::new(commit),
+            ],
+        )
+    };
+    add(&theirs_dir, base)?;
+    worktrees.paths.push(theirs_dir.clone());
+    git_apply_patch(&theirs_dir, diff, false).map_err(|error| error.to_string())?;
+    git_checked(&theirs_dir, &[OsStr::new("add"), OsStr::new("-A")])?;
+    let mut commit = identity.to_vec();
+    commit.extend(
+        [
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "Zest worker change",
+        ]
+        .iter()
+        .map(OsStr::new),
+    );
+    git_checked(&theirs_dir, &commit)?;
+    let theirs = git_checked(&theirs_dir, &[OsStr::new("rev-parse"), OsStr::new("HEAD")])?
+        .trim()
+        .to_string();
+
+    add(&ours_dir, &ours)?;
+    worktrees.paths.push(ours_dir.clone());
+    let mut pick = identity.to_vec();
+    pick.extend([
+        OsStr::new("cherry-pick"),
+        OsStr::new("--no-commit"),
+        OsStr::new(&theirs),
+    ]);
+    git_checked(&ours_dir, &pick).map_err(|error| format!("the changes conflict: {error}"))?;
+    let patch = git_checked(
+        &ours_dir,
+        &[
+            OsStr::new("diff"),
+            OsStr::new("--cached"),
+            OsStr::new("--binary"),
+            OsStr::new("--no-ext-diff"),
+            OsStr::new("HEAD"),
+        ],
+    )?;
+    drop(worktrees);
+    Ok(patch)
+}
+
+fn git_apply_patch(root: &Path, diff: &str, check_only: bool) -> Result<()> {
+    if check_only {
+        let check = Command::new("git")
+            .args(["apply", "--check", "--binary", "--whitespace=nowarn", "-"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| HarnessError::Other(format!("start git apply --check: {error}")))?;
+        return apply_to_child(check, diff, "check");
+    }
     let apply = Command::new("git")
         .args(["apply", "--binary", "--whitespace=nowarn", "-"])
         .current_dir(root)
@@ -2314,6 +2656,7 @@ mod tests {
                 model: None,
                 workspace: ExternalWorkspace::Isolated,
                 timeout_secs: 10,
+                idle_timeout_secs: None,
             },
         );
         agents
@@ -2389,6 +2732,9 @@ mod tests {
             orchestration: OrchestrationState::default(),
             dispatch_receipt: None,
             idempotency_key: None,
+            reviewable_diff: None,
+            review_only: false,
+            worker_base: None,
         };
         assert!(job.transition(DelegationStatus::AwaitingApproval).unwrap());
         assert!(!job.transition(DelegationStatus::AwaitingApproval).unwrap());
@@ -2466,6 +2812,53 @@ Thanks."#;
     }
 
     #[test]
+    fn verdict_takes_check_results_from_the_coordinator_not_the_reviewer() {
+        let required = vec!["cargo test".to_string()];
+        let recorded = vec![AcceptanceCheckResult {
+            command: "cargo test".into(),
+            status: CheckStatus::Passed,
+            output: "$ cargo test\nexit 0\n\ntest result: ok".into(),
+        }];
+        // The reviewer left the checks out entirely: still a usable verdict.
+        let report = ReviewReport::parse_verdict(
+            r#"{"decision":"accepted","summary":"Looks good","findings":[]}"#,
+            recorded.clone(),
+        )
+        .unwrap();
+        assert_eq!(report.checks, recorded);
+        assert!(report.can_accept(&required));
+        assert_eq!(report.unmet_check(&required), None);
+
+        // A reviewer that paraphrases or misreports a check cannot change it.
+        let report = ReviewReport::parse_verdict(
+            r#"{"decision":"accepted","summary":"Looks good","checks":[{"command":"cargo test","status":"PASS","output":"trust me"}]}"#,
+            recorded,
+        )
+        .unwrap();
+        assert_eq!(
+            report.checks[0].output,
+            "$ cargo test\nexit 0\n\ntest result: ok"
+        );
+
+        // An accepted verdict over a failed check is not applicable, and says why.
+        let failed = vec![AcceptanceCheckResult {
+            command: "cargo test".into(),
+            status: CheckStatus::Failed,
+            output: "$ cargo test\nexit 101".into(),
+        }];
+        let report = ReviewReport::parse_verdict(
+            r#"{"decision":"accepted","summary":"Looks good"}"#,
+            failed,
+        )
+        .unwrap();
+        assert!(!report.can_accept(&required));
+        assert_eq!(
+            report.unmet_check(&required).as_deref(),
+            Some("acceptance check `cargo test` failed")
+        );
+    }
+
+    #[test]
     fn review_report_extracts_json_when_code_fences_come_first() {
         let checks = vec!["cargo test".into()];
         let braces = "{\n".repeat(40);
@@ -2508,6 +2901,43 @@ Here is the JSON verdict:
     }
 
     #[test]
+    fn only_an_unjudged_saved_diff_can_be_reviewed_again() {
+        let root = scratch("review-again");
+        let store = DelegationStore::open(&root).unwrap();
+        let mut job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        job.approve().unwrap();
+        job.transition(DelegationStatus::Queued).unwrap();
+        job.transition(DelegationStatus::WorkerRunning).unwrap();
+        job.reviewable_diff = Some(worker_diff_hash("diff-1"));
+        job.transition(DelegationStatus::ReviewRunning).unwrap();
+        job.transition(DelegationStatus::Blocked).unwrap();
+
+        // Without the flag, a blocked card cannot jump back into the queue.
+        assert!(job.transition(DelegationStatus::Queued).is_err());
+        // A different diff on disk is not the one that awaits review.
+        assert!(job.queue_review_again("diff-2").is_err());
+        assert_eq!(job.status, DelegationStatus::Blocked);
+
+        job.queue_review_again("diff-1").unwrap();
+        assert_eq!(job.status, DelegationStatus::Queued);
+        assert!(job.review_only);
+        job.transition(DelegationStatus::ReviewRunning).unwrap();
+        job.transition(DelegationStatus::ChangesRequested).unwrap();
+        // A verdict closes the door: no reviewer shopping.
+        assert_eq!(job.reviewable_diff, None);
+
+        // A queued job without the flag still has to run its worker first.
+        let mut fresh = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        fresh.approve().unwrap();
+        fresh.transition(DelegationStatus::Queued).unwrap();
+        assert!(fresh.transition(DelegationStatus::ReviewRunning).is_err());
+    }
+
+    #[test]
     fn changes_requested_creates_a_fresh_worker_attempt() {
         let root = scratch("fresh-attempt");
         let now = now_millis();
@@ -2545,6 +2975,9 @@ Here is the JSON verdict:
             orchestration: OrchestrationState::default(),
             dispatch_receipt: None,
             idempotency_key: None,
+            reviewable_diff: None,
+            review_only: false,
+            worker_base: None,
         };
         job.approve().unwrap();
         job.transition(DelegationStatus::Queued).unwrap();
@@ -2912,6 +3345,78 @@ Here is the JSON verdict:
         assert!(dependency_blocker(&dependent, &jobs)
             .unwrap()
             .contains("cancelled"));
+    }
+
+    #[test]
+    fn a_moved_checkout_gets_a_three_way_apply_or_stays_untouched() {
+        let root = scratch("three-way");
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.name", "Zest Test"]);
+        run_git(&root, &["config", "user.email", "zest-test@localhost"]);
+        run_git(&root, &["config", "core.autocrlf", "false"]);
+        let lines = |edit: &[(usize, &str)]| {
+            let mut lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+            for (index, text) in edit {
+                lines[*index] = text.to_string();
+            }
+            lines.join("\n") + "\n"
+        };
+        fs::write(root.join("file.txt"), lines(&[])).unwrap();
+        run_git(&root, &["add", "file.txt"]);
+        run_git(&root, &["commit", "--quiet", "-m", "baseline"]);
+        let base = String::from_utf8(run_git_output(&root, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        fs::write(root.join("file.txt"), lines(&[(6, "worker line 7")])).unwrap();
+        let diff = String::from_utf8(run_git_output(&root, &["diff", "--binary"]).stdout).unwrap();
+
+        // The user changed line 5 meanwhile: the hunk's context no longer
+        // matches, but the edits do not overlap.
+        fs::write(root.join("file.txt"), lines(&[(4, "user line 5")])).unwrap();
+        assert!(apply_worker_diff(&root, &diff, None).is_err());
+        assert_eq!(
+            apply_worker_diff(&root, &diff, Some(&base)).unwrap(),
+            ApplyOutcome::ThreeWay
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("file.txt")).unwrap(),
+            lines(&[(4, "user line 5"), (6, "worker line 7")])
+        );
+
+        // Overlapping edits conflict: the checkout is left exactly as it was.
+        fs::write(root.join("file.txt"), lines(&[(6, "user line 7")])).unwrap();
+        let error = apply_worker_diff(&root, &diff, Some(&base)).unwrap_err();
+        assert!(error.to_string().contains("three-way merge"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("file.txt")).unwrap(),
+            lines(&[(6, "user line 7")])
+        );
+        let worktrees =
+            String::from_utf8(run_git_output(&root, &["worktree", "list"]).stdout).unwrap();
+        assert_eq!(worktrees.lines().count(), 1, "{worktrees}");
+    }
+
+    #[test]
+    fn list_skips_and_reports_an_unreadable_job_file() {
+        let root = scratch("unreadable-job");
+        let store = DelegationStore::open(&root).unwrap();
+        let job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        fs::write(store.dir().join("job-broken.json"), "{ not json").unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].job_id, job.job_id);
+        let (jobs, unreadable) = store.list_all().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(unreadable.len(), 1);
+        assert_eq!(unreadable[0].job_id, "job-broken");
+        assert!(
+            unreadable[0].error.contains("corrupt"),
+            "{:?}",
+            unreadable[0]
+        );
     }
 
     #[test]

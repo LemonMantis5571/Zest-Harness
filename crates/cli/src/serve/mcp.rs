@@ -237,6 +237,7 @@ fn is_mutating_tool(name: &str) -> bool {
             | "delegation_update"
             | "delegation_approve"
             | "delegation_retry"
+            | "delegation_review_again"
             | "delegation_cancel"
             | "delegation_apply"
     )
@@ -345,6 +346,14 @@ fn call_tool_inner(state: &AppState, params: &Value) -> Result<Value, (i64, Stri
                 .retry(&state.root, &job_id, expected)
                 .map_err(tool_err)?)
         }
+        "delegation_review_again" => {
+            let job_id = required_str(&arguments, "jobId")?;
+            let expected = optional_u64(&arguments, "expectedUpdatedAt");
+            json!(state
+                .coordinator
+                .review_again(&state.root, &job_id, expected)
+                .map_err(tool_err)?)
+        }
         "delegation_cancel" => {
             let job_id = required_str(&arguments, "jobId")?;
             let expected = optional_u64(&arguments, "expectedUpdatedAt");
@@ -430,13 +439,13 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
         ),
         tool(
             "delegation_artifact",
-            "Read a paged worker.diff, worker-result.json, or review-result.json artifact.",
+            "Read a paged artifact: worker.diff, worker-result.json, review-result.json, worker-partial.diff (what a failed or timed-out worker had changed; never reviewed), or worker-transcript.jsonl (the worker's text, thinking and tool activity, one JSON object per line).",
             json!({
                 "type": "object",
                 "required": ["jobId", "name"],
                 "properties": {
                     "jobId": {"type": "string"},
-                    "name": {"type": "string", "enum": ["worker.diff", "worker-result.json", "review-result.json"]},
+                    "name": {"type": "string", "enum": zest_coordinator::ALLOWED_ARTIFACTS},
                     "offset": {"type": "integer", "minimum": 0}
                 }
             }),
@@ -468,6 +477,11 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
         tool(
             "delegation_retry",
             "Return a blocked or failed card to awaiting_approval. A new approval is required.",
+            object_with(&["jobId"]),
+        ),
+        tool(
+            "delegation_review_again",
+            "Review the saved worker diff of a blocked or failed card again with a fresh reviewer (canReviewAgain). The worker does not run again; the card's approval still applies.",
             object_with(&["jobId"]),
         ),
         tool(

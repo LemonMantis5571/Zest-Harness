@@ -279,6 +279,7 @@ export type DesktopBackend = {
   getDelegationJob(jobId: string): Promise<DelegationJob>;
   cancelDelegationJob(jobId: string): Promise<DelegationJob>;
   retryDelegationJob(jobId: string): Promise<DelegationJob>;
+  reviewDelegationJobAgain(jobId: string): Promise<DelegationJob>;
   applyDelegationJob(jobId: string): Promise<DelegationJob>;
   onDelegationEvent(handler: (event: DelegationEvent) => void): Promise<UnlistenFn>;
   /** Optional boot hook (fixture streams a canned turn). */
@@ -420,6 +421,7 @@ export function createTauriBackend(): DesktopBackend {
     getDelegationJob: (jobId) => tauriApi.getDelegationJob(jobId),
     cancelDelegationJob: (jobId) => tauriApi.cancelDelegationJob(jobId),
     retryDelegationJob: (jobId) => tauriApi.retryDelegationJob(jobId),
+    reviewDelegationJobAgain: (jobId) => tauriApi.reviewDelegationJobAgain(jobId),
     applyDelegationJob: (jobId) => tauriApi.applyDelegationJob(jobId),
     onDelegationEvent: (handler) => tauriApi.onDelegationEvent(handler),
   };

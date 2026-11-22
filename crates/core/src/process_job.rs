@@ -102,6 +102,38 @@ pub fn resume_process(pid: u32) {
     }
 }
 
+/// Whether a process with this id is running. Used to tell a crashed
+/// owner's leftovers from a live one's.
+pub fn process_is_running(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if !valid_handle(process) {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = unsafe { GetExitCodeProcess(process, &mut code) };
+        unsafe {
+            let _ = CloseHandle(process);
+        }
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
 pub fn terminate_process_tree(pid: u32) {
     #[cfg(windows)]
     {
