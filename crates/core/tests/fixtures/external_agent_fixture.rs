@@ -75,6 +75,21 @@ fn delegation_line7(prompt: &str) {
     send(r#"{"type":"result","response":"{\"summary\":\"fixture worker edited notes.txt\",\"changedFiles\":[\"notes.txt\"],\"checksAttempted\":[],\"blockers\":[]}"}"#);
 }
 
+/// A worker that starts a long-lived child of its own, then goes silent.
+fn spawn_grandchild(pidfile: &str) {
+    std::process::Command::new(env::current_exe().expect("fixture path"))
+        .args(["sleeper", pidfile])
+        .spawn()
+        .expect("start the grandchild");
+    std::thread::sleep(std::time::Duration::from_secs(300));
+}
+
+/// Record this process id, then sleep.
+fn sleeper(pidfile: &str) {
+    std::fs::write(pidfile, std::process::id().to_string()).expect("write pid file");
+    std::thread::sleep(std::time::Duration::from_secs(300));
+}
+
 /// A worker that edits a file, then goes silent and never finishes.
 fn delegation_hang() {
     std::fs::write("partial.txt", "unfinished work
@@ -185,6 +200,8 @@ fn main() {
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         Some("delegation_hang") => delegation_hang(),
+        Some("spawn_grandchild") => spawn_grandchild(&args.next().expect("pid file")),
+        Some("sleeper") => sleeper(&args.next().expect("pid file")),
         Some("delegation_line7") => delegation_line7(&args.next().unwrap_or_default()),
         Some("delegation_file") => {
             let kind = args.next().expect("file kind");

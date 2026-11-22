@@ -1155,6 +1155,19 @@ async fn run_limit(activity: Option<&WorkerActivity>, timeout: Duration) -> Stri
     }
 }
 
+/// Stop a worker and every process it started.
+fn stop_process_tree(job: Option<&crate::process_job::ProcessJob>, child: &Child) {
+    if let Some(job) = job {
+        job.terminate();
+    }
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        crate::process_job::terminate_process_tree(pid);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_and_run_with_cancel(
     cwd: &Path,
@@ -1178,6 +1191,13 @@ async fn spawn_and_run_with_cancel(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The worker and everything it starts live in one job (Windows) or
+    // process group (Unix), so stopping it stops the whole tree. On Windows
+    // it starts suspended until it is in the job, and without a console.
+    #[cfg(windows)]
+    command.creation_flags(crate::process_job::windows_creation_flags());
+    #[cfg(unix)]
+    command.process_group(0);
     prepare_external_command(&mut command);
     if config.allow_mcp {
         scrub_zest_secret_environment(&mut command, parent_secret_envs);
@@ -1188,6 +1208,15 @@ async fn spawn_and_run_with_cancel(
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", config.command))?;
+    // Closing the job (it is dropped on every return) kills what is left.
+    let job = crate::process_job::ProcessJob::new();
+    if let Some(pid) = child.id() {
+        if let Some(job) = job.as_ref() {
+            let _ = job.assign(pid);
+        }
+        #[cfg(windows)]
+        crate::process_job::resume_process(pid);
+    }
     // Preparing the worktree is not the worker's silence; its no-progress
     // clock starts with the process.
     if let Some(activity) = activity {
@@ -1233,6 +1262,7 @@ async fn spawn_and_run_with_cancel(
     let mut result = match run_result {
         Ok(result) => result,
         Err(error) => {
+            stop_process_tree(job.as_ref(), &child);
             let _ = child.kill().await;
             let _ = child.wait().await;
             let stderr = match stderr_task.take() {
@@ -1255,6 +1285,7 @@ async fn spawn_and_run_with_cancel(
     let status = match tokio::select! {
         result = tokio::time::timeout(remaining, child.wait()) => result,
         _ = wait_cancel(cancel) => {
+            stop_process_tree(job.as_ref(), &child);
             let _ = child.start_kill();
             let _ = child.wait().await;
             if let Some(task) = stderr_task.take() {
@@ -1265,6 +1296,7 @@ async fn spawn_and_run_with_cancel(
     } {
         Ok(result) => result.map_err(|error| format!("wait for {}: {error}", config.command))?,
         Err(_) => {
+            stop_process_tree(job.as_ref(), &child);
             let _ = child.start_kill();
             let _ = child.wait().await;
             if let Some(task) = stderr_task.take() {
@@ -3712,6 +3744,54 @@ mod tests {
         .unwrap();
 
         assert_eq!(run.text(), "got user");
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_takes_its_child_processes_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let pidfile = temp.path().join("grandchild.pid");
+        let mut config = fixture_config("spawn_grandchild", false);
+        config.args.push(pidfile.to_string_lossy().into_owned());
+        let activity = WorkerActivity::new(WorkerLimits {
+            total: Duration::from_secs(120),
+            idle: Duration::from_secs(4),
+        });
+        let error =
+            spawn_and_run_with_cancel(temp.path(), &config, "", None, None, &[], Some(&activity))
+                .await
+                .unwrap_err();
+        assert!(error.contains("made no progress"), "{error}");
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the worker started its child before going silent")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while process_alive(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker's child {pid} outlived it"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     #[tokio::test]

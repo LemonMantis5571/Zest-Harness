@@ -80,6 +80,11 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   1 MiB (`WorkerActivity::record`). External CLI and ACP events and native
   stream events all feed it. It is not an orchestration transcript of the
   reviewer.
+- **Process trees.** An external worker or reviewer runs in a Windows job
+  object (started suspended, without a console, then resumed) or its own
+  Unix process group (`process_job`). A timeout, cancel or failure stops the
+  whole tree, and closing the job at the end kills anything the CLI left
+  running.
 - **Partial work.** When a worker fails or is stopped, whatever it had
   changed in its worktree is saved as `worker-partial.diff` and the card
   error says so. It is evidence only: never reviewed, never applied by Zest,
