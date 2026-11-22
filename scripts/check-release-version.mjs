@@ -9,15 +9,12 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(expected)) {
   throw new Error(`Release tag is not valid semver: ${tag}`);
 }
 
+// The desktop build stamps this version into the app and installers (crates/desktop/build.rs).
 const cargo = await readFile(resolve("Cargo.toml"), "utf8");
 const cargoVersion = cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-const tauri = JSON.parse(await readFile(resolve("crates/desktop/tauri.conf.json"), "utf8"));
 
 if (cargoVersion !== expected) {
   throw new Error(`Cargo version ${cargoVersion ?? "missing"} does not match ${expected}`);
-}
-if (tauri.version !== expected) {
-  throw new Error(`Tauri version ${tauri.version ?? "missing"} does not match ${expected}`);
 }
 
 console.log(`Release version OK: ${tag}`);

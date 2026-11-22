@@ -3,19 +3,15 @@ name: Native GPUI
 on:
   pull_request:
     paths:
-      - 'spikes/gpui/**'
+      - 'crates/desktop/**'
+      - 'crates/core/**'
+      - 'crates/coordinator/**'
+      - 'crates/plugin-api/**'
+      - 'Cargo.toml'
       - 'packaging/gpui/**'
       - 'scripts/package-gpui.mjs'
       - 'scripts/install-installer-tools.ps1'
-      - 'crates/plugin-api/**'
-      - 'crates/desktop/src/plugins.rs'
-      - 'Cargo.toml'
-      - 'crates/core/**'
-      - 'crates/coordinator/**'
-      - 'crates/desktop/src/attachments.rs'
-      - 'crates/desktop/src/context_meter.rs'
-      - 'crates/desktop/src/scratch_dir.rs'
-      - 'crates/desktop/src/workspace_files.rs'
+      - 'scripts/check-desktop-accessibility.ps1'
       - '.github/workflows/gpui-windows.yml'
 
 concurrency:
@@ -33,25 +29,25 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/gpui -> target
+          workspaces: crates/desktop -> target
           save-if: false
       - name: Test native workspace, including offline agent and delegation flows
         timeout-minutes: 40
         shell: pwsh
         run: |
-          cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml -- --nocapture | Tee-Object -Variable testLog
+          cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- --nocapture | Tee-Object -Variable testLog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($scenario in 'native_workspace', 'delegation_board') {
             if (-not ($testLog -match "^SELFTEST ${scenario}: PASS ")) { throw "Missing $scenario smoke result" }
           }
-      - run: cargo build --locked --release --manifest-path spikes/gpui/Cargo.toml
+      - run: cargo build --locked --release --manifest-path crates/desktop/Cargo.toml
       - name: Check UI Automation names and composer text
         run: |
-          $app = Start-Process spikes/gpui/target/release/zest-gpui-spike.exe -ArgumentList '--demo' -PassThru
+          $app = Start-Process crates/desktop/target/release/zest-desktop.exe -ArgumentList '--demo' -PassThru
           try {
             $deadline = (Get-Date).AddSeconds(30)
             while ((Get-Date) -lt $deadline -and (Get-Process -Id $app.Id).MainWindowHandle -eq 0) { Start-Sleep -Milliseconds 250 }
-            powershell -NoProfile -File spikes/gpui/benchmark/accessibility.ps1 -AppProcessId $app.Id -Check
+            powershell -NoProfile -File scripts/check-desktop-accessibility.ps1 -AppProcessId $app.Id -Check
             if ($LASTEXITCODE -ne 0) { throw 'The UI Automation check failed.' }
           } finally {
             Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
@@ -72,7 +68,7 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/gpui -> target
+          workspaces: crates/desktop -> target
           save-if: false
       - name: Install GPUI and WebKitGTK build dependencies
         run: |
@@ -80,5 +76,5 @@ jobs:
           sudo apt-get install -y cmake clang libssl-dev libdbus-1-dev libfontconfig-dev libwayland-dev \
             libx11-xcb-dev libxkbcommon-x11-dev libxkbcommon-dev libasound2-dev libvulkan1 \
             libwebkit2gtk-4.1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev dpkg-dev rpm squashfs-tools
-      - run: cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
+      - run: cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
       - run: npm run gpui:package

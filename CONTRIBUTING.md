@@ -12,19 +12,22 @@ Use the toolchain versions pinned in `rust-toolchain.toml`, `.nvmrc`, and
 `package.json`:
 
 - Rust 1.97.1
-- Node.js 24.16.0+
-- npm 11.21.0. Older npm releases mishandle dependency overrides through workspace links.
+- Node.js 24.16.0+ (the repository's scripts are plain Node with no packages)
+- npm 11.21.0
 
 ## Local development
 
 From the repository root:
 
 ```powershell
-npm ci
 npm run hooks:install
-npm run ui:build
-npm run desktop:dev
+npm run dev
 ```
+
+`npm run dev` builds and opens the desktop app in release mode; the first build
+takes several minutes. `npm run gpui -- --demo` opens it on a temporary offline
+project that needs no provider or credentials. On Windows, building the desktop
+needs MSVC and the Windows SDK.
 
 The hook installer enables a local pre-commit check for staged files under
 `outputs/` and for the [feature map](docs/features/README.md). CI checks tracked files and every file introduced or modified by a
@@ -35,18 +38,21 @@ repository path is added to the allowlist in
 of `outputs/`; put intentional product or docs media in the corresponding
 `assets/` or `docs/` directory.
 
-On Linux, install the desktop packages listed in the Linux verification
-workflow, then run the same npm commands from Bash. PowerShell is not
-required.
-
+On Linux, run the same npm commands from Bash. PowerShell is not required.
 For Ubuntu 24.04, the CI-equivalent prerequisites are:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libssl-dev cmake \
-  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-  libdbus-1-dev libxdo-dev curl wget file tar patchelf libfuse2t64
+# The root workspace (core, coordinator, CLI)
+sudo apt-get install -y build-essential pkg-config libssl-dev cmake libdbus-1-dev
+# The desktop app: GPUI's windowing and Vulkan headers, WebKitGTK for web views
+sudo apt-get install -y clang libfontconfig-dev libwayland-dev libx11-xcb-dev \
+  libxkbcommon-x11-dev libxkbcommon-dev libasound2-dev libvulkan1 \
+  libwebkit2gtk-4.1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev
 ```
+
+`.github/workflows/gpui-windows.yml` has the full list, including the packaging
+tools (`dpkg-dev`, `rpm`, `squashfs-tools`).
 
 Run the terminal client with:
 
@@ -57,7 +63,11 @@ cargo run -p zest
 The shared Rust library is in `crates/core`, the shared delegation coordinator
 is in `crates/coordinator`, the terminal client and `zest serve` daemon are in
 `crates/cli`, and the desktop application is in `crates/desktop`. The desktop
-web UI lives in `crates/desktop/ui`.
+is a separate Cargo workspace with its own `Cargo.lock` because GPUI is pinned
+to a Zed git revision. Build it with `--manifest-path crates/desktop/Cargo.toml`
+or the `npm run gpui*` scripts; root `cargo` commands skip it. When a change
+adds a dependency to `zest-core` or `zest-coordinator`, update
+`crates/desktop/Cargo.lock` too.
 
 `zest serve` is a coordinator-only process. It must not depend on the desktop
 crate or WebKit. Linux CI builds and tests it without WebKitGTK. See
@@ -73,16 +83,13 @@ npm run plugin:install -- wallpaper
 npm run plugin:install -- now-playing
 ```
 
-Open Customize > Extras, press Refresh, and turn it on. The desktop itself does
+Open Customize > Add-ons, press Refresh, and turn it on. The desktop itself does
 not need a Cargo feature for installed add-ons. A Rust plugin is built
 separately with `cargo build -p <package> --release`, then installed with its
 executable and `plugin.json` in one plugin folder.
 Use [`docs/plugin.schema.json`](docs/plugin.schema.json) when validating a
 manifest; the desktop loader remains the final authority for safe paths and
 supported plugin kinds.
-
-When changing desktop data types, regenerate TypeScript bindings using the
-existing ts-rs test workflow rather than editing generated files by hand.
 
 ## Verification
 
@@ -99,30 +106,25 @@ cargo install cargo-audit --locked
 bash scripts/release-verify.sh
 ```
 
-The gate checks formatting, linting, Rust and UI tests, the Playwright browser
-tests, the feature map, generated bindings, dependency advisories, and Git
-whitespace. Live provider checks are separate: they require credentials and may
-consume real quota.
+The gate checks formatting, linting, the root workspace's Rust tests, the
+feature map, dependency advisories, and Git whitespace. Live provider checks
+are separate: they require credentials and may consume real quota.
 
-The browser tests run the UI in offline fixture mode (`?fixture=1`) under
-Playwright. Install its Chromium once per machine with
-`npx playwright install chromium`; the release gate does this for you. Run one
-spec with `npm run ui:e2e -- <name>`. CI uploads traces from a failed run as the
-`playwright-traces-*` artifact.
+The desktop app has its own CI workflow (`gpui-windows.yml`). It runs the
+desktop tests, including a scripted workspace session against an offline
+provider, checks UI Automation names on Windows, and builds the installers.
+Run its tests locally with:
 
-The dev server runs on port 1420 unless `ZEST_UI_PORT` names another; set a
-different port in each worktree that runs browser tests or zest-control at the
-same time. Outside CI, Playwright and zest-control reuse a server on that port
-only when it serves the same checkout, and refuse one that belongs to another.
-The Tauri dev app (`npm run desktop:dev`) always uses 1420.
+```powershell
+cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
+```
 
-`scripts/zest-control.mjs` drives the same fixture UI one command at a time
-(`start`, `send`, `inspect`, `errors`, `snapshot`, `stop`; `help` lists them)
-for debugging and for agents. The gate runs its `check` smoke test after the
-browser tests, so the CLI stays working. See
-[docs/features/ui-control-cli.md](docs/features/ui-control-cli.md).
+On Windows, `scripts/gpui-control.mjs` drives the running app one command at a
+time (`start`, `send`, `click`, `inspect`, `errors`, `snapshot`, `stop`;
+`help` lists them) through UI Automation, for debugging and for agents.
 
-For a source-only check without dependency audits or generated-binding drift:
+For a source-only check without dependency audits that also runs the desktop
+tests:
 
 ```powershell
 npm run verify
@@ -133,12 +135,12 @@ The same command works in Bash.
 ### While you are still working
 
 `npm run verify` is a pre-commit gate, not a test command. It runs the feature
-map check, UI tests, UI lint, the Playwright browser tests, `cargo fmt --check`,
-`clippy --workspace --all-targets`, and `cargo test --workspace --lib`. Clippy
-and the test build have different fingerprints, so the workspace is compiled
-twice, `zest-desktop` included. That is minutes per run, and almost none of it
-is spent running tests: a full `cargo test -p zest-core --lib` executes in about
-15 seconds once it is built.
+map check, `cargo fmt --check`, `clippy --workspace --all-targets`,
+`cargo test --workspace --lib`, and the desktop tests. Clippy and the test
+build have different fingerprints, so the root workspace is compiled twice, and
+the desktop is a third, separate release build. That is minutes per run, and
+almost none of it is spent running tests: a full `cargo test -p zest-core --lib`
+executes in about 15 seconds once it is built.
 
 Work the inner loop instead, and save the gate for the end:
 
@@ -160,8 +162,10 @@ Tests that spawn child processes (`tools::external_agent`) carry real timeouts,
 so they are the first to flake when the machine is already busy compiling. Rerun
 them alone before believing a failure.
 
-Add a focused regression test for behavior changes. For UI changes, update the
-relevant characterization tests under `crates/desktop/ui/src`.
+Add a focused regression test for behavior changes. For desktop changes, add a
+unit test next to the code in `crates/desktop/src`, or extend the scripted
+workspace scenario in `crates/desktop/src/workspace_test.rs` when the change is
+about a whole flow.
 
 ## Feature map
 

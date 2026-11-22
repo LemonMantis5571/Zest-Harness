@@ -12,8 +12,8 @@ SemVer prerelease suffix, such as `v0.4.0-rc.1`, creates a prerelease.
 
 1. Start with a clean worktree. Never commit provider keys, `.env` files,
    signing overlays, or local `zest.toml` files.
-2. Set the same version in `Cargo.toml` (`workspace.package.version`) and
-   `crates/desktop/tauri.conf.json`.
+2. Set the version in `Cargo.toml` (`workspace.package.version`). The desktop
+   build stamps the same version into the app and installers.
 3. Add release notes at `docs/releases/<version>.md` and move the shipped
    entries from `CHANGELOG.md` into a dated release section.
 4. Merge the release preparation through a pull request. Wait for the required
@@ -25,8 +25,9 @@ SemVer prerelease suffix, such as `v0.4.0-rc.1`, creates a prerelease.
    ```
 
    On Linux or macOS, run `bash scripts/release-verify.sh` after installing
-   `cargo-audit` and the desktop libraries listed in
-   `.github/workflows/linux-verify.yml`.
+   `cargo-audit` and the libraries listed in
+   `.github/workflows/linux-verify.yml`. Also run the desktop tests:
+   `cargo test --locked --release --manifest-path crates/desktop/Cargo.toml`.
 6. Confirm the version and tag match, then push an annotated tag pointing at
    the verified `master` commit:
 
@@ -36,22 +37,21 @@ SemVer prerelease suffix, such as `v0.4.0-rc.1`, creates a prerelease.
    git push origin v0.3.0
    ```
 
-The gate includes the UI, Rust, generated TypeScript bindings, dependency
-audits, and Git whitespace. Live provider checks are not a release gate:
-`cargo run -p zest -- doctor --live` consumes real quota and must only be run
-with a test account, with the result recorded separately.
+The gate covers the root workspace's Rust code, its dependency audit, the
+feature map, the output policy and Git whitespace. The desktop app has its own
+lockfile (`crates/desktop/Cargo.lock`) that the gate does not audit; check it
+with `cargo audit --file crates/desktop/Cargo.lock`. Live provider checks are
+not a release gate: `cargo run -p zest -- doctor --live` consumes real quota
+and must only be run with a test account, with the result recorded separately.
 
-The Linux Tauri stack currently brings in GTK3 bindings. `cargo audit` reports
-their unmaintained status and the known `glib` unsoundness advisory as
-informational transitive warnings; the release gate still fails on blocking
-vulnerabilities and does not treat those warnings as a clean bill of health.
-Track the Tauri GTK migration before calling the Linux runtime hardened for
-hostile content.
+On Linux the desktop's web views (`wry`) use WebKitGTK and GTK3. `cargo audit`
+reports several of those bindings as unmaintained; treat that as a reason not
+to call the Linux runtime hardened for hostile content.
 
 ## Build and publish
 
-The tagged workflow checks that the tag, Cargo version, and Tauri version
-match. It then runs the native desktop tests and builds:
+The tagged workflow checks that the tag and Cargo version match. It then runs
+the desktop tests and builds:
 
 - Windows `.msi` and `.exe` installers of the native GPUI app (`npm run gpui:package`;
   `scripts/install-installer-tools.ps1` installs WiX Toolset 3 and NSIS on the runner);
@@ -68,15 +68,13 @@ verification jobs and all package jobs pass.
 
 ## Signing and clean-machine checks
 
-The installers keep the Tauri releases' package names, MSI upgrade code and
-`zest-desktop` executable name, so an installed Tauri build upgrades in place.
-`scripts/build-signed.ps1` still signs only the Tauri build; signing the GPUI
-installers is not wired up.
+The installers keep the package names, MSI upgrade code and `zest-desktop`
+executable name of the earlier Tauri releases, so an installed 0.3.x build
+upgrades in place. The installers are not code-signed.
 
-Unsigned installers do not prove publisher identity. If signing is enabled
-later, keep the private certificate in the certificate store or signing
-service and publish only the public certificate fingerprint. The signing
-overlay is ignored by Git.
+Unsigned installers do not prove publisher identity. If signing is added,
+keep the private certificate in the certificate store or signing service and
+publish only the public certificate fingerprint.
 
 Test the exact uploaded files on a clean Windows profile or Linux machine that
 has no Rust, Node.js, source checkout, or old Zest state. Confirm:

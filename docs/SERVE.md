@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="../crates/desktop/ui/src/assets/zest-mark.png" alt="Zest" width="72" height="72" />
+<img src="../assets/logo.png" alt="Zest" width="72" height="72" />
 
 # zest serve
 
@@ -10,7 +10,7 @@ Windowless coordinator daemon. One project, inbound MCP on loopback.
 
 `zest serve` owns one project, the delegation queue, and an inbound MCP
 endpoint on loopback. It does not open a parent chat, read prompts from stdin,
-or load Tauri, WebKit, or dialogs.
+or load GPUI, a webview, or dialogs.
 
 This is one of four different things people call “headless” or “MCP” in Zest:
 
@@ -59,8 +59,9 @@ One coordinator owns a project at a time, through
 `.zest/delegations/coordinator.lock`. A second `zest serve` for the same project
 fails to start. The desktop holds the lock only while it has delegation work
 queued or running in that project, so `zest serve` can start for a project that
-is open in the desktop. While `zest serve` owns a project, the desktop shows its
-cards read-only, and desktop actions report that another coordinator owns it.
+is open in the desktop. While `zest serve` owns a project, the desktop's
+Delegation board says that another coordinator owns it, shows the cards
+read-only and hides their actions.
 
 ## Readiness
 

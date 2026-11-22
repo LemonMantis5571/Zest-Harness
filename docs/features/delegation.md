@@ -10,18 +10,11 @@ paths:
   - crates/core/src/tools/external_agent.rs
   - crates/core/src/tools/isolated_workspace.rs
   - crates/coordinator/src/scheduler.rs
-  - crates/desktop/src/delegation.rs
-  - crates/desktop/ui/src/components/WorkbenchPanel.tsx
-  - crates/desktop/ui/src/components/OrchestrationStatus.tsx
-  - crates/desktop/ui/src/components/WorkerModelPicker.tsx
-  - crates/desktop/ui/src/components/SubagentLine.tsx
-  - crates/desktop/ui/src/lib/subagents.ts
-  - crates/desktop/ui/src/lib/generated/Delegation*.ts
+  - crates/desktop/src/workspace/board.rs
+  - crates/desktop/src/native.rs
 tests:
   - crates/core/tests/fixtures/external_agent_fixture.rs
-  - crates/desktop/ui/src/lib/fixtureBackend.test.ts
-  - crates/desktop/ui/src/lib/subagents.test.ts
-  - crates/desktop/ui/e2e/subagents.spec.ts
+  - crates/desktop/src/workspace/board/selftest.rs
 verify:
   - cargo test -p zest-core --lib delegation
   - cargo test -p zest-core --lib delegated_worker
@@ -30,9 +23,8 @@ verify:
   - cargo test -p zest-core --lib tools::external_agent
   - cargo test -p zest-core --lib tools::isolated_workspace
   - cargo test -p zest-coordinator
-  - npm run test -w ui
-  - npm run test:e2e -w ui -- workbench
-  - npm run test:e2e -w ui -- subagents
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- offline_workspace_smoke
+  - npm run gpui:test
 ---
 
 # Delegation (feature cards)
@@ -43,14 +35,14 @@ Queueing, locking and restart recovery are in
 
 ## Behavior
 
-The GPUI **Delegation** panel uses the same coordinator as the packaged desktop. It accepts scoped cards and separate worker and reviewer targets, follows worker events, shows check output and review findings, and pages through the saved artifacts. Actions carry the revision displayed to the user. An existing coordinator lock permits browsing while the other process owns the queue. The Windows native self-test runs the fixture worker and reviewer and verifies the checkout before and after clicking apply.
+The desktop's **Delegation** tab (under Workbench) uses the same coordinator as `zest serve`. It accepts scoped cards and separate worker and reviewer targets, reloads as worker events arrive, shows check output and review findings, and pages through the saved artifacts. Actions carry the revision displayed to the user. An existing coordinator lock permits browsing while the other process owns the queue. The native workspace self-test runs the fixture worker and reviewer and verifies the checkout before and after clicking apply.
 
 - A feature card (title, objective, lane, scope, context, dependsOn,
   acceptanceChecks, worker, reviewer) becomes a job at
   `.zest/delegations/<jobId>.json`. Its artifacts are `worker.diff`,
   `worker-result.json` and `review-result.json` in `.zest/delegations/<jobId>/`.
 - Every new card starts in `awaiting_approval`. No worker runs until an approval
-  is recorded. That can be the desktop **Approve** button, `delegation_approve`,
+  is recorded. That can be the desktop **Approve and run** button, `delegation_approve`,
   a trusted `zest serve`, or a dispatch receipt written by `delegate_feature`
   after the user answers `y`.
 - Approval pins fingerprints of the card and of the resolved worker and reviewer
@@ -95,13 +87,9 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   `[agent · model]` line or the workspace diff, cut at 600 characters, or
   "Delegated to <agent> · <model>" when the answer is empty. The model still
   receives the whole body.
-- In the chat, a `delegate_feature` call is a Subagent line that follows its
-  job on the board (`SubagentLine.tsx`): "Waiting for approval", "Worker
-  running", "Ready to apply" and so on ahead of the card title, with the
-  approval, each worker and reviewer attempt (with its duration), the
-  acceptance checks and the review findings nested under it. "Open in
-  Delegation" opens the Workbench on the Delegation tab with that card
-  expanded and highlighted.
+- In the desktop chat, a `delegate_feature` call is an ordinary tool row
+  whose title is the first line of that summary. It does not follow the job's
+  status or link to its card; open Workbench > Delegation to see it.
 
 ```text
 awaiting_approval -> queued -> worker_running -> review_running -> ready_to_apply -> accepted
@@ -114,28 +102,34 @@ blocked | failed | changes_requested | apply_conflict | queued -> awaiting_appro
 
 Entry points:
 
-1. **Desktop board.** The compact sidebar nests each job under the chat that
-   created it, with its status, and a click opens the board at that job
-   (see threads-and-history). The Workbench **Delegation** tab (`WorkbenchPanel.tsx`)
-   calls `lib/api.ts`, which calls the Tauri commands in
-   `crates/desktop/src/lib.rs`: `list_delegation_jobs` (runs `reconcile`
-   first), `list_delegation_targets`, `create_delegation_job`,
-   `update_delegation_job`, `approve_delegation_job`, `cancel_delegation_job`,
-   `retry_delegation_job`, `apply_delegation_job`, `get_delegation_job` and
-   `prepare_delegation_handoff`. Each one calls `DelegationCoordinator`.
-   Coordinator events reach the UI through `TauriDelegationNotifier` (in
-   `crates/desktop/src/delegation.rs`) as `delegation-event`, which `App.tsx`
-   handles in `handleDelegationEvent`. That handler announces
-   `ready_to_apply`, `changes_requested`, `blocked`, `failed`, `applied` and
-   `cancelled` through the notification policy (see
-   [notifications](notifications.md)); a cancel or apply the user clicked in
-   this window is not announced again.
+1. **Desktop board.** `Project::open` (`crates/desktop/src/native.rs`) builds
+   one `DelegationCoordinator` per open project on the app's Tokio runtime
+   (`TokioSpawner`) with `LockRetention::WhileActive`. The Workbench
+   **Delegation** tab is `crates/desktop/src/workspace/board.rs`.
+   `load_board(true)` runs when the tab opens and on **Refresh**: it calls
+   `reconcile` (a held lock makes the board read-only), `list_targets` and
+   `list_views`. **New delegation** opens a form for title, objective, scope,
+   acceptance checks, a worker and an optional reviewer, and calls
+   `create_job` with the active chat as parent. The card list and the
+   selected card's detail come from `DelegationJobView`. **Approve and run**,
+   **Apply reviewed diff**, **Prepare retry** and **Cancel delegation** call
+   `approve`, `apply`, `retry` and `cancel` with the displayed `updated_at`,
+   on a blocking task, one at a time. The three artifact buttons call
+   `artifact_page` with **Previous page**/**Next page**. Coordinator events
+   reach the window through `BoardNotifier`, which only bumps a watch channel;
+   the board reloads (without reconcile) while the Delegation tab is open. On
+   quit, the app calls `shutdown` for a project whose lock it holds. The
+   desktop does not raise notifications for delegation events, does not list
+   jobs in the sidebar, and cannot edit a card after creating it
+   (`update_job`).
 2. **`delegate_feature` tool** (`FeatureDelegator`). It has Exec risk and the
    approval target `agent/<id>/feature/<model>`. After the user approves, it
    validates the card and calls `DelegationStore::create` with origin
    `interactive_tool`. It then writes a `DispatchReceipt` bound to the card and
-   target fingerprints. On the desktop, `turn.rs` consumes the receipt straight
-   away with `apply_dispatch_receipt`. Otherwise the next coordinator
+   target fingerprints. On the desktop, the turn's event handler in
+   `native.rs` consumes the receipt straight away with
+   `apply_dispatch_receipt` when the tool result carries
+   `ToolMetadata::Delegation` with a job id. Otherwise the next coordinator
    `reconcile` picks it up. This tool can only target `[agents.<id>]` workers
    with `workspace = "isolated"`.
 3. **MCP `delegation_*` tools** on `zest serve`.
@@ -183,7 +177,8 @@ The pipeline is `DelegationCoordinator::run_job` in `scheduler.rs`:
 It holds the phase log (at most 128 entries), the decision gates (`approval`,
 `apply`, `changes`, `recovery`), an inbox (at most 64 messages), the current
 dispatch and its heartbeat, the retry state, and external session evidence,
-which is not a transcript. `OrchestrationStatus.tsx` renders it.
+which is not a transcript. The desktop board does not render it; it shows
+each attempt's role and agent only.
 
 "Handoff" means two different things here:
 
@@ -192,10 +187,9 @@ which is not a transcript. `OrchestrationStatus.tsx` renders it.
   dropped, and only safe tool-input keys are kept. It is added to the prompt of
   the direct `delegate_external` tool only. Feature cards never get chat
   history.
-- `DelegationCoordinator::handoff` (the `prepare_delegation_handoff` command)
-  returns the worker summary (at most 8000 characters) and the changed files.
-  **Send to chat** copies the summary into the composer draft through the
-  `zest:delegation-handoff` window event.
+- `DelegationCoordinator::handoff` returns the worker summary (at most 8000
+  characters) and the changed files. The desktop has no **Send to chat**
+  action that uses it; the board shows the worker summary on the card.
 
 `delegate_external` (`EXTERNAL_AGENT_TOOL`) is a synchronous run of an
 `[agents.<id>]` worker inside a chat turn. It returns the worker's answer and
@@ -208,19 +202,24 @@ dispatch result does not change the association.
 
 `list_targets` lists every `[providers.*]` entry, marked available when
 `resolve_provider_target` succeeds, and every `[agents.*]` entry, which must be
-isolated. The create form lets a provider target set a model and an effort. An
-unavailable target shows **Reconnect**, and there is no automatic fallback.
-`WorkerModelPicker.tsx` (Settings > CLI delegation) sets a CLI worker's own
-model through `set_external_agent_model`. It only works for the built-in Claude
-Code and Gemini presets.
+isolated. The desktop form lists only available targets, by label, and
+**New delegation** is hidden when none is available. The form has no model or
+effort override, no **Reconnect** for an unavailable target, and no context or
+`dependsOn` fields. There is no automatic fallback. The desktop has no picker
+for a CLI worker's own model; set it in that agent's `[agents.<id>]` entry.
 
 ## Verify
 
 - `cargo test -p zest-coordinator` runs the full create, approve, review and
   apply cycle against `external_agent_fixture.rs`, compiled with `rustc`.
-- `npm run test -w ui` includes the "fixture delegation lifecycle" tests in
-  `fixtureBackend.test.ts`.
-- For a manual check, run `npm run ui:dev` and open `/?fixture=1`, then go to
+- `cargo test --locked --release --manifest-path crates/desktop/Cargo.toml --
+  offline_workspace_smoke` ends with `workspace/board/selftest.rs`: it builds
+  the same fixture worker, creates a card in a GPUI test window, checks that a
+  stale approval is refused, approves, waits for the isolated worker and the
+  independent review, previews the diff and applies it. `npm run gpui:test` runs
+  the same scenario in a real window. Both need `git` and `rustc` on PATH.
+- For a manual check, open a Git project with an `[agents.<id>]` worker that
+  has `workspace = "isolated"` (`npm run gpui -- --project PATH`), then go to
   Workbench > Delegation.
 
 ## Pitfalls
@@ -245,6 +244,4 @@ Code and Gemini presets.
 - **Isolation needs a real repository.** It requires a Git repository with a
   HEAD commit. A folder that only contains repositories gets
   `no_repository_error`. ACP agents cannot use `workspace = "current"`.
-- **Stale TypeScript types.** Regenerate the TS types with
-  `cargo test -p zest-desktop --features export-bindings`.
 - **Unused status.** Nothing assigns the `Planned` status.

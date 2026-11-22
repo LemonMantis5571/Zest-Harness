@@ -16,13 +16,7 @@ paths:
   - crates/core/src/tools/prepared.rs
   - crates/core/src/tools/outcome.rs
   - crates/core/src/tools/spill.rs
-  - crates/desktop/ui/src/components/ToolCallRow.tsx
-  - crates/desktop/ui/src/components/ToolRunGroup.tsx
-  - crates/desktop/ui/src/lib/toolRuns.ts
-  - crates/desktop/ui/src/lib/toolDisplay.ts
-tests:
-  - crates/desktop/ui/src/lib/toolRuns.test.ts
-  - crates/desktop/ui/src/lib/toolDisplay.test.ts
+  - crates/desktop/src/view.rs
 verify:
   - cargo test -p zest-core --lib -- tools::characterization
   - cargo test -p zest-core --lib -- tools::project
@@ -32,7 +26,7 @@ verify:
   - cargo test -p zest-core --lib -- tools::edit_match
   - cargo test -p zest-core --lib -- tools::grep
   - cargo test -p zest-core --lib -- tools::spill
-  - npm run ui:test
+  - npm run gpui:test
 ---
 
 # Project file tools
@@ -86,13 +80,14 @@ verify:
   stored under `.zest/spill/<thread-id>/` and replaced by a head/tail preview plus
   a locator the model can `read_file` or `grep`. Errors, `read_file` output, and
   Sensitive results are never spilled.
-- UI: each call is a Tool line in the turn's Trace, worded by its state ("Reading
-  src/a.ts", "Read src/a.ts", "Failed to read src/a.ts"). Two or more calls in a
-  row fold into one Chain of Thought line such as "Ran 2 commands, edited 1
-  file, 3 lookups" with +/- counts; it opens while a call runs and folds when
-  the run settles. Thinking, an approval, an HTML card or a subagent ends a run,
-  so the order stays as it happened. Lines with a diff open the diff viewer;
-  lines with output expand to show it.
+- Desktop: each call is its own collapsible row in the turn's trace, in the
+  order it happened: an icon for the tool (pencil for writes and edits, search
+  for `glob`/`grep`, a file for `read_file`, and so on), the tool name, the first
+  line of its result, and "running…" or its duration. A failed call shows an X
+  and red text. Expanding a row shows the diff when the call has one, else the
+  result text, as a fenced block. Consecutive calls are not folded into a
+  summary line. A reopened chat shows saved calls as rows with their label and
+  status.
 
 ## How it works
 1. `RuntimeBuilder::build` (crates/core/src/runtime.rs) registers
@@ -113,20 +108,22 @@ verify:
    folds the file for each match kind and maps every hit back to raw byte
    ranges, and `splice` writes the replacement into them. The pre-image hash and
    the diff therefore cover the real bytes that will be written.
-5. Tool events become `tool_call_*` chat events; the UI builds `ToolPart`s,
-   `buildTrace` (assistantTrace.ts) folds them with `summarizeTools`
-   (toolRuns.ts), and `ToolRunGroup` / `ToolLine` (ToolCallRow.tsx) render them.
-   The native GPUI window draws the same rows with `render_trace` and picks the
-   React UI's icon for each tool in `trace_icon` (spikes/gpui/src/view.rs).
+5. In the desktop app, tool stream events become `EvKind::ToolStart` and
+   `EvKind::ToolResult` (crates/desktop/src/main.rs). `ToolStart` adds a running
+   trace row; `ToolResult` sets its status, duration and title, and `tool_body`
+   makes its body from the diff or the summary. `render_trace` draws the row and
+   `trace_icon` picks its icon (crates/desktop/src/view.rs).
 6. `tools/mod.rs` lists every tool module. The browser modules registered
    there (`browser`, `browser_dom`) are covered in
    [browser-and-web](browser-and-web.md).
 
 ## Verify
 Rust unit tests above; `a_real_grep_spill_can_be_read_back_through_its_locator`
-in `tools::characterization` proves the spill loop end to end. UI folding is
-covered by toolRuns.test.ts and assistantTrace.test.ts. In `?fixture=1` a sent message shows a tool line;
-`&scenario=tool-error` shows a failed line.
+in `tools::characterization` proves the spill loop end to end. `npm run
+gpui:test` runs the offline demo provider through a denied and an approved
+`Demo: write` (the approval preview names `demo.txt`), then previews the written
+file. To look at the rows by hand, run `npm run gpui -- --demo` and send `Demo:
+write`.
 
 ## Pitfalls
 - The spill locator sits under `.zest/`, which every walk skips; only a direct

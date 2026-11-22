@@ -19,7 +19,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$bundleDir = Join-Path (Join-Path (Join-Path $root "target") "release") "bundle"
+# npm run gpui:package writes to target/gpui/bundle/<version>/<os>.
+$bundleDir = Join-Path (Join-Path (Join-Path $root "target") "gpui") "bundle"
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { throw "Node.js is required to create release checksums." }

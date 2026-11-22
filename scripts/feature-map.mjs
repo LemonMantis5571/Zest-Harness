@@ -35,10 +35,7 @@ const COVERED_EXTENSIONS = new Set([".rs", ".ts", ".tsx", ".mjs", ".js", ".ps1",
 const COVERED_ROOTS = ["crates/", "scripts/"];
 
 // Exact prefixes that never need an owner, each with the reason.
-export const COVERAGE_EXEMPT = [
-  // ts-rs output; the owning feature is the Rust type it was generated from.
-  "crates/desktop/ui/src/lib/generated/",
-];
+export const COVERAGE_EXEMPT = [];
 
 const LIST_KEYS = new Set(["paths", "tests", "verify"]);
 const SCALAR_KEYS = new Set(["title", "summary"]);

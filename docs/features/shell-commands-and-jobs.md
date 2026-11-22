@@ -7,6 +7,8 @@ paths:
   - crates/core/src/tools/jobs.rs
   - crates/core/src/jobs.rs
   - crates/core/src/process_job.rs
+  - crates/desktop/src/native.rs
+  - crates/desktop/src/workspace.rs
 tests:
   - crates/core/tests/tool_path_e2e.rs
 verify:
@@ -47,17 +49,19 @@ verify:
   killed and its output returned as the error.
 - `job_list`, `job_output` (offset, optional wait up to 30 s), and `job_kill`
   (Exec risk) only see jobs owned by the calling chat's thread id.
-- When a job finishes, the desktop injects a notice into the owning chat
-  (live turn, idle session, or the saved thread on disk). The user hears of it
-  only when they need to (see [notifications](notifications.md)): a `failed`
-  job toasts "Background job failed", and any other ending sends an OS
-  notification only while Zest is not focused.
+- The desktop's Workbench **Jobs** tab lists the active chat's jobs (kind,
+  status, label) as of when the tab opened. It cannot read a job's output or
+  stop it; the agent's job tools can. The desktop does not inject a notice
+  into the owning chat or notify the user when a job finishes; the agent sees
+  the ending only through `job_list` or `job_output`.
 - `[tools.bash] enabled = false` removes `bash` but keeps the job tools.
 
 ## How it works
 1. Registered only for the parent chat via `register_exec_tools_with_jobs`
-   (tools/mod.rs) from runtime.rs; the desktop passes its process-wide
-   `AppState.jobs` registry and the thread id as owner.
+   (tools/mod.rs) from runtime.rs. The desktop (`Chat::agent` in
+   `crates/desktop/src/native.rs`) passes its project's `Project.jobs`
+   registry, one per opened project, with `with_job_registry`, and the chat's
+   thread id as owner with `with_job_owner`.
 2. `Bash::prepare` parses input, runs `classify`, and returns
    `PreparedToolCall::plain_with_preview` with the command line in
    `preview.path` (the approval target) and `auto_eligible` set.
@@ -71,9 +75,10 @@ verify:
 5. `JobRegistry::start_process` (jobs.rs) owns background children, a 256 KiB
    output ring (`next_offset`, `truncated`), status (Running, Stopping,
    Completed, Killed, Failed) and a broadcast of `JobEvent`s.
-6. Desktop: `forward_job_events` -> `inject_job_completion` (lib.rs) queues the
-   notice and emits `job_completed`; Tauri `list_jobs`, `job_output`, `job_kill`
-   expose the registry to the UI, fenced by thread id.
+6. Desktop: opening the Jobs tab (`Panel::Jobs` in
+   `crates/desktop/src/workspace.rs`) calls `JobRegistry::list` with the active
+   chat's thread id and renders one line per snapshot. Nothing in the desktop
+   subscribes to `JobEvent`s.
 
 ## Verify
 Unit tests cover `classify`, argv parsing, timeouts, and job ownership.
@@ -90,6 +95,7 @@ run it explicitly with the command above.
   stderr); keep them drained together.
 - `JobRegistry::kill` must not wait on the child mutex (the watcher holds it);
   it kills by PID and lets the watcher publish the terminal state.
-- `JobSnapshot.owner_root` is the job's `cwd`, not necessarily the project root,
-  so the offline fallback in `inject_job_completion` opens the store there.
-- The UI API has `listJobs` / `jobKill`, but no component lists jobs yet.
+- `JobSnapshot.owner_root` is the job's `cwd`, not necessarily the project root;
+  do not use it to find a chat's thread store.
+- The Jobs tab is a snapshot: it does not refresh while open. Reopen the tab to
+  see a status change.

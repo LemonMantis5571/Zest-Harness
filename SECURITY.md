@@ -26,8 +26,9 @@ it with the provider before investigating further.
 
 ## Security boundaries
 
-Zest keeps OpenAI-compatible provider keys entered through the desktop in the OS
-credential manager and does not intentionally write provider secrets to
+Zest reads OpenAI-compatible provider keys from the OS credential manager (the
+`credential` account named in `zest.toml`), keeps ChatGPT sign-in sessions
+there, and does not intentionally write provider secrets to
 `zest.toml`, the transcript, tool context, or logs, and it sends no telemetry.
 Usage records, including the opt-in `[usage] task_traces`, stay in the local
 `usage.json` and are never uploaded. Native Anthropic
@@ -36,7 +37,8 @@ The approval system is a user confirmation boundary, not an OS sandbox: an
 approved shell command can perform any action available to the current user.
 Use isolated or disposable workspaces for untrusted code.
 
-The Linux beta uses the GTK3 stack required by the current Tauri runtime.
+The Linux beta uses the GTK3 and WebKitGTK stack that the desktop app's
+browser and HTML windows (wry and tao) require.
 RustSec may report transitive unmaintained GTK crates and the known `glib`
 unsoundness advisory. These are tracked beta dependency risks, not evidence
 that the runtime is safe for hostile content; do not use the beta as a sandbox.

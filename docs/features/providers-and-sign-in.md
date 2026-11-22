@@ -1,37 +1,18 @@
 ---
 title: Providers and sign-in
-summary: Choose a provider on launch, connect it through a coding CLI sign-in, ChatGPT, or your own API key, and switch providers from inside a chat.
+summary: Configure providers in zest.toml, sign in to a coding CLI or ChatGPT from Customize > Models, and see which provider a chat uses.
 paths:
   - crates/core/src/auth.rs
   - crates/core/src/credentials.rs
   - crates/core/src/codex_oauth.rs
   - crates/core/src/provider/codex_oauth.rs
-  - crates/desktop/src/lib.rs
-  - crates/desktop/ui/src/components/AuthShell.tsx
-  - crates/desktop/ui/src/components/ProviderPicker.tsx
-  - crates/desktop/ui/src/components/ApiProviderForm.tsx
-  - crates/desktop/ui/src/components/ProviderSwitchSheet.tsx
-  - crates/desktop/ui/src/components/WaitingScreen.tsx
-  - crates/desktop/ui/src/components/ProviderIcon.tsx
-  - crates/desktop/ui/src/lib/loginWait.ts
-  - crates/desktop/ui/src/lib/providerVerify.ts
-  - crates/desktop/ui/src/lib/chatgptCodex.ts
-  - crates/desktop/ui/src/lib/providerMarks.ts
-  - crates/desktop/ui/src/lib/providerSelection.ts
-tests:
-  - crates/desktop/ui/src/lib/loginWait.test.ts
-  - crates/desktop/ui/src/lib/providerVerify.test.ts
-  - crates/desktop/ui/src/lib/chatgptCodex.test.ts
-  - crates/desktop/ui/src/lib/providerMarks.test.ts
-  - crates/desktop/ui/src/lib/providerSelection.test.ts
-  - crates/desktop/ui/e2e/picker-keyboard.spec.ts
+  - crates/desktop/src/workspace.rs
+  - crates/desktop/src/native.rs
 verify:
   - cargo test -p zest-core --lib auth::tests
   - cargo test -p zest-core --lib credentials::tests
   - cargo test -p zest-core --lib codex_oauth
-  - cargo test -p zest-desktop --lib characterization
-  - npm run ui:test
-  - npm run ui:e2e -- picker-keyboard
+  - npm run gpui:test
 ---
 
 # Providers and sign-in
@@ -43,106 +24,84 @@ connected provider actually serves turns is in
 
 ## Behavior
 
-- Launch lists `codex`, `claude`, `cursor` (`PICKER_IDS`), then every other
-  `[providers.*]` entry in the active config, plus a `codex-chatgpt` "ChatGPT
-  sign-in" row when no `codex_oauth` provider exists and either `codex` is
-  configured or the Codex CLI is on PATH. The row sits right after `codex`.
-- A row is selectable only when it is both signed in (`AuthStatus` Ready or
-  Unknown) **and** configured. Signed in but unconfigured reads "Signed in.
-  Configure this provider in Settings." and the picker labels it "Configure".
-- Detection never reads or returns secrets: it checks that a credentials file
-  exists and parses (`~/.claude/.credentials.json`, `$CODEX_HOME/auth.json`),
-  reads only `authInfo.email` from `~/.cursor/cli-config.json`, and treats
-  "can't tell" as `Unknown`, never "not logged in".
-- Warm launch opens the remembered provider (`last-provider` in the user config
-  dir) only if it is ready. A remembered provider that is not ready stops at the
-  picker; Zest never silently starts a different one. Launch does not probe.
-- Connect runs the vendor login (`claude auth login`, `codex login`) in its own
-  console window, or an in-process ChatGPT PKCE sign-in on `localhost:1455`.
-  ChatGPT Connect first shows a "Use ChatGPT for Codex" risk confirmation.
-- The waiting screen polls every 1.5 s for up to 120 ticks (then "Still
-  waiting"), stops after 5 consecutive status failures, and re-checks on window
-  focus. A credentials file that was already ready when Reconnect started does
-  not count as success.
-- After sign-in Zest sends one tiny real turn (`verify_provider`) before opening
-  chat. A refused *model* still enters chat with a warning; any other failure
-  shows the error and "Back to providers". Only this path says "needs to be
-  reconnected", and only for credential failures.
-- A failed probe is remembered for 30 minutes (`zest.providerVerify` in
-  localStorage): the row shows "Reconnect" and Continue stays disabled.
-- API keys are never written to `zest.toml`. Adding a provider writes the entry
-  to the project `zest.toml` if one exists, else the user config, and stores the
-  key under its `credential` account in the OS credential manager.
-- A worktree chat runs in its isolated checkout but reads and edits provider
+- The desktop app has no provider picker on launch. A project window opens
+  straight into chat. A chat uses its saved provider (`Thread.provider_id`);
+  a new chat uses the config's default target, else the first configured
+  provider. The offline demo uses the built-in `demo` provider.
+- Providers come only from `[providers.*]` in the active config (see
+  [settings-and-appearance](settings-and-appearance.md)). With none
+  configured, Customize > Models says "Configure a provider in zest.toml to
+  start a turn." and a turn fails with "Choose a configured provider. '<id>'
+  is unavailable."
+- The desktop app does not read or write the remembered `last-provider`, and
+  it does not check sign-in state (`AuthStatus`) before a turn; a missing
+  sign-in surfaces as the provider's turn error.
+- Customize > Models shows a **Sign in** button for the selected provider when
+  it is a `codex_oauth`, `codex_cli` or `claude_code` entry. It runs the vendor
+  login (`claude auth login`, `codex login`) in its own console window, or an
+  in-process ChatGPT PKCE sign-in on `localhost:1455` stored under the entry's
+  `credential` account (else the provider id). There is no Cursor sign-in and
+  no ChatGPT risk confirmation.
+- While a sign-in runs the workspace note shows the login's browser text and
+  the button becomes **Cancel sign-in**, which kills the login ("Sign-in
+  cancelled."). The status is polled every 500 ms until it reports "Signed
+  in." or the failure detail. Closing the window also kills a running login.
+  Only one sign-in runs per window.
+- The desktop app does not send a verification turn after sign-in and does not
+  add a `codex_oauth` entry to `zest.toml`; configure the entry first.
+- The desktop app has no API key form. Add API providers to `zest.toml` by hand
+  and store the key in the OS credential manager under the entry's
+  `credential` account, or set the entry's `api_key_env` variable. API keys are
+  never written to `zest.toml`.
+- A worktree chat runs in its isolated checkout but reads provider
   configuration from the original project. This applies to Claude Code, Codex
   CLI, and API providers alike; a missing original project is an error.
-  `zest_core::worktree_registry::config_root` resolves that project for both the
-  Tauri shell and the native GPUI workspace.
-- Enable Claude Code / Codex CLI / Cursor CLI writes a parent-provider entry with
-  preset models (`sonnet`, `gpt-5.6-sol`, `composer-2.5`) and no API key.
-- In-chat switching keeps the thread when both sides run Zest's loop (API key,
-  ChatGPT) and forks a copy when a CLI provider is on either side.
+  `zest_core::worktree_registry::config_root` resolves that project when the
+  desktop opens a project window.
+- An existing chat stays on its provider. Picking another provider for it in
+  Customize > Models says "Start a new chat to choose a different provider."
+  The desktop app has no in-chat provider switch.
 
 ## How it works
 
-1. Boot: `App.tsx` boot effect calls `listProviders` + `lastProvider`, then
-   `pickReadyProvider` / `pickProviderFallback` (`lib/providerSelection.ts`) and
-   `enterChat` → `startSession`. Otherwise it renders `ProviderPicker`.
-2. Rows come from `list_providers` in `crates/desktop/src/lib.rs`:
-   `detect_all()` (core `auth.rs`) → `provider_view_from_slot`, then
-   `append_configured_direct_provider_views` (`configured_provider_view` asks
-   `ProviderRegistry::from_config(..).auth_status()`), then
-   `append_chatgpt_codex_offer`.
-3. Connect: `goConnect` / `reconnectProvider` → `start_login` → core
-   `start_claude_code_login`, `start_codex_cli_login` or
-   `start_codex_oauth_login` (`codex_oauth::start_login`, callback thread +
-   token exchange). Only one login runs at a time (`AppState.login`).
-4. Poll: `startWaitingPoll` → `listProviders` + `loginSessionIsNew`
-   (`lib/loginWait.ts`) and `login_status` → `LoginProcess::poll_status`. A CLI
-   login succeeds when its credentials file is rewritten (`store_rewritten`) or
-   the process exits 0. On ChatGPT success `login_status` calls
-   `ensure_codex_oauth_configured`, which adds a `codex_oauth` entry (id
-   `codex-chatgpt`, or `codex` when free) and keeps reporting `running` until the
-   row turns ready.
-5. Verify: `finishVerifiedLogin` → `verify_provider` → `probe_provider` →
-   core `provider::probe` (max_tokens 1, no thinking). Result goes to
-   `markProviderVerified` / `markProviderVerifyFailed` (`lib/providerVerify.ts`).
-6. Keys: `ApiProviderForm` → `configure_anthropic_provider` /
-   `configure_api_provider` (`config_edit::add_*_provider` +
-   `credentials::set`); key replacement → `set_provider_key` (Anthropic and
-   OpenAI-compatible entries with a `credential` only).
-7. `credentials.rs`: keyring service `zest`, per-process result cache, secrets of
+1. Open: `Project::open_with_registry` (`native.rs`) resolves `config_root`
+   and loads `Config::find(config_root)`; `Chat::new` picks the provider;
+   `Chat::agent` fails early when the provider id is not in the config.
+2. Sign-in: `Workspace::start_login` (`workspace.rs`) calls core
+   `auth::start_codex_oauth_login(account)`, `start_codex_cli_login` or
+   `start_claude_code_login` and keeps the `LoginProcess` in `Workspace.login`.
+   A background loop calls `LoginProcess::poll_status` every 500 ms. A CLI
+   login succeeds when its credentials file is rewritten or the process exits
+   0. `Drop for Workspace` kills a login still running.
+3. `auth::detect_all` checks sign-in state without reading or returning
+   secrets: it checks that a credentials file exists and parses
+   (`~/.claude/.credentials.json`, `$CODEX_HOME/auth.json`), reads only
+   `authInfo.email` from `~/.cursor/cli-config.json`, and treats "can't tell"
+   as `Unknown`. `zest auth` (CLI) prints these rows; the desktop app does not
+   use them.
+4. `credentials.rs`: keyring service `zest`, per-process result cache, secrets of
    1280+ UTF-16 units chunked on Windows (`zest-chunked:N` manifest), every write
    read back through a fresh entry; macOS uses an owner-only
    `<data dir>/zest/credentials.json` instead of Keychain.
-8. Switch: `ProviderSwitchSheet` (command palette "Switch provider", Settings
-   "Change provider") → `switchProvider` → `switch_session_provider`, which uses
-   core `thread_provider_handoff` (Stay / InPlace / Copy).
-9. ChatGPT turns: `CodexOAuthProvider` (`provider/codex_oauth.rs`) refreshes the
+5. ChatGPT turns: `CodexOAuthProvider` (`provider/codex_oauth.rs`) refreshes the
    session via `codex_oauth::refresh_and_store` before each turn, then streams
    through `provider/codex_rig.rs`.
 
 ## Verify
 
-- Fixture: `npm run ui:dev`, open `/?fixture=1&scenario=provider-picker`. The
-  first `startSession` fails so the picker shows; Continue then opens chat.
-  `startLogin` is not available in fixture mode.
-- `zest auth` (CLI) prints the same `detect_all()` rows.
-- Live sign-in and `verify_provider` spend a real turn; do not automate them.
+- `zest auth` (CLI) prints the `detect_all()` rows.
+- `npm run gpui:test` renders Customize > Models during the workspace selftest.
+- Live sign-in spends a real login; do not automate it.
 
 ## Pitfalls
 
-- `start_login` on Windows must not hide the console or null stdio: `claude
+- `start_*_login` on Windows must not hide the console or null stdio: `claude
   login` then never opens a browser (`LOGIN_CREATION_FLAGS`).
 - Cancel must release `localhost:1455` immediately (`CodexOAuthLogin::cancel`
-  drops the listener), or the next Connect reports the port in use.
-- `credentials::get` caches denials so a keychain prompt is not re-raised by the
-  status poll; only `set`/`delete` or a restart clears it.
-- `enterChat` marks a verify failure only for `codex` auth errors. Setup errors
-  (for example a folder without config) must not turn the row into "Reconnect".
+  drops the listener), or the next sign-in reports the port in use.
+- `credentials::get` caches denials so a keychain prompt is not re-raised by
+  later reads; only `set`/`delete` or a restart clears it.
 - Being signed in to a vendor CLI is not enough: the provider also needs a config
-  entry, or Continue would fail after the click.
-- `last-provider` is written only after a session actually started
-  (`persist_choice` in `start_session_inner`).
-- `backend.configureCodexOAuthProvider` has no UI caller; the OAuth entry is
-  written by `login_status`.
+  entry, or it does not appear in Customize > Models.
+- The config is read when the project window opens. Reopen the window after
+  editing `zest.toml`.

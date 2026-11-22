@@ -4,11 +4,12 @@ members = [
     "crates/core",
     "crates/coordinator",
     "crates/cli",
-    "crates/desktop",
     "crates/plugin-api",
     "crates/plugins/now-playing",
     "crates/plugins/wallpaper",
 ]
+# The desktop app has its own workspace and lockfile (see crates/desktop/Cargo.toml).
+exclude = ["crates/desktop"]
 
 [workspace.package]
 version = "0.3.0"

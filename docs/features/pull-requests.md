@@ -1,22 +1,14 @@
 ---
 title: Linked pull requests
-summary: Zest detects the GitHub pull request for a chat's branch, lists linked pull requests across projects, and opens their diff in the review pane.
+summary: Zest detects the GitHub pull request for a chat's branch, lists linked pull requests across projects, and shows their checks and diff.
 paths:
   - crates/core/src/pull_request.rs
-  - crates/desktop/ui/src/components/PullRequestsPanel.tsx
-  - crates/desktop/ui/src/lib/pullRequestLink.ts
-  - crates/desktop/ui/src/components/BranchChangesBar.tsx
   - crates/core/src/workspace_changes.rs
-  - crates/desktop/src/pr_checks.rs
-  - crates/desktop/ui/src/components/PullRequestChecks.tsx
-tests:
-  - crates/desktop/ui/src/lib/pullRequestLink.test.ts
-  - crates/desktop/ui/e2e/pull-requests.spec.ts
+  - crates/desktop/src/workspace/projects.rs
 verify:
-  - cargo test -p zest-desktop --lib -- pull_request_number
+  - cargo test -p zest-core --lib -- pull_request::tests
   - cargo test -p zest-core --lib -- workspace_changes
-  - npm run ui:test
-  - npm run ui:e2e -- pull-requests
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace::projects::
 ---
 
 # Linked pull requests
@@ -24,56 +16,74 @@ verify:
 ## Behavior
 - A chat learns its pull request from `gh pr view --json
   number,title,state,isDraft,url,additions,deletions,changedFiles` run in the
-  project on the current branch (3 s timeout). The result is stored in the
+  project on the current branch (3 s timeout). The desktop app looks it up when
+  the Pull requests page opens, for the active chat, and only when the chat's
+  recorded branch is the branch checked out now. The result is stored in the
   thread's `ThreadGitContext.pull_request`, so it survives restarts.
-- When a pull request is linked, `git_context` reports its +/- and file counts
-  (`stats_source: "pull_request"`) instead of the local `git diff --numstat`.
-- The Pull requests view lists every linked pull request across all projects,
-  newest chat first, one row per URL. Search matches project, title, number, and
-  branch; status filters are All, Open, Draft (open and draft), Merged, Closed.
-  Refresh reloads; the empty state explains how a PR gets linked.
-- A plain click on a pull request title opens its chat (switching project if
-  needed) and the diff in the review pane, showing "Fetching the pull request
-  diff..." until it arrives. Ctrl/Cmd/Shift-click or middle-click opens the URL
-  in the browser instead. The external-link icon always opens GitHub.
-- The diff comes from `gh pr diff <n>` (30 s timeout); if that fails it falls back
-  to `git diff <base_branch>...HEAD`. Both go through the same redaction and
-  2 MiB cap as branch changes. Free chats open the URL externally. A project chat keeps the review open when the diff is empty or unavailable.
-- Opening a PR in a chat also reads its current merge state and checks with a separate read-only GitHub CLI request. Check links open the check provider's log or details page. The review refreshes every 30 seconds while visible and on **Refresh checks**. An unavailable diff or check lookup leaves the other information and GitHub link available.
-- PR numbers must be 1-1000000; a requested number wins over the stored one.
+- Once linked, the pull request number shows in the branch strip above the
+  composer and in the status line below it, and the chat's sidebar row uses a
+  pull request icon. The strip's +/- counts stay the local `git diff --numstat`
+  counts.
+- The Pull requests page (sidebar) lists linked pull requests from the open
+  project, the projects in `<zest config dir>/known-workspaces.json`, and visible
+  worktree chats, newest chat first, one row per URL. Each row reads
+  "<project> · #<n> <title> · <branch> · <state>". The filter field matches that
+  text; status filters are All, Open, Draft (open and draft), Merged, Closed.
+  Refresh reloads. The empty state says to open the page from a Git chat with a
+  pull request on its branch.
+- Clicking a row opens its chat and the review on the same page. A row from
+  another project opens that project in its own window (or brings an open one to
+  the front) and starts the review there. Rows have no "open in browser"
+  modifier; use **Open on GitHub** in the review.
+- The review shows "#<n> <title> · <chat title>", **All pull requests**, **Open
+  on GitHub**, and **Refresh checks**. Checks read "<state> · <n> checks", with
+  one row per check; a check with a link opens its log or details page. The
+  checks refresh every 30 seconds while the review is shown and on **Refresh
+  checks**. "Fetching checks…" and "Fetching pull request diff…" show while each
+  request runs, and one failing leaves the other available.
+- The diff comes from `gh pr diff <n>` (30 s timeout); if that fails it falls
+  back to `git diff <base_branch>...HEAD`. Both go through the same redaction
+  and 2 MiB cap as branch changes. The review shows "<n> files · +<a> −<d>" and
+  the patch 80 lines at a time with **Previous 80 lines** / **Next 80 lines**.
+  An unavailable diff reads "Pull request diff unavailable."
+- PR numbers must be 1-1000000.
 
 ## How it works
-1. `git_context` (Tauri, crates/desktop/src/lib.rs) -> `inspect_git_context` ->
-   `lookup_pull_request_cached` -> `lookup_pull_request`; `record_git_context`
-   saves it on an existing thread.
-2. `PullRequestsPanel` (lazy in ChatScreen.tsx) calls backend
-   `listChatProjects()` and reads `thread.gitContext.pullRequest`.
-3. Links use `pullRequestAnchorProps` (marks `data-internal-link`, which
-   externalLinks.ts respects) and `handlePullRequestClick` /
-   `shouldOpenPullRequestExternally` (pullRequestLink.ts). The same helpers serve
-   BranchChangesBar, Composer, and ChatHistorySidebar.
-4. ChatScreen `requestPullRequest` switches chats if needed (holding the link in
-   `pendingPullRequestRef`) and calls `openPullRequestDiff` -> backend
-   `pullRequestDiff(number)` -> Tauri `pull_request_diff` ->
-   `fetch_github_pull_request_diff` + `snapshot_from_unified_diff`, or
-   `inspect_merge_base` (workspace_changes.rs).
-5. The diff renders in `DiffViewer` with `source: "pull_request"` (see
-   workspace-changes-and-review).
+1. `Workspace::load_pull_requests` (`crates/desktop/src/workspace/projects.rs`)
+   compares `chat_git_baseline`'s branch with the chat's `git_context.branch`,
+   calls `zest_core::pull_request::lookup_pull_request_cached`, and saves a new
+   link with `Chat::edit`. It then runs `list_links` on a blocking thread, which
+   reads each project's `ThreadStore::list` summaries and keeps rows whose
+   `git_context.pull_request` passes `is_safe_pr_number`. Hidden worktree records
+   are skipped.
+2. `open_linked_chat` opens the thread in this window, or calls `visit_project`,
+   which opens the other project's window with `open_project_window` and then
+   opens the chat there.
+3. `begin_review` spawns `zest_core::pull_request::diff(root, number, context)`
+   (`fetch_github_pull_request_diff` + `snapshot_from_unified_diff`, or
+   `inspect_merge_base` from workspace_changes.rs) and `refresh_checks`, which
+   loops on `pull_request::status` (`gh pr view <n> --json
+   state,url,statusCheckRollup`, 10 s timeout) every 30 s until the page or its
+   `report_epoch` changes.
+4. Links open through `zest_core::codex_oauth::open_http_url`, which accepts only
+   HTTP(S) URLs.
 
 ## Verify
-The e2e specs run in `?fixture=1` (fixture PR #13, "Bot CI"): filtering and
-search, opening the review, back/forward navigation, and
-`&scenario=pull-request-delayed` for the loading state.
-The delayed test adds `&holdPullRequestDiff=1` to hold the fixture response.
-It checks the loading message and disabled Clean/Raw controls, then releases
-the response to verify the diff appears and the controls become enabled.
-This keeps lazy-loaded UI components running and does not rely on the CI
-runner observing the fixture's short loading window in real time.
+`pull_request::tests` covers parsing running and completed checks and external
+statuses. `workspace::projects::` checks the worktree count label. There is no
+offline end-to-end test for pull requests: in a repository with a pushed branch
+and an open pull request, open a chat on that branch, open Pull requests, and
+check that the row appears, that clicking it shows the checks and the diff, and
+that the chat's branch strip shows the number afterwards.
 
 ## Pitfalls
 - `gh` must be installed and authenticated; without it no PR is detected and
-  `pull_request_diff` falls back to the merge-base diff.
+  the diff falls back to the merge-base diff.
 - `PULL_REQUEST_CACHE` is a single process-wide slot keyed by (root, branch) that
-  expires after 30 seconds, including a missing PR. Returning focus to the chat can discover a newly opened PR after that interval.
-- A stale `pullRequestLoadRef` response is dropped; keep incrementing it when the
-  pane closes or the chat changes.
+  expires after 30 seconds, including a missing PR. Reopening the page after that
+  interval can discover a newly opened PR.
+- Nothing in the desktop app writes `known-workspaces.json`, so projects only
+  ever opened in the desktop app (other than the open one and worktree chats)
+  are not listed.
+- A late diff or check result is dropped when `report_epoch` has moved; keep
+  incrementing it whenever the page changes.

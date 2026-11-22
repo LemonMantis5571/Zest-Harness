@@ -13,8 +13,6 @@ use crate::lock::CoordinatorLock;
 use crate::runtime::{
     DelegationNotifier, NoopNotifier, SharedNotifier, SpawnAbort, TaskSpawner, TokioSpawner,
 };
-#[cfg(feature = "export-bindings")]
-use ts_rs::TS;
 use zest_core::{
     apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
     diff_paths, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
@@ -46,11 +44,6 @@ fn unix_millis() -> u64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DelegationStatus.ts", rename_all = "snake_case")
-)]
 pub enum DelegationStatus {
     Planned,
     AwaitingApproval,
@@ -68,11 +61,6 @@ pub enum DelegationStatus {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "ReviewSeverity.ts", rename_all = "snake_case")
-)]
 pub enum ReviewSeverity {
     Blocking,
     Advisory,
@@ -80,15 +68,6 @@ pub enum ReviewSeverity {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "AcceptanceCheckStatus.ts",
-        rename_all = "snake_case"
-    )
-)]
 pub enum AcceptanceCheckStatus {
     Pending,
     Passed,
@@ -98,11 +77,6 @@ pub enum AcceptanceCheckStatus {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "ReviewFinding.ts", rename_all = "camelCase")
-)]
 pub struct ReviewFinding {
     pub severity: ReviewSeverity,
     pub path: String,
@@ -111,11 +85,6 @@ pub struct ReviewFinding {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "AcceptanceCheckView.ts", rename_all = "camelCase")
-)]
 pub struct AcceptanceCheckView {
     pub command: String,
     pub status: AcceptanceCheckStatus,
@@ -124,20 +93,13 @@ pub struct AcceptanceCheckView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DelegationTarget.ts", rename_all = "camelCase")
-)]
 pub enum DelegationTargetView {
     ExternalAgent {
         #[serde(rename = "agentId")]
-        #[cfg_attr(feature = "export-bindings", ts(rename = "agentId"))]
         agent_id: String,
     },
     Provider {
         #[serde(rename = "providerId")]
-        #[cfg_attr(feature = "export-bindings", ts(rename = "providerId"))]
         provider_id: String,
         model: Option<String>,
         effort: Option<String>,
@@ -182,11 +144,6 @@ impl From<DelegationTargetView> for DelegationTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "ReviewerTarget.ts", rename_all = "camelCase")
-)]
 pub enum ReviewerTargetView {
     SameAsWorker,
     Target { target: DelegationTargetView },
@@ -214,15 +171,6 @@ impl From<ReviewerTargetView> for ReviewerTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "DelegationAttemptView.ts",
-        rename_all = "camelCase"
-    )
-)]
 pub struct DelegationAttemptView {
     pub attempt_id: String,
     pub role: String,
@@ -236,7 +184,6 @@ pub struct DelegationAttemptView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
 pub struct AttemptUsageView {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -246,15 +193,6 @@ pub struct AttemptUsageView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "ResolvedTargetMetadataView.ts",
-        rename_all = "camelCase"
-    )
-)]
 pub struct ResolvedTargetMetadataView {
     pub target: DelegationTargetView,
     pub config_fingerprint: String,
@@ -284,13 +222,11 @@ impl From<&AttemptUsage> for AttemptUsageView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
 pub struct DelegationOriginView {
     pub coordinator: String,
     pub chat_id: Option<String>,
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub idempotency_key: Option<String>,
 }
 
@@ -314,11 +250,6 @@ fn serialized_label<T: Serialize>(value: &T) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "WorktreeLineageView.ts", rename_all = "camelCase")
-)]
 pub struct WorktreeLineageView {
     pub base_ref: Option<String>,
     pub start_ref: Option<String>,
@@ -343,22 +274,14 @@ impl From<&WorktreeLineage> for WorktreeLineageView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DispatchView.ts", rename_all = "camelCase")
-)]
 pub struct DispatchView {
     pub id: String,
     pub role: String,
     pub target: String,
     pub attempt: u32,
     pub status: String,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub started_at: u64,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub heartbeat_at: Option<u64>,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub finished_at: Option<u64>,
 }
 
@@ -379,19 +302,12 @@ impl From<&DispatchState> for DispatchView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "InboxMessageView.ts", rename_all = "camelCase")
-)]
 pub struct InboxMessageView {
     pub id: String,
     pub kind: String,
     pub sender: String,
     pub body: String,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub created_at: u64,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub read_at: Option<u64>,
 }
 
@@ -410,20 +326,13 @@ impl From<&InboxMessage> for InboxMessageView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DecisionGateView.ts", rename_all = "camelCase")
-)]
 pub struct DecisionGateView {
     pub id: String,
     pub label: String,
     pub status: String,
     pub required: bool,
     pub detail: Option<String>,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub opened_at: u64,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub resolved_at: Option<u64>,
 }
 
@@ -443,16 +352,10 @@ impl From<&DecisionGate> for DecisionGateView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "RetryStateView.ts", rename_all = "camelCase")
-)]
 pub struct RetryStateView {
     pub attempt: u32,
     pub last_error: Option<String>,
     pub next_action: Option<String>,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub requested_at: Option<u64>,
 }
 
@@ -469,15 +372,6 @@ impl From<&RetryState> for RetryStateView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "ExternalSessionEvidenceView.ts",
-        rename_all = "camelCase"
-    )
-)]
 pub struct ExternalSessionEvidenceView {
     pub worker_id: String,
     pub command: String,
@@ -487,7 +381,6 @@ pub struct ExternalSessionEvidenceView {
     pub branch: Option<String>,
     pub preview: Option<String>,
     pub resumable: bool,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub captured_at: u64,
 }
 
@@ -509,15 +402,9 @@ impl From<&ExternalSessionEvidence> for ExternalSessionEvidenceView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "LifecycleEntryView.ts", rename_all = "camelCase")
-)]
 pub struct LifecycleEntryView {
     pub phase: String,
     pub detail: String,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub at: u64,
     pub dispatch_id: Option<String>,
 }
@@ -535,11 +422,6 @@ impl From<&LifecycleEntry> for LifecycleEntryView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "OrchestrationView.ts", rename_all = "camelCase")
-)]
 pub struct OrchestrationView {
     pub version: u32,
     pub run_id: String,
@@ -548,7 +430,6 @@ pub struct OrchestrationView {
     pub phase: String,
     pub dispatch: Option<DispatchView>,
     pub worktree: WorktreeLineageView,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub heartbeat_at: Option<u64>,
     pub inbox: Vec<InboxMessageView>,
     pub decision_gates: Vec<DecisionGateView>,
@@ -585,15 +466,6 @@ impl From<&OrchestrationState> for OrchestrationView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "DelegationCreateRequest.ts",
-        rename_all = "camelCase"
-    )
-)]
 pub struct CreateDelegationJobRequest {
     pub parent_thread_id: String,
     pub title: String,
@@ -612,24 +484,13 @@ pub struct CreateDelegationJobRequest {
     #[serde(default)]
     pub chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub origin_coordinator: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "DelegationUpdateRequest.ts",
-        rename_all = "camelCase"
-    )
-)]
 pub struct UpdateDelegationJobRequest {
     pub job_id: String,
     pub worker: Option<DelegationTargetView>,
@@ -640,21 +501,11 @@ pub struct UpdateDelegationJobRequest {
     pub context: Option<Vec<String>>,
     pub acceptance_checks: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub expected_updated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(
-        export,
-        export_to = "DelegationTargetOption.ts",
-        rename_all = "camelCase"
-    )
-)]
 pub struct DelegationTargetOption {
     pub target: DelegationTargetView,
     pub available: bool,
@@ -664,11 +515,6 @@ pub struct DelegationTargetOption {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DelegationHandoff.ts", rename_all = "camelCase")
-)]
 pub struct DelegationHandoff {
     pub job_id: String,
     pub summary: String,
@@ -679,11 +525,6 @@ pub struct DelegationHandoff {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DelegationJobView.ts", rename_all = "camelCase")
-)]
 pub struct DelegationJobView {
     pub job_id: String,
     pub parent_thread_id: String,
@@ -697,10 +538,8 @@ pub struct DelegationJobView {
     pub depends_on: Vec<String>,
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub worker_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub reviewer_attempt_id: Option<String>,
     pub reviewer_agent: String,
     pub worker_target: DelegationTargetView,
@@ -713,31 +552,21 @@ pub struct DelegationJobView {
     pub attempt: u32,
     pub status: DelegationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub orchestration: Option<OrchestrationView>,
     pub changed_files: Vec<String>,
     pub changed_file_count: usize,
     pub acceptance_checks: Vec<AcceptanceCheckView>,
     pub reviewer_findings: Vec<ReviewFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub worker_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub error: Option<String>,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub created_at: u64,
-    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "DelegationEvent.ts", rename_all = "snake_case")
-)]
 pub enum DelegationEvent {
     CardCreated { job: DelegationJobView },
     ApprovalRequired { job: DelegationJobView },

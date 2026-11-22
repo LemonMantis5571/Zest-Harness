@@ -21,28 +21,27 @@ release.
 | dotenvy | MIT | [dotenvy](https://github.com/allan2/dotenvy) |
 | globset, ignore | Unlicense or MIT | [ripgrep crates](https://github.com/BurntSushi/ripgrep/tree/master/crates) |
 | similar | Apache-2.0 | [similar](https://github.com/mitsuhiko/similar) |
-| tauri, tauri-plugin-notification | Apache-2.0 or MIT | [Tauri](https://github.com/tauri-apps/tauri), [Tauri plugins](https://github.com/tauri-apps/plugins-workspace) |
 | tokio | MIT | [Tokio](https://github.com/tokio-rs/tokio) |
 | toml, toml_edit | MIT or Apache-2.0 | [toml-rs](https://github.com/toml-rs/toml) |
 
-## JavaScript direct dependencies
+## Desktop app direct dependencies
 
-The desktop webview uses the following direct packages. All are permissive
-licenses except the Geist font package, which is distributed under the
-SIL Open Font License 1.1.
+The desktop app (`crates/desktop`, its own Cargo workspace) adds these direct
+dependencies:
 
-| Components | License |
-| --- | --- |
-| React, React DOM, React Markdown, Remark GFM, Mermaid, Shiki, shadcn, Tailwind Merge, tw-animate-css, clsx, lucide-react | MIT or ISC (see each package metadata) |
-| Base UI, @shadcn/react, class-variance-authority, @tauri-apps/api, @tauri-apps/plugin-notification | MIT or Apache-2.0 |
-| @fontsource-variable/geist | SIL OFL-1.1 |
-| Vite, Tailwind CSS, Oxlint, TypeScript, and their plugins/types | MIT or Apache-2.0 |
-| Vendored monochrome provider paths from `@lobehub/icons` 5.15.0 ([lobe-icons](https://github.com/lobehub/lobe-icons)) | MIT |
-| Six lint rules vendored from [anti-slop](https://github.com/dmmulroy/anti-slop) at `c44ef22ca116` into `crates/desktop/ui/.oxlint-plugins/anti-slop.mjs` (dev tooling, not shipped) | MIT |
+| Component | License | Upstream |
+| --- | --- | --- |
+| gpui, gpui_platform | Apache-2.0 | [Zed](https://github.com/zed-industries/zed) |
+| wry | Apache-2.0 or MIT | [wry](https://github.com/tauri-apps/wry) |
+| tao | Apache-2.0 | [tao](https://github.com/tauri-apps/tao) |
+| accesskit, image, unicode-segmentation, base64, chrono, url | MIT or Apache-2.0 | [Rust ecosystem repositories](https://crates.io/) |
+| syntect, pulldown-cmark | MIT | [syntect](https://github.com/trishume/syntect), [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) |
+| pdf-inspector | MIT | [firecrawl/pdf-inspector](https://github.com/firecrawl/pdf-inspector) |
+| embed-resource (build only) | MIT | [embed-resource](https://github.com/nabijaczleweli/rust-embed-resource) |
 
 ## Native desktop assets
 
-The GPUI app embeds these files from `spikes/gpui/assets/` so it matches the webview's look:
+The desktop app embeds these files from `crates/desktop/assets/`:
 
 | Component | License | Upstream |
 | --- | --- | --- |

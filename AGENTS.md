@@ -1,11 +1,13 @@
 # Working on Zest
 
-Zest is a local-first coding workbench: a Rust workspace with a Tauri desktop
-app and a React/TypeScript UI. `crates/core` holds provider-independent
-behavior, `crates/coordinator` the delegation queue, `crates/cli` the `zest`
-terminal client and `zest serve` daemon, `crates/desktop` the Tauri app, and
-`crates/desktop/ui` its web UI. [CONTRIBUTING.md](CONTRIBUTING.md) has the full
-setup and conventions; this page is the short version for agents.
+Zest is a local-first coding workbench: a Rust workspace plus a native desktop
+app built with GPUI. `crates/core` holds provider-independent behavior,
+`crates/coordinator` the delegation queue, `crates/cli` the `zest` terminal
+client and `zest serve` daemon, and `crates/desktop` the desktop app. The
+desktop crate is its own Cargo workspace with its own `Cargo.lock`, so root
+`cargo` commands do not build it.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the full setup and conventions; this
+page is the short version for agents.
 
 ## Find your way with the feature map
 
@@ -26,52 +28,48 @@ otherwise, and so do the pre-commit hook and CI.
 
 ## Drive the app and prove a change
 
-Use the control CLI instead of writing a throwaway browser script. It keeps one
-live session of the UI (offline fixture backend, no credentials), answers in
-JSON, and records every console error, page error, failed request, and toast.
-[docs/features/ui-control-cli.md](docs/features/ui-control-cli.md) has the details.
+On Windows, use the control CLI instead of writing a throwaway automation
+script. It launches the release app (an offline demo project unless you pass
+`--project`), answers in JSON, and collects panics and errors from the app's
+output. It drives the window only through UI Automation patterns, never
+simulated keystrokes, and starts the app with `--no-focus` so it does not take
+focus from whatever else is on screen.
 
 ```bash
-node scripts/zest-control.mjs doctor            # what is installed/running, with fixes
-node scripts/zest-control.mjs check             # smoke-test core flows (starts a session if needed)
-node scripts/zest-control.mjs start --scenario split-streaming
-node scripts/zest-control.mjs send "hello"      # waits for the turn; says if it was queued
-node scripts/zest-control.mjs inspect state     # also: messages, code-blocks, meter, composer, toasts
-node scripts/zest-control.mjs snapshot          # accessibility tree as YAML
-node scripts/zest-control.mjs click "New chat"  # a miss lists the buttons on screen
-node scripts/zest-control.mjs press Mod+K
-node scripts/zest-control.mjs errors            # everything that went wrong, tagged by command
-node scripts/zest-control.mjs screenshot out.png
-node scripts/zest-control.mjs stop
+node scripts/gpui-control.mjs doctor             # what is built and running, with fixes
+node scripts/gpui-control.mjs start              # offline demo; --project DIR for a real one, --build to rebuild
+node scripts/gpui-control.mjs send "Demo: write" # waits for the reply or an approval/question card
+node scripts/gpui-control.mjs click "Allow once" # buttons, tabs, switches and radios by accessible name
+node scripts/gpui-control.mjs inspect            # turn state, messages, composer, tabs
+node scripts/gpui-control.mjs snapshot           # every named control with its role and state
+node scripts/gpui-control.mjs errors             # panics and errors since start (or the last --clear)
+node scripts/gpui-control.mjs screenshot out.png
+node scripts/gpui-control.mjs stop
 ```
 
-If you find yourself scripting the same interaction twice, add a command or an
-`inspect` probe to `scripts/zest-control-daemon.mjs` instead.
-
-The UI dev server listens on `ZEST_UI_PORT` (default 1420) for `ui:dev`,
-`ui:e2e`, and zest-control alike. Give each worktree you test in at the same
-time its own port, e.g. `ZEST_UI_PORT=1421`. Both tools reuse a running server
-only when it serves their own checkout, and refuse with a hint otherwise.
+If you find yourself scripting the same interaction twice, add a command to
+`scripts/gpui-control.mjs` and `scripts/gpui-control.ps1` instead. On Linux,
+rely on the desktop tests below.
 
 | Goal | Command |
 | --- | --- |
-| Look at the UI yourself | `npm run ui:dev`, then open `http://127.0.0.1:1420/?fixture=1` (or your `ZEST_UI_PORT`) |
-| Browser tests against that fixture UI | `npm run ui:e2e` (one spec: `npm run ui:e2e -- split-workspace`) |
-| UI unit tests | `npm run ui:test` |
+| Look at the app yourself | `npm run gpui -- --demo` (offline) or `npm run dev` |
+| Desktop tests, including the scripted workspace scenario | `cargo test --locked --release --manifest-path crates/desktop/Cargo.toml` |
+| The same scenario in a real window | `npm run gpui:test` |
 | One Rust module's tests | `cargo test -p zest-core --lib -- provider::` |
 | One headless agent turn, machine-readable | `cargo run -p zest -- run --jsonl -- "PROMPT"` (uses a real provider and quota) |
 | Coordinator daemon with inbound MCP | `zest serve`, see [docs/SERVE.md](docs/SERVE.md) |
 | Everything, before you commit | `npm run verify` |
 
-Playwright needs Chromium once per machine: `npx playwright install chromium`.
-npm swallows Playwright flags, so for options such as `--repeat-each=8` run
-`npx playwright test <spec> --repeat-each=8` from `crates/desktop/ui`.
-The fixture backend (`crates/desktop/ui/src/lib/fixtureBackend.ts`) is what the
-browser tests run against; extend it when a new UI test needs backend behavior.
+The offline demo provider streams a canned reply; `Demo: write` asks to write a
+file and `Demo: question` asks a question, so approval and question cards can
+be exercised without credentials
+([docs/features/offline-fixture-mode.md](docs/features/offline-fixture-mode.md)).
 
-Work the inner loop (`cargo check -p <crate>`, one module's tests, one e2e spec)
-and run `npm run verify` once at the end; it compiles the workspace twice and
-takes minutes. Do not run `cargo fmt` while a build is in flight.
+Work the inner loop (`cargo check -p <crate>`, one module's tests,
+`cargo check --manifest-path crates/desktop/Cargo.toml`) and run
+`npm run verify` once at the end; it builds both workspaces and takes minutes.
+Do not run `cargo fmt` while a build is in flight.
 
 ## Rules that are easy to break
 
@@ -79,9 +77,9 @@ takes minutes. Do not run `cargo fmt` while a build is in flight.
 - Preserve approval and credential boundaries on every execution path.
 - `zest` (crates/cli) must not depend on `zest-desktop` or WebKit; Linux CI
   builds it without WebKitGTK.
-- Never hand-edit `crates/desktop/ui/src/lib/generated/`; regenerate the ts-rs
-  bindings (see CONTRIBUTING.md).
+- A new dependency of `zest-core` or `zest-coordinator` must also land in
+  `crates/desktop/Cargo.lock`, or the desktop CI jobs fail on `--locked`.
 - Nothing under `outputs/` that is media or larger than 1 MiB.
 - Add a focused regression test for each behavior change.
-- Conventional Commits (`fix(ui): ...`, `feat(provider): ...`), one behavior
-  per change.
+- Conventional Commits (`fix(desktop): ...`, `feat(provider): ...`), one
+  behavior per change.

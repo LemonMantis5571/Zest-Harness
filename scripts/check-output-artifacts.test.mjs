@@ -62,7 +62,7 @@ test("rejects output files larger than 1 MiB", () => {
 test("allows small text reports and unrelated assets", () => {
   const violations = findOutputArtifactViolations([
     { path: "outputs/latency/RESULTS.md", size: 4096 },
-    { path: "crates/desktop/ui/src/assets/demo.mp4", size: 3 * 1024 * 1024 },
+    { path: "crates/desktop/assets/demo.mp4", size: 3 * 1024 * 1024 },
   ]);
 
   assert.deepEqual(violations, []);

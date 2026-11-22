@@ -1,46 +1,33 @@
 ---
-title: Native GPUI workspace
-summary: Open a project, run Zest agent turns, and review saved conversations and project files in a Windows GPUI window.
+title: Desktop app (GPUI)
+summary: The native Zest window for Windows and Linux in crates/desktop. Open a project, run agent turns, review changes and delegations, and build installers.
 paths:
-  - spikes/gpui/Cargo.toml
-  - spikes/gpui/build.rs
-  - spikes/gpui/zest.rc
-  - spikes/gpui/src/main.rs
-  - spikes/gpui/src/workspace.rs
-  - spikes/gpui/src/workspace/board.rs
+  - crates/desktop/Cargo.toml
+  - crates/desktop/Cargo.lock
+  - crates/desktop/build.rs
+  - crates/desktop/zest.rc
+  - crates/desktop/src/**
+  - crates/desktop/assets/**
+  - crates/desktop/icons/**
+  - crates/desktop/examples/workbench_io.rs
   - .github/workflows/gpui-windows.yml
-  - spikes/gpui/src/native.rs
-  - spikes/gpui/src/native_view.rs
-  - spikes/gpui/src/search.rs
-  - spikes/gpui/src/side.rs
-  - spikes/gpui/src/interaction.rs
-  - spikes/gpui/src/bridge.rs
-  - spikes/gpui/src/composer.rs
-  - spikes/gpui/src/md.rs
-  - spikes/gpui/src/view.rs
-  - spikes/gpui/src/theme.rs
-  - spikes/gpui/src/ui.rs
-  - spikes/gpui/src/icons_generated.rs
-  - spikes/gpui/src/workspace/chrome.rs
-  - spikes/gpui/assets/**
-  - spikes/gpui/benchmark/**
-  - spikes/gpui/examples/workbench_io.rs
-  - crates/desktop/src/attachments.rs
-  - crates/desktop/src/context_meter.rs
-  - crates/desktop/src/workspace_files.rs
+  - scripts/check-desktop-accessibility.ps1
+  - docs/gpui-spike/**
 tests:
-  - spikes/gpui/src/workspace/board/selftest.rs
-  - spikes/gpui/src/workspace_test.rs
-  - spikes/gpui/src/selftest.rs
-  - spikes/gpui/src/selftest_trace.rs
+  - crates/desktop/src/workspace/board/selftest.rs
+  - crates/desktop/src/workspace_test.rs
+  - crates/desktop/src/selftest.rs
+  - crates/desktop/src/selftest_trace.rs
 verify:
   - npm run gpui:test
-  - cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
 ---
 
-# Native GPUI workspace
+# Desktop app (GPUI)
 
-From this checkout, run `npm run gpui -- --project "D:\Code\MyProject"` to open a project. With no arguments, the native window opens a folder picker. It reads Zest's provider configuration, project chat store and usage ledger. This is a source build on Windows and requires the Rust toolchain, MSVC and the Windows SDK shader compiler described in [the rendering spike](../../spikes/gpui/FINDINGS.md).
+Zest's desktop app is a native [GPUI](https://github.com/zed-industries/zed) window in `crates/desktop`. That crate is its own Cargo workspace with its own `Cargo.lock`: GPUI is pinned to a Zed git revision, and its dependency tree must not constrain the CLI and core crates. The app reads Zest's provider configuration, project chat store and usage ledger through `zest-core`.
+
+From this checkout, run `npm run dev` or `npm run gpui -- --project "D:\Code\MyProject"` to open a project. With no arguments, the window opens a folder picker. Building needs the Rust toolchain. On Windows it also needs MSVC and the Windows SDK shader compiler. On Linux it needs the packages that `.github/workflows/gpui-windows.yml` installs: GPUI's X11, Wayland and Vulkan headers, plus WebKitGTK 4.1 for the `wry` web views. [The rendering spike](../gpui-spike/FINDINGS.md) records why GPUI replaced the former Tauri and React app.
 
 Run `npm run gpui -- --demo` for a temporary offline workspace. Send `Demo: write` to review an actual file-write request or `Demo: question` to answer a choice. Files and chats live in the temporary project for the duration of the demo.
 
@@ -64,21 +51,20 @@ The sidebar reads saved summaries in the background at startup and when opening 
 
 `npm run gpui:test` drives a native window, the real agent loop, the thread store and an offline provider in a temporary Git repository. Windows CI runs the same scenario in a GPUI test window through `cargo test`, including an approved edit that is committed and reviewed after reopening, then the delegation board's worker, reviewer and apply sequence. The original rendering fixtures remain available with `--selftest-queue` and `--agent --history=500`.
 
-### Native desktop port
+### Look and controls
 
-The native window uses the React UI's default "zest" theme. `spikes/gpui/src/theme.rs` holds its color tokens from `crates/desktop/ui/src/index.css`, embeds the Geist font, and serves Lucide icons generated from the UI's own `lucide-react` package (`node spikes/gpui/assets/generate-icons.mjs` adds icons and regenerates `icons_generated.rs`). `ui.rs` has the shared controls. `workspace/chrome.rs` draws the sidebar (back and forward, New chat, Search, Pull requests, Customize, the project's chats and the account row), the chat header and the page frame. Settings-type panels are tabs under Customize, and project tools (Changes, Files, Jobs, Checkpoints, Delegation, Worktrees) are tabs under Workbench, opened from the header. Chats sit in a rounded canvas with a centered 720 px transcript and the composer card, toolbar and status line below it. Finished replies have Copy and Download (save as Markdown). With changed lines since the chat's start commit, a strip above the composer shows the project, branch, +/- counts from `zest_core::workspace_changes::diff_stats` and any linked pull request; it hides during a turn, and dismissing it lasts until the counts change.
+`crates/desktop/src/theme.rs` holds the theme palettes, embeds the Geist font, and serves the Lucide icons in `crates/desktop/assets/icons`. To add an icon, install `lucide-react` without saving it, add the name to `crates/desktop/assets/generate-icons.mjs`, and run that script; it also regenerates `icons_generated.rs`. `ui.rs` has the shared controls. `workspace/chrome.rs` draws the sidebar (back and forward, New chat, Search, Pull requests, Customize, the project's chats and the account row), the chat header and the page frame. Settings-type panels are tabs under Customize, and project tools (Changes, Files, Jobs, Checkpoints, Delegation, Worktrees) are tabs under Workbench, opened from the header. Chats sit in a rounded canvas with a centered 720 px transcript and the composer card, toolbar and status line below it. Finished replies have Copy and Download (save as Markdown). With changed lines since the chat's start commit, a strip above the composer shows the project, branch, +/- counts from `zest_core::workspace_changes::diff_stats` and any linked pull request; it hides during a turn, and dismissing it lasts until the counts change.
 
-Customize > Appearance offers the React UI's Zest, Nights and Oceanic themes and its fonts: Geist and System UI always, Inter, Plus Jakarta Sans, JetBrains Mono and Fira Code when installed. A choice applies at once and is saved in `<config dir>/zest/gpui-appearance.json`. Code colors follow the theme's brightness for newly rendered messages; chats already on screen keep theirs until reopened.
-
+Customize > Appearance offers the Zest, Nights and Oceanic themes and these fonts: Geist and System UI always, Inter, Plus Jakarta Sans, JetBrains Mono and Fira Code when installed. A choice applies at once and is saved in `<config dir>/zest/gpui-appearance.json`. Code colors follow the theme's brightness for newly rendered messages; chats already on screen keep theirs until reopened.
 
 The default source launcher, `npm run dev`, opens GPUI. Split right and Split down add independently running chats. A divider supports dragging, arrow keys, Home, End and double-click to reset. Single view keeps the split group in the sidebar so its chats and drafts can be reopened during the session.
 
-Worktrees, Pull requests and Add-ons have native sidebar entries. Browser actions use a private system webview for each chat. HTML cards expose source and export, and on Windows they can open an isolated interactive document. Run `node spikes/gpui/benchmark/web-windows.mjs PATH_TO_BINARY` to drive the real web windows against a local fixture.
+Worktrees, Pull requests and Add-ons have native sidebar entries. Browser actions use a private system webview for each chat. HTML cards expose source and export, and on Windows they can open an isolated interactive document. Run `node docs/gpui-spike/benchmark/web-windows.mjs PATH_TO_BINARY` to drive the real web windows against a local fixture.
 
-Buttons have accessible names. The composer exposes its text as AccessKit text runs with the caret and selection, so Windows UI Automation offers TextPattern as well as ValuePattern. Windows CI launches the demo and runs `spikes/gpui/benchmark/accessibility.ps1 -Check` to fail on an unnamed button or an unreadable composer.
+Buttons have accessible names. The composer exposes its text as AccessKit text runs with the caret and selection, so Windows UI Automation offers TextPattern as well as ValuePattern. Windows CI launches the demo and runs `scripts/check-desktop-accessibility.ps1 -Check` to fail on an unnamed button or an unreadable composer.
 
-`npm run gpui:package` builds local x64 installers (MSI and NSIS on Windows, DEB, RPM and AppImage on Linux). The Linux AppImage uses the host GTK 3, WebKitGTK 4.1 and Vulkan runtime. Tagged releases ship these installers instead of the Tauri app. `spikes/gpui/build.rs` embeds Zest's icon and version into the Windows executable (`zest.rc`); GPUI also uses that icon for its windows.
+`npm run gpui:package` builds local x64 installers (MSI and NSIS on Windows, DEB, RPM and AppImage on Linux). The Linux AppImage uses the host GTK 3, WebKitGTK 4.1 and Vulkan runtime. Tagged releases ship these installers. `crates/desktop/build.rs` embeds Zest's icon and version into the Windows executable (`zest.rc`); GPUI also uses that icon for its windows.
 
-## Remaining desktop coverage
+## History
 
-The [Windows desktop comparison](../../spikes/gpui/benchmark/README.md) measures both frontends on matched offline transcripts and records the status of each desktop workflow.
+`docs/gpui-spike/` keeps the rendering spike's findings and the [Windows desktop comparison](../gpui-spike/benchmark/README.md), which measured GPUI against the former WebView frontend on matched offline transcripts. Its WebView runner needed the removed React UI and no longer runs.
