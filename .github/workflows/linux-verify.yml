@@ -28,16 +28,12 @@ jobs:
           OUTPUT_POLICY_HEAD_SHA: ${{ github.sha }}
         run: node ./scripts/check-output-artifacts.mjs --range "$OUTPUT_POLICY_BASE_SHA" "$OUTPUT_POLICY_HEAD_SHA"
 
-      # Tauri v2 needs WebKitGTK and friends; keyring needs the Secret Service
-      # (D-Bus) headers; aws-lc-rs needs cmake; AppImage bundling needs patchelf.
+      # keyring needs the Secret Service (D-Bus) headers; aws-lc-rs needs cmake.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential pkg-config libssl-dev cmake \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            libdbus-1-dev libxdo-dev \
-            curl wget file tar patchelf libfuse2t64
+            build-essential pkg-config libssl-dev cmake libdbus-1-dev curl wget file tar
 
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@master
@@ -73,17 +69,7 @@ jobs:
       - name: Verify
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          ZEST_CONTROL_ARTIFACTS: ${{ github.workspace }}/crates/desktop/ui/test-results/zest-control
         run: bash scripts/release-verify.sh
-
-      - name: Upload Playwright traces and control screenshots
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: playwright-traces-linux
-          path: crates/desktop/ui/test-results/
-          if-no-files-found: ignore
-          retention-days: 7
 
   cli-headless:
     name: zest serve without WebKit

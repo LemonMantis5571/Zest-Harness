@@ -2,8 +2,8 @@
 # Generate the installer artwork from the app icon.
 #
 # The MSI was shipping WiX's default banner - the red "no entry" placeholder in
-# the top-right of every page - because Tauri does not override it unless you
-# supply one. NSIS has the same story with its header and sidebar.
+# the top-right of every page - unless the installer supplies its own. NSIS
+# has the same story with its header and sidebar.
 #
 # Generated rather than hand-drawn so the art tracks the icon: change
 # icons/zest-icon-512.png, re-run this, rebuild.

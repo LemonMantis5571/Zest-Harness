@@ -3,15 +3,15 @@ title: BTW side questions
 summary: Ask a quick question about the current conversation in a side panel with /btw, without adding it to the main chat or interrupting a running task.
 paths:
   - crates/core/src/btw.rs
-  - crates/desktop/src/btw.rs
-  - crates/desktop/ui/src/components/BtwPanel.tsx
+  - crates/desktop/src/side.rs
+  - crates/desktop/src/native_view.rs
   - docs/BTW.md
 tests:
-  - crates/desktop/ui/e2e/btw.spec.ts
+  - crates/desktop/src/workspace_test.rs
 verify:
-  - npm run ui:e2e -- btw
+  - npm run gpui:test
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace_test::
   - cargo test -p zest-core --lib -- btw::tests
-  - cargo test -p zest-desktop --lib -- btw::tests
 ---
 
 # BTW side questions
@@ -19,28 +19,26 @@ verify:
 User-facing reference: [docs/BTW.md](../BTW.md) (per-provider fork behaviour, lifetime, billing).
 
 ## Behavior
-- `/btw [question]` as the first whole token in the main composer opens the "Side conversation" panel and sends the question; the composer is cleared. `/btw/file` or `/btw` later in the text is ordinary text. Picking `/btw` from the slash menu opens the panel and keeps the rest of the main draft.
-- Composer attachments stay in the composer; they are never sent with a side question.
-- The panel streams answers, accepts follow-ups, and has "Stop side answer" and "Close side conversation" (Esc also closes). A stopped or failed answer keeps the question editable in the panel and shows an alert (for example "Answer stopped").
-- It works while the main task runs ("Main task is still running"); the main turn keeps going and its Stop button stays.
-- Nothing from the side exchange enters the main transcript, thread file, context meter, checkpoints, queue, or provider cursor. Closing the panel or switching chats discards it; reopening `/btw` starts fresh.
-- Optional usage traces carry the frozen parent run ID, including snapshots
-  captured while the desktop is still preparing the main turn.
-- `send_message` refuses text starting with `/btw` ("Open /btw from the main chat composer to ask a side question.").
+- `/btw [question]` as the first whole token in the main composer opens the "Side conversation" panel above the composer and sends the question; the composer text is cleared. `/btw` alone opens the panel without asking. `/btw/file` or `/btw` later in the text is ordinary text.
+- Composer attachments stay in the composer: picked files are untouched and pasted images are put back. They are never sent with a side question.
+- The panel lists each question and its streamed answer and has its own "Ask a side question" field for follow-ups. "Stop side answer" (or Esc in that field) cancels the answer; "Close" discards the conversation.
+- A second question while one is being answered is refused with "Finish or stop the current side answer first." and stays in the field. A stopped or failed answer shows the error in the panel and puts the question back in the field.
+- It works while the main task runs; the main turn keeps going and its Stop button stays.
+- Nothing from the side exchange enters the main transcript, thread file, context meter, checkpoints, queue, or provider cursor. Closing the panel or opening another chat discards it; the next `/btw` starts fresh.
+- `/btw` is handled before a message is queued, so it never reaches the agent as a main-chat message.
 - CLI: `/btw [question]` enters a side conversation in the interactive terminal and `/back` discards it (`crates/cli/src/main.rs`).
 
 ## How it works
-1. `ChatScreen.tsx` composer `onSubmit` -> `btwQuestion` (`lib/slashCommands.ts`) -> `setBtw` renders `BtwPanel.tsx`.
-2. `BtwPanel` -> `backend.startBtw(sessionId)` -> Tauri `btw::start_btw` (`crates/desktop/src/btw.rs`) -> `SessionController::side_context` (`session.rs`): the snapshot the running turn's worker last published (`ActiveTurn::side_context`, via `fork_snapshot`), or `Agent::side_conversation()` when idle. `SideConversations::open` keeps one slot per session (opening again closes the previous) and at most 8 overall.
-3. `backend.sendBtw(id, text, onDelta)` -> `btw::send_btw` streams `StreamEvent::Text` over a Tauri `Channel`; a second send while answering is refused. `cancel_btw` cancels the slot's `CancelToken`; `close_btw` removes the slot. `set_session` / `end_session` close the owner's slots.
+1. `native_view.rs` `submit_native` checks `zest_core::commands::btw_question`; a match calls `Root::ask_side` (`side.rs`) instead of `accept_submission`. Follow-ups from the panel's field reach `ask_side` through the `side_input` subscription in `main.rs`.
+2. `ask_side` creates the `SideConversation` on the first question of a panel: `native::Chat::agent` builds an agent from the chat's saved `agent_messages`, and when the main turn is still streaming, the running user prompt is appended so the side sees what was asked. Then `Agent::side_conversation().without_provider_session()`. It does not include the running turn's in-progress tool steps.
+3. The send runs on the Tokio executor; `StreamEvent::Text` deltas come back over a channel and are appended to the last answer. A generation counter drops deltas and results that arrive after the panel was closed or reopened. `close_side` resets the state; dropping `Side` cancels its token. `Workspace::open` closes the side panel of the chat being left.
 4. `SideConversation::send` (`crates/core/src/btw.rs`) clones the frozen `TurnRequest`, appends a side-question instruction after the unchanged prefix, and streams via `Provider::stream_turn`. Only a text answer is committed; errors, cancellation, empty answers, or a `tool_use` block reset the provider session and commit nothing. Usage goes to the normal ledger.
-5. `turn.rs` publishes side snapshots: the submitted prompt before persistence, then after each completed provider/tool step (`publish_side_context` in `agent.rs`), with sensitive tool results redacted and no provider session.
 
 ## Verify
-- `npm run ui:e2e -- btw` (fixture mode): follow-ups then an unchanged main transcript; opening during a running task without queueing (`split-streaming` holds the main turn); slash-menu discovery; stop keeps the question editable (`btw-streaming` holds the side answer until Stop).
-- `cargo test -p zest-desktop --lib -- btw::tests` checks close/reopen cancels only the side answer and that switching sessions drops it.
+- `npm run gpui:test` (and `workspace_test::` in a GPUI test window) sends `/btw side question` in the offline demo, waits for the side answer, and checks that the saved thread's message count is unchanged before closing the panel.
+- By hand in `npm run gpui -- --demo`: send a message, then `/btw what did I ask?`; the answer appears in the panel, the transcript is unchanged, and Close removes the panel.
 
 ## Pitfalls
-- Never fork a moving provider cursor: snapshots from a running turn use `without_provider_session()` and replay the frozen transcript.
-- Late deltas after close must not reopen the panel or reach the main chat; the panel guards with a lifetime flag and the backend cancels on a closed channel.
+- Never fork a moving provider cursor: side conversations always use `without_provider_session()` and replay the saved transcript.
+- Late deltas after close must not reopen the panel or reach the main chat; keep the generation check in both the delta loop and the final result.
 - Provider-specific side sessions live in the provider modules: Codex `thread/fork` in `provider/codex_app_server.rs`, Claude `--fork-session` in `provider/claude_code.rs`, and Cursor's separate Ask-mode session via `Provider::side_conversation_provider` in `provider/cursor_acp.rs`.

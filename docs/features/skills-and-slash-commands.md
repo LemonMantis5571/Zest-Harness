@@ -1,22 +1,20 @@
 ---
 title: Skills and slash commands
-summary: Personal SKILL.md files become /commands and model-readable instructions; enabled MCP servers and built-ins share the same / list in the composer.
+summary: Personal SKILL.md files become /commands and model-readable instructions; built-ins, skills and enabled MCP servers are listed in Customize > Skills & MCP.
 paths:
   - crates/core/src/skills.rs
   - crates/core/src/tools/read_skill.rs
   - crates/core/src/commands.rs
-  - crates/desktop/ui/src/lib/slashCommands.ts
-  - crates/desktop/ui/src/components/CommandOutputCard.tsx
-  - crates/desktop/ui/src/components/CustomizePanel.tsx
+  - crates/desktop/src/native.rs
+  - crates/desktop/src/native_view.rs
+  - crates/desktop/src/workspace.rs
 tests:
-  - crates/desktop/ui/src/lib/slashCommands.test.ts
-  - crates/desktop/ui/e2e/slash-commands.spec.ts
+  - crates/desktop/src/workspace_test.rs
 verify:
   - cargo test -p zest-core --lib -- skills::tests
   - cargo test -p zest-core --lib -- tools::read_skill
   - cargo test -p zest-core --lib -- commands::tests
-  - npm run ui:test
-  - npm run ui:e2e -- slash-commands
+  - npm run gpui:test
 ---
 
 # Skills and slash commands
@@ -30,46 +28,57 @@ verify:
 - The system prompt lists every skill (`# Available skills`) and inlines bodies of
   4 KiB or less up to a 16 KiB total (`# Skill details`); the model loads the rest
   with `read_skill(name)`, which errors with the known names on a miss.
-- In the composer, `/` at the start of a whitespace-delimited token (before the
-  caret) opens the Commands list, filtered by name prefix. Paths such as
-  `/etc/hosts` do not open it. Several commands can be used in one draft.
+- The composer does not open a command list when you type `/`; its placeholder
+  only mentions commands. Type the command yourself, or pick it from
+  Customize > Skills & MCP, which lists every command as `/name · description`
+  ("No skills or MCP commands configured." when there are none). Clicking a row
+  returns to the chat and puts `/<name> ` into the composer.
 - The list contains built-ins `btw` and `model`, skills, and enabled MCP servers
   whose id is a legal token. Reserved built-ins beat skills and MCP; a skill beats
   an MCP server of the same name.
+- Sending exactly `/model` opens Customize > Models (see
+  [model-and-effort-selection](model-and-effort-selection.md)); `/btw <question>`
+  opens the side conversation (see [btw-side-questions](btw-side-questions.md)).
+  Neither is sent as a turn.
 - On send, every recognised `/token` anywhere in the draft is removed and its
   skill body (or an MCP "use this server" instruction) is placed above the
   remaining text, separated by `---`. Unknown `/tokens` stay as typed. `//text`
-  sends a literal `/text`.
-- The transcript and thread title keep what the user typed; the expansion goes
-  only to the model. The message records the command names (`plan + review`) and
-  a document-shaped reply renders in `CommandOutputCard`.
-- Customize > Skills lists the skills found on disk; Refresh re-reads them.
+  sends a literal `/text`. Several commands can be used in one draft; paths such
+  as `/etc/hosts` are left alone.
+- In Plan mode a message with no recognised command is expanded with the `plan`
+  skill.
+- The transcript keeps what the user typed; the expansion goes only to the
+  model.
+- The offline demo loads no skills and no MCP commands.
 
 ## How it works
 1. `SkillSet::discover` (skills.rs) runs in `RuntimeBuilder::build`
-   (runtime.rs); `compose_system_with_docs` (prompt.rs) adds the catalogue and
-   inlined bodies; `register_skill_tools` adds `ReadSkill` over the shared
-   `Arc<RwLock<SkillSet>>`.
-2. Composer.tsx loads `backend.listCommands()` on mount and again whenever the
-   palette opens -> Tauri `list_commands` (crates/desktop/src/lib.rs), which calls
-   `SkillSet::discover()`, `mcp_slashes`, and `list_slash_commands`.
-3. `slashTokenAt`, `filterSlashCommands`, `splitSlashMatch` (slashCommands.ts)
-   drive the list; `isModelSlash` / `btwQuestion` route the built-ins in the UI.
-4. On send, turn.rs calls `zest_core::expand_command(text, &session.skills,
-   &mcp)` (`commands::expand`); in Plan mode with no typed command it uses
-   `expand_command_as(text, skills, PLAN_SKILL)`.
-5. Customize > Skills (`SkillsPanel` in CustomizePanel.tsx) calls Tauri
-   `list_skills`, which reads skills from disk so it works mid-turn.
+   (runtime.rs), which the desktop calls for every turn; `compose_system_with_docs`
+   (prompt.rs) adds the catalogue and inlined bodies; `register_skill_tools` adds
+   `ReadSkill` over the shared `Arc<RwLock<SkillSet>>`.
+2. `Project::open_with_registry` (`native.rs`) discovers a second `SkillSet`
+   and the MCP slashes (`mcp_slashes(&config.mcp, &McpCatalog::load())`) once
+   per project window and keeps them in `Project.skills` / `Project.mcp`.
+3. Customize > Skills & MCP (`Panel::Commands` in `workspace.rs`) renders
+   `zest_core::list_slash_commands(&project.skills, &project.mcp)`.
+4. `Root::submit_native` (`native_view.rs`) catches `/model` and
+   `btw_question(text)` before queueing.
+5. When a queued input runs, `Chat::run` (`native.rs`) calls
+   `zest_core::expand_command(text, &project.skills, &project.mcp)`
+   (`commands::expand`); in Plan mode with no typed command it uses
+   `expand_command_as(text, skills, "plan")`.
 
 ## Verify
-Unit tests above; the e2e spec inserts `/browse-x` and `/plan` at several caret
-positions in `?fixture=1` (fixture skills come from fixtureBackend.ts
-`listCommands`).
+Unit tests above. `npm run gpui:test` renders the Skills & MCP panel during the
+workspace selftest. By hand: add a skill under `~/.zest/skills/`, open a project,
+pick it in Customize > Skills & MCP, and send.
 
 ## Pitfalls
-- `list_commands` and `list_skills` re-discover from disk each call, but expansion
-  uses the session's `SkillSet`, discovered when the runtime was built. A skill
-  added mid-session shows in the list before the session can expand it.
+- The Skills & MCP list and `/command` expansion use the window's `SkillSet`,
+  discovered when the project window opened, while the system prompt and
+  `read_skill` rediscover skills every turn. A skill added mid-session is
+  visible to the model but is not a `/command` until the window is reopened.
+  There is no Refresh button.
 - Command names accept only `[A-Za-z0-9_-]`; everything else must survive
   untouched (paths, URLs, regexes).
 - Skill bodies are instructions to the model; only install trusted skills.

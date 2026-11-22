@@ -26,6 +26,15 @@ a replacement for the commit history.
 - The conversation is compacted inside a turn when it nears the context window,
   and when the provider rejects a request as too long, including in the CLI.
 
+### Removed
+
+- The Tauri desktop app and its React UI. The native GPUI app, which releases
+  already shipped, is now the only desktop app and lives in `crates/desktop`.
+  Installers keep the same package names, MSI upgrade code and executable name,
+  so installed builds upgrade in place. The browser fixture UI, its Playwright
+  tests and `zest-control` went with it; on Windows, `scripts/gpui-control.mjs`
+  drives the native app instead.
+
 ## 0.3.0 stable - 2026-10-18
 
 ### Added

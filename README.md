@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./crates/desktop/ui/src/assets/zest-mark.png" alt="Zest" width="72" height="72" />
+<img src="./crates/desktop/icons/zest-mark.png" alt="Zest" width="72" height="72" />
 
 # Zest
 
@@ -100,7 +100,7 @@ and [provider quota](docs/QUOTA.md).
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pinned toolchain, Linux packages, and local verification gate.
 
-Run `npm run dev` to choose a project in the native GPUI workbench. Releases ship this native app. `npm run desktop:dev` still runs the older Tauri app. On Windows and Linux, `npm run gpui -- --demo` opens the native GPUI workbench in a temporary offline project. To use an existing repository, run `npm run gpui -- --project "D:\Code\MyProject"`. See the [native workspace feature map](docs/features/gpui-workspace.md) for supported workflows and verification.
+Run `npm run dev` to choose a project in the desktop app, a native GPUI window in `crates/desktop`. On Windows and Linux, `npm run gpui -- --demo` opens it in a temporary offline project. To use an existing repository, run `npm run gpui -- --project "D:\Code\MyProject"`. See the [desktop app feature map](docs/features/gpui-workspace.md) for supported workflows and verification.
 
 ## Platforms
 

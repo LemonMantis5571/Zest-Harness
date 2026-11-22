@@ -1,90 +1,41 @@
 ---
-title: Offline fixture mode
-summary: Run the desktop UI in an ordinary browser with an in-memory fake backend and a canned turn; every Playwright spec runs against it.
+title: Offline demo mode
+summary: Run the desktop app with no provider or credentials in a temporary project, with a built-in offline provider that can stream a reply, request a file write, or ask a question.
 paths:
-  - crates/desktop/ui/src/lib/fixture.ts
-  - crates/desktop/ui/src/lib/fixtureBackend.ts
-  - crates/desktop/ui/src/lib/backend.ts
-  - crates/desktop/ui/playwright.config.ts
-  - crates/desktop/ui/vite.config.ts
-  - crates/desktop/ui/devServer.ts
-  - crates/desktop/ui/e2e/devServerSetup.ts
-  - crates/desktop/ui/e2e/fixtures/
+  - crates/desktop/src/native.rs
+  - crates/desktop/src/workspace.rs
+  - crates/desktop/src/workspace/extras.rs
+  - crates/desktop/src/workspace/board.rs
 tests:
-  - crates/desktop/ui/src/lib/fixtureBackend.test.ts
-  - crates/desktop/ui/e2e/fixtureBoot.ts
+  - crates/desktop/src/workspace_test.rs
+  - crates/desktop/src/workspace/board/selftest.rs
 verify:
-  - npm run ui:test
-  - npm run ui:e2e
+  - npm run gpui:test
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
 ---
 
-# Offline fixture mode
+# Offline demo mode
 
 ## Behavior
-- `ui-stress` supplies long project and branch labels and an 85% context reading
-  to exercise compact composer layouts and the compaction warning offline.
-- `context-recovery` fails context reads after `zest:fixture-fail-context` until
-  `zest:fixture-recover-context` is dispatched. Node tests can supply
-  `contextFailureReady` and `contextRecoveryReady`, so failed and recovered
-  popovers are deterministic and do not depend on request counts.
-- The `subagents` scenario restores a chat with a `delegate_external` worker, a `delegate_feature` card tied to the board's fixture job, and a Claude Code `Agent` whose activities name it as `parentId`. A send streams a live agent with nested steps (150 ms apart; "slow" in the message spaces them 1.5 s apart). Approving the fixture job now records worker and reviewer attempts.
-- In `background-approval`, `zest:fixture-background-approval` accepts a CustomEvent detail of `fixture-free` or `fixture-local` to start another approval. `cancelTurn(threadId)` cancels that turn. Renaming either seeded chat works without opening it, so notification tests can exercise identical titles and delayed lookup.
-- `advisor-unavailable` starts with an advisor saved for a removed provider and
-  reports the configuration issue. Choosing Off clears the saved provider and
-  issue, including after the session rebuild and reopening Settings.
-- `claude-alias-resolution` starts a Claude Code chat on an unresolved `opus`
-  alias. Sending a message finishes a turn, then exposes `resolvesTo` as
-  `claude-opus-5` in `sessionInfo`. Earlier snapshots stay unresolved, so the
-  UI must refresh the catalogue to update the open chat's picker.
-- The `html-artifacts` scenario exercises publication and restored interactive HTML. A dev-only token endpoint serves bounded source with the isolated response CSP; it is not a production artifact store or native IPC proof.
-- `npm run ui:dev`, then `http://127.0.0.1:1420/?fixture=1` (port `ZEST_UI_PORT` when set): the full chat shell runs with no Tauri, provider, or credentials. `?fixture` is honoured only by the Vite dev server (`import.meta.env.DEV`); release builds drop the module.
-- On load the fixture starts session `session-fixture` / thread `fixture` and streams one canned turn: user "What's in README.md?", a thinking delta, four `read_file` tool calls (exercising run grouping), then a word-by-word reply. A second thread, `fixture-local` (provider `ollama`), shows as busy with a `git_status` tool for about 9 s to exercise the sidebar activity mark.
-- Sending a message echoes it: `Fixture echo: <text>`. A `followup`/`steer`/`inject` target queues it (`input_queued`) instead, in every scenario, including during a live `split-streaming` turn.
-- Like the desktop, `contextUsage` rejects with a `busy` error envelope while a turn is in flight on the active chat (a live `split-streaming` send or a pending safety scenario).
-- Every backend method call is counted per page on `globalThis.__zestFixtureCalls` (`recordFixtureCalls`), so a spec or `zest-control inspect backend-calls` can see what the UI asked for. The page's own backend is on `globalThis.__zestFixtureBackend`, for specs that must call it directly (raw CRLF text the composer would normalize). `generateReadingDiff` returns the diff unabridged.
-- Seeded sidebar: "Fixture", "Local model chat" (`fixture-local`), "Fifteen turns" (`fixture-long`, 15 user turns for history windowing), and "Free chat" (`fixture-free`) under Free chats. Rename, pin, delete, fork, rewind, edit, search, and older/newer paging work on in-memory state.
-- The `sidebar-status` scenario can create in-memory worktree chats from either sidebar layout. Each receives a distinct fixture checkout and branch; `worktree-chats.spec.ts` exercises the menus without creating real Git worktrees or making provider calls. Git counts come from the fixture too: the first worktree chat reports 2 ahead, 1 behind and 3 uncommitted, later ones are clean, and each turn sent in a worktree chat (held for 150 ms so the sidebar sees it end) adds one uncommitted change. `?worktreeStatus=fail` makes every status read throw.
-- Also faked: two MCP servers (`Haiku`, `github`), external agents `claude` and `gemini`, one delegation job (approve runs the whole worker/reviewer lifecycle synchronously to `ready_to_apply`), Now Playing and Wallpaper plugins (both off until turned on), usage/profile/quota figures, workspace files (`src/`, `README.md`, `Cargo.toml`), git context with PR #13, `/btw` side conversations, system prompt, and the slash-command list.
-- Not available (throws "fixture backend: X is not available" or similar): provider key and `configure*Provider` calls, `startLogin`, `openProjectConfig`, `openPricesFile`, `revealWorkspaceFolder`, `jobOutput`, `jobKill`. `checkExternalAgent` and `checkMcpServer` return a not-available result.
-- `?scenario=<name>` changes behavior: `approval`, `question`, `cancel`, `tool-error` (safety turns on send), `options-delayed` / `options-failing` (900 ms model/effort saves; the first failing one throws), `provider-picker` (reports `mode: "tauri"`, first `startSession` fails so the picker shows, adds two extra providers), `model-catalogue` (54 extra long-named models), `split-streaming` (sends stay live until cancelled, or until `zest:fixture-split-turn` with `detail: { prompt, action, text? }` streams more text, finishes the turn, or stops it on a tool approval or a question; `prompt` is the text that started it, see [split workspace](split-workspace.md)), `btw-streaming` (a side answer stays live after its first chunk until Stop or close), `pull-request-delayed` (800 ms PR diff), `sidebar-status` (workspace `/fixture/zest-app`; `boot` leaves background chats awaiting approval, awaiting an answer, and working, and finishes one so it reads as unread; `zest:fixture-finish-working` ends the working one; `listDelegationJobs` adds read-only jobs, four under the open chat and one under "Pick a migration path"), `background-approval` (after the echo, the seeded "Free chat" stops for an approval while another chat is open), `claude-cli-outdated` (the session is Claude Code on CLI 2.1.220, so Opus 5.5 and Fable 5.1 carry `needsCli`).
+- `npm run gpui -- --demo` opens the desktop app on a new temporary directory. Nothing is read from or written to a real project, and no provider, API key or sign-in is needed. The directory is deleted when the app exits.
+- Every chat uses the built-in `demo` provider with the model `offline`. The provider settings show "Offline demo provider".
+- An ordinary message streams a short thinking line and then the reply "Offline reply. This conversation has N wire messages.", word by word, so streaming, stop and history all work offline.
+- `Demo: write` makes the provider request `write_file` for `demo.txt`. The request goes through the normal approval card; approving it writes the file in the temporary project, and Changes shows it.
+- `Demo: question` makes the provider call `ask_user` with "Which file?" and the choices First and Second, so the question card can be answered.
+- Some areas stay off in the demo: Add-ons say they are available in project windows, the Usage panel does not request provider quota, and the delegation board does not list worker targets from configured providers.
+- `--demo` skips loading `.env` files and creating `~/.zest/zest.toml`.
 
 ## How it works
-1. `getBackend()` in `backend.ts` caches one backend per page; `selectBackend` returns `createFixtureBackend()` when `import.meta.env.DEV` and the URL has `fixture`.
-2. `createFixtureBackend` in `fixtureBackend.ts` implements the whole `DesktopBackend` type with closure state; `scenarioFromLocation` reads `?scenario`. `mode` is `"fixture"` except for `provider-picker` and `model-catalogue`, which take App's normal boot path.
-3. In fixture mode `App.tsx` calls `startSession("fixture")` (bounded by `BOOT_TIMEOUT_MS`, 15 s), then `backend.boot(handleChatEvent)`, which is not bounded; `boot` runs `runFixtureStream` (`fixture.ts`) only when there is no scenario or a safety scenario.
-4. Events go through the handler registered by `onChatEvent`/`onDelegationEvent`; a generation counter stops a StrictMode double subscription from clearing the live sink.
-5. Safety scenarios keep one `pendingScenario`; `resolveApproval`, `resolveQuestion`, and `cancelTurn` finish it (cancel also auto-fires after 5 s).
-6. Playwright (`playwright.config.ts`): tests in `e2e/`, 2 workers, fully parallel, base URL `http://127.0.0.1:<port>`, 1280x800, traces kept on failure. The port is `ZEST_UI_PORT`, default 1420 (`uiPort` in `devServer.ts`). Its `webServer` runs `npm run dev -- --host 127.0.0.1 --port <port> --strictPort` and reuses an already running dev server outside CI; `e2e/devServerSetup.ts` then fails the run unless that server reports this checkout's root on `/__zest_dev_server` (the `devServerIdentity` plugin in `vite.config.ts`). `vite.config.ts` takes the same port (1420 under Tauri, whose devUrl, CSP, and `html.rs` pin it), `strictPort`, and the `@` alias.
+1. `workspace::launch_if_requested` creates the temporary directory when `--demo` or `--selftest-workspace` is passed and opens it as a project with `demo` set.
+2. `native.rs` builds the agent for a demo project from the `Demo` provider, the write tools and the question tool, with the window's approver, questioner and approval policy. Real projects build the agent from `zest.toml` instead.
+3. `Demo::stream_turn` checks the last user message for the two trigger phrases and, when tool use is allowed, returns a `tool_use` block; otherwise it streams the canned reply.
+4. `--selftest-workspace` also turns the temporary directory into a Git repository (`workspace_test::init_repository`) and drives the window through a scripted session: an approved edit, reopening and reviewing it, and the delegation board's worker, reviewer and apply sequence.
 
 ## Verify
-- The delayed PR fixture accepts `&holdPullRequestDiff=1` to keep each diff
-  request pending until the browser dispatches
-  `zest:fixture-release-pull-request-diff`. Node tests can supply the
-  `pullRequestDiffReady` promise instead. Without a hold, its 800 ms delay
-  remains unchanged. The browser tests release the response only after
-  asserting the loading state, without pausing UI rendering timers.
-- `node scripts/zest-control.mjs start` drives this fixture one command at a time and `check` smoke-tests it; see [ui-control-cli](ui-control-cli.md).
-- `npm run ui:test` runs `fixtureBackend.test.ts` (side conversations, rename, free chats, search, delegation lifecycle, plugins and files, safety scenarios, windowed open, PR review, queued-message recovery).
-- `advisor-settings.spec.ts` clicks Off for the unavailable advisor and checks
-  the saved setting as well as the radio state and cleared issue.
-  `model-picker-cli-version.spec.ts` checks that the alias trigger and selected
-  row update after a completed turn without reopening the chat or reloading.
-  The fixture unit tests cover clearing the unavailable advisor and keeping
-  alias metadata unresolved during a turn and in earlier snapshots.
-- `npm run ui:e2e` or one spec: `npm run ui:e2e -- split-workspace`. Every spec except `streaming-performance` opens `/?fixture=1`; that one loads the standalone harness `e2e/fixtures/streaming.html`. Needs `npx playwright install chromium` once.
-
-## Adding fixture behavior for a new e2e test
-- GPT-6 fixture choices carry their published 1,050,000-token context capacity and image capability, so model-picker tests exercise the displayed metadata as well as saved selections.
-- New backend method: implement it in `createFixtureBackend` (TypeScript requires it once it is on `DesktopBackend`). Prefer deterministic in-memory state over `notAvailable`.
-- New situation: add the name to the `FixtureScenario` union and to the `scenarioFromLocation` check, branch on `scenario` in the methods involved, cover it in `fixtureBackend.test.ts` via `createFixtureBackend({ scenario })`, and open `/?fixture=1&scenario=<name>` from the spec.
-- Preference-dependent UI can be pinned with `page.addInitScript` writing `localStorage` (the split spec sets `zest.responseBlockStreaming.v1`).
+- `npm run gpui:test` runs the scripted workspace check in a real window.
+- `cargo test --locked --release --manifest-path crates/desktop/Cargo.toml` runs the same scenario in a GPUI test window (Windows CI checks for its `SELFTEST native_workspace: PASS` and `SELFTEST delegation_board: PASS` lines).
+- By hand: `npm run gpui -- --demo`, send `Demo: write`, allow the request, and open Changes.
 
 ## Pitfalls
-- Fixture state is per page load; nothing persists, and specs cannot share state.
-- The canned boot stream is a turn, not startup, and must stay outside the boot timeout. It used to be inside it: on a slow CI runner the stream passed 15 s and the app dropped an open chat back to the provider picker mid-test, which surfaced as an unrelated-looking `slash-commands.spec.ts` click timeout on Windows. To reproduce slow-runner timing locally, throttle the CPU in a spec with CDP `Emulation.setCPUThrottlingRate` (6x reproduced it).
-- A spec that types into the seeded chat right after `goto` races that boot turn: sends are queued and its end re-renders the chat. Call `waitForFixtureBoot(page)` (`e2e/fixtureBoot.ts`) first, as `zest-control start` does, or use a scenario (which skips the boot turn). To assert on a live turn or side answer, use `split-streaming` or `btw-streaming` instead of racing the canned timing.
-- Default `sendMessage` responds synchronously with the full echo; only `split-streaming` leaves a turn running. Specs that need a live turn must use that scenario or add one.
-- A new empty thread is not listed until it has a message, matching the desktop store.
-- `lib/*.ts` modules loaded by `node --test` must import siblings with relative `.ts` paths; the `@/` alias only resolves under Vite.
-- A local `npm run ui:dev` from the same checkout is reused by Playwright; stale code there means stale test results. A server from another worktree is refused: set `ZEST_UI_PORT` per worktree.
-- Never `import("/src/...")` from `page.evaluate`. Once a dev server has served an edit, the app imports changed modules as `?t=<timestamp>` URLs, so a bare path loads a second copy with its own state (a second fixture backend that no component listens to). Use `globalThis.__zestFixtureBackend`.
+- The trigger phrases must be the whole message, exactly `Demo: write` or `Demo: question`.
+- Demo chats are saved inside the temporary project, so they are gone after the app exits.

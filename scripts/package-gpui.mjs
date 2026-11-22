@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const manifest = path.join(repo, "spikes/gpui/Cargo.toml");
+const manifest = path.join(repo, "crates/desktop/Cargo.toml");
 const packaging = path.join(repo, "packaging/gpui");
 const art = path.join(repo, "crates/desktop");
 const { values } = parseArgs({ options: { out: { type: "string" }, binary: { type: "string" } } });
@@ -39,8 +39,8 @@ if (values.binary) {
   binary = path.resolve(values.binary);
 } else {
   const { target_directory: target } = JSON.parse(run("cargo", ["metadata", "--manifest-path", manifest, "--no-deps", "--format-version", "1"], true));
-  run("cargo", ["build", "--manifest-path", manifest, "--locked", "--release", "--bin", "zest-gpui-spike"]);
-  binary = path.join(target, "release", windows ? "zest-gpui-spike.exe" : "zest-gpui-spike");
+  run("cargo", ["build", "--manifest-path", manifest, "--locked", "--release", "--bin", "zest-desktop"]);
+  binary = path.join(target, "release", windows ? "zest-desktop.exe" : "zest-desktop");
 }
 if (!existsSync(binary)) throw new Error(`Missing release executable: ${binary}`);
 
@@ -49,6 +49,7 @@ const stage = mkdtempSync(path.join(output, ".pack-"));
 const scratch = mkdtempSync(path.join(os.tmpdir(), "zest-installer-"));
 try {
   if (windows) {
+    // Machines that built the former Tauri app keep WiX and NSIS in its tool cache.
     const cache = path.join(process.env.LOCALAPPDATA, "tauri");
     const wix = [process.env.WIX && path.join(process.env.WIX, "bin"), path.join(cache, "WixTools314")];
     const nsis = [process.env["ProgramFiles(x86)"] && path.join(process.env["ProgramFiles(x86)"], "NSIS"), path.join(cache, "NSIS")];

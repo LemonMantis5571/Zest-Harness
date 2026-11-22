@@ -7,9 +7,6 @@
 .env
 .env.*
 !.env.example
-# Machine-specific signing overlay (thumbprint is public, but the file names a
-# certificate only this machine has). The .example stays committed.
-crates/desktop/tauri.signing.conf.json
 
 # --- Project-local Zest state (do not commit chat history or personal prompts) ---
 .zest/threads/
@@ -32,16 +29,9 @@ crates/desktop/.zest/
 # --- Local tool downloads ---
 /tools/*
 !/tools/.gitkeep
-crates/desktop/binaries/
 
-# --- Node (npm workspaces at repo root) ---
+# --- Node ---
 node_modules/
-crates/desktop/ui/dist/
-crates/desktop/ui/.vite/
-
-# --- Tauri generated ---
-crates/desktop/gen/
-crates/desktop/src-tauri/target/
 
 # --- Editor / OS ---
 .DS_Store

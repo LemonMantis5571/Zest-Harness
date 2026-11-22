@@ -153,7 +153,6 @@ pub async fn diff(
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "export-bindings", derive(ts_rs::TS))]
 pub struct PullRequestStatus {
     pub state: String,
     pub url: String,
@@ -161,7 +160,6 @@ pub struct PullRequestStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "export-bindings", derive(ts_rs::TS))]
 pub struct PullRequestCheck {
     pub name: String,
     pub status: String,

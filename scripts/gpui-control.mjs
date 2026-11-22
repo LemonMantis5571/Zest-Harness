@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-// Drive the native Zest desktop (GPUI) from the command line and get JSON back: the native
-// counterpart of scripts/zest-control.mjs. It launches the release app with its output in a
-// log, then reads and drives the window through Windows UI Automation (scripts/gpui-control.ps1),
-// never with simulated keystrokes.
+// Drive the Zest desktop app from the command line and get JSON back. It launches the release
+// app with its output in a log, then reads and drives the window through Windows UI Automation
+// (scripts/gpui-control.ps1), never with simulated keystrokes.
 //
 //   node scripts/gpui-control.mjs start [--project DIR] [--build]   (default: offline --demo)
 //   node scripts/gpui-control.mjs send "Demo: write"
@@ -16,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const binary = path.join(repo, "spikes/gpui/target/release", process.platform === "win32" ? "zest-gpui-spike.exe" : "zest-gpui-spike");
+const binary = path.join(repo, "crates/desktop/target/release", process.platform === "win32" ? "zest-desktop.exe" : "zest-desktop");
 const driver = path.join(repo, "scripts/gpui-control.ps1");
 const stateDir = path.join(os.tmpdir(), "zest-gpui-control");
 const stateFile = path.join(stateDir, "state.json");
@@ -85,7 +84,7 @@ function flag(args, name) {
 
 function drive(state, command, extra = {}) {
   if (process.platform !== "win32") {
-    fail("gpui-control drives the app through Windows UI Automation. On Linux, use the GPUI tests: npm run gpui:test and cargo test --manifest-path spikes/gpui/Cargo.toml.");
+    fail("gpui-control drives the app through Windows UI Automation. On Linux, use the GPUI tests: npm run gpui:test and cargo test --manifest-path crates/desktop/Cargo.toml.");
   }
   const params = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", driver, "-Command", command, "-AppPid", String(state.pid)];
   for (const [key, value] of Object.entries(extra)) if (value !== undefined) params.push(`-${key}`, String(value));
@@ -127,7 +126,7 @@ switch (command) {
       platform: process.platform,
       automation: process.platform === "win32" ? "Windows UI Automation" : "unavailable (Windows only)",
       binary: existsSync(binary) ? binary : null,
-      fix: existsSync(binary) ? undefined : "Build it: cargo build --locked --release --manifest-path spikes/gpui/Cargo.toml (or start --build)",
+      fix: existsSync(binary) ? undefined : "Build it: cargo build --locked --release --manifest-path crates/desktop/Cargo.toml (or start --build)",
       session: state && alive(state.pid) ? state : null,
     });
     break;
@@ -137,7 +136,7 @@ switch (command) {
     if (existing && alive(existing.pid)) reply({ ok: true, reused: true, ...existing });
     const project = option(args, "--project");
     if (flag(args, "--build") || !existsSync(binary)) {
-      const build = spawnSync("cargo", ["build", "--locked", "--release", "--manifest-path", path.join(repo, "spikes/gpui/Cargo.toml")], { stdio: "inherit", cwd: repo });
+      const build = spawnSync("cargo", ["build", "--locked", "--release", "--manifest-path", path.join(repo, "crates/desktop/Cargo.toml")], { stdio: "inherit", cwd: repo });
       if (build.status !== 0) fail("cargo build failed");
     }
     mkdirSync(stateDir, { recursive: true });

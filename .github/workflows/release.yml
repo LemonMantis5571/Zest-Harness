@@ -32,10 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential pkg-config libssl-dev cmake \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            libdbus-1-dev libxdo-dev \
-            curl wget file tar patchelf libfuse2t64
+            build-essential pkg-config libssl-dev cmake libdbus-1-dev curl wget file tar
 
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@master
@@ -87,7 +84,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/gpui -> target
+          workspaces: crates/desktop -> target
 
       - name: Check release version
         run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
@@ -97,7 +94,7 @@ jobs:
         run: ./scripts/install-installer-tools.ps1
 
       - name: Test the desktop app
-        run: cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
+        run: cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
 
       - name: Build installers
         run: npm run gpui:package -- --out release-bundle
@@ -152,13 +149,13 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/gpui -> target
+          workspaces: crates/desktop -> target
 
       - name: Check release version
         run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
 
       - name: Test the desktop app
-        run: cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
+        run: cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
 
       - name: Build installers
         run: npm run gpui:package -- --out release-bundle

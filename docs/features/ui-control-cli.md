@@ -1,122 +1,46 @@
 ---
-title: UI control CLI (zest-control)
-summary: One-line commands that drive the live UI, inspect it, and report every error, so agents debug and verify without writing throwaway browser scripts.
+title: Desktop control CLI (gpui-control)
+summary: One-line commands that launch the desktop app, drive it through UI Automation, and report its state and errors as JSON, so agents verify changes on Windows without writing throwaway scripts.
 paths:
-  - scripts/zest-control.mjs
-  - scripts/zest-control-daemon.mjs
-  - scripts/zest-ui-measure.mjs
-  - crates/desktop/ui/devServer.ts
   - scripts/gpui-control.mjs
   - scripts/gpui-control.ps1
-tests:
-  - scripts/zest-control.test.mjs
-  - crates/desktop/ui/e2e/ui-quality.spec.ts
 verify:
-  - npm run control:test
-  - npm run control:check
+  - node scripts/gpui-control.mjs doctor
+  - node scripts/gpui-control.mjs start
+  - node scripts/gpui-control.mjs send "Demo: write"
+  - node scripts/gpui-control.mjs stop
 ---
 
-# UI control CLI (zest-control)
+# Desktop control CLI (gpui-control)
 
 ## Behavior
 
-- `viewport WIDTH HEIGHT` resizes the fixture window. `inspect ui-quality`
-  reports visible controls and text with their bounds, clipping ancestors,
-  font sizes, and measured contrast. `--selector CSS` narrows the measurement.
-  Images, filters, opacity, and missing opaque backgrounds report unknown
-  contrast, never a passing value. This diagnostic does not replace keyboard
-  journeys, screenshot review, or a full accessibility audit.
-
-- `inspect html` returns the accessibility trees of open artifact frames. `html-click "Name"` and `html-value "Label" "Value"` interact with those frames (`--nth` chooses one).
-
-- `node scripts/zest-control.mjs <command>` prints JSON (`snapshot` prints YAML)
-  and exits 0 on success, 1 when the command failed, 2 for bad usage, 3 when no
-  session is running. Failures carry an `error` and, where the cause is known,
-  a `hint` with the next command to run.
-- `start` launches one session per checkout: the Vite dev server on port
-  `ZEST_UI_PORT` (default 1420) and headless Chromium on `/?fixture=1`. A
-  server already on that port is reused only when its `/__zest_dev_server`
-  identity names this checkout's UI root. A server from another checkout, an
-  older Zest UI without the endpoint, or another program fails `start` with a
-  hint to stop it or set another `ZEST_UI_PORT`; `doctor` reports the same.
-  An invalid `ZEST_UI_PORT` exits 2 before anything starts. It waits for the seeded chat's canned boot turn to finish, so
-  the first `send` is not queued. `--scenario` picks a fixture scenario;
-  `--headed` shows the browser. A second `start` reuses the running session.
-- The session records console errors and warnings, uncaught page errors,
-  failed requests, HTTP errors, crashes, and every toast, each tagged with the
-  command that was running (`idle` between commands). Every command's reply
-  lists the errors it caused under `newErrors`; `errors` returns them all.
-- `send` reports `outcome: "sent"` and the reply once the turn settles. If the
-  chat already has a turn running, the message is queued instead and `send`
-  fails with a hint, unless `--allow-queue` is given.
-- `wait-settle` succeeds only when no turn is running (no Stop button) and two
-  samples 300 ms apart match. A turn that stays live (`split-streaming`) fails
-  with a hint to use `stop-turn`.
-- A failed `click` lists the accessible names that are on screen.
-- `inspect backend-calls` returns how many times the UI called each fixture
-  backend method since the page loaded, for spotting repeated or missing calls.
-- `check` runs boot, send, ruby highlighting, context meter, command palette,
-  and stop-turn (with the meter kept during the turn), then fails if any error
-  was recorded. Without a session it starts one and stops it afterwards. A
-  failed step saves a screenshot to `ZEST_CONTROL_ARTIFACTS`, or the temp
-  directory.
-- `stop` closes the browser, stops the dev server only if the session started
-  it, and removes the session file. An idle session stops itself after 30
-  minutes.
-
-### Native app (gpui-control)
-
-`node scripts/gpui-control.mjs` (`npm run gpui:control --`) drives the native GPUI app the same way, with JSON replies and exit codes 0 ok, 1 failed, 2 usage, 3 no session. `start` launches the release build (offline `--demo` unless `--project DIR`; `--build` rebuilds) with its output in a log under `<tmp>/zest-gpui-control/`. `inspect`, `messages` and `snapshot` read the accessibility tree; `click NAME [--nth N]`, `type`, `send TEXT` (waits for the reply, or an approval or question card) and `wait-settle` act through UI Automation patterns (Invoke, Select, Toggle, Value), never simulated keystrokes, so nothing is typed into another window. `errors [--clear]` lists panics and error lines from the log, and every reply carries the newest ones. `screenshot FILE` copies the window from the screen. It is Windows-only; on Linux the GPUI tests are the automation.
+- `node scripts/gpui-control.mjs <command>` (or `npm run gpui:control -- <command>`) prints JSON and exits 0 on success, 1 when the command failed, 2 for bad usage, 3 when no session is running.
+- `doctor` reports the platform, whether the release binary is built (with the build command when it is not), and the running session.
+- `start` launches the release build of `zest-desktop`: the offline `--demo` project unless `--project DIR` is given, and `--build` rebuilds first (it also builds when the binary is missing). The app runs with `--no-focus`, so its window does not take focus from whatever the user is doing, and its output goes to a log under `<tmp>/zest-gpui-control/`. A second `start` reuses the running session.
+- `inspect` returns the turn state, the transcript rows, the composer text and the page tabs; `messages` returns only the transcript rows as screen readers hear them; `snapshot` lists every named control with its role and state.
+- `click NAME [--nth N]` presses a button, tab, switch or radio by accessible name. `type TEXT` puts text in the message box. `send TEXT [--timeout S]` types and sends, then waits until the reply finishes or an approval or question card appears. `wait-settle [--timeout S]` waits until no turn is running.
+- Every action goes through UI Automation patterns (Invoke, SelectionItem, Toggle, Value), never simulated keystrokes or mouse input, so nothing is typed into another window.
+- `errors [--clear]` lists panics and error lines from the app's log since start, or since the last `--clear`. Every reply also carries the newest of them under `newErrors`.
+- `screenshot FILE` captures the app's window.
+- `stop` ends the app and removes the session file.
+- It is Windows-only. On Linux it says so and points to the desktop tests.
 
 ## How it works
 
-1. `zest-control.mjs` is the client. It parses arguments (`parseArgs`), reads
-   the session file from `statePath()` (`<tmp>/zest-control/<hash>.json`, never
-   in the repository), and sends one command per call to the daemon over
-   loopback HTTP with a per-session token. `doctor` and `start` run in the
-   client; `check` starts an ephemeral session when none is running.
-2. `zest-control-daemon.mjs` is spawned detached by `start`. `ensureServer`
-   probes the port with `probeDevServer` (`crates/desktop/ui/devServer.ts`,
-   shared with Playwright and `vite.config.ts`), reuses this checkout's server,
-   refuses any other (`reuseRefusal`), or starts Vite
-   (`node_modules/vite/bin/vite.js --port <port> --strictPort` in `crates/desktop/ui`),
-   `launchBrowser` opens a 1280x800 page (the Playwright specs' viewport),
-   attaches the event listeners, and installs a `MutationObserver` init script
-   that reports toasts through `console.debug` with a `[zest-control:toast]`
-   prefix. Commands run one at a time in arrival order.
-3. UI knowledge lives in the daemon's helpers: `#zest-composer-input`, Stop as
-   `Stop` or `Stop response`, message rows as `[data-slot="message"]` with
-   `data-align` end (user) or start (assistant), the queued panel under
-   "Queued messages", code blocks by `data-slot` with
-   `code-block-language[data-unsupported]`, and the meter by its
-   `Context usage` title.
-4. Scenario names are read from the `FixtureScenario` union in
-   `fixtureBackend.ts`, so validation and `help` never drift from the fixture.
+1. `gpui-control.mjs` is the client. It keeps the session (process id, log path, arguments, error offset) in `<tmp>/zest-gpui-control/state.json`, launches the app detached with its output redirected to the log, and runs one `gpui-control.ps1` call per command.
+2. `gpui-control.ps1` finds the app's main window by process id with `System.Windows.Automation`, walks its descendants, and implements each command: `Find-Named` matches controls by accessible name, `Activate` picks the pattern a control supports, `Get-Composer` reads and sets the message box through the Value pattern, and `Get-State` summarizes the window. It prints one JSON line, which the client parses.
+3. The names it relies on come from the app's AccessKit tree: buttons, tabs, switches and the composer all carry accessible names (see [gpui-workspace](gpui-workspace.md)).
 
 ## Verify
 
-- `npm run control:test` covers argument parsing, the session path, scenario
-  discovery and validation, help text, `ZEST_UI_PORT` parsing, and the
-  dev-server probe against fake servers for this checkout, another checkout,
-  an unidentified server, and a free port.
-- Two checkouts at once: `ZEST_UI_PORT=1437 node scripts/zest-control.mjs start`
-  in one and `ZEST_UI_PORT=1439 npm run ui:e2e` in the other. Pointing either
-  at the other's port must fail with the other checkout's path.
-- `npm run control:check` exercises the whole CLI against the live UI. It runs
-  in `npm run verify` and both release-verify scripts after the Playwright
-  suite, so a broken probe fails the gate.
+- `node scripts/gpui-control.mjs start`, then `send "Demo: write"`: the reply stops at the approval card; `click "Allow once"` finishes the turn, and `errors` reports none.
+- `inspect` after `click "Customize"` lists the Customize tabs.
+- Check that the foreground window stays the same through `start` and `send`.
 
 ## Pitfalls
 
-- It drives the offline fixture UI, not the Tauri app. Bugs in Rust commands
-  only show here if the fixture models them; when one slips through, fix the
-  fixture too ([offline-fixture-mode](offline-fixture-mode.md)).
-- The session keeps the port it started on; to change `ZEST_UI_PORT`, `stop`
-  first.
-- One session per checkout: two agents in the same checkout share it, and
-  `open`, `scenario`, `pref`, and `check` reload the page and reset fixture
-  state.
-- When a UI selector the daemon relies on changes (composer id, Stop label,
-  `data-slot` names), update the helper in `zest-control-daemon.mjs`; `check`
-  in the gate is what catches the drift.
-- `pref` reloads the page, so fixture state starts fresh after it.
+- It drives the release build in `crates/desktop/target/release`. After changing the app, pass `--build` or rebuild before `start`, or you test the old binary.
+- A control without an accessible name cannot be clicked. Name new controls (the Windows CI accessibility check fails on unnamed buttons anyway).
+- One session at a time per machine: the session file is not per checkout.
+- If you find yourself scripting the same interaction twice, add a command to both scripts instead.

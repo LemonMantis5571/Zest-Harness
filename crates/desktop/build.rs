@@ -1,42 +1,43 @@
-use std::path::Path;
-use std::process::Command;
+//! Embeds Zest's icon and version into the Windows executable. GPUI loads icon resource 1
+//! for its windows, so this also sets the taskbar and title-bar icon.
 
 fn main() {
-    let dist = Path::new("ui/dist/index.html");
-    if !dist.exists() {
-        println!("cargo:warning=ui/dist missing - running npm run build --prefix ui");
-        // `Command` does not apply Windows' PATHEXT lookup, so invoking the
-        // extension-less `npm` binary fails even when npm is on PATH. Keep the
-        // command portable for both native Windows builds and Unix CI.
-        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        let status = Command::new(npm)
-            .args(["run", "build", "--prefix", "ui"])
-            .status()
-            .expect(
-                "failed to spawn npm - install Node.js and run: npm install --prefix crates/desktop/ui",
-            );
-        if !status.success() {
-            panic!("npm run build --prefix ui failed; run it manually first");
+    println!("cargo:rerun-if-changed=zest.rc");
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let version = workspace_version();
+    let mut numbers: Vec<String> = version
+        .split(['.', '-'])
+        .take(3)
+        .map(|part| part.parse::<u16>().unwrap_or(0).to_string())
+        .collect();
+    numbers.resize(4, "0".into());
+    let macros = [
+        format!("ZEST_VERSION_NUMBERS={}", numbers.join(",")),
+        format!("ZEST_VERSION_TEXT=\"{version}\""),
+    ];
+    embed_resource::compile("zest.rc", macros)
+        .manifest_optional()
+        .expect("embed the Windows icon and version resource");
+}
+
+/// The release version from the repository's `[workspace.package]`.
+fn workspace_version() -> String {
+    let manifest = std::fs::read_to_string("../../Cargo.toml").expect("read the workspace Cargo.toml");
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[workspace.package]";
+        } else if in_package
+            && let Some(value) = line.strip_prefix("version").map(str::trim_start)
+            && let Some(value) = value.strip_prefix('=')
+        {
+            return value.trim().trim_matches('"').to_string();
         }
     }
-
-    println!("cargo:rerun-if-changed=ui/dist/index.html");
-    println!("cargo:rerun-if-changed=tauri.conf.json");
-    let windows_target = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
-    let attributes = if windows_target {
-        tauri_build::Attributes::new()
-            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
-    } else {
-        tauri_build::Attributes::new()
-    };
-    tauri_build::try_build(attributes).expect("Tauri build failed");
-    if windows_target {
-        // Embed Tauri's default Common Controls dependency in every executable,
-        // including library tests. The binary-only resource is kept for icons.
-        println!("cargo:rerun-if-changed=windows-common-controls.rc");
-        println!("cargo:rerun-if-changed=windows-common-controls.manifest");
-        embed_resource::compile_for_everything("windows-common-controls.rc", embed_resource::NONE)
-            .manifest_required()
-            .expect("Common Controls manifest compilation failed");
-    }
+    panic!("[workspace.package] has no version");
 }

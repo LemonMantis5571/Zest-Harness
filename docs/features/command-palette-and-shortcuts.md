@@ -1,58 +1,41 @@
 ---
 title: Command palette and keyboard shortcuts
-summary: Mod+K search over chats, actions, commands, and settings; rebindable shortcuts; Escape closing whatever is on top.
+summary: Ctrl+K search over chats, saved message text and panels; fixed workspace and composer shortcuts; Escape to leave a panel or stop a turn.
 paths:
-  - crates/desktop/ui/src/components/CommandPalette.tsx
-  - crates/desktop/ui/src/components/KeyboardShortcuts.tsx
-  - crates/desktop/ui/src/components/ChatScreen.tsx
-  - crates/desktop/ui/src/lib/commandPaletteSearch.ts
-  - crates/desktop/ui/src/lib/keybindings.ts
-  - crates/desktop/ui/src/lib/useKeybindings.ts
-  - crates/desktop/ui/src/lib/escapeStack.ts
-  - crates/desktop/ui/src/lib/contextMenu.ts
-  - crates/desktop/ui/src/lib/useDialogFocusTrap.ts
+  - crates/desktop/src/workspace.rs
+  - crates/desktop/src/composer.rs
+  - crates/desktop/src/workspace/chrome.rs
 tests:
-  - crates/desktop/ui/src/lib/commandPaletteSearch.test.ts
-  - crates/desktop/ui/src/lib/keybindings.test.ts
-  - crates/desktop/ui/src/lib/escapeStack.test.ts
-  - crates/desktop/ui/src/lib/contextMenu.test.ts
-  - crates/desktop/ui/e2e/sidebar-search.spec.ts
+  - crates/desktop/src/workspace_test.rs
 verify:
-  - npm run ui:test
-  - npm run ui:e2e -- sidebar-search
-  - npm run ui:e2e -- workbench
+  - npm run gpui:test
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace_test
 ---
 
 # Command palette and keyboard shortcuts
 
 ## Behavior
-- Default chords (`Mod` = Ctrl, or Cmd on macOS): Mod+K palette, Mod+B chat history, Mod+N new chat, Mod+. stop turn, `/` focus composer, Mod+, settings, Mod+Shift+, Customize, Mod+Shift+K shortcuts editor, Mod+Shift+P profile, Mod+Shift+U usage, Mod+Shift+M switch provider. Split view adds Mod+Shift+Enter (zoom the focused pane) and Mod+Shift+H (minimize it), plus "Restore all split panes" with no default chord; they sit under "Split view" in the shortcuts editor and are only handled while split view is open.
-- The palette is a dialog named "Search" with filter tabs All / Chats / Actions / Settings. On open the input is focused and empty; the sidebar's "Search chats" button opens it on the Chats tab.
-- With an empty query, All shows up to 8 recent chats plus actions; typing searches titles, projects, and (after 180 ms) chat bodies through `searchChats`, showing an excerpt and jumping to the matching message. Chats cap at 12 when searching, 24 on the Chats tab; slash commands (up to 16) appear only when searching or on Actions; Settings items appear on All only while searching.
-- Palette keys: Up/Down move (wrapping), Enter runs, Escape closes, Left or Shift+Right changes the filter tab.
-- Choosing a command: `btw` opens a side conversation, `model` opens the model picker, anything else puts `/<name> ` into the composer.
-- Shortcuts are rebindable in Customize > Shortcuts. Enter, Tab, Space, Backspace, and Escape cannot be bound on their own, and Escape cannot be bound at all. Clashes are shown, not blocked. Only overrides are stored (`localStorage` `zest.keybindings`), so a changed default reaches users who never touched that binding. An empty string means deliberately unbound.
-- Unmodified chords (like `/`) never fire while typing in an input, textarea, or contenteditable.
-- Escape closes the topmost surface in this order: diff, provider switch, model picker, settings, palette, message edit, shell panel (Customize/Profile/Usage/PRs); only when none is open does it stop a running turn.
-- Split view does not mount `ChatScreen`, so it registers its own handlers: `SplitWorkspace.tsx` calls `useKeybindings` for Mod+K and the three split commands and shows `CommandPalette` with `scope="actions"`, which lists only "Zoom pane", "Minimize pane" and "Restore all panes" (no chats, slash commands, or filter tabs). The sidebar's "Search chats" button there still opens the focused pane's chat chooser instead. The commands act on the pane holding keyboard focus when the chord is pressed or the palette opens, else the group's focused pane. Other chords (Mod+B, Mod+N, and so on) are not handled in split view.
-- The native right-click menu appears only in inputs, selects, textareas, and contenteditable regions (a `contenteditable="false"` ancestor turns it off).
+- Workspace shortcuts (context `Workspace`): Ctrl+K Find chats, Ctrl+N new chat, Ctrl+O open a project folder, Ctrl+\ split the workspace (or return to single view), Ctrl+Shift+Enter zoom the focused pane, Ctrl+Shift+H minimize it, Escape back to the chat from a panel.
+- Composer shortcuts (context `Composer`): Enter send, Shift+Enter newline, Escape stop the running turn (in the `/btw` input it cancels the side question), Ctrl+A / Ctrl+C / Ctrl+X / Ctrl+V select all, copy, cut and paste, Ctrl+. the system emoji and symbol picker, plus arrow, Shift+arrow, Home, End, Backspace and Delete editing. Ctrl+C also copies a selection in the transcript (context `Chat`).
+- Shortcuts are fixed. The desktop app has no shortcuts editor and stores no overrides, and it uses Ctrl on every OS.
+- The desktop app does not have a command palette. Ctrl+K and the sidebar's Search button open the Search page ("Find chats, saved text and panels."), which is the closest equivalent.
+- The Search page has one text field. It lists, in order (everything when the field is empty): Customize and Workbench pages whose name contains the text, chats whose title contains it, then (after 180 ms) saved message hits from the [shared transcript index](threads-and-history.md) as `title · excerpt`. Clicking a hit opens the chat at the matching message.
+- Enter in the Search field opens the first chat whose title matches, else the first message hit for the current text, else the first matching page.
+- Slash commands are not listed on the Search page; they are in Customize > Skills & MCP (see [skills-and-slash-commands](skills-and-slash-commands.md)).
+- Escape is bound in both contexts, and the deeper one wins: with focus in a composer or text field Escape goes to that field, so from a page's text field use the "Back to chat" button (shown with an Esc hint) instead.
+- The desktop app has no right-click context menu.
 
 ## How it works
-- Registry: `COMMANDS` in `keybindings.ts` (`CommandId`, `defaultChord`); `chordFromEvent`/`normalizeChord` produce canonical strings (`Mod`, `Alt`, `Shift`, upper-case key); `commandFor` returns the first match in registry order; `loadBindings`/`saveBindings`/`conflicts`/`chordIsBindable` back the editor.
-- Dispatch: `useKeybindings` (`useKeybindings.ts`) adds one window `keydown` listener; `ChatScreen.tsx` passes handlers for every `CommandId`. `useBindings` broadcasts `zest:keybindings-changed` and listens to `storage` so other windows stay in sync.
-- Editor: `KeyboardShortcuts.tsx` records with a capture-phase listener and `stopPropagation`, so the chord being assigned does not also run.
-- Escape: `ChatScreen.tsx` has its own `keydown` listener that asks `escapeAction` (`escapeStack.ts`) which surface to dismiss.
-- Palette: `ChatScreen` builds `paletteActions` (go back/forward, new chat, workbench, switch provider, Customize, settings, profile, usage) with shortcut labels from `formatChord`. `CommandPalette.tsx` loads `listCommands` and `listChatProjects` when opened, merges `searchChats` hits with `mergeChatHits`, and lays out sections with `buildPaletteSections` (`commandPaletteSearch.ts`).
-- Context menu: `main.tsx` blocks `contextmenu` unless `shouldPreserveNativeContextMenu` (`contextMenu.ts`) allows it.
-- Focus: `useDialogFocusTrap` keeps Tab inside plain positioned dialogs (Settings, for example) and restores focus to the trigger on close.
+- Actions: `actions!(native_workspace, [NewChat, FindChat, OpenFolder, ToggleSplit, ZoomPane, MinimizePane, ClosePanel])` in `workspace.rs`; `launch_if_requested` binds them with `cx.bind_keys` after `composer::bind_keys`, and `Workspace::render` attaches one `on_action` listener per action.
+- Composer: `composer.rs` declares its actions (`Send`, `Newline`, `Stop`, `ShowCharacterPalette`, the editing actions) and `bind_keys` binds them to the `Composer` context. `Stop` emits `ComposerEvent::Stop`; the chat view stops the turn and the side panel cancels its question.
+- Search: `Workspace::page(Panel::Search)` reloads the chat summaries; the filter field is a `Composer`. `Workspace::search` debounces 180 ms, cancels the previous query with a `CancelToken`, and runs `search::search` on the background executor. `open_hit` opens the chat and calls `reveal_message`. The Enter handling is the `ComposerEvent::Send` subscription in `Workspace::new`.
+- Page names come from `PAGES` in `workspace.rs`; the page frame, tabs and "Back to chat" button come from `page_frame` in `workspace/chrome.rs`.
 
 ## Verify
-- `npm run ui:test`: chord normalization, display, bindability, conflicts, dispatch lookup, Escape order, palette sections, and the context-menu guard.
-- `npm run ui:e2e -- sidebar-search` (palette opens on Chats with focus) and `-- workbench` (runs "Open workbench" from the palette).
-- Fixture: `/?fixture=1`, press Ctrl+K, type "Turn 3 prompt" to find "Fifteen turns" by body text with an excerpt.
+- `npm run gpui:test` (and its `cargo test` run in `workspace_test.rs`) sends turns with Enter in the composer, calls the split, zoom and minimize actions directly, and renders the Search page.
+- By hand: `npm run gpui -- --demo`, send a message, press Ctrl+K, type a word from it, and click the message hit.
 
 ## Pitfalls
-- Escape is deliberately not in the registry. A new overlay needs a flag in `escapeAction` placed above `stop-turn`; otherwise Escape closes it and also cancels the turn (a past regression with shell panels).
-- Mod+Shift+C was avoided for Customize because Chromium reserves it for the inspector.
-- Left arrow in the palette input changes the filter tab rather than moving the caret.
-- `useDialogFocusTrap` has no unit test; check it by hand when changing dialog markup.
+- A new workspace shortcut needs an action in `actions!`, a `KeyBinding` in `launch_if_requested`, and an `on_action` listener; a binding without a listener does nothing.
+- A key bound in `Composer` shadows the same key in `Workspace` while a composer has focus. Escape in the main composer stops the turn rather than closing a panel.
+- Ctrl+. is the emoji picker, not "stop turn".

@@ -6,7 +6,8 @@ paths:
   - crates/coordinator/src/lock.rs
   - crates/coordinator/src/runtime.rs
   - crates/coordinator/src/scheduler.rs
-  - crates/desktop/src/delegation.rs
+  - crates/desktop/src/native.rs
+  - crates/desktop/src/workspace/board.rs
 tests:
   - crates/core/tests/fixtures/external_agent_fixture.rs
 verify:
@@ -22,7 +23,7 @@ use. The job record and its state machine live in `zest-core`
 
 ## Behavior
 
-The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool dispatch receipts directly to its coordinator. Shutdown recovery also acquires the project lock before marking an interrupted job.
+The desktop app uses the `WhileActive` lock lifetime and submits approved chat-tool dispatch receipts directly to its coordinator. Shutdown recovery also acquires the project lock before marking an interrupted job.
 
 - **One coordinator per project.** `CoordinatorLock` holds an exclusive OS lock
   (`flock` on Unix, `LockFileEx` on Windows) on
@@ -91,10 +92,12 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
 
 - `lib.rs` re-exports the public API.
 - `runtime.rs` separates spawning from notification:
-  - `TaskSpawner`: `TokioSpawner` for serve and tests, and `TauriSpawner` in
-    `crates/desktop/src/delegation.rs`.
+  - `TaskSpawner`: `TokioSpawner`. Serve and tests use the current runtime;
+    the desktop (`Project::open` in `crates/desktop/src/native.rs`) passes
+    the handle of its own Tokio runtime with `TokioSpawner::from_handle`.
   - `DelegationNotifier`: `NoopNotifier`, `RecordingNotifier` for tests, and
-    the desktop's `TauriDelegationNotifier`, which emits `delegation-event`.
+    the desktop's `BoardNotifier`, which drops the event and only bumps a
+    watch channel so the open Delegation board reloads.
 - In `scheduler.rs`, `DelegationCoordinator` holds the lane semaphore, the
   `running` cancel tokens, the ledger, the notifier, the per-root locks and the
   ops mutex.
@@ -151,15 +154,18 @@ reviewer). They run many fixture jobs at once, so `wait_for_status` allows
 
 - **Missing `card_created` on create.** `card_created` is sent by `enqueue`,
   after approval. `create_job` emits no event.
-- **Desktop only reconciles on list.** The desktop calls `reconcile` only inside
-  `list_delegation_jobs` and never calls `shutdown`. Receipts written by the
-  terminal client, and jobs that were running when the app exited, are handled
-  the next time the board loads.
+- **Desktop only reconciles from the board.** The desktop calls `reconcile`
+  only when the Workbench Delegation tab opens and on its **Refresh** button
+  (`load_board(true)` in `crates/desktop/src/workspace/board.rs`); reloads
+  triggered by coordinator events skip it. Receipts written by the terminal
+  client, and jobs left `worker_running`/`review_running` by a crash, are
+  handled the next time the board is opened. On a normal quit the desktop
+  calls `shutdown` for each project whose lock it still holds.
 - **Read-only board while another process owns the project.** When
-  `zest serve` holds the lock, the desktop's `list_delegation_jobs` skips
-  `reconcile` and still returns the cards; desktop actions fail with the lock
-  message. Any other listing error is still swallowed by `App.tsx`, which shows
-  an empty board.
+  `zest serve` holds the lock, `reconcile` fails with the lock message, the
+  board marks itself read-only, still lists the cards through `list_views`,
+  and hides the create and action buttons. Any other listing error is shown
+  as the board's message.
 - **Unlock before close.** `CoordinatorLock` drops its OS lock explicitly (`flock(LOCK_UN)` / `UnlockFileEx`) before the file closes. Closing alone releases it only when every copy of the descriptor is gone, and a child another thread is forking (git, a worker) holds one until it execs, so a `WhileActive` release followed by a quick re-acquire failed as "another coordinator". `lock::tests` reproduces it with a cloned handle.
 - **Heartbeat detail is not a liveness proof.** The detail says when the run
   last showed progress; the watchdog, not the heartbeat, stops a run that

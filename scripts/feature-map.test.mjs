@@ -79,10 +79,9 @@ test("patterns match exact files, directory prefixes, and globs", () => {
   assert.ok(compilePattern("crates\\core\\src\\lib.rs")("crates/core/src/lib.rs"));
 });
 
-test("coverage applies to source under crates/ and scripts/, minus generated bindings", () => {
+test("coverage applies to source under crates/ and scripts/", () => {
   assert.ok(isCovered("crates/core/src/lib.rs"));
   assert.ok(isCovered("scripts/dev-verify.mjs"));
-  assert.ok(!isCovered("crates/desktop/ui/src/lib/generated/ChatEvent.ts"));
   assert.ok(!isCovered("crates/desktop/icons/icon.png"));
   assert.ok(!isCovered("docs/SERVE.md"));
 });
@@ -100,7 +99,7 @@ test("reports stale patterns and unowned source files", () => {
 });
 
 test("a clean map produces no errors", () => {
-  const files = ["crates/core/src/a.rs", "crates/desktop/ui/src/lib/generated/X.ts"];
+  const files = ["crates/core/src/a.rs", "crates/desktop/icons/icon.png"];
   assert.deepEqual(validateFeatureMap([feature({ paths: ["crates/core/src/"] })], files), []);
 });
 

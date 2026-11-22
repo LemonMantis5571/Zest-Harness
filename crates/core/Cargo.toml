@@ -9,7 +9,6 @@ description = "Agent loop, model client, and tool layer for the Zest coding harn
 workspace = true
 
 [dependencies]
-ts-rs = { version = "12", optional = true }
 async-trait.workspace = true
 blake3.workspace = true
 dirs.workspace = true
@@ -54,5 +53,3 @@ keyring = { workspace = true, features = ["apple-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
 
-[features]
-export-bindings = ["dep:ts-rs"]
