@@ -68,7 +68,11 @@ runtime="$scratch/runtime-x86_64"
 if [[ -n "${ZEST_APPIMAGE_RUNTIME:-}" ]]; then
   cp "$ZEST_APPIMAGE_RUNTIME" "$runtime"
 else
-  curl --fail --location --retry 2 --header 'Accept: application/octet-stream' \
+  # Anonymous GitHub API calls share a small per-IP limit that CI runners often exhaust (HTTP 403),
+  # so authenticate when a token is set. curl drops the header when the asset redirects to another host.
+  auth=()
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then auth=(--header "Authorization: Bearer $GITHUB_TOKEN"); fi
+  curl --fail --location --retry 2 --header 'Accept: application/octet-stream' "${auth[@]}" \
     https://api.github.com/repos/AppImage/type2-runtime/releases/assets/657374641 -o "$runtime"
 fi
 echo "617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46  $runtime" | sha256sum --check

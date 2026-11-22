@@ -82,3 +82,5 @@ jobs:
             libwebkit2gtk-4.1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev dpkg-dev rpm squashfs-tools
       - run: cargo test --locked --release --manifest-path spikes/gpui/Cargo.toml
       - run: npm run gpui:package
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
