@@ -2368,18 +2368,197 @@ fn nearest_existing(path: &Path) -> PathBuf {
 /// Apply an accepted diff without ever asking Git to accept partial hunks.
 /// The caller should persist the returned job after this function succeeds.
 pub fn apply_diff_checked(root: &Path, diff: &str) -> Result<()> {
+    apply_worker_diff(root, diff, None).map(|_| ())
+}
+
+/// How [`apply_worker_diff`] brought a diff into the checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// The diff applied as it is.
+    Clean,
+    /// The checkout had changed around the worker's edits; a three-way merge
+    /// from the worker's base placed the same changes.
+    ThreeWay,
+}
+
+/// Apply a reviewed worker diff. When it no longer applies as it is and
+/// `base` (the commit the worker started from) is known, merge it three
+/// ways in temporary worktrees and apply the result only if that merge is
+/// clean. Either way Git never leaves a partial apply or conflict markers in
+/// the checkout.
+pub fn apply_worker_diff(root: &Path, diff: &str, base: Option<&str>) -> Result<ApplyOutcome> {
     validate_diff_paths(root, diff)?;
     let _guard = apply_lock()?;
-    let check = Command::new("git")
-        .args(["apply", "--check", "--binary", "--whitespace=nowarn", "-"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| HarnessError::Other(format!("start git apply --check: {error}")))?;
-    apply_to_child(check, diff, "check")?;
+    let plain = match git_apply_patch(root, diff, true) {
+        Ok(()) => {
+            git_apply_patch(root, diff, false)?;
+            return Ok(ApplyOutcome::Clean);
+        }
+        Err(error) => error,
+    };
+    let Some(base) = base else {
+        return Err(plain);
+    };
+    let merged = three_way_patch(root, diff, base).map_err(|error| {
+        HarnessError::Other(format!(
+            "{plain}; a three-way merge from the worker's base did not apply either: {error}"
+        ))
+    })?;
+    if merged.trim().is_empty() {
+        return Err(HarnessError::Other(format!(
+            "{plain}; a three-way merge found nothing left to change, so the changes may already be in the checkout"
+        )));
+    }
+    let allowed = diff_paths(diff);
+    if let Some(extra) = diff_paths(&merged)
+        .into_iter()
+        .find(|path| !allowed.contains(path))
+    {
+        return Err(HarnessError::Other(format!(
+            "{plain}; a three-way merge touched {extra}, which the reviewed diff does not"
+        )));
+    }
+    validate_diff_paths(root, &merged)?;
+    git_apply_patch(root, &merged, true)?;
+    git_apply_patch(root, &merged, false)?;
+    Ok(ApplyOutcome::ThreeWay)
+}
 
+/// Worktrees created for a three-way merge, removed when dropped.
+struct MergeWorktrees<'a> {
+    root: &'a Path,
+    paths: Vec<PathBuf>,
+}
+
+impl Drop for MergeWorktrees<'_> {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(path)
+                .current_dir(self.root)
+                .output();
+        }
+    }
+}
+
+fn git_checked(cwd: &Path, args: &[&std::ffi::OsStr]) -> std::result::Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    if !output.status.success() {
+        return Err(clip_chars(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            2_000,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The worker's change (base -> base + diff), replayed onto a snapshot of
+/// the checkout as it is now, as a patch against the checkout.
+fn three_way_patch(root: &Path, diff: &str, base: &str) -> std::result::Result<String, String> {
+    use std::ffi::OsStr;
+    if !(matches!(base.len(), 40 | 64) && base.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+        return Err("the worker's base is not a commit id".into());
+    }
+    let identity = [
+        OsStr::new("-c"),
+        OsStr::new("user.name=Zest"),
+        OsStr::new("-c"),
+        OsStr::new("user.email=zest@localhost"),
+        OsStr::new("-c"),
+        OsStr::new("commit.gpgSign=false"),
+    ];
+    // `stash create` records tracked changes as a commit without touching
+    // the checkout, the index or any ref.
+    let ours = match git_checked(root, &[OsStr::new("stash"), OsStr::new("create")])?.trim() {
+        "" => git_checked(root, &[OsStr::new("rev-parse"), OsStr::new("HEAD")])?
+            .trim()
+            .to_string(),
+        stash => stash.to_string(),
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("zest-merge-")
+        .tempdir()
+        .map_err(|error| format!("create merge directory: {error}"))?;
+    let theirs_dir = temp.path().join("theirs");
+    let ours_dir = temp.path().join("ours");
+    let mut worktrees = MergeWorktrees {
+        root,
+        paths: Vec::new(),
+    };
+    let add = |dir: &Path, commit: &str| {
+        git_checked(
+            root,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                OsStr::new("--quiet"),
+                dir.as_os_str(),
+                OsStr::new(commit),
+            ],
+        )
+    };
+    add(&theirs_dir, base)?;
+    worktrees.paths.push(theirs_dir.clone());
+    git_apply_patch(&theirs_dir, diff, false).map_err(|error| error.to_string())?;
+    git_checked(&theirs_dir, &[OsStr::new("add"), OsStr::new("-A")])?;
+    let mut commit = identity.to_vec();
+    commit.extend(
+        [
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "Zest worker change",
+        ]
+        .iter()
+        .map(OsStr::new),
+    );
+    git_checked(&theirs_dir, &commit)?;
+    let theirs = git_checked(&theirs_dir, &[OsStr::new("rev-parse"), OsStr::new("HEAD")])?
+        .trim()
+        .to_string();
+
+    add(&ours_dir, &ours)?;
+    worktrees.paths.push(ours_dir.clone());
+    let mut pick = identity.to_vec();
+    pick.extend([
+        OsStr::new("cherry-pick"),
+        OsStr::new("--no-commit"),
+        OsStr::new(&theirs),
+    ]);
+    git_checked(&ours_dir, &pick).map_err(|error| format!("the changes conflict: {error}"))?;
+    let patch = git_checked(
+        &ours_dir,
+        &[
+            OsStr::new("diff"),
+            OsStr::new("--cached"),
+            OsStr::new("--binary"),
+            OsStr::new("--no-ext-diff"),
+            OsStr::new("HEAD"),
+        ],
+    )?;
+    drop(worktrees);
+    Ok(patch)
+}
+
+fn git_apply_patch(root: &Path, diff: &str, check_only: bool) -> Result<()> {
+    if check_only {
+        let check = Command::new("git")
+            .args(["apply", "--check", "--binary", "--whitespace=nowarn", "-"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| HarnessError::Other(format!("start git apply --check: {error}")))?;
+        return apply_to_child(check, diff, "check");
+    }
     let apply = Command::new("git")
         .args(["apply", "--binary", "--whitespace=nowarn", "-"])
         .current_dir(root)
@@ -3144,6 +3323,56 @@ Here is the JSON verdict:
         assert!(dependency_blocker(&dependent, &jobs)
             .unwrap()
             .contains("cancelled"));
+    }
+
+    #[test]
+    fn a_moved_checkout_gets_a_three_way_apply_or_stays_untouched() {
+        let root = scratch("three-way");
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.name", "Zest Test"]);
+        run_git(&root, &["config", "user.email", "zest-test@localhost"]);
+        run_git(&root, &["config", "core.autocrlf", "false"]);
+        let lines = |edit: &[(usize, &str)]| {
+            let mut lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+            for (index, text) in edit {
+                lines[*index] = text.to_string();
+            }
+            lines.join("\n") + "\n"
+        };
+        fs::write(root.join("file.txt"), lines(&[])).unwrap();
+        run_git(&root, &["add", "file.txt"]);
+        run_git(&root, &["commit", "--quiet", "-m", "baseline"]);
+        let base = String::from_utf8(run_git_output(&root, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        fs::write(root.join("file.txt"), lines(&[(6, "worker line 7")])).unwrap();
+        let diff = String::from_utf8(run_git_output(&root, &["diff", "--binary"]).stdout).unwrap();
+
+        // The user changed line 5 meanwhile: the hunk's context no longer
+        // matches, but the edits do not overlap.
+        fs::write(root.join("file.txt"), lines(&[(4, "user line 5")])).unwrap();
+        assert!(apply_worker_diff(&root, &diff, None).is_err());
+        assert_eq!(
+            apply_worker_diff(&root, &diff, Some(&base)).unwrap(),
+            ApplyOutcome::ThreeWay
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("file.txt")).unwrap(),
+            lines(&[(4, "user line 5"), (6, "worker line 7")])
+        );
+
+        // Overlapping edits conflict: the checkout is left exactly as it was.
+        fs::write(root.join("file.txt"), lines(&[(6, "user line 7")])).unwrap();
+        let error = apply_worker_diff(&root, &diff, Some(&base)).unwrap_err();
+        assert!(error.to_string().contains("three-way merge"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("file.txt")).unwrap(),
+            lines(&[(6, "user line 7")])
+        );
+        let worktrees =
+            String::from_utf8(run_git_output(&root, &["worktree", "list"]).stdout).unwrap();
+        assert_eq!(worktrees.lines().count(), 1, "{worktrees}");
     }
 
     #[test]

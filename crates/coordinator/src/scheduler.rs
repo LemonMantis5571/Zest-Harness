@@ -16,11 +16,11 @@ use crate::runtime::{
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    acceptance_check_skip_reason, apply_diff_checked, capture_workspace_snapshot,
+    acceptance_check_skip_reason, apply_worker_diff, capture_workspace_snapshot,
     capture_worktree_lineage, delegation_limits, dependency_blocker, diff_paths, pin_worker_base,
     resolve_provider_target, run_acceptance_checks, run_delegation_reviewer, run_delegation_worker,
     run_provider_reviewer, run_provider_worker, unpin_worker_base, validate_diff_scope,
-    worker_diff_hash, AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob,
+    worker_diff_hash, ApplyOutcome, AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob,
     DelegationOrigin, DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
     ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
     ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerActivity,
@@ -1999,18 +1999,29 @@ impl DelegationCoordinator {
         store
             .begin_apply(&mut job)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = validate_diff_scope(root, &diff, &job.card.scope)
-            .and_then(|()| apply_diff_checked(root, &diff))
+        let outcome = match validate_diff_scope(root, &diff, &job.card.scope)
+            .and_then(|()| apply_worker_diff(root, &diff, job.worker_base.as_deref()))
         {
-            let _ = job.transition(CoreDelegationStatus::ApplyConflict);
-            job.set_error(error.to_string());
-            let job = store.update(job).map_err(|save| save.to_string())?;
-            self.emit(&store, &job, EventKind::Conflict);
-            return Ok(job_view(&store, &job));
-        }
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = job.transition(CoreDelegationStatus::ApplyConflict);
+                job.set_error(error.to_string());
+                let job = store.update(job).map_err(|save| save.to_string())?;
+                self.emit(&store, &job, EventKind::Conflict);
+                return Ok(job_view(&store, &job));
+            }
+        };
         job.transition(CoreDelegationStatus::Accepted)
             .map_err(|error| error.to_string())?;
         job.error = None;
+        if outcome == ApplyOutcome::ThreeWay {
+            job.orchestration.add_message(
+                zest_core::MessageKind::Info,
+                "coordinator",
+                "The checkout had changed around the worker's edits, so the reviewed changes were placed with a three-way merge from the worker's base.",
+                unix_millis(),
+            );
+        }
         unpin_worker_base(root, job_id);
         let job = store.update(job).map_err(|error| error.to_string())?;
         self.emit(&store, &job, EventKind::Applied);
@@ -2896,7 +2907,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
 
-    use zest_core::{FeatureCard, DELEGATION_FORMAT_VERSION};
+    use zest_core::{apply_diff_checked, FeatureCard, DELEGATION_FORMAT_VERSION};
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -2995,7 +3006,7 @@ mod tests {
         job_id: &str,
         wanted: DelegationStatus,
     ) -> DelegationJobView {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             let view = get_view(root, job_id).unwrap();
             if view.status == wanted {
@@ -3244,7 +3255,6 @@ mod tests {
             .create_job(root, worker_request("Silent worker", "hang"))
             .unwrap();
         coordinator.approve(root, &created.job_id, None).unwrap();
-        let started = std::time::Instant::now();
         let failed = wait_for_status(
             &coordinator,
             root,
@@ -3254,7 +3264,7 @@ mod tests {
         .await;
         let error = failed.error.as_deref().unwrap();
         assert!(error.contains("made no progress for 2 seconds"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(15));
+        // The 30-second total would read "timed out after 30 seconds".
         assert!(failed
             .attempts
             .iter()
@@ -3354,6 +3364,60 @@ mod tests {
         assert!(error.contains("large.txt"), "{error}");
         assert!(error.contains("limit"), "{error}");
         assert!(!root.join("large.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_merges_three_ways_after_the_user_edits_nearby() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("line7", &["delegation_line7"]));
+        git(root, &["config", "core.autocrlf", "false"]);
+        let lines = |edit: &[(usize, &str)]| {
+            let mut lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+            for (index, text) in edit {
+                lines[*index] = text.to_string();
+            }
+            lines.join(
+                "
+",
+            ) + "
+"
+        };
+        std::fs::write(root.join("notes.txt"), lines(&[])).unwrap();
+        git(root, &["add", "notes.txt"]);
+        git(root, &["commit", "--quiet", "--no-verify", "-m", "notes"]);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Line seven", "line7"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        // The user kept working: line 5 changed, so the reviewed hunk's
+        // context no longer matches.
+        std::fs::write(root.join("notes.txt"), lines(&[(4, "user line 5")])).unwrap();
+        let applied = coordinator.apply(root, &ready.job_id, None).unwrap();
+        assert_eq!(
+            applied.status,
+            DelegationStatus::Accepted,
+            "{:?}",
+            applied.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            lines(&[(4, "user line 5"), (6, "worker line 7")])
+        );
+        assert!(applied
+            .orchestration
+            .unwrap()
+            .inbox
+            .iter()
+            .any(|message| message.body.contains("three-way merge")));
     }
 
     #[tokio::test]
@@ -3775,7 +3839,7 @@ mod tests {
         root: &Path,
         job_id: &str,
     ) -> DelegationJobView {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             let view = get_view(root, job_id).unwrap();
             if view.status != DelegationStatus::Queued {

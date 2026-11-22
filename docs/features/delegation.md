@@ -106,8 +106,13 @@ The GPUI **Delegation** panel uses the same coordinator as the packaged desktop.
   (`MAX_REVIEWER_ATTEMPTS`); the card inbox says so. The checks are not run
   again for that second reviewer.
 - Apply checks the scope again and runs `git apply --check` before `git apply`.
-  If either fails, the job becomes `apply_conflict` and the checkout is left
-  untouched. A successful apply leaves the job `accepted`. Zest saves an
+  When the diff no longer applies as it is (the user changed lines around the
+  worker's edits), `apply_worker_diff` replays the worker's change from its
+  base onto a `git stash create` snapshot of the checkout in temporary
+  worktrees (a cherry-pick) and applies the resulting patch, only if that
+  merge is clean and touches only the reviewed paths. The card inbox says a
+  three-way merge was used. Otherwise the job becomes `apply_conflict` and
+  the checkout is left untouched, with no conflict markers. A successful apply leaves the job `accepted`. Zest saves an
   apply intent before Git touches the checkout. If the coordinator stops
   before recording the outcome, the card becomes `blocked` on reconciliation
   or the next Apply. Inspect the checkout against `worker.diff` before

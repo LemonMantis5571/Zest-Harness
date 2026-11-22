@@ -91,14 +91,14 @@ pub use delegated_worker::{
     ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
 };
 pub use delegation::{
-    apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
-    diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths, worker_diff_hash,
-    AcceptanceCheckResult, AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts,
-    DelegationAttempt, DelegationJob, DelegationOrigin, DelegationStatus, DelegationStore,
-    DelegationTarget, DispatchReceipt, FeatureCard, ResolvedTargetMetadata, ReviewDecision,
-    ReviewFinding, ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
-    WorkspaceSnapshot, DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION,
-    V2_DELEGATION_FORMAT_VERSION,
+    apply_diff_checked, apply_worker_diff, capture_workspace_snapshot, capture_worktree_lineage,
+    dependency_blocker, diff_paths, validate_diff_paths, validate_diff_scope,
+    validate_review_paths, worker_diff_hash, AcceptanceCheckResult, ApplyOutcome, AttemptRole,
+    AttemptUsage, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
+    DelegationOrigin, DelegationStatus, DelegationStore, DelegationTarget, DispatchReceipt,
+    FeatureCard, ResolvedTargetMetadata, ReviewDecision, ReviewFinding, ReviewReport,
+    ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult, WorkspaceSnapshot,
+    DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION, V2_DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};

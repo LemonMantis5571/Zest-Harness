@@ -60,6 +60,21 @@ fn delegation_file(kind: &str, prompt: &str) {
     send(r#"{"type":"result","response":"{\"summary\":\"fixture worker added a file\",\"changedFiles\":[],\"checksAttempted\":[],\"blockers\":[]}"}"#);
 }
 
+/// A worker that rewrites line 7 of the project's `notes.txt`.
+fn delegation_line7(prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        delegation(prompt);
+        return;
+    }
+    let notes = std::fs::read_to_string("notes.txt").expect("read notes.txt");
+    let mut lines: Vec<String> = notes.lines().map(str::to_string).collect();
+    lines[6] = "worker line 7".into();
+    std::fs::write("notes.txt", lines.join("
+") + "
+").expect("write notes.txt");
+    send(r#"{"type":"result","response":"{\"summary\":\"fixture worker edited notes.txt\",\"changedFiles\":[\"notes.txt\"],\"checksAttempted\":[],\"blockers\":[]}"}"#);
+}
+
 /// A worker that edits a file, then goes silent and never finishes.
 fn delegation_hang() {
     std::fs::write("partial.txt", "unfinished work
@@ -170,6 +185,7 @@ fn main() {
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         Some("delegation_hang") => delegation_hang(),
+        Some("delegation_line7") => delegation_line7(&args.next().unwrap_or_default()),
         Some("delegation_file") => {
             let kind = args.next().expect("file kind");
             delegation_file(&kind, &args.next().unwrap_or_default())
