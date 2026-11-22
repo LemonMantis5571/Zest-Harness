@@ -81,7 +81,7 @@ El camino artesanal (`stream_responses`, `ResponsesAccumulator`, `send_once`, `c
 Lo que **no** está hecho y hay que hacer antes de considerar la fase cerrada:
 
 - Probar un turno real contra el backend. Todo lo anterior es compilación y tests unitarios; el mapeo de eventos, el `finish_reason` y el usage solo se confirman con una respuesta de verdad.
-- Comprobar si el turno reintenta. El camino viejo tenía `MAX_ATTEMPTS = 3`, `CONNECT_TIMEOUT` y `STREAM_IDLE_TIMEOUT` propios. Rig trae los suyos y no los he verificado, así que hoy es una regresión potencial de robustez, no confirmada en ninguna dirección.
+- Reintentos: resuelto. `codex_rig` envuelve cada intento en `retry::run_with_retry`, como los demás proveedores HTTP (ver `docs/features/provider-runtime.md`).
 - `Include::ReasoningEncryptedContent` lo añade Rig por su cuenta, así que la ruta empieza a devolver razonamiento cifrado. `from_rig_content` ya lo persiste como bloque `reasoning_encrypted` y lo lee de vuelta, con test de ida y vuelta, pero conviene mirar cuánto contexto ocupa en un turno real.
 
 **Fase 2, OpenAI API.** `OpenAiCompatibleProvider` sobre `providers::openai` con `base_url` configurable. Sin firmas y sin caché de Anthropic, es el provider de menor riesgo; sirve para consolidar la forma de traducción que la fase 1 estrenó.

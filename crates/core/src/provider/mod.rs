@@ -840,6 +840,12 @@ impl RateLimitSnapshot {
     }
 }
 
+/// Stop reason for a response whose stream failed after visible text arrived.
+///
+/// The provider keeps the text the user already saw instead of failing the
+/// turn, and the agent asks the model to carry on from where it stopped.
+pub const STREAM_INTERRUPTED: &str = "stream_interrupted";
+
 #[derive(Debug)]
 pub struct Completion {
     /// The assistant turn's content blocks, in index order. Push this back into

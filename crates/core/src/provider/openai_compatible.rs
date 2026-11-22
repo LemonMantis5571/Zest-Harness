@@ -22,6 +22,7 @@ use crate::anthropic::types::{Message, ToolDef, Usage};
 use crate::auth::AuthStatus;
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
+use crate::retry::{self, RetryPolicy};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a hosted endpoint may take to start answering.
@@ -31,7 +32,6 @@ const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 /// prompt processed, which on a CPU or a cold start can take minutes.
 const LOCAL_RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(600);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 struct Request {
@@ -157,6 +157,7 @@ pub struct OpenAiCompatibleClient {
     /// A server on this machine or network. Its header timeout is not retried:
     /// a second attempt re-sends the whole prompt and starts the wait over.
     local_server: bool,
+    retry: RetryPolicy,
 }
 
 /// Loopback, private-network and link-local hosts are "local" for timeouts.
@@ -216,7 +217,14 @@ impl OpenAiCompatibleClient {
             base_url,
             headers_timeout,
             local_server,
+            retry: RetryPolicy::default(),
         })
+    }
+
+    /// Replace the retry budget, e.g. with [`RetryPolicy::immediate`] in tests.
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     fn endpoint(&self) -> String {
@@ -229,50 +237,36 @@ impl OpenAiCompatibleClient {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<Completion> {
-        let mut attempt = 0;
-        let response = loop {
-            attempt += 1;
-            match self.send_once(req, cancel).await {
-                Ok(response) => break response,
-                Err((error, retry_after))
-                    if attempt < MAX_ATTEMPTS
-                        && error.is_transient()
-                        && !(self.local_server
-                            && matches!(error, HarnessError::ResponseTimeout { .. })) =>
-                {
-                    let delay = retry_after.unwrap_or_else(|| {
-                        Duration::from_secs(1 << attempt.min(4).saturating_sub(1))
-                    });
-                    tokio::select! {
-                        biased;
-                        _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
-                        _ = tokio::time::sleep(delay) => {}
-                    }
-                }
-                Err((error, _)) => {
-                    return Err(if attempt > 1 {
-                        HarnessError::Exhausted {
-                            attempts: attempt,
-                            source: Box::new(error),
-                        }
-                    } else {
-                        error
-                    })
-                }
-            }
+        // Retried only while nothing reached the user; see `try_once`.
+        let mut attempt = OpenAiAttempt {
+            client: self,
+            req,
+            cancel,
         };
+        retry::run_with_retry(&self.retry, &mut attempt, on_event, cancel).await
+    }
 
+    /// One request and its stream. A stream that fails after visible text
+    /// returns that text, stopped with [`super::STREAM_INTERRUPTED`]; with
+    /// nothing visible yet the failure is an error the caller may retry.
+    async fn try_once(
+        &self,
+        req: &Request,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> std::result::Result<Completion, retry::AttemptError> {
+        let response = self.send_once(req, cancel).await?;
         let limits = rate_limits_from_headers(response.headers());
         let mut parser = SseParser::default();
         let mut body = response.bytes_stream();
         let mut accumulator = OpenAiAccumulator::default();
         let mut last_progress = tokio::time::Instant::now();
 
-        loop {
+        let failure = 'read: loop {
             let idle_deadline = last_progress + STREAM_IDLE_TIMEOUT;
             tokio::select! {
                 biased;
-                _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
+                _ = wait_cancel(cancel) => return Err((HarnessError::Cancelled, None)),
                 chunk = body.next() => match chunk {
                     Some(Ok(bytes)) => {
                         for payload in parser.feed(&bytes) {
@@ -280,26 +274,36 @@ impl OpenAiCompatibleClient {
                                 accumulator.done = true;
                                 break;
                             }
-                            let event: Value = serde_json::from_str(&payload)?;
-                            if accumulator.push(&event, on_event)? {
-                                last_progress = tokio::time::Instant::now();
+                            let pushed = serde_json::from_str::<Value>(&payload)
+                                .map_err(HarnessError::from)
+                                .and_then(|event| accumulator.push(&event, on_event));
+                            match pushed {
+                                Ok(true) => last_progress = tokio::time::Instant::now(),
+                                Ok(false) => {}
+                                Err(error) => break 'read Some(error),
                             }
                         }
-                        if accumulator.done { break; }
+                        if accumulator.done { break None; }
                     }
-                    Some(Err(error)) => return Err(error.into()),
-                    None => break,
+                    Some(Err(error)) => break Some(error.into()),
+                    None => break None,
                 },
                 _ = tokio::time::sleep_until(idle_deadline) => {
-                    return Err(HarnessError::StreamIdleTimeout);
+                    break Some(HarnessError::StreamIdleTimeout);
                 }
             }
-        }
+        };
 
-        if !accumulator.done {
-            return Err(HarnessError::PrematureEof);
+        let failure = failure.or_else(|| (!accumulator.done).then_some(HarnessError::PrematureEof));
+        let Some(error) = failure else {
+            return accumulator.finish(limits).map_err(|error| (error, None));
+        };
+        if error.is_retryable_stream_failure() {
+            if let Some(partial) = accumulator.salvage(limits) {
+                return Ok(partial);
+            }
         }
-        accumulator.finish(limits)
+        Err((error, None))
     }
 
     async fn send_once(
@@ -326,12 +330,35 @@ impl OpenAiCompatibleClient {
             return Ok(response);
         }
         let status = response.status().as_u16();
+        let retry_after = retry::retry_after_from_headers(response.headers());
         let body = tokio::time::timeout(STREAM_IDLE_TIMEOUT, response.text())
             .await
             .ok()
             .and_then(|body| body.ok())
             .unwrap_or_default();
-        Err((HarnessError::Api { status, body }, None))
+        Err((HarnessError::Api { status, body }, retry_after))
+    }
+}
+
+struct OpenAiAttempt<'c> {
+    client: &'c OpenAiCompatibleClient,
+    req: &'c Request,
+    cancel: Option<&'c CancelToken>,
+}
+
+#[async_trait]
+impl retry::Attempt for OpenAiAttempt<'_> {
+    async fn run(
+        &mut self,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> std::result::Result<Completion, retry::AttemptError> {
+        self.client.try_once(self.req, on_event, self.cancel).await
+    }
+
+    /// A local server that has not answered is usually still loading the
+    /// model; a second request only queues behind the first.
+    fn may_retry(&self, error: &HarnessError) -> bool {
+        !(self.client.local_server && matches!(error, HarnessError::ResponseTimeout { .. }))
     }
 }
 
@@ -448,8 +475,10 @@ impl OpenAiAccumulator {
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.stop_reason = Some(
                 match reason {
-                    "tool_calls" => "tool_use",
+                    "tool_calls" | "function_call" => "tool_use",
                     "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    "content_filter" => "refusal",
                     other => other,
                 }
                 .into(),
@@ -509,6 +538,21 @@ impl OpenAiAccumulator {
         Ok(progressed)
     }
 
+    /// The visible text of a stream that broke off, which the user has
+    /// already read. Unfinished tool calls are dropped; the model is asked to
+    /// continue. `None` when there is no text to keep.
+    fn salvage(self, limits: Option<RateLimitSnapshot>) -> Option<Completion> {
+        (!self.text.trim().is_empty()).then(|| Completion {
+            content: vec![json!({"type":"text", "text": self.text})],
+            stop_reason: Some(super::STREAM_INTERRUPTED.into()),
+            usage: self.usage,
+            usage_available: self.usage_available,
+            limits,
+            served_model: self.served_model,
+            provider_session: None,
+        })
+    }
+
     fn finish(self, limits: Option<RateLimitSnapshot>) -> Result<Completion> {
         let mut content = Vec::new();
         if !self.text.is_empty() {
@@ -521,23 +565,11 @@ impl OpenAiAccumulator {
                     message: "OpenAI-compatible stream ended with an incomplete tool call".into(),
                 });
             }
-            if !tool.saw_arguments || tool.arguments.trim().is_empty() {
-                return Err(HarnessError::Stream {
-                    kind: "incomplete_tool_call".into(),
-                    message: "OpenAI-compatible stream ended before tool arguments arrived".into(),
-                });
-            }
-            let input: Value =
-                serde_json::from_str(&tool.arguments).map_err(|error| HarnessError::Stream {
-                    kind: "malformed_tool_input".into(),
-                    message: format!("OpenAI-compatible tool arguments are invalid JSON: {error}"),
-                })?;
-            if !input.is_object() {
-                return Err(HarnessError::Stream {
-                    kind: "malformed_tool_input".into(),
-                    message: "OpenAI-compatible tool arguments must be a JSON object".into(),
-                });
-            }
+            // Arguments that are missing or not a JSON object stay as they
+            // came. The agent repairs them or answers the call with an error
+            // (`tool_input_repair`); they never reach a tool as `{}`.
+            let input = serde_json::from_str::<Value>(&tool.arguments)
+                .unwrap_or_else(|_| Value::String(tool.arguments.clone()));
             content.push(json!({"type":"tool_use", "id":tool.id, "name":tool.name, "input":input}));
         }
         Ok(Completion {
@@ -760,6 +792,40 @@ mod tests {
             timeout("https://openrouter.ai/api/v1"),
             RESPONSE_HEADERS_TIMEOUT
         );
+    }
+
+    #[test]
+    fn a_broken_stream_keeps_only_its_visible_text() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        accumulator
+            .push(
+                &json!({ "choices": [{ "delta": {
+                    "content": "Half an answer",
+                    "tool_calls": [{ "index": 0, "id": "call-1",
+                        "function": { "name": "read", "arguments": "{\"pa" } }]
+                } }] }),
+                &mut sink,
+            )
+            .unwrap();
+        let partial = accumulator.salvage(None).unwrap();
+        assert_eq!(
+            partial.stop_reason.as_deref(),
+            Some(super::super::STREAM_INTERRUPTED)
+        );
+        assert_eq!(
+            partial.content,
+            [json!({"type":"text","text":"Half an answer"})]
+        );
+
+        let mut nothing_visible = OpenAiAccumulator::default();
+        nothing_visible
+            .push(
+                &json!({ "choices": [{ "delta": { "reasoning": "thinking" } }] }),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(nothing_visible.salvage(None).is_none());
     }
 
     fn usage_of(usage: Value) -> Usage {
@@ -1052,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_tool_arguments_fail_instead_of_becoming_an_empty_object() {
+    fn malformed_tool_arguments_stay_text_instead_of_becoming_an_empty_object() {
         let mut accumulator = OpenAiAccumulator::default();
         let mut sink = |_: StreamEvent<'_>| {};
         accumulator
@@ -1062,10 +1128,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            accumulator.finish(None),
-            Err(HarnessError::Stream { kind, .. }) if kind == "malformed_tool_input"
-        ));
+        let completion = accumulator.finish(None).unwrap();
+        assert_eq!(completion.content[0]["input"], json!("{"));
     }
 
     #[test]
@@ -1104,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_missing_tool_arguments_are_incomplete() {
+    fn empty_or_missing_tool_arguments_stay_empty_text() {
         for arguments in [None, Some("")] {
             let mut accumulator = OpenAiAccumulator::default();
             let mut sink = |_: StreamEvent<'_>| {};
@@ -1120,10 +1184,8 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(matches!(
-                accumulator.finish(None),
-                Err(HarnessError::Stream { kind, .. }) if kind == "incomplete_tool_call"
-            ));
+            let completion = accumulator.finish(None).unwrap();
+            assert_eq!(completion.content[0]["input"], json!(""));
         }
     }
 }
