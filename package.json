@@ -29,6 +29,7 @@
     "gpui": "cargo run --locked --release --manifest-path spikes/gpui/Cargo.toml --",
     "gpui:test": "cargo run --locked --release --manifest-path spikes/gpui/Cargo.toml -- --selftest-workspace",
     "gpui:package": "node ./scripts/package-gpui.mjs",
+    "gpui:control": "node ./scripts/gpui-control.mjs",
     "verify": "node ./scripts/dev-verify.mjs",
     "output-policy:check": "node ./scripts/check-output-artifacts.mjs",
     "output-policy:test": "node --test ./scripts/check-output-artifacts.test.mjs",
