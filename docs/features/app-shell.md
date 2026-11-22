@@ -28,7 +28,7 @@ verify:
 - Outside the demo, startup loads `.env`, `~/.zest/.env` and `~/.zest/env`, then creates `~/.zest/zest.toml` from the embedded starter config if it is missing. An existing config is never overwritten; a failure is printed and the window still opens.
 - `--help` lists the workspace options. The rendering-spike modes (`--selftest`, `--selftest-queue`, `--bench`, `--scroll`, `--langs`, `--agent` and friends) still run the original stream fixtures and cannot be combined with `--project` or `--demo`.
 - Notification clicks reopen the chat they belong to and bring its window forward.
-- Keyboard shortcuts bound at startup: Ctrl+N new chat, Ctrl+K find chats, Ctrl+O open folder, Ctrl+\ toggle split, Ctrl+Shift+Enter zoom pane, Ctrl+Shift+H minimize pane, Escape close panel.
+- Keyboard shortcuts bound at startup: Ctrl+N new chat, Ctrl+K command palette, Ctrl+O open folder, Ctrl+\ toggle split, Ctrl+Shift+Enter zoom pane, Ctrl+Shift+H minimize pane, Escape close panel.
 - On Windows the executable carries Zest's icon and the release version, which GPUI also uses for its window and taskbar icon.
 
 ## How it works

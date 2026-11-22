@@ -30,7 +30,7 @@ verify:
 - **Restore all panes** clears zoom and every minimized pane.
 - **Single view** keeps the group in the sidebar as "Split view with N chats" and shows the active chat alone. Clicking that row reopens the group; a group that was open at the time is saved in its place. Saved groups, zoom and minimized panes last for the window's session and are not saved across a restart.
 - A pane counts as on screen for alerts only while it is visible: a minimized or zoomed-away chat that needs input or finishes shows an "Open · …" banner.
-- The desktop app does not have several features the old split view had: forking into another pane, an empty pane with a chat chooser, dragging a pane to another edge, a stacked layout for narrow windows, a "Continue in single view" action for one pane, a split-view command palette, and rebindable pane shortcuts.
+- The desktop app does not have several features the old split view had: forking into another pane, an empty pane with a chat chooser, dragging a pane to another edge, a stacked layout for narrow windows, a "Continue in single view" action for one pane, and rebindable pane shortcuts.
 
 ## How it works
 1. `Workspace` (`crates/desktop/src/workspace.rs`) keeps `layout: Option<Layout>` for the open group and `saved_layouts` for the others. `chats` maps each thread id to its own `Root` view, so every pane has its own command channel and turn. `split` saves the open group or calls `add_pane(Direction::Across)`; `select_chat` calls `Layout::open` so navigation fills the active pane.

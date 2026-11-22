@@ -55,10 +55,14 @@ fn ime_log(msg: String) {
 pub enum ComposerEvent {
     Send { text: String, images: Vec<Arc<Image>> },
     Stop,
+    /// Up (-1) or Down (+1) in a field that drives a list (`list_nav`).
+    Navigate(i32),
 }
 
 pub struct Composer {
     pub multiline_field: bool,
+    /// Up and Down move a selection in a list (emitting `Navigate`) instead of the caret.
+    pub list_nav: bool,
     pub placeholder: &'static str,
     pub has_files: bool,
     pub focus: FocusHandle,
@@ -80,6 +84,7 @@ impl Composer {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             multiline_field: false,
+            list_nav: false,
             has_files: false,
             placeholder: MESSAGE_HINT,
             focus: cx.focus_handle(),
@@ -219,10 +224,18 @@ impl Composer {
         self.move_to(t, w, cx);
     }
     fn up(&mut self, _: &Up, w: &mut Window, cx: &mut Context<Self>) {
+        if self.list_nav {
+            cx.emit(ComposerEvent::Navigate(-1));
+            return;
+        }
         let t = self.vertical(self.cursor(), -1.);
         self.move_to(t, w, cx);
     }
     fn down(&mut self, _: &Down, w: &mut Window, cx: &mut Context<Self>) {
+        if self.list_nav {
+            cx.emit(ComposerEvent::Navigate(1));
+            return;
+        }
         let t = self.vertical(self.cursor(), 1.);
         self.move_to(t, w, cx);
     }

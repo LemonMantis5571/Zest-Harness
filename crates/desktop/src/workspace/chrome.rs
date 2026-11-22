@@ -134,7 +134,7 @@ impl Workspace {
         }
     }
 
-    fn go(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn go(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.nav_index.checked_add_signed(step).filter(|i| *i < self.nav.len()) else {
             return;
         };

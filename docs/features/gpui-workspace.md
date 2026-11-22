@@ -35,7 +35,7 @@ Run `npm run gpui -- --demo` for a temporary offline workspace. Send `Demo: writ
 
 | Area | Available in the native window |
 | --- | --- |
-| Workspace and history | Open a project, start or rename chats, pin a chat, split the workspace and switch between independent sessions. Ctrl+K searches chat titles and saved message text. A transcript result opens the matching message. |
+| Workspace and history | Open a project, start or rename chats, pin a chat, split the workspace and switch between independent sessions. Ctrl+K opens a command palette over actions, pages and chats; Search finds saved message text. A transcript result opens the matching message. |
 | Agent conversation | Send, stream, stop, and reopen a conversation with saved provider context. Markdown, code, thinking, tool results, and provider activity render in the transcript. Follow-ups queue in order and can be edited or removed. After stop, error or reopen, use **Resume queued** to send the oldest pending input. |
 | Files and interaction | Attach files or paste images, inspect proposed tool inputs, approve or deny individual requests and answer agent questions. The agent uses Zest's shared tools and approval policy. |
 | Provider and commands | Choose a configured provider, model, effort and permission mode. The settings panel exposes supported sign-in flows. Use skills, MCP slash commands, plan mode and the independent `/btw` conversation. |

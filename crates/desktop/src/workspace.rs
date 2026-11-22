@@ -14,6 +14,7 @@ mod recent;
 mod extras;
 mod projects;
 mod toasts;
+mod palette;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -31,7 +32,7 @@ actions!(
     ]
 );
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
     Chat,
     Profile,
@@ -124,6 +125,7 @@ pub struct Workspace {
     toasts: toasts::Toasts,
     /// The checkpoint whose Rewind is waiting for confirmation.
     rewind_confirm: Option<String>,
+    palette: Option<palette::Palette>,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -240,6 +242,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             toasts: toasts::Toasts::default(),
             rewind_confirm: None,
+            palette: None,
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -1410,7 +1413,7 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .on_action(cx.listener(|ws, _: &NewChat, w, cx| ws.new_chat(w, cx)))
-            .on_action(cx.listener(|ws, _: &FindChat, w, cx| ws.page(Panel::Search, w, cx)))
+            .on_action(cx.listener(|ws, _: &FindChat, w, cx| ws.toggle_palette(w, cx)))
             .on_action(cx.listener(|ws, _: &OpenFolder, _, cx| ws.pick_project(cx)))
             .on_action(cx.listener(|ws, _: &ZoomPane, _, cx| ws.zoom_active(cx)))
             .on_action(cx.listener(|ws, _: &MinimizePane, w, cx| ws.minimize_active(w, cx)))
@@ -1442,6 +1445,7 @@ impl Render for Workspace {
                     .child(main),
             )
             .children(toasts)
+            .children(self.palette_overlay(cx))
     }
 }
 
