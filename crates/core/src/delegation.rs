@@ -1804,9 +1804,11 @@ impl DelegationStore {
     fn artifact_path(&self, job_id: &str, name: &str) -> Result<PathBuf> {
         let job_id = validate_id(job_id, "delegation job")?;
         let name = match name {
-            "worker.diff" | "worker-result.json" | "review-result.json" | "worker-partial.diff" => {
-                name
-            }
+            "worker.diff"
+            | "worker-result.json"
+            | "review-result.json"
+            | "worker-partial.diff"
+            | "worker-transcript.jsonl" => name,
             _ => return Err(HarnessError::Other("unknown delegation artifact".into())),
         };
         let path = self.dir().join(job_id).join(name);

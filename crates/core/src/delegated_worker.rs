@@ -480,8 +480,10 @@ async fn run_in_workspace(
         session.agent.set_next_run_id(run_id);
     }
     activity.progress(Some("started"));
-    let mut sink =
-        |event: StreamEvent<'_>| activity.progress(stream_event_label(&event).as_deref());
+    let mut sink = |event: StreamEvent<'_>| {
+        activity.progress(stream_event_label(&event).as_deref());
+        record_stream_event(activity, &event);
+    };
     // A provider stream that stalls, or a turn that never ends, used to hold
     // the job's lane forever. Dropping the turn is safe here: the worker has
     // no shell, and its worktree is removed by the caller either way.
@@ -492,6 +494,31 @@ async fn run_in_workspace(
     let final_text = final_text(&session.agent);
     let usage = attempt_usage(session.agent.turn_usage().as_ref());
     Ok((final_text, usage))
+}
+
+/// Copy a native stream event into the run's transcript.
+fn record_stream_event(activity: &WorkerActivity, event: &StreamEvent<'_>) {
+    match event {
+        StreamEvent::Text(text) => activity.record("text", text, true),
+        StreamEvent::Thinking(text) => activity.record("thinking", text, true),
+        StreamEvent::ToolCallStart { name, .. } => activity.record("tool", name, false),
+        StreamEvent::ToolCallResult {
+            name,
+            summary,
+            is_error,
+            path,
+            ..
+        } => {
+            let target = path.map(|path| format!(" {path}")).unwrap_or_default();
+            let outcome = if *is_error { "failed" } else { "done" };
+            activity.record(
+                "tool result",
+                &format!("{name}{target} {outcome}: {summary}"),
+                false,
+            );
+        }
+        _ => {}
+    }
 }
 
 /// What a native stream event shows the worker doing, for the heartbeat.

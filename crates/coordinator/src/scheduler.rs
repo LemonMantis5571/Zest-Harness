@@ -42,6 +42,7 @@ pub const ALLOWED_ARTIFACTS: &[&str] = &[
     "worker-result.json",
     "review-result.json",
     "worker-partial.diff",
+    "worker-transcript.jsonl",
 ];
 pub const DESKTOP_ORIGIN: &str = "desktop_agent_board";
 pub const INBOUND_MCP_ORIGIN: &str = "inbound_mcp";
@@ -2365,6 +2366,12 @@ impl DelegationCoordinator {
         }
         .await;
         worker_heartbeat.abort();
+        // Saved whatever happened, so a failed or stopped worker can be read too.
+        let _ = store.write_artifact(
+            job_id,
+            "worker-transcript.jsonl",
+            &worker_activity.transcript(),
+        );
         if cancel.is_cancelled() {
             return self.cancelled(&store, job).await;
         }
@@ -3094,6 +3101,14 @@ mod tests {
             DelegationStatus::ReadyToApply,
         )
         .await;
+        let transcript = coordinator
+            .artifact_page(root, &created.job_id, "worker-transcript.jsonl", 0)
+            .unwrap()
+            .content;
+        assert!(
+            transcript.contains("fixture worker changed delegated.txt"),
+            "{transcript}"
+        );
         assert_eq!(ready.acceptance_checks.len(), 1);
         let check = &ready.acceptance_checks[0];
         assert!(matches!(check.status, AcceptanceCheckStatus::Passed));

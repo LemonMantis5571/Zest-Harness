@@ -1679,6 +1679,27 @@ fn expand_windows_environment(value: &str) -> String {
     expanded
 }
 
+/// Copy new worker events into the run's transcript.
+fn record_events(activity: Option<&WorkerActivity>, events: &[ExternalAgentEvent]) {
+    let Some(activity) = activity else {
+        return;
+    };
+    for event in events {
+        match event {
+            ExternalAgentEvent::Text(text) | ExternalAgentEvent::TextDelta(text) => {
+                activity.record("text", text, true)
+            }
+            ExternalAgentEvent::Thinking(text) => activity.record("thinking", text, true),
+            ExternalAgentEvent::ToolCall { title, status, .. } => {
+                activity.record("tool", &format!("{title} ({status})"), false)
+            }
+            ExternalAgentEvent::Diff { path } => activity.record("diff", path, false),
+            ExternalAgentEvent::Error(error) => activity.record("error", error, false),
+            ExternalAgentEvent::Done => {}
+        }
+    }
+}
+
 /// A short name for what a worker event shows it doing, for the heartbeat.
 fn activity_label(event: &ExternalAgentEvent) -> Option<String> {
     match event {
@@ -1723,6 +1744,7 @@ async fn run_headless(
                         .find_map(activity_label);
                     activity.progress(label.as_deref());
                 }
+                record_events(activity, &run.events[event_start..]);
                 if let Some(on_event) = on_event.as_deref_mut() {
                     for event in run.events[event_start..].iter().cloned() {
                         on_event(event);
@@ -1737,6 +1759,7 @@ async fn run_headless(
                 run.malformed_lines += 1;
                 if let Some(activity) = activity {
                     activity.progress(Some("output"));
+                    activity.record("output", line, false);
                 }
                 let text = line.to_string();
                 run.events.push(ExternalAgentEvent::Text(text.clone()));
@@ -2374,7 +2397,9 @@ async fn wait_for_response(
             }
         };
         if value.get("method").and_then(Value::as_str) == Some("session/update") {
+            let start = run.events.len();
             absorb_acp_update(&value, run);
+            record_events(activity, &run.events[start..]);
             continue;
         }
         if value.get("method").and_then(Value::as_str) == Some("session/request_permission") {

@@ -439,7 +439,7 @@ fn tool_defs(policy: ServePolicy) -> Vec<Value> {
         ),
         tool(
             "delegation_artifact",
-            "Read a paged artifact: worker.diff, worker-result.json, review-result.json, or worker-partial.diff (what a failed or timed-out worker had changed; never reviewed).",
+            "Read a paged artifact: worker.diff, worker-result.json, review-result.json, worker-partial.diff (what a failed or timed-out worker had changed; never reviewed), or worker-transcript.jsonl (the worker's text, thinking and tool activity, one JSON object per line).",
             json!({
                 "type": "object",
                 "required": ["jobId", "name"],
