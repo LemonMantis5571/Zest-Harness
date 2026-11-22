@@ -58,6 +58,21 @@ fn offline_workspace_smoke() {
         std::thread::sleep(tick);
         app.executor().advance_clock(tick);
     }
+    // Close the window before quitting. Dropping each chat's Bridge ends its Tokio task, which
+    // drops the event sender and wakes the window's receiver from a Tokio thread. If that wake
+    // lands while `quit` is shutting the app down, GPUI's test scheduler deadlocks (each side
+    // waits on a lock the other holds), so let those wakes arrive while the app still runs.
+    app.update(|cx| {
+        for window in cx.windows() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    });
+    let drain = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < drain {
+        app.run_until_parked();
+        std::thread::sleep(tick);
+        app.executor().advance_clock(tick);
+    }
     app.quit();
 }
 

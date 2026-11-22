@@ -86,7 +86,7 @@ jobs:
         shell: bash
         env:
           # Temporary: repeat the run to catch the intermittent hang. Remove once it is fixed.
-          DESKTOP_TEST_RUNS: 5
+          DESKTOP_TEST_RUNS: 8
         run: |
           cargo test --locked --release --manifest-path crates/desktop/Cargo.toml --no-run
           for run in $(seq 1 "${DESKTOP_TEST_RUNS:-1}"); do
