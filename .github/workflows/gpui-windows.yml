@@ -77,8 +77,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang libssl-dev libdbus-1-dev libfontconfig-dev libwayland-dev \
             libx11-xcb-dev libxkbcommon-x11-dev libxkbcommon-dev libasound2-dev libvulkan1 \
-            libwebkit2gtk-4.1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev dpkg-dev rpm squashfs-tools
-      - run: cargo test --locked --release --manifest-path crates/desktop/Cargo.toml
+            libwebkit2gtk-4.1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev dpkg-dev rpm squashfs-tools gdb
+      # A normal run takes seconds once built. If one is still going after 10 minutes, print every
+      # thread's stack so the hang can be read from the log instead of waiting out the job timeout.
+      # Set DESKTOP_TEST_RUNS to repeat the run when chasing an intermittent failure.
+      - name: Run the desktop tests (with a hang backtrace)
+        shell: bash
+        run: |
+          cargo test --locked --release --manifest-path crates/desktop/Cargo.toml --no-run
+          for run in $(seq 1 "${DESKTOP_TEST_RUNS:-1}"); do
+            echo "::group::Desktop test run $run"
+            cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- --nocapture > test.log 2>&1 &
+            pid=$!
+            for _ in $(seq 1 600); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              cat test.log
+              echo "::endgroup::"
+              echo "::error::Desktop test run $run was still running after 10 minutes. Thread backtraces follow."
+              for p in $(pgrep -f 'release/deps/zest_desktop-'); do
+                echo "===== test process $p"
+                sudo gdb -p "$p" -batch -ex 'set pagination off' -ex 'info threads' -ex 'thread apply all bt 40' 2>&1 | grep -vF '[New LWP'
+              done
+              pkill -f 'release/deps/zest_desktop-' || true
+              kill "$pid" 2>/dev/null || true
+              exit 1
+            fi
+            cat test.log
+            echo "::endgroup::"
+            wait "$pid"
+          done
       - run: npm run gpui:package
         env:
           GITHUB_TOKEN: ${{ github.token }}
