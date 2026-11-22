@@ -90,6 +90,12 @@ fn sleeper(pidfile: &str) {
     std::thread::sleep(std::time::Duration::from_secs(300));
 }
 
+/// A worker that crashes with an error that mentions a connection.
+fn delegation_crash() {
+    send(r#"{"type":"result","is_error":true,"result":"Connection reset by peer; the service is unavailable"}"#);
+    std::process::exit(3);
+}
+
 /// A worker that edits a file, then goes silent and never finishes.
 fn delegation_hang() {
     std::fs::write("partial.txt", "unfinished work
@@ -200,6 +206,7 @@ fn main() {
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         Some("delegation_hang") => delegation_hang(),
+        Some("delegation_crash") => delegation_crash(),
         Some("spawn_grandchild") => spawn_grandchild(&args.next().expect("pid file")),
         Some("sleeper") => sleeper(&args.next().expect("pid file")),
         Some("delegation_line7") => delegation_line7(&args.next().unwrap_or_default()),

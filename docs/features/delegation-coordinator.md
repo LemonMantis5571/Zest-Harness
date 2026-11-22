@@ -78,9 +78,12 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
   - calls `kick_pending`.
 - **`shutdown`** stops new enqueues, cancels in-flight tokens and waits up to
   8 s. It then marks jobs that are still running as `blocked`, not `cancelled`.
-- **Error classification.** A failed run is marked `blocked` when the error
-  mentions "unavailable", "not configured", "owns its agent loop" or "Connect".
-  Any other error marks it `failed`.
+- **Error classification.** `run_job` returns a `RunError` decided where the
+  error happens: an unreadable config or a worker/reviewer target that no
+  longer resolves (unavailable, not configured, a provider that owns its agent
+  loop) is `Blocked`; anything after that, including a worker or reviewer
+  that crashes, times out or makes no progress, is `Failed`. The message text
+  is never inspected.
 - **Artifacts.** `artifact_page` serves the three allowed artifacts in 64 KiB
   pages with a `nextOffset`.
 

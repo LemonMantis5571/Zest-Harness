@@ -987,6 +987,24 @@ fn limits_for(config: &Config, target: &DelegationTarget) -> WorkerLimits {
     }
 }
 
+/// Why a run stopped, which decides what the card becomes. Decided where
+/// the error happens, not by reading its message.
+#[derive(Debug)]
+enum RunError {
+    /// The target or configuration needs the user's attention before any run
+    /// can work (unreadable config, an unavailable provider or worker):
+    /// `blocked`.
+    Blocked(String),
+    /// The run itself went wrong: `failed`.
+    Failed(String),
+}
+
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
 /// A reviewer that fails or returns an unreadable report gets one fresh
 /// replacement before the card blocks.
 const MAX_REVIEWER_ATTEMPTS: u32 = 2;
@@ -1726,19 +1744,18 @@ impl DelegationCoordinator {
             let permit = coordinator.lanes.clone().acquire_owned().await;
             let result = match permit {
                 Ok(_permit) => coordinator.run_job(&root, &job_id, cancel.as_ref()).await,
-                Err(error) => Err(format!("delegation scheduler stopped: {error}")),
+                Err(error) => Err(RunError::Failed(format!(
+                    "delegation scheduler stopped: {error}"
+                ))),
             };
-            if let Err(error) = result {
-                let kind = if error.contains("unavailable")
-                    || error.contains("not configured")
-                    || error.contains("owns its agent loop")
-                    || error.contains("Connect")
-                {
-                    EventKind::Blocked
-                } else {
-                    EventKind::Failed
-                };
-                let _ = coordinator.fail(&root, &job_id, &error, kind);
+            match result {
+                Ok(()) => {}
+                Err(RunError::Blocked(error)) => {
+                    let _ = coordinator.fail(&root, &job_id, &error, EventKind::Blocked);
+                }
+                Err(RunError::Failed(error)) => {
+                    let _ = coordinator.fail(&root, &job_id, &error, EventKind::Failed);
+                }
             }
             if let Ok(mut running) = coordinator.running.lock() {
                 if running
@@ -2170,7 +2187,7 @@ impl DelegationCoordinator {
         root: &Path,
         job_id: &str,
         cancel: &zest_core::CancelToken,
-    ) -> Result<(), String> {
+    ) -> Result<(), RunError> {
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let mut job = store
             .load(job_id)
@@ -2199,9 +2216,9 @@ impl DelegationCoordinator {
             return Ok(());
         }
         if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
+            return Ok(self.cancelled(&store, job).await?);
         }
-        let config = Config::find(root).map_err(|error| error.to_string())?;
+        let config = Config::find(root).map_err(|error| RunError::Blocked(error.to_string()))?;
         if let Some(blocker) = unrunnable_check(&config, &job) {
             job.transition(CoreDelegationStatus::Blocked)
                 .map_err(|error| error.to_string())?;
@@ -2214,7 +2231,9 @@ impl DelegationCoordinator {
         }
         let parent_secret_envs = config.provider_key_env_names();
         let resolved_targets = resolve_job_targets(root, &job).map_err(|error| {
-            format!("{error}. Reconnect the provider/worker or choose another target.")
+            RunError::Blocked(format!(
+                "{error}. Reconnect the provider/worker or choose another target."
+            ))
         })?;
         if !job.is_approved_for(&resolved_targets.worker, &resolved_targets.reviewer) {
             job.transition(CoreDelegationStatus::AwaitingApproval)
@@ -2242,7 +2261,7 @@ impl DelegationCoordinator {
             let worker_result = worker_result_from_store(&store, &job).ok_or_else(|| {
                 "the saved worker result is missing; retry for a new worker attempt".to_string()
             })?;
-            return self
+            return Ok(self
                 .run_review_phase(
                     root,
                     &store,
@@ -2253,7 +2272,7 @@ impl DelegationCoordinator {
                     &worker_result,
                     cancel,
                 )
-                .await;
+                .await?);
         }
         job.transition(CoreDelegationStatus::WorkerRunning)
             .map_err(|error| error.to_string())?;
@@ -2386,7 +2405,7 @@ impl DelegationCoordinator {
             &worker_activity.transcript(),
         );
         if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
+            return Ok(self.cancelled(&store, job).await?);
         }
         let (worker_result, worker_diff, worker_text, worker_usage, worker_base) = match worker {
             Ok(worker) => worker,
@@ -2402,17 +2421,17 @@ impl DelegationCoordinator {
                         );
                     }
                 }
-                return Err(error);
+                return Err(RunError::Failed(error));
             }
         };
         if worker_diff.trim().is_empty() {
-            return Err("worker returned no diff artifact".into());
+            return Err(RunError::Failed("worker returned no diff artifact".into()));
         }
         if worker_diff.len() > MAX_WORKER_DIFF_BYTES {
-            return Err(format!(
+            return Err(RunError::Failed(format!(
                 "worker diff is {} bytes, larger than the {MAX_WORKER_DIFF_BYTES}-byte limit for a delegated change; split the card into smaller ones",
                 worker_diff.len()
-            ));
+            )));
         }
         validate_diff_scope(root, &worker_diff, &job.card.scope)
             .map_err(|error| format!("worker produced an unsafe or out-of-scope diff: {error}"))?;
@@ -2447,7 +2466,7 @@ impl DelegationCoordinator {
         let _ = worker_text;
         self.emit(&store, &job, EventKind::WorkerCompleted);
         if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
+            return Ok(self.cancelled(&store, job).await?);
         }
         self.run_review_phase(
             root,
@@ -2459,7 +2478,8 @@ impl DelegationCoordinator {
             &worker_result,
             cancel,
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     /// Run the acceptance checks once, then the reviewer, retrying the
@@ -3469,6 +3489,34 @@ mod tests {
             DelegationStatus::ReadyToApply,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_crashed_worker_fails_even_when_its_error_mentions_a_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("crash", &["delegation_crash"]));
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Crashing worker", "crash"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        // The word "Connection" used to turn any failure into `blocked`,
+        // which read as "fix your configuration".
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.starts_with("worker failed:"), "{error}");
+        assert!(error.contains("Connection reset"), "{error}");
+        assert!(failed
+            .attempts
+            .iter()
+            .all(|attempt| attempt.finished_at.is_some()));
     }
 
     #[tokio::test]
