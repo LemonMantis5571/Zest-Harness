@@ -11,6 +11,7 @@ publish = false
 embed-resource = "3.0.11"
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 accesskit = "0.24"
 # crates.io only has gpui 0.2.2 (2025-10-22) and no gpui_platform/gpui_windows, so pin Zed.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "7a349ce42df27b03c3ac16d478c88b8e1411607e", features = ["profiler"] }
@@ -29,7 +30,7 @@ tempfile = "3"
 dirs = "6"
 zest-plugin-api = { path = "../../crates/plugin-api" }
 pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", rev = "ef52f77850b29189048797a48b24862251f54fe7" }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Isolated browser/HTML windows run their own platform event loop.
 wry = "0.57"

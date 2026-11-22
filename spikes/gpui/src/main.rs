@@ -558,7 +558,13 @@ impl Root {
 
     fn reparse(&mut self, ix: usize) {
         let t = Instant::now();
-        let doc = md::parse(&self.live_text);
+        // While streaming, "Stream complete blocks" holds back the block still being written.
+        let source = if self.live == Some(ix) && self.native.is_some() && theme::block_streaming() {
+            md::complete_prefix(&self.live_text)
+        } else {
+            &self.live_text
+        };
+        let doc = md::parse(source);
         self.stats.parse_us.push(t.elapsed().as_micros() as u64);
         self.msgs[ix].doc = Rc::new(doc);
         self.list.remeasure_items(ix..ix + 1);

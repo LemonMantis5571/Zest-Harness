@@ -7,6 +7,7 @@ use crate::ui;
 /// Settings-type panels, shown as tabs under Customize (the React UI's CustomizePanel).
 pub(super) const CUSTOMIZE: &[(Panel, &str, Icon)] = &[
     (Panel::Appearance, "Appearance", Icon::Palette),
+    (Panel::ChatView, "Chat view", Icon::MessageSquare),
     (Panel::Settings, "Models", Icon::Layers),
     (Panel::Commands, "Skills & MCP", Icon::Plug),
     (Panel::Extras, "Add-ons", Icon::Puzzle),
@@ -194,11 +195,24 @@ impl Workspace {
                         } else {
                             let row = ws.history.get(index - ws.draft_ids.len())?;
                             let busy = ws.chats.get(&row.id).is_some_and(|c| c.read(cx).turn_active);
-                            let glyph = if busy {
+                            let needs_input = ws.chats.get(&row.id).is_some_and(|c| !c.read(cx).cards.is_empty());
+                            let pr = row.git_context.as_ref().is_some_and(|g| g.pull_request.is_some());
+                            let glyph = if theme::compact_sidebar() {
+                                // needs input > working > pull request > idle
+                                if needs_input {
+                                    Icon::CircleAlert
+                                } else if busy {
+                                    Icon::LoaderCircle
+                                } else if pr {
+                                    Icon::GitPullRequest
+                                } else {
+                                    Icon::Circle
+                                }
+                            } else if busy {
                                 Icon::LoaderCircle
                             } else if row.pinned {
                                 Icon::Pin
-                            } else if row.git_context.as_ref().is_some_and(|g| g.pull_request.is_some()) {
+                            } else if pr {
                                 Icon::GitPullRequest
                             } else {
                                 Icon::MessageSquare
@@ -317,6 +331,26 @@ impl Workspace {
                 ws.project_open = !ws.project_open;
                 cx.notify();
             }));
+        // Compact list: the project name is the only heading tier, with New chat always visible.
+        let compact_heading = div()
+            .px(px(6.))
+            .h(px(24.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme::muted_foreground()))
+                    .child(
+                        self.project.path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                    ),
+            )
+            .child(ui::icon_button_xs("compact-new-chat", Icon::Plus, "New chat in this project", cx.listener(|ws, _, w, cx| ws.new_chat(w, cx))));
         let splits = div().flex().flex_col().children(self.saved_layouts.iter().enumerate().map(|(index, group)| {
             chat_row(
                 SharedString::from(format!("saved-split-{index}")),
@@ -352,20 +386,22 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(project_row)
-                            .when(self.project_open, |d| {
+                            .when(!theme::compact_sidebar(), |d| d.child(project_row))
+                            .when(theme::compact_sidebar(), |d| d.child(compact_heading))
+                            .when(self.project_open || theme::compact_sidebar(), |d| {
                                 d.child(
                                     div()
                                         .flex_1()
                                         .min_h_0()
-                                        .pl_3()
+                                        .when(!theme::compact_sidebar(), |d| d.pl_3())
                                         .flex()
                                         .flex_col()
                                         .child(splits)
                                         .child(history),
                                 )
                             }),
-                    ),
+                    )
+                    .children(self.recent_section(cx)),
             );
         let provider = self.chat(cx).options.lock().unwrap().provider.clone();
         let footer = div()
@@ -380,7 +416,7 @@ impl Workspace {
                 div()
                     .id("account")
                     .role(Role::Button)
-                    .aria_label("Model & permissions")
+                    .aria_label("Your profile")
                     .tab_index(0)
                     .cursor_pointer()
                     .flex_1()
@@ -404,7 +440,13 @@ impl Workspace {
                             .border_color(rgb(theme::border()))
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Z"),
+                            .overflow_hidden()
+                            .map(|d| match &self.profile.avatar {
+                                Some(image) => d.child(img(image.clone()).size_full().object_fit(ObjectFit::Cover)),
+                                None => d.child(
+                                    self.profile.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "Z".into()),
+                                ),
+                            }),
                     )
                     .child(
                         div()
@@ -412,7 +454,7 @@ impl Workspace {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).line_height(px(16.)).child("Zest"))
+                            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).line_height(px(16.)).child(if self.profile.name.is_empty() { "Zest".to_string() } else { self.profile.name.clone() }))
                             .child(
                                 div()
                                     .truncate()
@@ -423,7 +465,7 @@ impl Workspace {
                             ),
                     )
                     .child(icon(Icon::ChevronsUpDown, 14.).text_color(rgb(theme::muted_foreground())))
-                    .on_click(cx.listener(|ws, _, w, cx| ws.page(Panel::Settings, w, cx))),
+                    .on_click(cx.listener(|ws, _, w, cx| ws.page(Panel::Profile, w, cx))),
             )
             .child(ui::icon_button("usage", Icon::Gauge, "Usage", cx.listener(|ws, _, w, cx| ws.page(Panel::Usage, w, cx))));
         div()
@@ -521,6 +563,7 @@ impl Workspace {
         let group = self.page_group();
         let (title, subtitle) = match self.panel {
             Panel::Search => ("Search", "Find chats, saved text and panels."),
+            Panel::Profile => ("Your profile", "Your activity in Zest on this computer. Press Enter in the name field to save it."),
             Panel::PullRequests => ("Pull requests", "Pull requests linked to this project's chats."),
             Panel::Rename => ("Rename chat", "Type a new title and press Enter."),
             _ if group.is_some_and(|g| std::ptr::eq(g, CUSTOMIZE)) => (
@@ -550,15 +593,21 @@ impl Workspace {
                     .child(ui::button("back", ui::Variant::Ghost, Some(Icon::ArrowLeft), "Back to chat", cx.listener(|ws, _, w, cx| ws.page(Panel::Chat, w, cx))))
                     .child(kbd("Esc")),
             );
+        // Tabs follow UI SDK's tabs behavior: only the selected tab is a tab stop, and
+        // arrow keys, Home and End move the selection and focus together.
         let tabs = group.map(|group| {
+            let count = group.len();
             div()
+                .id("page-tabs")
+                .role(Role::TabList)
+                .aria_orientation(accesskit::Orientation::Horizontal)
                 .flex()
                 .flex_wrap()
                 .gap(px(6.))
                 .pb_3()
                 .border_b_1()
                 .border_color(rgb(crate::theme::canvas_line()))
-                .children(group.iter().map(|&(panel, label, glyph)| {
+                .children(group.iter().enumerate().map(|(index, &(panel, label, glyph))| {
                     let active = panel == self.panel;
                     ui::button(
                         SharedString::from(format!("tab-{label}")),
@@ -567,7 +616,25 @@ impl Workspace {
                         label,
                         cx.listener(move |ws, _, w, cx| ws.page(panel, w, cx)),
                     )
+                    .role(Role::Tab)
+                    .aria_selected(active)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(count)
+                    .track_focus(&self.tab_focus[index])
+                    .tab_stop(active)
                     .when(active, |d| d.text_color(rgb(theme::foreground())))
+                    .on_key_down(cx.listener(move |ws, event: &KeyDownEvent, window, cx| {
+                        let target = match event.keystroke.key.as_str() {
+                            "left" => (index + count - 1) % count,
+                            "right" => (index + 1) % count,
+                            "home" => 0,
+                            "end" => count - 1,
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        ws.page(group[target].0, window, cx);
+                        window.focus(&ws.tab_focus[target], cx);
+                    }))
                 }))
         });
         div()
@@ -693,6 +760,74 @@ impl Workspace {
             .child(ui::section_title("Typography"))
             .child(ui::hint("Geist ships with Zest. Inter, Plus Jakarta Sans, JetBrains Mono and Fira Code appear here when installed."))
             .child(div().max_w(px(420.)).child(faces))
+            .into_any_element()
+    }
+
+    /// Customize > Chat view: the history layout and how streaming replies appear.
+    pub(super) fn chat_view_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let compact = theme::compact_sidebar();
+        let option = |id: &'static str, title: &'static str, hint: &'static str, glyph: Icon, selected: bool, choose: bool| {
+            div()
+                .id(id)
+                .role(Role::RadioButton)
+                .aria_label(SharedString::from(title))
+                .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
+                .tab_index(0)
+                .cursor_pointer()
+                .w(px(240.))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if selected { rgb(theme::primary()) } else { rgb(theme::soft_border()) })
+                .bg(rgb(theme::card()))
+                .hover(|s| s.bg(rgb(theme::secondary())))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(icon(glyph, 16.))
+                        .child(title)
+                        .when(selected, |d| d.child(icon(Icon::Check, 14.).text_color(rgb(theme::primary())))),
+                )
+                .child(ui::hint(hint))
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    theme::set_compact_sidebar(choose);
+                    ws.save_appearance(window, cx);
+                }))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(ui::section_title("Chat history"))
+            .child(
+                div()
+                    .id("chat-history-view")
+                    .role(Role::RadioGroup)
+                    .aria_label("Chat history visualization")
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(option("view-project", "Project tree", "Projects expand into their chats, with ages and status icons.", Icon::Folder, !compact, false))
+                    .child(option("view-compact", "Compact list", "One line per chat with a single status mark.", Icon::ListTodo, compact, true)),
+            )
+            .child(ui::section_title("Response display"))
+            .child(div().max_w(px(560.)).child(ui::switch_row(
+                "block-streaming",
+                "Stream complete blocks",
+                "Show a reply block by block as each paragraph, list or code block completes.",
+                theme::block_streaming(),
+                cx.listener(|ws, on: &bool, window, cx| {
+                    theme::set_block_streaming(*on);
+                    ws.save_appearance(window, cx);
+                }),
+            )))
             .into_any_element()
     }
 

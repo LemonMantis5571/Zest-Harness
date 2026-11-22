@@ -22,6 +22,8 @@ paths:
   - spikes/gpui/src/ui.rs
   - spikes/gpui/src/icons_generated.rs
   - spikes/gpui/src/workspace/chrome.rs
+  - spikes/gpui/src/workspace/profile.rs
+  - spikes/gpui/src/workspace/recent.rs
   - spikes/gpui/assets/**
   - spikes/gpui/benchmark/**
   - spikes/gpui/examples/workbench_io.rs
@@ -67,6 +69,8 @@ The sidebar reads saved summaries in the background at startup and when opening 
 ### Native desktop port
 
 The native window uses the React UI's default "zest" theme. `spikes/gpui/src/theme.rs` holds its color tokens from `crates/desktop/ui/src/index.css`, embeds the Geist font, and serves Lucide icons generated from the UI's own `lucide-react` package (`node spikes/gpui/assets/generate-icons.mjs` adds icons and regenerates `icons_generated.rs`). `ui.rs` has the shared controls. `workspace/chrome.rs` draws the sidebar (back and forward, New chat, Search, Pull requests, Customize, the project's chats and the account row), the chat header and the page frame. Settings-type panels are tabs under Customize, and project tools (Changes, Files, Jobs, Checkpoints, Delegation, Worktrees) are tabs under Workbench, opened from the header. Chats sit in a rounded canvas with a centered 720 px transcript and the composer card, toolbar and status line below it. Finished replies have Copy and Download (save as Markdown). With changed lines since the chat's start commit, a strip above the composer shows the project, branch, +/- counts from `zest_core::workspace_changes::diff_stats` and any linked pull request; it hides during a turn, and dismissing it lasts until the counts change.
+
+Customize also has a Chat view tab (Project tree or Compact list history, and "Stream complete blocks"), and the footer account row opens Your profile. The sidebar's Recent section lists chats started outside a project. Page tabs follow UI SDK's tabs behavior (only the selected tab is a tab stop; arrow keys, Home and End move selection and focus), and switches use its switch semantics. `node scripts/gpui-control.mjs` drives the app for agents (see [ui-control-cli](ui-control-cli.md)).
 
 Customize > Appearance offers the React UI's Zest, Nights and Oceanic themes and its fonts: Geist and System UI always, Inter, Plus Jakarta Sans, JetBrains Mono and Fira Code when installed. A choice applies at once and is saved in `<config dir>/zest/gpui-appearance.json`. Code colors follow the theme's brightness for newly rendered messages; chats already on screen keep theirs until reopened.
 

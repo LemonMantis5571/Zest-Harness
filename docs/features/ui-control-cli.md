@@ -6,6 +6,8 @@ paths:
   - scripts/zest-control-daemon.mjs
   - scripts/zest-ui-measure.mjs
   - crates/desktop/ui/devServer.ts
+  - scripts/gpui-control.mjs
+  - scripts/gpui-control.ps1
 tests:
   - scripts/zest-control.test.mjs
   - crates/desktop/ui/e2e/ui-quality.spec.ts
@@ -61,6 +63,10 @@ verify:
 - `stop` closes the browser, stops the dev server only if the session started
   it, and removes the session file. An idle session stops itself after 30
   minutes.
+
+### Native app (gpui-control)
+
+`node scripts/gpui-control.mjs` (`npm run gpui:control --`) drives the native GPUI app the same way, with JSON replies and exit codes 0 ok, 1 failed, 2 usage, 3 no session. `start` launches the release build (offline `--demo` unless `--project DIR`; `--build` rebuilds) with its output in a log under `<tmp>/zest-gpui-control/`. `inspect`, `messages` and `snapshot` read the accessibility tree; `click NAME [--nth N]`, `type`, `send TEXT` (waits for the reply, or an approval or question card) and `wait-settle` act through UI Automation patterns (Invoke, Select, Toggle, Value), never simulated keystrokes, so nothing is typed into another window. `errors [--clear]` lists panics and error lines from the log, and every reply carries the newest ones. `screenshot FILE` copies the window from the screen. It is Windows-only; on Linux the GPUI tests are the automation.
 
 ## How it works
 

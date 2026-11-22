@@ -232,13 +232,50 @@ pub fn available_faces(cx: &App) -> Vec<&'static Face> {
     FACES.iter().filter(|f| f.bundled || installed.iter().any(|n| n == f.family)).collect()
 }
 
-/// The saved theme and font, per machine, like the React UI's `localStorage` keys.
-#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+static BLOCK_STREAMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static COMPACT_SIDEBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Customize > Chat view > "Stream complete blocks" (default on): a streaming reply shows only
+/// its complete Markdown blocks.
+pub fn block_streaming() -> bool {
+    BLOCK_STREAMING.load(Ordering::Relaxed)
+}
+
+pub fn set_block_streaming(on: bool) {
+    BLOCK_STREAMING.store(on, Ordering::Relaxed);
+}
+
+/// Customize > Chat view > Chat history: the compact one-line list instead of the project tree.
+pub fn compact_sidebar() -> bool {
+    COMPACT_SIDEBAR.load(Ordering::Relaxed)
+}
+
+pub fn set_compact_sidebar(on: bool) {
+    COMPACT_SIDEBAR.store(on, Ordering::Relaxed);
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The saved look and chat-view choices, per machine, like the React UI's `localStorage` keys.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Appearance {
     #[serde(default)]
     pub theme: String,
     #[serde(default)]
     pub font: String,
+    /// "project" (default) or "compact", as `zest.chatViewMode`.
+    #[serde(default)]
+    pub chat_view: String,
+    #[serde(default = "yes")]
+    pub block_streaming: bool,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { theme: String::new(), font: String::new(), chat_view: String::new(), block_streaming: true }
+    }
 }
 
 fn appearance_path() -> Option<std::path::PathBuf> {
@@ -253,6 +290,8 @@ pub fn load_appearance() {
         .unwrap_or_default();
     set_theme(&saved.theme);
     set_face(&saved.font);
+    set_compact_sidebar(saved.chat_view == "compact");
+    set_block_streaming(saved.block_streaming);
 }
 
 /// Saves the active theme and font for the next launch.
@@ -261,7 +300,12 @@ pub fn save_appearance() -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let value = Appearance { theme: palette().id.into(), font: face().id.into() };
+    let value = Appearance {
+        theme: palette().id.into(),
+        font: face().id.into(),
+        chat_view: if compact_sidebar() { "compact" } else { "project" }.into(),
+        block_streaming: block_streaming(),
+    };
     zest_core::fsutil::atomic_write_json(&path, &value).map_err(|e| format!("Could not save appearance: {e}"))
 }
 
@@ -342,6 +386,9 @@ mod tests {
         assert_eq!(set_face("").id, "geist");
         let saved: Appearance = serde_json::from_str("{}").unwrap();
         assert_eq!(saved, Appearance::default());
+        assert!(saved.block_streaming, "block streaming defaults on, as in the React UI");
+        let older: Appearance = serde_json::from_str(r#"{"theme":"nights","font":"inter"}"#).unwrap();
+        assert!(older.block_streaming && older.chat_view.is_empty());
     }
 
     #[::core::prelude::v1::test]
