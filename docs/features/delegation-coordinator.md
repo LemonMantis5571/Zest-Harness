@@ -130,10 +130,22 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
 - a process exiting after Git apply but before either the card or the MCP
   command receipt records completion. The same command ID still reports an
   incomplete receipt after restart;
-- cancel idempotency and dependencies;
-- concurrent approve.
+- cancel idempotency and dependencies, and cancelling a running worker
+  (attempt closed, worktree removed);
+- concurrent approve;
+- the reviewer path: coordinator-recorded check results, one automatic
+  reviewer retry, review again on the same diff, reviewer edits, a finding
+  outside the project, and a silent reviewer;
+- workers that go silent (idle limit, partial diff kept) or crash with a
+  connection error (`failed`, not `blocked`);
+- a new binary file applied byte for byte, an oversized new file refused,
+  a three-way apply after the user edited nearby lines, an unreadable job
+  file next to a runnable one, and a card whose check cannot auto-run.
 
-These tests need `git` and `rustc` on PATH to build the fixture worker.
+These tests need `git` and `rustc` on PATH to build the fixture worker
+(`external_agent_fixture.rs`, whose `delegation*` modes play each worker and
+reviewer). They run many fixture jobs at once, so `wait_for_status` allows
+120 s.
 
 ## Pitfalls
 
@@ -149,6 +161,9 @@ These tests need `git` and `rustc` on PATH to build the fixture worker.
   message. Any other listing error is still swallowed by `App.tsx`, which shows
   an empty board.
 - **Unlock before close.** `CoordinatorLock` drops its OS lock explicitly (`flock(LOCK_UN)` / `UnlockFileEx`) before the file closes. Closing alone releases it only when every copy of the descriptor is gone, and a child another thread is forking (git, a worker) holds one until it execs, so a `WhileActive` release followed by a quick re-acquire failed as "another coordinator". `lock::tests` reproduces it with a cloned handle.
+- **Heartbeat detail is not a liveness proof.** The detail says when the run
+  last showed progress; the watchdog, not the heartbeat, stops a run that
+  shows none.
 - **Unsure means keep.** Under `WhileActive`, anything that leaves
   `has_active_work` unsure (an unreadable store, a poisoned mutex) keeps the
   lock, on purpose.
