@@ -1,0 +1,69 @@
+name: RustSec audit
+
+# Pull requests run the RustSec gate only when they change a lockfile, so an advisory published
+# for an existing dependency surfaces here: daily, on demand, and on pushes that change a
+# lockfile. A failure opens (or comments on) one issue instead of failing every open PR.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - Cargo.lock
+      - crates/desktop/Cargo.lock
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: rustsec
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit both lockfiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit
+        id: audit
+        shell: bash
+        run: |
+          set -o pipefail
+          status=0
+          for lock in Cargo.lock crates/desktop/Cargo.lock; do
+            if cargo audit --color never --file "$lock" 2>&1 | tee audit.txt; then
+              continue
+            fi
+            status=1
+            echo "**$lock**" >> report.md
+            echo '```' >> report.md
+            grep -E '^(Crate|Version|Title|ID|Solution):' audit.txt >> report.md || true
+            echo '```' >> report.md
+          done
+          exit $status
+
+      - name: Report a failure as an issue
+        if: failure() && steps.audit.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="RustSec: a dependency has a new advisory"
+          body="$(printf 'The scheduled RustSec audit failed: %s\n\n%s\n\nUpdate the affected crate in the lockfile that lists it (`cargo update -p <crate>`, plus `--manifest-path crates/desktop/Cargo.toml` for the desktop). PRs that change a lockfile run the same gate.' "$RUN_URL" "$(cat report.md)")"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

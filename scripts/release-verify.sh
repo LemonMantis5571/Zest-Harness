@@ -38,11 +38,18 @@ check_toolchain() {
 }
 
 
+# Audits the root lockfile and the desktop app's own lockfile. CI sets ZEST_RUSTSEC=skip on a
+# pull request that changes neither, so an advisory published upstream does not fail unrelated
+# PRs; the daily rustsec.yml run reports it instead.
 check_audit() {
+  if [ "${ZEST_RUSTSEC:-}" = "skip" ]; then
+    echo "Skipped: this pull request changes no Cargo.lock (see .github/workflows/rustsec.yml)."
+    return 0
+  fi
   if command -v cargo-audit >/dev/null 2>&1; then
-    cargo audit
+    cargo audit && cargo audit --file crates/desktop/Cargo.lock
   elif command -v cargo-deny >/dev/null 2>&1; then
-    cargo deny check advisories
+    cargo deny check advisories && cargo deny --manifest-path crates/desktop/Cargo.toml check advisories
   else
     echo "cargo-audit (or cargo-deny) is required for the RustSec gate. Install: cargo install cargo-audit --locked" >&2
     return 1
