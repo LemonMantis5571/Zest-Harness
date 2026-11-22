@@ -70,11 +70,18 @@ Step "cargo test" {
   cargo test --workspace --all-targets
 }
 
+# Audits the root lockfile and the desktop app's own lockfile. CI sets ZEST_RUSTSEC=skip on a
+# pull request that changes neither, so an advisory published upstream does not fail unrelated
+# PRs; the daily rustsec.yml run reports it instead.
 Step "RustSec (cargo audit)" {
-  if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
+  if ($env:ZEST_RUSTSEC -eq "skip") {
+    Write-Host "Skipped: this pull request changes no Cargo.lock (see .github/workflows/rustsec.yml)."
+  } elseif (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
     cargo audit
+    if ($LASTEXITCODE -eq 0) { cargo audit --file crates/desktop/Cargo.lock }
   } elseif (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
     cargo deny check advisories
+    if ($LASTEXITCODE -eq 0) { cargo deny --manifest-path crates/desktop/Cargo.toml check advisories }
   } else {
     throw "cargo-audit (or cargo-deny) is required for the RustSec gate. Install: cargo install cargo-audit --locked"
   }

@@ -37,12 +37,11 @@ SemVer prerelease suffix, such as `v0.4.0-rc.1`, creates a prerelease.
    git push origin v0.3.0
    ```
 
-The gate covers the root workspace's Rust code, its dependency audit, the
-feature map, the output policy and Git whitespace. The desktop app has its own
-lockfile (`crates/desktop/Cargo.lock`) that the gate does not audit; check it
-with `cargo audit --file crates/desktop/Cargo.lock`. Live provider checks are
-not a release gate: `cargo run -p zest -- doctor --live` consumes real quota
-and must only be run with a test account, with the result recorded separately.
+The gate covers the root workspace's Rust code, the RustSec audit of both
+lockfiles (`Cargo.lock` and `crates/desktop/Cargo.lock`), the feature map, the
+output policy and Git whitespace. Live provider checks are not a release gate:
+`cargo run -p zest -- doctor --live` consumes real quota and must only be run
+with a test account, with the result recorded separately.
 
 On Linux the desktop's web views (`wry`) use WebKitGTK and GTK3. `cargo audit`
 reports several of those bindings as unmaintained; treat that as a reason not
