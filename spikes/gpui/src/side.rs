@@ -161,18 +161,22 @@ impl Root {
             .gap_1();
         for (q, a) in &self.side.history {
             body = body
-                .child(div().text_color(rgb(LINK)).child(q.clone()))
-                .child(a.clone());
+                .child(div().mt_1().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(rgb(link())).child(q.clone()))
+                .child(div().text_size(px(13.)).child(a.clone()));
         }
-        div()
-            .bg(rgb(PANEL))
+        crate::ui::card()
             .px_3()
             .py_2()
+            .flex()
+            .flex_col()
+            .gap_2()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .child(div().flex_1().child("Side conversation"))
+                    .gap_2()
+                    .child(crate::theme::icon(crate::theme::Icon::MessageSquare, 14.))
+                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Side conversation"))
                     .when(self.side.busy, |d| {
                         d.child(button(
                             "stop-side",

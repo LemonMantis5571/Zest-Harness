@@ -63,6 +63,7 @@ verify:
 - `cargo test -p zest-core --lib -- config` runs the `config`, `config_edit`, and `config_migrate` tests (comment preservation, gateway migration, lint).
 - `cargo test -p zest-core --lib -- profile::` runs the streak and heatmap tests.
 - `npm run ui:test` covers the theme, font, and chat-view registries.
+- The [native GPUI workspace](gpui-workspace.md) copies the `zest`, `nights` and `oceanic` tokens into `THEMES` in `spikes/gpui/src/theme.rs` and offers the same fonts that exist natively. Keep the two in step when a palette changes or a theme is added. It saves its choice in `<config dir>/zest/gpui-appearance.json`, not `localStorage`, so the two apps do not share it. Chat-view options and the profile screen are not ported.
 - Fixture: open `/?fixture=1`, then Customize > Appearance / Typography; Profile works on canned stats.
 
 ## Pitfalls

@@ -7,7 +7,11 @@ publish = false
 # Standalone: never joins Zest's workspace or touches the root Cargo.lock.
 [workspace]
 
+[build-dependencies]
+embed-resource = "3.0.11"
+
 [dependencies]
+accesskit = "0.24"
 # crates.io only has gpui 0.2.2 (2025-10-22) and no gpui_platform/gpui_windows, so pin Zed.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "7a349ce42df27b03c3ac16d478c88b8e1411607e", features = ["profiler"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "7a349ce42df27b03c3ac16d478c88b8e1411607e" }
@@ -16,17 +20,22 @@ pulldown-cmark = { version = "0.13", default-features = false }
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 unicode-segmentation = "1"
 futures = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "io-util"] }
 async-trait = "0.1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.23"
 tempfile = "3"
+dirs = "6"
+zest-plugin-api = { path = "../../crates/plugin-api" }
 pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", rev = "ef52f77850b29189048797a48b24862251f54fe7" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-# Quick investigation: can a GPUI window host a wry child webview (raw window handle)?
-wry = { version = "0.57", optional = true }
+# Isolated browser/HTML windows run their own platform event loop.
+wry = "0.57"
+tao = "0.37"
+getrandom = "0.4"
+url = "2"
 
 # Experiment 3: provider-neutral streaming types from Zest's core crate.
 zest-core = { path = "../../crates/core" }
@@ -38,10 +47,13 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "7a349ce42df27b03c3ac16d478c88b8e1411607e", features = ["test-support"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "7a349ce42df27b03c3ac16d478c88b8e1411607e", features = ["wayland", "x11"] }
+
 [features]
 default = ["core"]
 core = []
-webview = ["dep:wry"]
+webview = []
 grammars = ["dep:two-face"]
 
 [profile.dev]

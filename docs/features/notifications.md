@@ -18,6 +18,8 @@ verify:
 
 # Notifications and toasts
 
+The native workspace routes approval and question prompts, turn failures, and responses that took at least ten seconds. A background window sends a system notification. Selecting it reopens the owning chat. A focused window offers Open for an offscreen chat. Job and delegation notifications below describe the Tauri app.
+
 ## Behavior
 - The model: live state lives on screen, and Zest only pings when something needs the user and they are not looking. `attentionRoute` in `notificationPolicy.ts` makes every attention decision from three facts: the event kind, whether its chat is on screen, and whether Zest is focused.
 - Attention events: "Approval needed", "Input needed" (a question), "Response ready" (only for turns of 10 s or more), "Request failed", "Background job failed", "Background job finished", and delegation outcomes in the active project ("Changes ready to apply", "Review requested changes", "Delegation needs attention", "Delegation failed", "Accepted changes applied", "Delegation cancelled").

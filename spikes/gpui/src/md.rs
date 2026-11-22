@@ -251,7 +251,9 @@ fn close(cur: &mut Option<Cur>) {
 
 struct Hl {
     ss: SyntaxSet,
-    theme: Theme,
+    dark: Theme,
+    /// For light palettes such as Oceanic.
+    light: Theme,
 }
 
 static HL: OnceLock<Hl> = OnceLock::new();
@@ -265,7 +267,7 @@ pub fn init_highlighter() -> std::time::Duration {
         #[cfg(not(feature = "grammars"))]
         let ss = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
-        Hl { ss, theme: ts.themes["base16-ocean.dark"].clone() }
+        Hl { ss, dark: ts.themes["base16-ocean.dark"].clone(), light: ts.themes["InspiredGitHub"].clone() }
     });
     t.elapsed()
 }
@@ -276,8 +278,10 @@ thread_local! {
 
 pub fn highlight(lang: &str, code: &str) -> Vec<(Range<usize>, SpanKind)> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    let dark = crate::theme::palette().dark;
     lang.hash(&mut h);
     code.hash(&mut h);
+    dark.hash(&mut h);
     let key = h.finish();
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
@@ -286,7 +290,7 @@ pub fn highlight(lang: &str, code: &str) -> Vec<(Range<usize>, SpanKind)> {
     let syntax = find_syntax(&hl.ss, lang).map(|(s, _)| s);
     let mut out = vec![];
     if let Some(syntax) = syntax {
-        let mut hlines = HighlightLines::new(syntax, &hl.theme);
+        let mut hlines = HighlightLines::new(syntax, if dark { &hl.dark } else { &hl.light });
         let mut off = 0;
         for line in LinesWithEndings::from(code) {
             if let Ok(ranges) = hlines.highlight_line(line, &hl.ss) {

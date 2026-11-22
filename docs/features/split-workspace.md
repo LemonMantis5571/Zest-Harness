@@ -2,6 +2,7 @@
 title: Split workspace
 summary: Open several chats side by side in resizable, nested panes, each with its own draft, model, and running turn.
 paths:
+  - spikes/gpui/src/workspace/panes.rs
   - crates/desktop/ui/src/components/SplitWorkspace.tsx
   - crates/desktop/ui/src/components/SplitPaneStrip.tsx
   - crates/desktop/ui/src/lib/splitLayout.ts

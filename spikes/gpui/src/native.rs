@@ -21,6 +21,8 @@ pub fn executor() -> &'static tokio::runtime::Runtime {
 #[derive(Clone)]
 pub struct Project {
     pub path: PathBuf,
+    pub registry_dir: PathBuf,
+    pub config_root: PathBuf,
     pub store: Arc<ThreadStore>,
     pub config: Config,
     pub ledger: Arc<Mutex<Ledger>>,
@@ -34,14 +36,24 @@ pub struct Project {
 
 impl Project {
     pub fn open(path: PathBuf, demo: bool) -> Result<Self> {
+        let registry_dir = if demo {
+            path.join(".zest/demo-desktop")
+        } else {
+            dirs::config_dir().ok_or_else(|| error("Cannot find Zest configuration directory"))?.join("zest")
+        };
+        Self::open_with_registry(path, demo, registry_dir)
+    }
+
+    pub(super) fn open_with_registry(path: PathBuf, demo: bool, registry_dir: PathBuf) -> Result<Self> {
         let path = std::fs::canonicalize(path).map_err(error)?;
         if !path.is_dir() {
             return Err(HarnessError::Other("Choose a project directory".into()));
         }
+        let config_root = zest_core::worktree_registry::config_root(&registry_dir, &path).map_err(error)?;
         let config = if demo {
             Config::parse("")?
         } else {
-            Config::find(&path)?
+            Config::find(&config_root)?
         };
         static LIVE_LEDGER: OnceLock<Arc<Mutex<Ledger>>> = OnceLock::new();
         let ledger = if demo {
@@ -74,6 +86,8 @@ impl Project {
             board_events,
             store: Arc::new(ThreadStore::open(&path)?),
             path,
+            registry_dir,
+            config_root,
             config,
             mcp,
             ledger,
@@ -111,6 +125,7 @@ pub struct Selection {
 
 #[derive(Clone)]
 pub struct Chat {
+    browser: Arc<crate::web_content::Browser>,
     pub project: Project,
     pub thread: Arc<Mutex<Thread>>,
     pub options: Arc<Mutex<Selection>>,
@@ -149,6 +164,7 @@ impl Chat {
         Self {
             project,
             thread: Arc::new(Mutex::new(thread)),
+            browser: Arc::default(),
             options: Arc::new(Mutex::new(options)),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Manual))),
         }
@@ -195,7 +211,7 @@ impl Chat {
                             };
                             let failed = result.is_err();
                             if let Err(e) = result {
-                                emit(&events, EvKind::Notice(e.to_string()));
+                                emit(&events, EvKind::Failure(e.to_string()));
                             }
                             emit(
                                 &events,
@@ -252,6 +268,8 @@ impl Chat {
                 .with_questioner(host.clone())
                 .with_ledger(self.project.ledger.clone())
                 .with_job_registry(self.project.jobs.clone())
+                .with_browser_adapter(self.browser.clone())
+                .with_html_artifacts(true)
                 .with_policy(self.policy.clone())
                 .with_job_owner(&thread_id)
                 .with_parent_thread_id(&thread_id);
@@ -326,6 +344,12 @@ impl Chat {
         cancel: &CancelToken,
     ) -> Result<()> {
         let (mut agent, provider, kind) = self.agent(events)?;
+        if !self.project.demo && let Ok(Some(context)) = tokio::task::spawn_blocking(crate::plugins::agent_context).await {
+            let system = agent.system.get_or_insert_with(|| SystemPrompt::new(DEFAULT_SYSTEM));
+            if !system.volatile.is_empty() { system.volatile.push_str("\n\n"); }
+            system.volatile.push_str("# Enabled local integrations\n\n");
+            system.volatile.push_str(&context);
+        }
         let assistant = new_id("assistant");
         let user = new_id("user");
         let run = new_id("turn");
@@ -541,8 +565,10 @@ fn apply(t: &mut Thread, msg: &str, ev: StreamEvent<'_>) -> Option<EvKind> {
             diff,
             metadata,
         } => {
+            let artifact = crate::artifact::metadata_document(metadata.as_ref());
             t.apply_tool_result(msg, id, name, summary, is_error, path, diff, metadata);
             EvKind::ToolResult {
+                artifact,
                 id: id.into(),
                 summary: summary.into(),
                 diff: diff.map(str::to_owned),

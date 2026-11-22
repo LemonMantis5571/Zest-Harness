@@ -51,10 +51,11 @@ hostile content.
 ## Build and publish
 
 The tagged workflow checks that the tag, Cargo version, and Tauri version
-match. It then builds:
+match. It then runs the native desktop tests and builds:
 
-- Windows `.msi` and `.exe` installers;
-- Linux `.deb`, `.rpm`, and AppImage packages;
+- Windows `.msi` and `.exe` installers of the native GPUI app (`npm run gpui:package`;
+  `scripts/install-installer-tools.ps1` installs WiX Toolset 3 and NSIS on the runner);
+- Linux `.deb`, `.rpm`, and AppImage packages of the same app;
 - standalone `zest` CLI binaries for Linux and Windows, without WebKit, for
   `zest serve` and the terminal client;
 - separate SHA256 manifests for the Windows and Linux installers and CLI
@@ -66,6 +67,11 @@ workflow. The workflow publishes the release only after both platform
 verification jobs and all package jobs pass.
 
 ## Signing and clean-machine checks
+
+The installers keep the Tauri releases' package names, MSI upgrade code and
+`zest-desktop` executable name, so an installed Tauri build upgrades in place.
+`scripts/build-signed.ps1` still signs only the Tauri build; signing the GPUI
+installers is not wired up.
 
 Unsigned installers do not prove publisher identity. If signing is enabled
 later, keep the private certificate in the certificate store or signing

@@ -79,7 +79,7 @@ verify:
 6. UI: `App.tsx` `handleChatEvent` batches `text_delta`/`thinking_delta` per animation frame (`reduceChatEvents`); other events flush the batch first, then `reduceChatEvent` (`chatReducer.ts`). Queue events update `threadQueue.ts` maps, not the transcript. `ChatScreen` renders rows in `MessageScroller`; `WorkingIndicator` shows while sending with no pending approval/question.
 
 ## Verify
-- In the [native GPUI workspace](gpui-workspace.md), run `npm run gpui:test` to exercise chat and durable follow-ups through the shared agent. The rendering fixture has a separate in-memory queue test, available with `npm run gpui -- --selftest-queue`.
+- In the [native GPUI workspace](gpui-workspace.md), run `npm run gpui:test` to exercise chat and durable follow-ups through the shared agent. Its composer sends on Enter or the round send button, which becomes Stop while a turn runs; queued follow-ups, approval and question cards stack above the composer card. The rendering fixture has a separate in-memory queue test, available with `npm run gpui -- --selftest-queue`.
 - `npm run ui:dev`, open `http://127.0.0.1:1420/?fixture=1`: the fixture boots with a streaming turn (Stop visible). `?fixture=1&scenario=cancel` holds a turn open to test Stop; `approval`, `question`, `tool-error` exercise the other terminal paths. Typing while busy should add a queued message.
 - Rust tests above cover transactional history, inbox claiming, coalesced persistence, and turn event order.
 

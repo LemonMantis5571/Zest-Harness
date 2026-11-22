@@ -2,6 +2,7 @@
 title: Plugins (Now Playing, Wallpaper)
 summary: Optional out-of-process add-ons, off by default, that show and control music or put an image behind the app.
 paths:
+  - spikes/gpui/src/workspace/extras.rs
   - docs/PLUGINS.md
   - docs/plugin.schema.json
   - crates/plugin-api/

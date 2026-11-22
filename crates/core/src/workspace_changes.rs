@@ -52,6 +52,59 @@ pub fn is_safe_commit_id(value: &str) -> bool {
     (4..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Line counts of a checkout's uncommitted and committed changes since a start commit.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GitDiffStats {
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+}
+
+/// Sums `git diff --numstat` output.
+pub fn parse_git_numstat(output: &[u8]) -> GitDiffStats {
+    let mut stats = GitDiffStats::default();
+    for line in String::from_utf8_lossy(output).lines() {
+        let mut fields = line.split('\t');
+        let additions = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let deletions = fields.next().and_then(|value| value.parse::<u64>().ok());
+        // Binary diffs report `-` for both counts. They still represent one
+        // changed file, but do not have meaningful line statistics.
+        if additions.is_some() || deletions.is_some() || line.contains("\t-\t") {
+            stats.changed_files = stats.changed_files.saturating_add(1);
+        }
+        stats.additions = stats.additions.saturating_add(additions.unwrap_or(0));
+        stats.deletions = stats.deletions.saturating_add(deletions.unwrap_or(0));
+    }
+    stats
+}
+
+/// Changed lines in `root` since `start_commit` (or against the index when absent),
+/// as both desktop frontends show beside the composer. Failures count as no changes.
+pub async fn diff_stats(root: &Path, start_commit: Option<&str>) -> GitDiffStats {
+    let start_commit = start_commit.map(str::trim);
+    let mut command = Command::new("git");
+    command.args(["diff", "--numstat"]);
+    if let Some(start_commit) = start_commit {
+        if !is_safe_commit_id(start_commit) {
+            return GitDiffStats::default();
+        }
+        command.arg(start_commit);
+    }
+    command.arg("--");
+    command
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let output = match timeout(Duration::from_secs(30), command.output()).await {
+        Ok(Ok(output)) if output.status.success() => output,
+        _ => return GitDiffStats::default(),
+    };
+    parse_git_numstat(&output.stdout)
+}
+
 /// Hosts pass a numeric pull-request id into `gh`. Reject zero and anything
 /// large enough that it is no longer a plausible issue number.
 pub fn is_safe_pr_number(number: u64) -> bool {
@@ -825,6 +878,24 @@ async fn change_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numstat_counts_lines_and_binary_files() {
+        let stats = super::parse_git_numstat(
+            b"3	1	src/lib.rs
+-	-	assets/logo.png
+10	0	README.md
+",
+        );
+        assert_eq!(
+            (stats.additions, stats.deletions, stats.changed_files),
+            (13, 1, 3)
+        );
+        assert_eq!(
+            super::parse_git_numstat(b""),
+            super::GitDiffStats::default()
+        );
+    }
 
     /// Git emits `XY <destination>\0<source>\0`, destination first. Reading
     /// the second field instead reports the pre-rename path and then lets the

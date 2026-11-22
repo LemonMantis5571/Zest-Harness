@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zest
+Comment=Local-first coding workbench
+Exec=zest-desktop --launcher
+Icon=zest-desktop
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=dev.zest.app

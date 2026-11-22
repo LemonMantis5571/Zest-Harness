@@ -2,12 +2,14 @@
 //! IME through `EntityInputHandler`. Built on `StyledText` so wrapping and hit-testing come
 //! from GPUI's own text layout instead of hand-rolled line breaking.
 
-use crate::view::{FG, MONO, MUTED, SANS, SEL_BG};
+use crate::view::{fg, MONO, muted, sans, sel_bg};
 use gpui::prelude::*;
 use gpui::*;
 use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
+
+const MESSAGE_HINT: &str = "Ask about this project — / for commands, paste or attach files";
 
 actions!(
     zest_spike,
@@ -79,7 +81,7 @@ impl Composer {
         Self {
             multiline_field: false,
             has_files: false,
-            placeholder: "Message Zest…  (Enter sends, Shift+Enter newline)",
+            placeholder: MESSAGE_HINT,
             focus: cx.focus_handle(),
             text: String::new(),
             sel: 0..0,
@@ -155,6 +157,16 @@ impl Composer {
 
     fn insert(&mut self, new: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, new, window, cx);
+    }
+
+    /// Sends the draft, as Enter does. Used by the chat's send button.
+    pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.do_send(&Send, window, cx);
+    }
+
+    /// The chat composer sits inside the chat's own card; other fields draw as inputs.
+    fn is_chat(&self) -> bool {
+        self.placeholder == MESSAGE_HINT
     }
 
     fn do_send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
@@ -422,6 +434,104 @@ impl EntityInputHandler for Composer {
     }
 }
 
+/// AccessKit indexes characters and word starts within a run with `u8`.
+const RUN_CHARS: usize = u8::MAX as usize;
+
+/// A piece of the composer text exposed as an AccessKit `TextRun`.
+///
+/// Each logical line is one or more runs; runs that split a long line are linked with
+/// `previous_on_line` / `next_on_line` so line navigation still treats them as one line.
+#[derive(Debug, PartialEq)]
+struct A11yRun {
+    bytes: Range<usize>,
+    lengths: Vec<u8>,
+    word_starts: Vec<u8>,
+    continues_line: bool,
+}
+
+/// Characters are graphemes, as AccessKit expects. A grapheme too long for a `u8` length
+/// is split into its code points.
+fn a11y_characters(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    text.grapheme_indices(true).flat_map(|(start, g)| {
+        let pieces: Vec<Range<usize>> = if g.len() <= u8::MAX as usize {
+            vec![start..start + g.len()]
+        } else {
+            g.char_indices().map(|(i, c)| start + i..start + i + c.len_utf8()).collect()
+        };
+        pieces
+    })
+}
+
+fn a11y_runs(text: &str) -> Vec<A11yRun> {
+    let words: Vec<usize> = text
+        .split_word_bound_indices()
+        .filter(|(_, w)| !w.trim().is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let mut runs = vec![];
+    let mut current = A11yRun { bytes: 0..0, lengths: vec![], word_starts: vec![], continues_line: false };
+    let mut line_ended = false;
+    for ch in a11y_characters(text) {
+        if line_ended || current.lengths.len() == RUN_CHARS {
+            let continues_line = !line_ended;
+            let start = ch.start;
+            runs.push(std::mem::replace(
+                &mut current,
+                A11yRun { bytes: start..start, lengths: vec![], word_starts: vec![], continues_line },
+            ));
+        }
+        if words.binary_search(&ch.start).is_ok() {
+            current.word_starts.push(current.lengths.len() as u8);
+        }
+        current.lengths.push((ch.end - ch.start) as u8);
+        current.bytes.end = ch.end;
+        line_ended = text[ch.clone()].ends_with('\n');
+    }
+    runs.push(current);
+    runs
+}
+
+/// The run and character index of a byte offset in the composer text.
+fn a11y_position(runs: &[A11yRun], offset: usize) -> (usize, usize) {
+    let index = runs.iter().position(|r| offset < r.bytes.end).unwrap_or(runs.len() - 1);
+    let run = &runs[index];
+    let target = offset.clamp(run.bytes.start, run.bytes.end);
+    let mut at = run.bytes.start;
+    let mut character = 0;
+    for len in &run.lengths {
+        if at >= target {
+            break;
+        }
+        at += *len as usize;
+        character += 1;
+    }
+    (index, character)
+}
+
+/// Adds the composer's text runs and caret/selection, which Windows exposes as UIA TextPattern.
+fn write_a11y_text(text: &str, anchor: usize, focus: usize, b: &mut A11ySubtreeBuilder) {
+    let runs = a11y_runs(text);
+    let ids: Vec<accesskit::NodeId> = (0..runs.len()).map(|i| b.synthetic_node_id(i)).collect();
+    for (i, run) in runs.iter().enumerate() {
+        let mut node = accesskit::Node::new(Role::TextRun);
+        node.set_value(&text[run.bytes.clone()]);
+        node.set_character_lengths(run.lengths.clone());
+        node.set_word_starts(run.word_starts.clone());
+        if run.continues_line {
+            node.set_previous_on_line(ids[i - 1]);
+        }
+        if runs.get(i + 1).is_some_and(|next| next.continues_line) {
+            node.set_next_on_line(ids[i + 1]);
+        }
+        b.push_child(ids[i], node);
+    }
+    let position = |offset| {
+        let (run, character_index) = a11y_position(&runs, offset);
+        accesskit::TextPosition { node: ids[run], character_index }
+    };
+    b.parent_node().set_text_selection(accesskit::TextSelection { anchor: position(anchor), focus: position(focus) });
+}
+
 struct ComposerText {
     input: Entity<Composer>,
     inner: StyledText,
@@ -463,7 +573,7 @@ impl Element for ComposerText {
         if focus.is_focused(w) && collapsed && self.caret_blink_on {
             let origin = layout.position_for_index(cursor).unwrap_or(bounds.origin);
             let lh = layout.line_height();
-            w.paint_quad(fill(Bounds::new(origin, size(px(1.5), lh)), rgb(FG)));
+            w.paint_quad(fill(Bounds::new(origin, size(px(1.5), lh)), rgb(fg())));
             w.request_autoscroll(Bounds::new(origin, size(px(1.5), lh)));
         }
         let input = self.input.clone();
@@ -512,11 +622,11 @@ impl Render for Composer {
             let mut hs = HighlightStyle::default();
             let mut touched = false;
             if !self.sel.is_empty() && self.sel.start <= a && self.sel.end >= b {
-                hs.background_color = Some(rgb(SEL_BG).into());
+                hs.background_color = Some(rgb(sel_bg()).into());
                 touched = true;
             }
             if self.marked.as_ref().is_some_and(|m| m.start <= a && m.end >= b) {
-                hs.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(rgb(FG).into()), wavy: false });
+                hs.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(rgb(fg()).into()), wavy: false });
                 touched = true;
             }
             if touched {
@@ -526,15 +636,33 @@ impl Render for Composer {
         let styled = StyledText::new(if empty { SharedString::from(" ") } else { SharedString::from(self.text.clone()) })
             .with_highlights(runs);
         let focused = self.focus.is_focused(window);
-        let lh = px(22.);
+        let chat = self.is_chat();
+        let lh = px(21.);
         let this = cx.entity();
         let thumbs = self.images.clone();
 
         div()
             .id("composer")
             .role(Role::MultilineTextInput)
-            .aria_label("Message")
+            .aria_label(if self.placeholder == MESSAGE_HINT { "Message" } else { self.placeholder })
             .aria_value(SharedString::from(self.text.clone()))
+            .a11y_synthetic_children({
+                let text = self.text.clone();
+                let focus = self.cursor();
+                let anchor = if self.reversed { self.sel.end } else { self.sel.start };
+                move |b| write_a11y_text(&text, anchor, focus, b)
+            })
+            .on_a11y_action(AccessibleAction::SetValue, {
+                let editor = this.clone();
+                move |data, window, cx| {
+                    if let Some(accesskit::ActionData::Value(value)) = data {
+                        editor.update(cx, |field, cx| {
+                            let range = 0..field.text.encode_utf16().count();
+                            field.replace_text_in_range(Some(range), value, window, cx);
+                        });
+                    }
+                }
+            })
             .key_context("Composer")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::do_send))
@@ -560,11 +688,15 @@ impl Render for Composer {
             .flex()
             .flex_col()
             .gap_2()
-            .p_3()
-            .rounded_lg()
-            .bg(rgb(0x1d1f26))
-            .border_1()
-            .border_color(rgb(if focused { 0x4a78c2 } else { 0x2c2f3a }))
+            .when(chat, |d| d.px_4().pt(px(14.)).pb_2())
+            .when(!chat, |d| {
+                d.px(px(10.))
+                    .py(px(5.))
+                    .rounded(px(8.))
+                    .bg(rgb(crate::theme::input_bg()))
+                    .border_1()
+                    .border_color(if focused { rgb(crate::theme::primary()) } else { rgb(crate::theme::border()) })
+            })
             .when(!thumbs.is_empty(), |d| {
                 d.child(div().flex().flex_row().gap_2().children(thumbs.into_iter().map(|im| {
                     div()
@@ -573,7 +705,7 @@ impl Render for Composer {
                         .items_center()
                         .gap_1()
                         .text_size(px(11.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(muted()))
                         .child(img(im.clone()).size(px(56.)).rounded_md().object_fit(ObjectFit::Cover))
                         .child(format!("{:?} {}KB", im.format, im.bytes().len() / 1024))
                 })))
@@ -583,12 +715,12 @@ impl Render for Composer {
                     .id("composer-scroll")
                     .relative()
                     .min_h(lh)
-                    .max_h(lh * 8.)
+                    .max_h(if chat { px(180.) } else { lh * 8. })
                     .overflow_y_scroll()
-                    .font_family(SANS)
+                    .font_family(sans())
                     .text_size(px(14.))
                     .line_height(lh)
-                    .text_color(rgb(FG))
+                    .text_color(rgb(fg()))
                     .on_mouse_down(MouseButton::Left, {
                         let this = this.clone();
                         move |e: &MouseDownEvent, w, cx| {
@@ -607,7 +739,7 @@ impl Render for Composer {
                                 .absolute()
                                 .top_0()
                                 .left_0()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .child(self.placeholder),
                         )
                     }),
@@ -623,3 +755,39 @@ impl Focusable for Composer {
 
 #[allow(dead_code)]
 const _: &str = MONO;
+
+#[cfg(test)]
+mod tests {
+    use super::{A11yRun, RUN_CHARS, a11y_position, a11y_runs};
+
+    #[test]
+    fn empty_text_still_has_one_run_for_text_pattern() {
+        let runs = a11y_runs("");
+        assert_eq!(runs, vec![A11yRun { bytes: 0..0, lengths: vec![], word_starts: vec![], continues_line: false }]);
+        assert_eq!(a11y_position(&runs, 0), (0, 0));
+    }
+
+    #[test]
+    fn lines_become_runs_with_graphemes_and_word_starts() {
+        let text = "hi e\u{301}x\nnext";
+        let runs = a11y_runs(text);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(&text[runs[0].bytes.clone()], "hi e\u{301}x\n");
+        assert_eq!(runs[0].lengths, vec![1, 1, 1, 3, 1, 1]);
+        assert_eq!(runs[0].word_starts, vec![0, 3]);
+        assert!(!runs[1].continues_line);
+        assert_eq!(a11y_position(&runs, 7), (0, 5));
+        assert_eq!(a11y_position(&runs, 8), (1, 0));
+        assert_eq!(a11y_position(&runs, 9), (1, 1));
+        assert_eq!(a11y_position(&runs, text.len()), (1, 4));
+    }
+
+    #[test]
+    fn long_lines_split_into_linked_runs() {
+        let text = "a".repeat(RUN_CHARS + 3);
+        let runs = a11y_runs(&text);
+        assert_eq!(runs.iter().map(|r| r.lengths.len()).collect::<Vec<_>>(), vec![RUN_CHARS, 3]);
+        assert!(runs[1].continues_line);
+        assert_eq!(a11y_position(&runs, RUN_CHARS + 1), (1, 1));
+    }
+}

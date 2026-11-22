@@ -50,4 +50,4 @@ tempfile = "3"
 [features]
 default = []
 # Enable with `cargo test -p zest-desktop --features export-bindings` to regenerate TS DTOs.
-export-bindings = ["dep:ts-rs", "zest-coordinator/export-bindings"]
+export-bindings = ["dep:ts-rs", "zest-coordinator/export-bindings", "zest-core/export-bindings"]
