@@ -96,6 +96,23 @@ fn delegation_crash() {
     std::process::exit(3);
 }
 
+/// A normal worker with a misbehaving reviewer: `edit` changes a file,
+/// `escape` reports a finding outside the project, `hang` never answers.
+fn delegation_bad_reviewer(kind: &str, prompt: &str) {
+    if !prompt.contains("independent Zest reviewer") {
+        delegation(prompt);
+        return;
+    }
+    match kind {
+        "edit" => {
+            std::fs::write("reviewer.txt", "reviewer edit\n").expect("write reviewer edit");
+            send(r#"{"type":"result","response":"{\"decision\":\"accepted\",\"summary\":\"fixed it myself\",\"findings\":[]}"}"#);
+        }
+        "escape" => send(r#"{"type":"result","response":"{\"decision\":\"changes_requested\",\"summary\":\"see outside\",\"findings\":[{\"severity\":\"blocking\",\"path\":\"../outside.txt\",\"message\":\"look here\"}]}"}"#),
+        _ => std::thread::sleep(std::time::Duration::from_secs(300)),
+    }
+}
+
 /// A worker that edits a file, then goes silent and never finishes.
 fn delegation_hang() {
     std::fs::write("partial.txt", "unfinished work
@@ -206,6 +223,10 @@ fn main() {
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         Some("delegation_hang") => delegation_hang(),
+        Some("delegation_bad_reviewer") => {
+            let kind = args.next().expect("reviewer kind");
+            delegation_bad_reviewer(&kind, &args.next().unwrap_or_default())
+        }
         Some("delegation_crash") => delegation_crash(),
         Some("spawn_grandchild") => spawn_grandchild(&args.next().expect("pid file")),
         Some("sleeper") => sleeper(&args.next().expect("pid file")),

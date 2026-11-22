@@ -3525,6 +3525,80 @@ mod tests {
             .all(|attempt| attempt.finished_at.is_some()));
     }
 
+    async fn run_with_bad_reviewer(
+        kind: &str,
+        extra: &str,
+        wanted: DelegationStatus,
+    ) -> (
+        tempfile::TempDir,
+        Arc<DelegationCoordinator>,
+        DelegationJobView,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &format!(
+                "{}{extra}",
+                fixture_agent("bad", &["delegation_bad_reviewer", kind])
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Bad reviewer", "bad"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let view = wait_for_status(&coordinator, root, &created.job_id, wanted).await;
+        (temp, coordinator, view)
+    }
+
+    #[tokio::test]
+    async fn reviewer_edits_are_discarded_and_block_the_card() {
+        let (temp, coordinator, blocked) =
+            run_with_bad_reviewer("edit", "", DelegationStatus::Blocked).await;
+        assert!(blocked
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Reviewer produced edits"));
+        assert!(blocked.can_review_again);
+        assert_eq!(
+            attempts_by_role(&blocked, "reviewer"),
+            1,
+            "edits are not retried"
+        );
+        let report = coordinator
+            .artifact_page(temp.path(), &blocked.job_id, "review-result.json", 0)
+            .unwrap()
+            .content;
+        assert!(report.contains("reviewer diff was discarded"), "{report}");
+        assert!(!temp.path().join("reviewer.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_finding_outside_the_project_blocks_the_card() {
+        let (_temp, _coordinator, blocked) =
+            run_with_bad_reviewer("escape", "", DelegationStatus::Blocked).await;
+        let error = blocked.error.as_deref().unwrap();
+        assert!(
+            error.contains("outside.txt") || error.contains(".."),
+            "{error}"
+        );
+        assert!(blocked.can_review_again);
+    }
+
+    #[tokio::test]
+    async fn a_silent_reviewer_is_retried_once_then_fails_reviewable() {
+        let (_temp, _coordinator, failed) =
+            run_with_bad_reviewer("hang", "idle_timeout_secs = 2\n", DelegationStatus::Failed)
+                .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.starts_with("reviewer failed:"), "{error}");
+        assert!(error.contains("made no progress"), "{error}");
+        assert_eq!(attempts_by_role(&failed, "reviewer"), 2);
+        assert!(failed.can_review_again, "the worker diff is still unjudged");
+    }
+
     #[tokio::test]
     async fn cancel_stops_a_running_worker_and_cleans_its_worktree() {
         let temp = tempfile::tempdir().unwrap();
