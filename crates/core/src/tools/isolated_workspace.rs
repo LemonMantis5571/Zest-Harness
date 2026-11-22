@@ -50,10 +50,74 @@ impl PreparedWorkspace {
     }
 }
 
+const WORKTREE_DIR_PREFIX: &str = "zest-wt-";
+
+/// A temporary directory for a delegation worktree. Its name carries this
+/// process id, so a later coordinator can tell a crashed run's leftovers
+/// (see [`prune_stale_worktrees`]) from a live run's.
+pub(crate) fn worktree_tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(&format!("{WORKTREE_DIR_PREFIX}{}-", std::process::id()))
+        .tempdir()
+}
+
+/// Remove delegation worktrees of `root` whose owning process is gone,
+/// left behind when Zest crashed or was killed mid-run, then let Git forget
+/// worktrees whose directories no longer exist. Returns the removed paths.
+pub fn prune_stale_worktrees(root: &Path) -> Vec<String> {
+    let Ok(output) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut removed = Vec::new();
+    for path in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+    {
+        let path = Path::new(path);
+        let Some(owner) = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(WORKTREE_DIR_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if owner == std::process::id() || crate::process_job::process_is_running(owner) {
+            continue;
+        }
+        let gone = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .current_dir(root)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if gone {
+            removed.push(path.display().to_string());
+        }
+    }
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(root)
+        .output();
+    removed
+}
+
 /// Prepare a worker from the current project snapshot.
 pub(crate) async fn prepare(root: &Path) -> Result<PreparedWorkspace, String> {
     let base = git_output(root, &["rev-parse", "HEAD"]).await?;
-    let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
+    let temp = worktree_tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
     let worktree = temp.path().join("workspace");
     git_output_args(
         root,
@@ -94,7 +158,7 @@ pub(crate) async fn prepare(root: &Path) -> Result<PreparedWorkspace, String> {
 /// workspace recorded. It already holds the snapshot (sensitive files
 /// removed, `.zest` left out), so nothing is copied from the checkout.
 async fn prepare_at_base(root: &Path, base: &str) -> Result<PreparedWorkspace, String> {
-    let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
+    let temp = worktree_tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
     let worktree = temp.path().join("workspace");
     git_output_args(
         root,
@@ -735,6 +799,40 @@ mod tests {
         fallback.cleanup().await.unwrap();
         unpin_worker_base(temp.path(), "job-1");
         assert!(!has_commit_ref(temp.path(), "refs/zest/delegations/job-1").await);
+    }
+
+    #[tokio::test]
+    async fn stale_worktrees_of_dead_processes_are_pruned() {
+        let temp = committed_repo().await;
+        let parent = tempfile::tempdir().unwrap();
+        let add = |owner: u32| {
+            let dir = parent
+                .path()
+                .join(format!("{WORKTREE_DIR_PREFIX}{owner}-abc"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let worktree = dir.join("workspace");
+            let output = std::process::Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(&worktree)
+                .arg("HEAD")
+                .current_dir(temp.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            worktree
+        };
+        // No process has this id; this test process is alive.
+        let stale = add(u32::MAX - 7);
+        let live = add(std::process::id());
+        let removed = prune_stale_worktrees(temp.path());
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert!(!stale.exists());
+        assert!(live.exists());
+        let list = git_output(temp.path(), &["worktree", "list", "--porcelain"])
+            .await
+            .unwrap();
+        assert!(!list.contains(&format!("{}-abc", u32::MAX - 7)), "{list}");
+        let _ = remove_worktree(temp.path(), &live).await;
     }
 
     #[tokio::test]

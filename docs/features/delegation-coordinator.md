@@ -30,6 +30,11 @@ The GPUI workspace uses the desktop lock lifetime and submits approved chat-tool
   gets "another coordinator already owns this project" (`LOCK_HELD_MESSAGE`,
   checked with `is_lock_held_error`). The lock is taken on the first call to any
   coordinator method (`ensure_lock`/`require_lock`).
+- **Stale worktrees.** Delegation worktrees live in temporary directories
+  named `zest-wt-<pid>-…`. Each time a coordinator takes a project's lock it
+  removes the worktrees whose owning process is no longer running (left by a
+  crash or a killed process) and runs `git worktree prune`
+  (`prune_stale_worktrees`), reporting each on stderr.
 - **How long the lock is kept** depends on `LockRetention`:
   - `Process` (the default, used by `zest serve`): until the process exits.
   - `WhileActive` (the desktop): only while a job in that project is queued,

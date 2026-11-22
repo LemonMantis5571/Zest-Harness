@@ -2504,9 +2504,7 @@ fn three_way_patch(root: &Path, diff: &str, base: &str) -> std::result::Result<S
             .to_string(),
         stash => stash.to_string(),
     };
-    let temp = tempfile::Builder::new()
-        .prefix("zest-merge-")
-        .tempdir()
+    let temp = crate::tools::isolated_workspace::worktree_tempdir()
         .map_err(|error| format!("create merge directory: {error}"))?;
     let theirs_dir = temp.path().join("theirs");
     let ours_dir = temp.path().join("ours");

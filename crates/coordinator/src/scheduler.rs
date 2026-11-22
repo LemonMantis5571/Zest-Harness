@@ -18,13 +18,13 @@ use ts_rs::TS;
 use zest_core::{
     acceptance_check_skip_reason, apply_worker_diff, capture_workspace_snapshot,
     capture_worktree_lineage, delegation_limits, dependency_blocker, diff_paths, pin_worker_base,
-    resolve_provider_target, run_acceptance_checks, run_delegation_reviewer, run_delegation_worker,
-    run_provider_reviewer, run_provider_worker, unpin_worker_base, validate_diff_scope,
-    worker_diff_hash, ApplyOutcome, AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob,
-    DelegationOrigin, DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
-    ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
-    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerActivity,
-    WorkerLimits, WorkerResult,
+    prune_stale_worktrees, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
+    run_delegation_worker, run_provider_reviewer, run_provider_worker, unpin_worker_base,
+    validate_diff_scope, worker_diff_hash, ApplyOutcome, AttemptRole, AttemptUsage, CheckStatus,
+    Config, DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus,
+    DelegationStore, DelegationTarget, ExternalUsageReport, NativeTaskUsageContext, ProviderConfig,
+    ResolvedTargetMetadata, ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget,
+    WorkerActivity, WorkerLimits, WorkerResult,
 };
 use zest_core::{
     DecisionGate, DispatchState, ExternalSessionEvidence, InboxMessage, LifecycleEntry,
@@ -1309,7 +1309,13 @@ impl DelegationCoordinator {
                     .locks
                     .lock()
                     .map_err(|_| "coordinator lock map is poisoned".to_string())?;
-                locks.entry(key).or_insert(held);
+                locks.entry(key.clone()).or_insert(held);
+                drop(locks);
+                // Holding the lock, no other coordinator runs jobs here, so
+                // worktrees of a process that is gone are leftovers.
+                for path in prune_stale_worktrees(&key) {
+                    eprintln!("zest: removed stale delegation worktree {path}");
+                }
                 Ok(())
             }
             Err(error) => {

@@ -179,7 +179,7 @@ pub use tools::external_agent::{
 };
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
-pub use tools::isolated_workspace::{pin_worker_base, unpin_worker_base};
+pub use tools::isolated_workspace::{pin_worker_base, prune_stale_worktrees, unpin_worker_base};
 pub use tools::list_dir::ListDir;
 pub use tools::prepared::{PreImage, PreparedToolCall};
 pub use tools::question::{
