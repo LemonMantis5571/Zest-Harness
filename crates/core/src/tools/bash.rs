@@ -109,7 +109,7 @@ fn subverts_read_only(tokens: &[&str]) -> bool {
 /// rejected too because their meaning differs between `cmd.exe` and `sh`, and
 /// accepting an escape without reproducing both shells exactly would make the
 /// safety check depend on the host platform.
-fn parse_auto_argv(command: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_auto_argv(command: &str) -> Option<Vec<String>> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut token_started = false;

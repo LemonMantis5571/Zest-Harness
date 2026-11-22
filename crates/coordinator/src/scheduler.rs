@@ -14,13 +14,15 @@ use crate::runtime::{
     DelegationNotifier, NoopNotifier, SharedNotifier, SpawnAbort, TaskSpawner, TokioSpawner,
 };
 use zest_core::{
-    apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
-    diff_paths, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
-    run_delegation_worker, run_provider_reviewer, run_provider_worker, validate_diff_scope,
-    AttemptRole, AttemptUsage, CheckStatus, Config, DelegationJob, DelegationOrigin,
-    DelegationStatus as CoreDelegationStatus, DelegationStore, DelegationTarget,
-    ExternalUsageReport, NativeTaskUsageContext, ProviderConfig, ResolvedTargetMetadata,
-    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
+    acceptance_check_skip_reason, apply_worker_diff, capture_workspace_snapshot,
+    capture_worktree_lineage, delegation_limits, dependency_blocker, diff_paths, pin_worker_base,
+    prune_stale_worktrees, resolve_provider_target, run_acceptance_checks, run_delegation_reviewer,
+    run_delegation_worker, run_provider_reviewer, run_provider_worker, unpin_worker_base,
+    validate_diff_scope, worker_diff_hash, ApplyOutcome, AttemptRole, AttemptUsage, CheckStatus,
+    Config, DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus,
+    DelegationStore, DelegationTarget, ExternalUsageReport, NativeTaskUsageContext, ProviderConfig,
+    ResolvedTargetMetadata, ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget,
+    WorkerActivity, WorkerLimits, WorkerResult,
 };
 use zest_core::{
     DecisionGate, DispatchState, ExternalSessionEvidence, InboxMessage, LifecycleEntry,
@@ -28,9 +30,18 @@ use zest_core::{
 };
 
 const MAX_ACTIVE_WORKER_JOBS: usize = 2;
+/// Largest worker diff a job stores and reviews. A bigger one is refused
+/// with its size rather than cut down to something that no longer applies.
+const MAX_WORKER_DIFF_BYTES: usize = 8 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub const ARTIFACT_PAGE_BYTES: usize = 64 * 1024;
-pub const ALLOWED_ARTIFACTS: &[&str] = &["worker.diff", "worker-result.json", "review-result.json"];
+pub const ALLOWED_ARTIFACTS: &[&str] = &[
+    "worker.diff",
+    "worker-result.json",
+    "review-result.json",
+    "worker-partial.diff",
+    "worker-transcript.jsonl",
+];
 pub const DESKTOP_ORIGIN: &str = "desktop_agent_board";
 pub const INBOUND_MCP_ORIGIN: &str = "inbound_mcp";
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
@@ -557,6 +568,9 @@ pub struct DelegationJobView {
     pub changed_file_count: usize,
     pub acceptance_checks: Vec<AcceptanceCheckView>,
     pub reviewer_findings: Vec<ReviewFinding>,
+    /// A blocked or failed card whose saved worker diff never got a verdict:
+    /// `review_again` runs a fresh reviewer on it without a new worker run.
+    pub can_review_again: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -759,6 +773,108 @@ fn resolve_job_targets(
     Ok(ResolvedDelegationTargets { worker, reviewer })
 }
 
+/// The run the heartbeat reports on. The review phase swaps in each
+/// reviewer's activity; before the first one it reports the checks.
+#[derive(Clone, Default)]
+struct ActivitySlot(Arc<Mutex<Option<WatchedRun>>>);
+
+/// A role (`worker`, `reviewer`) and the activity of its current run.
+type WatchedRun = (&'static str, Arc<WorkerActivity>);
+
+impl ActivitySlot {
+    fn watching(role: &'static str, activity: Arc<WorkerActivity>) -> Self {
+        let slot = Self::default();
+        slot.set(role, activity);
+        slot
+    }
+
+    fn set(&self, role: &'static str, activity: Arc<WorkerActivity>) {
+        if let Ok(mut current) = self.0.lock() {
+            *current = Some((role, activity));
+        }
+    }
+
+    fn detail(&self, idle: &str) -> String {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|current| {
+                current
+                    .as_ref()
+                    .map(|(role, activity)| activity.summary(role))
+            })
+            .unwrap_or_else(|| idle.to_string())
+    }
+}
+
+/// The limits a worker or reviewer on `target` runs under.
+fn limits_for(config: &Config, target: &DelegationTarget) -> WorkerLimits {
+    match target {
+        DelegationTarget::ExternalAgent { agent_id } => config
+            .agents
+            .get(agent_id)
+            .map(delegation_limits)
+            .unwrap_or_default(),
+        DelegationTarget::Provider { .. } => WorkerLimits::default(),
+    }
+}
+
+/// Why a run stopped, which decides what the card becomes. Decided where
+/// the error happens, not by reading its message.
+#[derive(Debug)]
+enum RunError {
+    /// The target or configuration needs the user's attention before any run
+    /// can work (unreadable config, an unavailable provider or worker):
+    /// `blocked`.
+    Blocked(String),
+    /// The run itself went wrong: `failed`.
+    Failed(String),
+}
+
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+/// A reviewer that fails or returns an unreadable report gets one fresh
+/// replacement before the card blocks.
+const MAX_REVIEWER_ATTEMPTS: u32 = 2;
+
+/// What one reviewer process returned.
+struct ReviewOutput {
+    text: String,
+    /// Edits the reviewer made in its worktree; never applied.
+    diff: String,
+    usage: Option<AttemptUsage>,
+    evidence: Option<zest_core::ExternalSessionEvidence>,
+}
+
+fn write_json_artifact(
+    store: &DelegationStore,
+    job_id: &str,
+    name: &str,
+    value: &impl Serialize,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    store
+        .write_artifact(job_id, name, &bytes)
+        .map_err(|error| error.to_string())
+}
+
+/// The first acceptance check Zest would skip instead of run, as a card error.
+/// A skipped required check can never pass, so this stops the job before a
+/// worker spends a full attempt on it.
+fn unrunnable_check(config: &Config, job: &DelegationJob) -> Option<String> {
+    job.card.acceptance_checks.iter().find_map(|command| {
+        acceptance_check_skip_reason(config, command).map(|reason| {
+            format!(
+                "Acceptance check `{command}` cannot run: {reason}. Fix the check or the config, then retry."
+            )
+        })
+    })
+}
+
 fn attempt_usage_from_external(report: &ExternalUsageReport) -> AttemptUsage {
     AttemptUsage {
         input_tokens: report.input_tokens,
@@ -768,31 +884,6 @@ fn attempt_usage_from_external(report: &ExternalUsageReport) -> AttemptUsage {
     }
 }
 
-fn validate_authoritative_checks(
-    expected: &[zest_core::AcceptanceCheckResult],
-    report: &ReviewReport,
-) -> Result<(), String> {
-    for expected_check in expected {
-        let Some(actual) = report
-            .checks
-            .iter()
-            .find(|check| check.command == expected_check.command)
-        else {
-            return Err(format!(
-                "reviewer omitted authoritative acceptance check `{}`",
-                expected_check.command
-            ));
-        };
-        if actual.status != expected_check.status || actual.output != expected_check.output {
-            return Err(format!(
-                "reviewer changed authoritative result for `{}`",
-                expected_check.command
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobView {
     let diff = store
         .read_artifact(&job.job_id, "worker.diff")
@@ -800,6 +891,11 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_default();
     let changed_files = diff_paths(&diff);
+    let can_review_again = matches!(
+        job.status,
+        CoreDelegationStatus::Blocked | CoreDelegationStatus::Failed
+    ) && job.is_approved()
+        && job.reviewable_diff.as_deref() == Some(worker_diff_hash(&diff).as_str());
     let report = report_from_store(store, job);
     let acceptance_checks = job
         .card
@@ -877,6 +973,7 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         changed_files,
         acceptance_checks,
         reviewer_findings,
+        can_review_again,
         worker_summary,
         error: job.error.clone(),
         created_at: job.created_at,
@@ -1062,7 +1159,13 @@ impl DelegationCoordinator {
                     .locks
                     .lock()
                     .map_err(|_| "coordinator lock map is poisoned".to_string())?;
-                locks.entry(key).or_insert(held);
+                locks.entry(key.clone()).or_insert(held);
+                drop(locks);
+                // Holding the lock, no other coordinator runs jobs here, so
+                // worktrees of a process that is gone are leftovers.
+                for path in prune_stale_worktrees(&key) {
+                    eprintln!("zest: removed stale delegation worktree {path}");
+                }
                 Ok(())
             }
             Err(error) => {
@@ -1104,12 +1207,15 @@ impl DelegationCoordinator {
         true
     }
 
+    /// Every `HEARTBEAT_INTERVAL_SECS`, record what the watched run last did
+    /// (`idle` while nothing is watched).
     fn start_heartbeat_loop(
         self: &Arc<Self>,
         root: PathBuf,
         job_id: String,
         cancel: zest_core::CancelToken,
-        detail: String,
+        idle: String,
+        activity: ActivitySlot,
     ) -> Box<dyn SpawnAbort> {
         let coordinator = self.clone();
         self.spawner.spawn(Box::pin(async move {
@@ -1118,7 +1224,7 @@ impl DelegationCoordinator {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if !coordinator.record_heartbeat(&root, &job_id, &detail) {
+                        if !coordinator.record_heartbeat(&root, &job_id, &activity.detail(&idle)) {
                             break;
                         }
                     }
@@ -1270,7 +1376,13 @@ impl DelegationCoordinator {
         }
         job.require_updated_at(expected_updated_at)
             .map_err(|error| error.to_string())?;
-        let resolved = match resolve_job_targets(root, &job) {
+        let blocker = Config::find(root)
+            .map_err(|error| error.to_string())
+            .map(|config| unrunnable_check(&config, &job));
+        let resolved = match blocker.and_then(|blocker| match blocker {
+            Some(blocker) => Err(blocker),
+            None => resolve_job_targets(root, &job),
+        }) {
             Ok(resolved) => resolved,
             Err(error) => {
                 job.transition(CoreDelegationStatus::Blocked)
@@ -1464,19 +1576,18 @@ impl DelegationCoordinator {
             let permit = coordinator.lanes.clone().acquire_owned().await;
             let result = match permit {
                 Ok(_permit) => coordinator.run_job(&root, &job_id, cancel.as_ref()).await,
-                Err(error) => Err(format!("delegation scheduler stopped: {error}")),
+                Err(error) => Err(RunError::Failed(format!(
+                    "delegation scheduler stopped: {error}"
+                ))),
             };
-            if let Err(error) = result {
-                let kind = if error.contains("unavailable")
-                    || error.contains("not configured")
-                    || error.contains("owns its agent loop")
-                    || error.contains("Connect")
-                {
-                    EventKind::Blocked
-                } else {
-                    EventKind::Failed
-                };
-                let _ = coordinator.fail(&root, &job_id, &error, kind);
+            match result {
+                Ok(()) => {}
+                Err(RunError::Blocked(error)) => {
+                    let _ = coordinator.fail(&root, &job_id, &error, EventKind::Blocked);
+                }
+                Err(RunError::Failed(error)) => {
+                    let _ = coordinator.fail(&root, &job_id, &error, EventKind::Failed);
+                }
             }
             if let Ok(mut running) = coordinator.running.lock() {
                 if running
@@ -1526,10 +1637,17 @@ impl DelegationCoordinator {
             if let Err(error) = job.transition(CoreDelegationStatus::Cancelled) {
                 return Err(error.to_string());
             }
+            // The worker task cannot record this later: a cancelled job is
+            // never saved over.
+            job.finish_active_attempts_with_status(
+                zest_core::DispatchStatus::Cancelled,
+                "cancelled by the user",
+            );
             let job = match store.update(job) {
                 Ok(job) => job,
                 Err(error) => return Err(error.to_string()),
             };
+            unpin_worker_base(root, job_id);
             self.emit(&store, &job, EventKind::Cancelled);
             self.kick_pending(root, &store);
             return Ok(job_view(&store, &job));
@@ -1587,6 +1705,43 @@ impl DelegationCoordinator {
         Ok(job_view(&store, &job))
     }
 
+    /// Review the saved worker diff of a card that blocked or failed before a
+    /// verdict (a reviewer that kept failing, edited files, or timed out)
+    /// with a fresh reviewer, without rerunning the worker. The existing
+    /// approval still covers it: the diff and targets are the approved ones,
+    /// and a config change still sends the card back for approval.
+    pub fn review_again(
+        self: &Arc<Self>,
+        root: &Path,
+        job_id: &str,
+        expected_updated_at: Option<u64>,
+    ) -> ResultView {
+        self.require_lock(root)?;
+        let _ops = self.lock_ops()?;
+        let _release = self.release_when_idle(root);
+        let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
+        let mut job = store
+            .load(job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "delegation job was not found".to_string())?;
+        if job.status == CoreDelegationStatus::Queued && job.review_only {
+            return Ok(job_view(&store, &job));
+        }
+        job.require_updated_at(expected_updated_at)
+            .map_err(|error| error.to_string())?;
+        let saved_diff = store
+            .read_artifact(job_id, "worker.diff")
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
+        job.queue_review_again(&saved_diff)
+            .map_err(|error| error.to_string())?;
+        let job = store.update(job).map_err(|error| error.to_string())?;
+        self.emit(&store, &job, EventKind::Queued);
+        self.enqueue(root.to_path_buf(), job.job_id.clone());
+        Ok(job_view(&store, &job))
+    }
+
     pub fn reconcile(self: &Arc<Self>, root: &Path) -> Result<Vec<DelegationJobView>, String> {
         self.require_lock(root)?;
         let _ops = self.lock_ops()?;
@@ -1604,7 +1759,14 @@ impl DelegationCoordinator {
             })
             .unwrap_or_default();
         let mut changed = Vec::new();
-        for mut job in store.list().map_err(|error| error.to_string())? {
+        let (jobs, unreadable) = store.list_all().map_err(|error| error.to_string())?;
+        for bad in &unreadable {
+            eprintln!(
+                "zest: skipped unreadable delegation job {}: {}",
+                bad.job_id, bad.error
+            );
+        }
+        for mut job in jobs {
             if matches!(
                 job.status,
                 CoreDelegationStatus::WorkerRunning | CoreDelegationStatus::ReviewRunning
@@ -1706,18 +1868,30 @@ impl DelegationCoordinator {
         store
             .begin_apply(&mut job)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = validate_diff_scope(root, &diff, &job.card.scope)
-            .and_then(|()| apply_diff_checked(root, &diff))
+        let outcome = match validate_diff_scope(root, &diff, &job.card.scope)
+            .and_then(|()| apply_worker_diff(root, &diff, job.worker_base.as_deref()))
         {
-            let _ = job.transition(CoreDelegationStatus::ApplyConflict);
-            job.set_error(error.to_string());
-            let job = store.update(job).map_err(|save| save.to_string())?;
-            self.emit(&store, &job, EventKind::Conflict);
-            return Ok(job_view(&store, &job));
-        }
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = job.transition(CoreDelegationStatus::ApplyConflict);
+                job.set_error(error.to_string());
+                let job = store.update(job).map_err(|save| save.to_string())?;
+                self.emit(&store, &job, EventKind::Conflict);
+                return Ok(job_view(&store, &job));
+            }
+        };
         job.transition(CoreDelegationStatus::Accepted)
             .map_err(|error| error.to_string())?;
         job.error = None;
+        if outcome == ApplyOutcome::ThreeWay {
+            job.orchestration.add_message(
+                zest_core::MessageKind::Info,
+                "coordinator",
+                "The checkout had changed around the worker's edits, so the reviewed changes were placed with a three-way merge from the worker's base.",
+                unix_millis(),
+            );
+        }
+        unpin_worker_base(root, job_id);
         let job = store.update(job).map_err(|error| error.to_string())?;
         self.emit(&store, &job, EventKind::Applied);
         self.kick_pending(root, &store);
@@ -1851,7 +2025,7 @@ impl DelegationCoordinator {
         root: &Path,
         job_id: &str,
         cancel: &zest_core::CancelToken,
-    ) -> Result<(), String> {
+    ) -> Result<(), RunError> {
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let mut job = store
             .load(job_id)
@@ -1880,12 +2054,24 @@ impl DelegationCoordinator {
             return Ok(());
         }
         if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
+            return Ok(self.cancelled(&store, job).await?);
         }
-        let config = Config::find(root).map_err(|error| error.to_string())?;
+        let config = Config::find(root).map_err(|error| RunError::Blocked(error.to_string()))?;
+        if let Some(blocker) = unrunnable_check(&config, &job) {
+            job.transition(CoreDelegationStatus::Blocked)
+                .map_err(|error| error.to_string())?;
+            job.set_error(blocker);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(&store, &job, EventKind::Blocked);
+            return Ok(());
+        }
         let parent_secret_envs = config.provider_key_env_names();
         let resolved_targets = resolve_job_targets(root, &job).map_err(|error| {
-            format!("{error}. Reconnect the provider/worker or choose another target.")
+            RunError::Blocked(format!(
+                "{error}. Reconnect the provider/worker or choose another target."
+            ))
         })?;
         if !job.is_approved_for(&resolved_targets.worker, &resolved_targets.reviewer) {
             job.transition(CoreDelegationStatus::AwaitingApproval)
@@ -1898,6 +2084,33 @@ impl DelegationCoordinator {
                 .map_err(|error| error.to_string())?;
             self.emit(&store, &job, EventKind::ApprovalRequired);
             return Ok(());
+        }
+        if job.review_only {
+            let worker_diff = store
+                .read_artifact(job_id, "worker.diff")
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .filter(|diff| {
+                    job.reviewable_diff.as_deref() == Some(worker_diff_hash(diff).as_str())
+                })
+                .ok_or_else(|| {
+                    "the saved worker diff changed; retry for a new worker attempt".to_string()
+                })?;
+            let worker_result = worker_result_from_store(&store, &job).ok_or_else(|| {
+                "the saved worker result is missing; retry for a new worker attempt".to_string()
+            })?;
+            return Ok(self
+                .run_review_phase(
+                    root,
+                    &store,
+                    job,
+                    &config,
+                    &resolved_targets.reviewer,
+                    &worker_diff,
+                    &worker_result,
+                    cancel,
+                )
+                .await?);
         }
         job.transition(CoreDelegationStatus::WorkerRunning)
             .map_err(|error| error.to_string())?;
@@ -1913,11 +2126,16 @@ impl DelegationCoordinator {
             .update(job.clone())
             .map_err(|error| error.to_string())?;
         self.emit(&store, &job, EventKind::WorkerStarted);
+        let worker_activity = Arc::new(WorkerActivity::new(limits_for(
+            &config,
+            &resolved_targets.worker.target,
+        )));
         let worker_heartbeat = self.start_heartbeat_loop(
             root.to_path_buf(),
             job_id.to_string(),
             cancel.clone(),
             "worker dispatch is still active".into(),
+            ActivitySlot::watching("worker", worker_activity.clone()),
         );
 
         let snapshot = job.base_workspace_snapshot.clone();
@@ -1955,64 +2173,103 @@ impl DelegationCoordinator {
         };
         let worker_target = resolved_targets.worker.target.clone();
         let mut worker_evidence = None;
-        let worker = match &worker_target {
-            DelegationTarget::ExternalAgent { agent_id } => {
-                let agent = config
-                    .agents
-                    .get(agent_id)
-                    .ok_or_else(|| format!("external worker `{agent_id}` is unavailable"))?;
-                let result = run_delegation_worker(
-                    root,
-                    agent,
-                    &worker_prompt,
-                    Some(cancel),
-                    &parent_secret_envs,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                if let Ok(mut ledger) = self.ledger.lock() {
-                    ledger.record_external(agent_id, result.usage.as_ref());
+        let worker: Result<_, String> = async {
+            match &worker_target {
+                DelegationTarget::ExternalAgent { agent_id } => {
+                    let agent = config
+                        .agents
+                        .get(agent_id)
+                        .ok_or_else(|| format!("external worker `{agent_id}` is unavailable"))?;
+                    let result = run_delegation_worker(
+                        root,
+                        agent,
+                        &worker_prompt,
+                        Some(cancel),
+                        &parent_secret_envs,
+                        &worker_activity,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    if let Ok(mut ledger) = self.ledger.lock() {
+                        ledger.record_external(agent_id, result.usage.as_ref());
+                    }
+                    let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
+                    let parsed = WorkerResult::from_external(&result.text, &result.diff)
+                        .ok_or_else(|| "worker returned no usable result".to_string())?;
+                    if let Some(mut evidence) = result.session_evidence {
+                        evidence.worker_id = agent_id.clone();
+                        evidence.preview = Some(parsed.summary.clone());
+                        worker_evidence = Some(evidence);
+                    }
+                    Ok((
+                        parsed,
+                        result.diff,
+                        result.text,
+                        attempt_usage,
+                        result.base_commit,
+                    ))
                 }
-                let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
-                let parsed = WorkerResult::from_external(&result.text, &result.diff)
-                    .ok_or_else(|| "worker returned no usable result".to_string())?;
-                if let Some(mut evidence) = result.session_evidence {
-                    evidence.worker_id = agent_id.clone();
-                    evidence.preview = Some(parsed.summary.clone());
-                    worker_evidence = Some(evidence);
+                DelegationTarget::Provider { .. } => {
+                    let result = run_provider_worker(
+                        root,
+                        config.clone(),
+                        &worker_target,
+                        &worker_prompt,
+                        NativeTaskUsageContext {
+                            ledger: Some(self.ledger.clone()),
+                            correlation_id: Some(job_id.to_string()),
+                        },
+                        Some(cancel),
+                        &worker_activity,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    Ok((
+                        result.result,
+                        result.diff,
+                        result.final_text,
+                        Some(result.usage),
+                        Some(result.base_commit),
+                    ))
                 }
-                Ok((parsed, result.diff, result.text, attempt_usage))
             }
-            DelegationTarget::Provider { .. } => {
-                let result = run_provider_worker(
-                    root,
-                    config.clone(),
-                    &worker_target,
-                    &worker_prompt,
-                    NativeTaskUsageContext {
-                        ledger: Some(self.ledger.clone()),
-                        correlation_id: Some(job_id.to_string()),
-                    },
-                    Some(cancel),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                Ok((
-                    result.result,
-                    result.diff,
-                    result.final_text,
-                    Some(result.usage),
-                ))
+        }
+        .await;
+        worker_heartbeat.abort();
+        // Saved whatever happened, so a failed or stopped worker can be read too.
+        let _ = store.write_artifact(
+            job_id,
+            "worker-transcript.jsonl",
+            &worker_activity.transcript(),
+        );
+        if cancel.is_cancelled() {
+            return Ok(self.cancelled(&store, job).await?);
+        }
+        let (worker_result, worker_diff, worker_text, worker_usage, worker_base) = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                let mut error = format!("worker failed: {error}");
+                if let Some(partial) = worker_activity.take_partial_diff() {
+                    if store
+                        .write_artifact(job_id, "worker-partial.diff", partial.as_bytes())
+                        .is_ok()
+                    {
+                        error.push_str(
+                            ". What it had changed so far is saved as worker-partial.diff (not reviewed).",
+                        );
+                    }
+                }
+                return Err(RunError::Failed(error));
             }
         };
-        worker_heartbeat.abort();
-        if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
-        }
-        let (worker_result, worker_diff, worker_text, worker_usage) =
-            worker.map_err(|error: String| format!("worker failed: {error}"))?;
         if worker_diff.trim().is_empty() {
-            return Err("worker returned no diff artifact".into());
+            return Err(RunError::Failed("worker returned no diff artifact".into()));
+        }
+        if worker_diff.len() > MAX_WORKER_DIFF_BYTES {
+            return Err(RunError::Failed(format!(
+                "worker diff is {} bytes, larger than the {MAX_WORKER_DIFF_BYTES}-byte limit for a delegated change; split the card into smaller ones",
+                worker_diff.len()
+            )));
         }
         validate_diff_scope(root, &worker_diff, &job.card.scope)
             .map_err(|error| format!("worker produced an unsafe or out-of-scope diff: {error}"))?;
@@ -2031,6 +2288,13 @@ impl DelegationCoordinator {
             job.set_attempt_usage(&worker_attempt, usage)
                 .map_err(|e| e.to_string())?;
         }
+        job.reviewable_diff = Some(worker_diff_hash(&worker_diff));
+        // Keep the worker's snapshot commit reachable so the checks and every
+        // reviewer, including a later review again, start from it.
+        job.worker_base = match worker_base {
+            Some(base) if pin_worker_base(root, job_id, &base).await.is_ok() => Some(base),
+            _ => None,
+        };
         if let Some(evidence) = worker_evidence.take() {
             job.orchestration.attach_external_session(evidence);
         }
@@ -2040,42 +2304,214 @@ impl DelegationCoordinator {
         let _ = worker_text;
         self.emit(&store, &job, EventKind::WorkerCompleted);
         if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
+            return Ok(self.cancelled(&store, job).await?);
         }
+        self.run_review_phase(
+            root,
+            &store,
+            job,
+            &config,
+            &resolved_targets.reviewer,
+            &worker_diff,
+            &worker_result,
+            cancel,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Run the acceptance checks once, then the reviewer, retrying the
+    /// reviewer once when it fails in a way a fresh process may not repeat:
+    /// the process failed or timed out, or its report did not parse.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_review_phase(
+        self: &Arc<Self>,
+        root: &Path,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        config: &Config,
+        reviewer: &ResolvedTargetMetadata,
+        worker_diff: &str,
+        worker_result: &WorkerResult,
+        cancel: &zest_core::CancelToken,
+    ) -> Result<(), String> {
         job.transition(CoreDelegationStatus::ReviewRunning)
             .map_err(|error| error.to_string())?;
-        let reviewer_target = resolved_targets.reviewer.target.clone();
-        let reviewer_agent = reviewer_target.identity().to_string();
-        let reviewer_attempt = job
-            .start_attempt_with_metadata(
-                AttemptRole::Reviewer,
-                &reviewer_agent,
-                resolved_targets.reviewer.clone(),
-            )
-            .map_err(|error| error.to_string())?;
+        job.review_only = false;
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
-        self.emit(&store, &job, EventKind::ReviewerStarted);
-        let reviewer_heartbeat = self.start_heartbeat_loop(
+        let watched = ActivitySlot::default();
+        let heartbeat = self.start_heartbeat_loop(
             root.to_path_buf(),
-            job_id.to_string(),
+            job.job_id.clone(),
             cancel.clone(),
-            "review dispatch is still active".into(),
+            "acceptance checks are running".into(),
+            watched.clone(),
         );
+        let result = self
+            .review_attempts(
+                root,
+                store,
+                job,
+                config,
+                reviewer,
+                worker_diff,
+                worker_result,
+                cancel,
+                &watched,
+            )
+            .await;
+        heartbeat.abort();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn review_attempts(
+        self: &Arc<Self>,
+        root: &Path,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        config: &Config,
+        reviewer: &ResolvedTargetMetadata,
+        worker_diff: &str,
+        worker_result: &WorkerResult,
+        cancel: &zest_core::CancelToken,
+        watched: &ActivitySlot,
+    ) -> Result<(), String> {
+        let job_id = job.job_id.clone();
         let checks = run_acceptance_checks(
             root,
             config.clone(),
-            &worker_diff,
+            worker_diff,
+            job.worker_base.as_deref(),
             &job.card.acceptance_checks,
             Some(cancel),
         )
         .await
         .map_err(|error| format!("acceptance checks failed: {error}"))?;
-        let check_evidence = serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?;
-        let review_prompt = format!("{}\n\n# Authoritative acceptance-check results\n```json\n{}\n```\nReport these exact command/status/output values in your checks array.", job.card.review_prompt(root, &snapshot, &worker_result), check_evidence);
-        let mut reviewer_evidence = None;
-        let review = match &reviewer_target {
+        let snapshot = job.base_workspace_snapshot.clone();
+        let review_prompt = job
+            .card
+            .review_prompt(root, &snapshot, worker_result, &checks);
+        let reviewer_agent = reviewer.target.identity().to_string();
+        for round in 1..=MAX_REVIEWER_ATTEMPTS {
+            let last_round = round == MAX_REVIEWER_ATTEMPTS;
+            let reviewer_attempt = job
+                .start_attempt_with_metadata(
+                    AttemptRole::Reviewer,
+                    &reviewer_agent,
+                    reviewer.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(store, &job, EventKind::ReviewerStarted);
+            let activity = Arc::new(WorkerActivity::new(limits_for(config, &reviewer.target)));
+            watched.set("reviewer", activity.clone());
+            let outcome = self
+                .run_reviewer(
+                    root,
+                    config,
+                    &reviewer.target,
+                    worker_diff,
+                    job.worker_base.as_deref(),
+                    &review_prompt,
+                    &job_id,
+                    cancel,
+                    &activity,
+                )
+                .await;
+            if cancel.is_cancelled() {
+                return self.cancelled(store, job).await;
+            }
+            let review = match outcome {
+                Ok(review) => review,
+                Err(error) if !last_round => {
+                    self.retry_reviewer(store, &mut job, &format!("reviewer failed: {error}"))?;
+                    continue;
+                }
+                Err(error) => return Err(format!("reviewer failed: {error}")),
+            };
+            if let Some(mut evidence) = review.evidence {
+                evidence.preview = Some(review.text.chars().take(8_000).collect());
+                job.orchestration.attach_external_session(evidence);
+            }
+            if let Some(usage) = review.usage {
+                job.set_attempt_usage(&reviewer_attempt, usage)
+                    .map_err(|e| e.to_string())?;
+            }
+            if !review.diff.trim().is_empty() {
+                let discarded = serde_json::json!({
+                    "error": "reviewer produced edits; the reviewer diff was discarded",
+                    "raw": review.text,
+                });
+                return self.block_review(
+                    store,
+                    job,
+                    &reviewer_attempt,
+                    &discarded,
+                    "Reviewer produced edits. They were discarded, and a fresh reviewer is required.",
+                );
+            }
+            let report = match ReviewReport::parse_verdict(&review.text, checks.clone()) {
+                Ok(report) => report,
+                Err(error) => {
+                    let malformed =
+                        serde_json::json!({"error": error.to_string(), "raw": review.text});
+                    if !last_round {
+                        write_json_artifact(store, &job_id, "review-result.json", &malformed)?;
+                        job.finish_attempt(&reviewer_attempt);
+                        self.retry_reviewer(store, &mut job, &error.to_string())?;
+                        continue;
+                    }
+                    return self.block_review(
+                        store,
+                        job,
+                        &reviewer_attempt,
+                        &malformed,
+                        &error.to_string(),
+                    );
+                }
+            };
+            if let Err(error) = zest_core::validate_review_paths(root, &report) {
+                let report = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+                return self.block_review(
+                    store,
+                    job,
+                    &reviewer_attempt,
+                    &report,
+                    &error.to_string(),
+                );
+            }
+            write_json_artifact(store, &job_id, "review-result.json", &report)?;
+            job.finish_attempt(&reviewer_attempt);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(store, &job, EventKind::ReviewerCompleted);
+            return self.record_verdict(store, job, &report);
+        }
+        unreachable!("the last reviewer round always returns")
+    }
+
+    /// One reviewer process in a fresh worktree with the worker diff applied.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_reviewer(
+        &self,
+        root: &Path,
+        config: &Config,
+        target: &DelegationTarget,
+        worker_diff: &str,
+        worker_base: Option<&str>,
+        prompt: &str,
+        job_id: &str,
+        cancel: &zest_core::CancelToken,
+        activity: &WorkerActivity,
+    ) -> Result<ReviewOutput, String> {
+        let parent_secret_envs = config.provider_key_env_names();
+        match target {
             DelegationTarget::ExternalAgent { agent_id } => {
                 let agent = config
                     .agents
@@ -2084,168 +2520,103 @@ impl DelegationCoordinator {
                 let result = run_delegation_reviewer(
                     root,
                     agent,
-                    &worker_diff,
-                    &review_prompt,
+                    worker_diff,
+                    worker_base,
+                    prompt,
                     Some(cancel),
                     &parent_secret_envs,
+                    activity,
                 )
-                .await
-                .map_err(|error| format!("reviewer failed: {error}"))?;
+                .await?;
                 if let Ok(mut ledger) = self.ledger.lock() {
                     ledger.record_external(agent_id, result.usage.as_ref());
                 }
-                let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
-                if let Some(mut evidence) = result.session_evidence {
+                let evidence = result.session_evidence.map(|mut evidence| {
                     evidence.worker_id = agent_id.clone();
-                    reviewer_evidence = Some(evidence);
-                }
-                (result.text, result.diff, attempt_usage)
+                    evidence
+                });
+                Ok(ReviewOutput {
+                    usage: result.usage.as_ref().map(attempt_usage_from_external),
+                    text: result.text,
+                    diff: result.diff,
+                    evidence,
+                })
             }
             DelegationTarget::Provider { .. } => {
                 let result = run_provider_reviewer(
                     root,
                     config.clone(),
-                    &reviewer_target,
-                    &worker_diff,
-                    &review_prompt,
+                    target,
+                    worker_diff,
+                    worker_base,
+                    prompt,
                     NativeTaskUsageContext {
                         ledger: Some(self.ledger.clone()),
                         correlation_id: Some(job_id.to_string()),
                     },
                     Some(cancel),
+                    activity,
                 )
                 .await
-                .map_err(|error| format!("reviewer failed: {error}"))?;
-                (result.final_text, result.reviewer_diff, Some(result.usage))
+                .map_err(|error| error.to_string())?;
+                Ok(ReviewOutput {
+                    text: result.final_text,
+                    diff: result.reviewer_diff,
+                    usage: Some(result.usage),
+                    evidence: None,
+                })
             }
-        };
-        reviewer_heartbeat.abort();
-        if let Some(mut evidence) = reviewer_evidence.take() {
-            evidence.preview = Some(review.0.chars().take(8_000).collect());
-            job.orchestration.attach_external_session(evidence);
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
         }
-        if cancel.is_cancelled() {
-            return self.cancelled(&store, job).await;
-        }
-        if !review.1.trim().is_empty() {
-            let discarded = serde_json::json!({
-                "error": "reviewer produced edits; the reviewer diff was discarded",
-                "raw": review.0,
-            });
-            store
-                .write_artifact(
-                    job_id,
-                    "review-result.json",
-                    &serde_json::to_vec_pretty(&discarded).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            job.finish_attempt(&reviewer_attempt);
-            if let Some(usage) = review.2 {
-                job.set_attempt_usage(&reviewer_attempt, usage)
-                    .map_err(|e| e.to_string())?;
-            }
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.set_error(
-                "Reviewer produced edits. They were discarded, and a fresh reviewer is required.",
-            );
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::Blocked);
-            return Ok(());
-        }
-        let report = match ReviewReport::parse(&review.0, &job.card.acceptance_checks) {
-            Ok(report) => report,
-            Err(error) => {
-                let malformed = serde_json::json!({"error": error.to_string(), "raw": review.0});
-                store
-                    .write_artifact(
-                        job_id,
-                        "review-result.json",
-                        &serde_json::to_vec_pretty(&malformed)
-                            .map_err(|error| error.to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-                job.finish_attempt(&reviewer_attempt);
-                if let Some(usage) = review.2.clone() {
-                    job.set_attempt_usage(&reviewer_attempt, usage)
-                        .map_err(|e| e.to_string())?;
-                }
-                job.transition(CoreDelegationStatus::Blocked)
-                    .map_err(|error| error.to_string())?;
-                job.set_error(error.to_string());
-                store
-                    .update(job.clone())
-                    .map_err(|error| error.to_string())?;
-                self.emit(&store, &job, EventKind::Blocked);
-                return Ok(());
-            }
-        };
-        if let Err(error) = zest_core::validate_review_paths(root, &report) {
-            store
-                .write_artifact(
-                    job_id,
-                    "review-result.json",
-                    &serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            job.finish_attempt(&reviewer_attempt);
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.set_error(error.to_string());
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::Blocked);
-            return Ok(());
-        }
-        if let Err(error) = validate_authoritative_checks(&checks, &report) {
-            store
-                .write_artifact(
-                    job_id,
-                    "review-result.json",
-                    &serde_json::to_vec_pretty(&serde_json::json!({
-                        "error": error,
-                        "report": report,
-                        "authoritativeChecks": checks,
-                    }))
-                    .map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            job.finish_attempt(&reviewer_attempt);
-            if let Some(usage) = review.2 {
-                job.set_attempt_usage(&reviewer_attempt, usage)
-                    .map_err(|e| e.to_string())?;
-            }
-            job.transition(CoreDelegationStatus::Blocked)
-                .map_err(|error| error.to_string())?;
-            job.set_error(error);
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::Blocked);
-            return Ok(());
-        }
-        store
-            .write_artifact(
-                job_id,
-                "review-result.json",
-                &serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-        job.finish_attempt(&reviewer_attempt);
-        if let Some(usage) = review.2 {
-            job.set_attempt_usage(&reviewer_attempt, usage)
-                .map_err(|e| e.to_string())?;
-        }
+    }
+
+    /// Close a failed reviewer attempt and say on the card that a fresh
+    /// reviewer is starting.
+    fn retry_reviewer(
+        &self,
+        store: &DelegationStore,
+        job: &mut DelegationJob,
+        reason: &str,
+    ) -> Result<(), String> {
+        job.finish_active_attempts_with_status(zest_core::DispatchStatus::Failed, reason);
+        let now = unix_millis();
+        job.orchestration.add_message(
+            zest_core::MessageKind::Info,
+            "coordinator",
+            format!("{reason}. Starting one fresh reviewer automatically."),
+            now,
+        );
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
-        self.emit(&store, &job, EventKind::ReviewerCompleted);
+        Ok(())
+    }
+
+    fn block_review(
+        &self,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        reviewer_attempt: &str,
+        artifact: &serde_json::Value,
+        error: &str,
+    ) -> Result<(), String> {
+        write_json_artifact(store, &job.job_id, "review-result.json", artifact)?;
+        job.finish_attempt(reviewer_attempt);
+        job.transition(CoreDelegationStatus::Blocked)
+            .map_err(|error| error.to_string())?;
+        job.set_error(error);
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        self.emit(store, &job, EventKind::Blocked);
+        Ok(())
+    }
+
+    fn record_verdict(
+        self: &Arc<Self>,
+        store: &DelegationStore,
+        mut job: DelegationJob,
+        report: &ReviewReport,
+    ) -> Result<(), String> {
         if report.can_accept(&job.card.acceptance_checks) {
             job.transition(CoreDelegationStatus::ReadyToApply)
                 .map_err(|error| error.to_string())?;
@@ -2253,16 +2624,28 @@ impl DelegationCoordinator {
             store
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::ReadyToApply);
-        } else {
-            job.transition(CoreDelegationStatus::ChangesRequested)
-                .map_err(|error| error.to_string())?;
-            job.set_error("Reviewer requested changes before this diff can be applied.");
-            store
-                .update(job.clone())
-                .map_err(|error| error.to_string())?;
-            self.emit(&store, &job, EventKind::ChangesRequested);
+            self.emit(store, &job, EventKind::ReadyToApply);
+            return Ok(());
         }
+        job.transition(CoreDelegationStatus::ChangesRequested)
+            .map_err(|error| error.to_string())?;
+        let reason = match report.decision {
+            zest_core::ReviewDecision::Accepted => report
+                .unmet_check(&job.card.acceptance_checks)
+                .map(|reason| format!("The reviewer accepted the diff, but {reason}."))
+                .unwrap_or_else(|| {
+                    "The reviewer reported a blocking finding before this diff can be applied."
+                        .into()
+                }),
+            zest_core::ReviewDecision::ChangesRequested => {
+                "Reviewer requested changes before this diff can be applied.".into()
+            }
+        };
+        job.set_error(reason);
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        self.emit(store, &job, EventKind::ChangesRequested);
         Ok(())
     }
 
@@ -2402,7 +2785,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
 
-    use zest_core::{FeatureCard, DELEGATION_FORMAT_VERSION};
+    use zest_core::{apply_diff_checked, FeatureCard, DELEGATION_FORMAT_VERSION};
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -2449,6 +2832,12 @@ mod tests {
     }
 
     fn write_fixture_project(root: &Path) {
+        write_fixture_project_with(root, "");
+    }
+
+    /// The fixture project with extra `zest.toml` text appended after the
+    /// default `[agents.worker]` entry.
+    fn write_fixture_project_with(root: &Path, extra_config: &str) {
         git(root, &["init", "--quiet"]);
         git(root, &["config", "user.name", "Zest Test"]);
         git(root, &["config", "user.email", "zest-test@localhost"]);
@@ -2463,7 +2852,7 @@ mod tests {
         std::fs::write(
             root.join("zest.toml"),
             format!(
-                "[agents.worker]\nmode = \"headless\"\ncommand = {command}\nargs = [\"delegation\", \"{{prompt}}\"]\nworkspace = \"isolated\"\ntimeout_secs = 30\n"
+                "[agents.worker]\nmode = \"headless\"\ncommand = {command}\nargs = [\"delegation\", \"{{prompt}}\"]\nworkspace = \"isolated\"\ntimeout_secs = 30\n{extra_config}"
             ),
         )
         .unwrap();
@@ -2495,7 +2884,7 @@ mod tests {
         job_id: &str,
         wanted: DelegationStatus,
     ) -> DelegationJobView {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             let view = get_view(root, job_id).unwrap();
             if view.status == wanted {
@@ -2562,6 +2951,560 @@ mod tests {
                 .replace("\r\n", "\n"),
             "fixture worker change\n"
         );
+    }
+
+    #[tokio::test]
+    async fn reviewer_that_omits_check_output_still_reaches_ready_to_apply() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, "\n[tools.bash]\nextra_allowlist = [[\"rustc\"]]\n");
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let mut request = create_request("Checked delegation");
+        request.acceptance_checks = vec!["rustc --version".into()];
+        let created = coordinator.create_job(root, request).unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        // The fixture reviewer answers `"checks":[]`; the coordinator's own
+        // result is what the report records.
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        let transcript = coordinator
+            .artifact_page(root, &created.job_id, "worker-transcript.jsonl", 0)
+            .unwrap()
+            .content;
+        assert!(
+            transcript.contains("fixture worker changed delegated.txt"),
+            "{transcript}"
+        );
+        assert_eq!(ready.acceptance_checks.len(), 1);
+        let check = &ready.acceptance_checks[0];
+        assert!(matches!(check.status, AcceptanceCheckStatus::Passed));
+        assert!(
+            check.output.starts_with("$ rustc --version\nexit 0"),
+            "{}",
+            check.output
+        );
+    }
+
+    /// An `[agents.<name>]` entry that runs the fixture with `args` before
+    /// the prompt.
+    fn fixture_agent(name: &str, args: &[&str]) -> String {
+        let command =
+            serde_json::to_string(&fixture_binary().to_string_lossy().to_string()).unwrap();
+        let mut all: Vec<String> = args
+            .iter()
+            .map(|arg| serde_json::to_string(arg).unwrap())
+            .collect();
+        all.push("\"{prompt}\"".into());
+        format!(
+            "\n[agents.{name}]\nmode = \"headless\"\ncommand = {command}\nargs = [{}]\nworkspace = \"isolated\"\ntimeout_secs = 30\n",
+            all.join(", ")
+        )
+    }
+
+    fn worker_request(title: &str, agent_id: &str) -> CreateDelegationJobRequest {
+        let mut request = create_request(title);
+        request.worker = DelegationTargetView::ExternalAgent {
+            agent_id: agent_id.into(),
+        };
+        request
+    }
+
+    fn attempts_by_role(view: &DelegationJobView, role: &str) -> usize {
+        view.attempts
+            .iter()
+            .filter(|attempt| attempt.role == role)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_review_gets_one_fresh_reviewer() {
+        let temp = tempfile::tempdir().unwrap();
+        let counter = tempfile::tempdir().unwrap();
+        let counter = counter.path().join("reviews");
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &fixture_agent(
+                "flaky",
+                &["delegation_flaky_reviewer", &counter.to_string_lossy(), "1"],
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Flaky review", "flaky"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(attempts_by_role(&ready, "worker"), 1);
+        assert_eq!(attempts_by_role(&ready, "reviewer"), 2);
+        assert!(ready
+            .orchestration
+            .as_ref()
+            .unwrap()
+            .inbox
+            .iter()
+            .any(|message| message.body.contains("Starting one fresh reviewer")));
+    }
+
+    #[tokio::test]
+    async fn review_again_reuses_the_worker_diff_after_reviewers_keep_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let counter = tempfile::tempdir().unwrap();
+        let counter = counter.path().join("reviews");
+        let root = temp.path();
+        // Both automatic reviewer rounds answer prose; the third reviewer works.
+        write_fixture_project_with(
+            root,
+            &fixture_agent(
+                "flaky",
+                &["delegation_flaky_reviewer", &counter.to_string_lossy(), "2"],
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Review again", "flaky"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let blocked = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Blocked,
+        )
+        .await;
+        assert!(blocked.error.as_deref().unwrap().contains("malformed JSON"));
+        assert!(blocked.can_review_again);
+        assert_eq!(attempts_by_role(&blocked, "reviewer"), 2);
+        let diff_before = coordinator
+            .artifact_page(root, &created.job_id, "worker.diff", 0)
+            .unwrap()
+            .content;
+
+        let queued = coordinator
+            .review_again(root, &created.job_id, Some(blocked.updated_at))
+            .unwrap();
+        assert_eq!(queued.status, DelegationStatus::Queued);
+        assert!(queued.approved, "no fresh approval is needed");
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(
+            attempts_by_role(&ready, "worker"),
+            1,
+            "the worker did not run again"
+        );
+        assert_eq!(attempts_by_role(&ready, "reviewer"), 3);
+        assert!(!ready.can_review_again);
+        assert_eq!(
+            coordinator
+                .artifact_page(root, &created.job_id, "worker.diff", 0)
+                .unwrap()
+                .content,
+            diff_before
+        );
+        // A verdict exists now; asking another reviewer is refused.
+        let error = coordinator
+            .review_again(root, &created.job_id, None)
+            .unwrap_err();
+        assert!(error.contains("blocked or failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_goes_silent_is_stopped_at_its_idle_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // `timeout_secs = 30` would let it hang far longer than the test.
+        write_fixture_project_with(
+            root,
+            &format!(
+                "{}idle_timeout_secs = 2\n",
+                fixture_agent("hang", &["delegation_hang"])
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Silent worker", "hang"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.contains("made no progress for 2 seconds"), "{error}");
+        // The 30-second total would read "timed out after 30 seconds".
+        assert!(failed
+            .attempts
+            .iter()
+            .all(|attempt| attempt.finished_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_keeps_what_it_had_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &format!(
+                "{}idle_timeout_secs = 2\n",
+                fixture_agent("hang", &["delegation_hang"])
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Partial work", "hang"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("worker-partial.diff"),
+            "{:?}",
+            failed.error
+        );
+        let partial = coordinator
+            .artifact_page(root, &created.job_id, "worker-partial.diff", 0)
+            .unwrap()
+            .content;
+        assert!(partial.contains("+++ b/partial.txt"), "{partial}");
+        assert!(partial.contains("+unfinished work"), "{partial}");
+        // It is evidence only: nothing becomes reviewable or applicable.
+        assert!(!failed.can_review_again);
+        assert!(coordinator
+            .artifact_page(root, &created.job_id, "worker.diff", 0)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_new_binary_file_is_reviewed_and_applied_byte_for_byte() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &fixture_agent("binary", &["delegation_file", "binary"]),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Binary file", "binary"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        assert_eq!(ready.changed_files, vec!["image.bin".to_string()]);
+        let applied = coordinator.apply(root, &ready.job_id, None).unwrap();
+        assert_eq!(applied.status, DelegationStatus::Accepted);
+        let expected: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        assert_eq!(std::fs::read(root.join("image.bin")).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_new_file_fails_the_worker_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("large", &["delegation_file", "large"]));
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Large file", "large"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.contains("large.txt"), "{error}");
+        assert!(error.contains("limit"), "{error}");
+        assert!(!root.join("large.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_merges_three_ways_after_the_user_edits_nearby() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("line7", &["delegation_line7"]));
+        git(root, &["config", "core.autocrlf", "false"]);
+        let lines = |edit: &[(usize, &str)]| {
+            let mut lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+            for (index, text) in edit {
+                lines[*index] = text.to_string();
+            }
+            lines.join(
+                "
+",
+            ) + "
+"
+        };
+        std::fs::write(root.join("notes.txt"), lines(&[])).unwrap();
+        git(root, &["add", "notes.txt"]);
+        git(root, &["commit", "--quiet", "--no-verify", "-m", "notes"]);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Line seven", "line7"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let ready = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+        // The user kept working: line 5 changed, so the reviewed hunk's
+        // context no longer matches.
+        std::fs::write(root.join("notes.txt"), lines(&[(4, "user line 5")])).unwrap();
+        let applied = coordinator.apply(root, &ready.job_id, None).unwrap();
+        assert_eq!(
+            applied.status,
+            DelegationStatus::Accepted,
+            "{:?}",
+            applied.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            lines(&[(4, "user line 5"), (6, "worker line 7")])
+        );
+        assert!(applied
+            .orchestration
+            .unwrap()
+            .inbox
+            .iter()
+            .any(|message| message.body.contains("three-way merge")));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_job_file_does_not_stall_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, create_request("Next to a broken card"))
+            .unwrap();
+        let store = DelegationStore::open(root).unwrap();
+        std::fs::write(store.dir().join("job-broken.json"), "{ not json").unwrap();
+        assert_eq!(list_views(root).unwrap().len(), 1);
+        coordinator.reconcile(root).unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_crashed_worker_fails_even_when_its_error_mentions_a_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("crash", &["delegation_crash"]));
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Crashing worker", "crash"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        // The word "Connection" used to turn any failure into `blocked`,
+        // which read as "fix your configuration".
+        let failed = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::Failed,
+        )
+        .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.starts_with("worker failed:"), "{error}");
+        assert!(error.contains("Connection reset"), "{error}");
+        assert!(failed
+            .attempts
+            .iter()
+            .all(|attempt| attempt.finished_at.is_some()));
+    }
+
+    async fn run_with_bad_reviewer(
+        kind: &str,
+        extra: &str,
+        wanted: DelegationStatus,
+    ) -> (
+        tempfile::TempDir,
+        Arc<DelegationCoordinator>,
+        DelegationJobView,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(
+            root,
+            &format!(
+                "{}{extra}",
+                fixture_agent("bad", &["delegation_bad_reviewer", kind])
+            ),
+        );
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Bad reviewer", "bad"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let view = wait_for_status(&coordinator, root, &created.job_id, wanted).await;
+        (temp, coordinator, view)
+    }
+
+    #[tokio::test]
+    async fn reviewer_edits_are_discarded_and_block_the_card() {
+        let (temp, coordinator, blocked) =
+            run_with_bad_reviewer("edit", "", DelegationStatus::Blocked).await;
+        assert!(blocked
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Reviewer produced edits"));
+        assert!(blocked.can_review_again);
+        assert_eq!(
+            attempts_by_role(&blocked, "reviewer"),
+            1,
+            "edits are not retried"
+        );
+        let report = coordinator
+            .artifact_page(temp.path(), &blocked.job_id, "review-result.json", 0)
+            .unwrap()
+            .content;
+        assert!(report.contains("reviewer diff was discarded"), "{report}");
+        assert!(!temp.path().join("reviewer.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_finding_outside_the_project_blocks_the_card() {
+        let (_temp, _coordinator, blocked) =
+            run_with_bad_reviewer("escape", "", DelegationStatus::Blocked).await;
+        let error = blocked.error.as_deref().unwrap();
+        assert!(
+            error.contains("outside.txt") || error.contains(".."),
+            "{error}"
+        );
+        assert!(blocked.can_review_again);
+    }
+
+    #[tokio::test]
+    async fn a_silent_reviewer_is_retried_once_then_fails_reviewable() {
+        let (_temp, _coordinator, failed) =
+            run_with_bad_reviewer("hang", "idle_timeout_secs = 2\n", DelegationStatus::Failed)
+                .await;
+        let error = failed.error.as_deref().unwrap();
+        assert!(error.starts_with("reviewer failed:"), "{error}");
+        assert!(error.contains("made no progress"), "{error}");
+        assert_eq!(attempts_by_role(&failed, "reviewer"), 2);
+        assert!(failed.can_review_again, "the worker diff is still unjudged");
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_a_running_worker_and_cleans_its_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("hang", &["delegation_hang"]));
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Cancelled worker", "hang"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let running = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::WorkerRunning,
+        )
+        .await;
+        let cancelled = coordinator
+            .cancel(root, &created.job_id, Some(running.updated_at))
+            .unwrap();
+        assert_eq!(cancelled.status, DelegationStatus::Cancelled);
+        // The worker task notices, stops the process and removes its worktree;
+        // the card stays cancelled.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let list = Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            let worktrees = String::from_utf8_lossy(&list.stdout)
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count();
+            let idle = coordinator
+                .running
+                .lock()
+                .map(|running| running.is_empty())
+                .unwrap_or(false);
+            if worktrees == 1 && idle {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "worker worktree was not cleaned up"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let view = get_view(root, &created.job_id).unwrap();
+        assert_eq!(view.status, DelegationStatus::Cancelled);
+        assert!(view
+            .attempts
+            .iter()
+            .all(|attempt| attempt.finished_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn approval_blocks_a_card_whose_check_cannot_auto_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let mut request = create_request("Unrunnable check");
+        request.acceptance_checks = vec!["cargo test".into()];
+        let created = coordinator.create_job(root, request).unwrap();
+        let blocked = coordinator.approve(root, &created.job_id, None).unwrap();
+        assert_eq!(blocked.status, DelegationStatus::Blocked);
+        let error = blocked.error.as_deref().unwrap();
+        assert!(error.contains("`cargo test` cannot run"), "{error}");
+        assert!(
+            error.contains(r#"add ["cargo", "test"] to extra_allowlist under [tools.bash]"#),
+            "{error}"
+        );
+        assert!(blocked.attempts.is_empty(), "no worker may start");
     }
 
     const INTERRUPTED_DIFF: &str = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-fixture project\n+reviewed change\n";
@@ -2963,7 +3906,7 @@ mod tests {
         root: &Path,
         job_id: &str,
     ) -> DelegationJobView {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             let view = get_view(root, job_id).unwrap();
             if view.status != DelegationStatus::Queued {

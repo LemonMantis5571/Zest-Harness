@@ -9,6 +9,7 @@ paths:
   - crates/desktop/src/composer.rs
   - crates/desktop/src/view.rs
   - crates/core/src/agent.rs
+  - crates/core/src/tool_input_repair.rs
   - crates/core/src/runtime.rs
   - crates/core/src/prompt.rs
   - crates/core/src/cancel.rs
@@ -16,6 +17,7 @@ paths:
   - crates/core/src/persist.rs
 tests:
   - crates/desktop/src/selftest.rs
+  - crates/core/src/agent_resilience_tests.rs
   - crates/desktop/src/workspace_test.rs
 verify:
   - npm run gpui:test
@@ -24,6 +26,7 @@ verify:
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace_test::
   - cargo test -p zest-core --lib -- agent::tests
   - cargo test -p zest-core --lib -- inbox::tests
+  - cargo test -p zest-core --lib -- tool_input_repair::
   - cargo test -p zest-core --lib -- persist::tests
   - cargo test -p zest-core --lib -- prompt::tests
   - cargo test -p zest-core --lib -- runtime::tests
@@ -40,7 +43,12 @@ verify:
 - Text and thinking stream live. Each thinking block is a "Thinking" row that becomes "Thought for Ns" when the next text, tool call or activity arrives. Rows start collapsed and the user can open any of them.
 - Text from separate provider rounds (split by a tool call) is separated by a blank line, never glued together.
 - Each assistant turn records its steps in the order they happened (thinking, tool call, provider activity), so a reopened chat shows the same order. Provider activity is saved with the message.
-- A failed or cancelled turn keeps its partial transcript, marks running or awaiting-approval tool rows as interrupted, shows the error under the answer, and does not change the model's wire history. Provider transport details stay out of the error text.
+- A failed or cancelled turn keeps its partial transcript, marks running or awaiting-approval tool rows as interrupted, and shows the error under the answer. Provider transport details stay out of the error text.
+- In the agent, an interrupted turn's wire history keeps the user message and every completed provider round and tool result, closes any tool call that never ran with an error result, and ends with an `[Zest: this turn was interrupted ...]` note, because tools may already have changed files. The desktop app does not save that history yet: it writes `agent_messages` only after a successful turn, so the next turn in a reopened or continued chat does not see the interrupted rounds.
+- A response that stops short does not end the turn. After `max_tokens` the agent keeps the text and any tool calls that finished (the cut-off call gets an error result) and tells the model to continue in smaller pieces. An empty response, a stream that broke after visible text (`stream_interrupted`), or an unknown stop reason is continued the same way with its own note. After 3 such rounds in a row the turn stops with an error. A tool round resets the count. OpenAI-compatible `length` maps to `max_tokens` and `content_filter` to `refusal`; a refusal still ends the turn.
+- A turn takes at most `[tools] max_steps` provider rounds (default 200, `0` = no limit; `Agent::max_steps`). At the limit the model gets one more round with tools forbidden and a note asking it to summarize what it did and what is left; that round ends the turn, and any tool call in it is dropped.
+- When the model calls the same tool with identical input 3 rounds in a row (repeats inside one batch count once), Zest asks the user through the question card, "Keep going" or "Stop the turn". Keep going resets the count. Stop, or no interactive front-end (CLI, delegation workers), ends the turn before the call runs.
+- Tool-call arguments that are not a JSON object do not end the turn. `tool_input_repair.rs` repairs unambiguous cases against the tool's schema (arguments sent as a JSON string, even twice encoded; `"5"` for an integer, `"true"` for a boolean, quoted JSON for an object or array property). Anything else, such as JSON cut off mid-object, is not run: the call gets an error result ("Invalid arguments for `read_file`: ... Call the tool again ...") and the model tries again. Providers keep unparseable argument text as a string in `input`; the agent always replaces it with an object before the history is sent back.
 - A served model that differs from the requested one shows "Requested X, provider served Y" in the notice card. The desktop app does not offer reconnect or provider-choice buttons on an authentication error; the message names the problem and the provider is changed in Customize.
 - A turn belongs to its chat: each open chat has its own worker, so switching chats or splits lets a turn finish in the background, and a second message to a busy chat is queued.
 - The agent uses the turn's run ID (`turn_…`) as its run identity, so provider rounds, tool activity and the run record in `ChatPersistence` can be matched.
@@ -51,7 +59,7 @@ verify:
 2. `native.rs` `Chat::bridge` runs one Tokio task per chat. It waits for the previous run to finish, creates a fresh `CancelToken`, and runs `Chat::run`; `Cmd::Cancel` cancels the token. Every run ends with `EvKind::End`, after `EvKind::Failure` when it failed.
 3. `Chat::run` builds the agent (`Chat::agent`: `RuntimeBuilder` with the chat's provider, model, effort, approval policy, job registry, browser adapter and HTML artifacts; the offline demo uses its own provider), appends enabled plugin context to the volatile system prompt, then in one `Chat::edit` claims the input, expands slash commands (or the `plan` skill in Plan mode), builds content blocks with `attachments::build_user_content`, writes a "Before turn" checkpoint, and records the user message, assistant start and `TurnStarted` event. It creates the run record, then calls `Agent::send_blocks_cancellable`.
 4. Each `StreamEvent` is applied to the live thread (`apply` in `native.rs`) and forwarded as an `EvKind`; the thread is saved at most every 250 ms while streaming. On finish, `apply_done` commits the agent's messages and provider session, or `terminalize_interrupted` and `apply_error` record the failure; the final save and the run status (completed, aborted, failed) happen before `End` is sent.
-5. `agent.rs` loop: stream, run ungated tools concurrently and gated tools sequentially (results in call order), and commit `Agent::messages` only on `end_turn`. `CancelToken` (`cancel.rs`) is checked between steps. The desktop sends no steer or inject inputs; `InputInbox` (`inbox.rs`) is used by other callers.
+5. `agent.rs` loop: stream, run ungated tools concurrently and gated tools sequentially (results in call order). `run_turn_steps` builds a `TurnProgress`; `commit_turn` commits it on `end_turn`, `commit_interrupted_turn` on an error or cancel. `CancelToken` (`cancel.rs`) is checked between steps. The desktop sends no steer or inject inputs; `InputInbox` (`inbox.rs`) is used by other callers.
 6. System prompt: `RuntimeBuilder::build` (`runtime.rs`) -> `prompt.rs` `compose_system_with_docs`: `.zest/system.md` (max 32 KiB), base rules, `AGENTS.md`/`CLAUDE.md`/`PROJECT_CONTEXT.md` (16 KiB total), skills. `env_context` (cwd, platform, branch from `.git/HEAD`) and plugin context go in the volatile half, after the cache breakpoint.
 7. UI: `main.rs` pumps bridge events in batches into `Root::apply`, which adds and updates rows (see [Message rendering](message-rendering.md)). On `End` it clears pending cards, rebuilds the turn from the saved thread (`restore_native`), and starts the next queued message unless the turn was stopped, failed or was a compaction.
 
@@ -63,6 +71,7 @@ verify:
 
 ## Pitfalls
 - The UI reserves the turn (`turn_active`) before the worker sends `Start`, and releases it only on `End`; a Stop can cross a successful `End` on its way, so `stop_requested` is checked too before starting the next message.
-- `Agent::messages` is transactional: never write partial turns into it. The transcript (`thread.messages`) is a separate projection.
+- Only `commit_turn` and `commit_interrupted_turn` write `Agent::messages` during a turn. Never commit a half-built assistant message or a tool call without a result: providers reject both. The transcript (`thread.messages`) is a separate projection.
+- `Chat::run` in `native.rs` saves `agent.messages_for_persist()` only in its `Ok` branch; the error branch only terminalizes the transcript.
 - `Chat::edit` saves the thread before replacing the in-memory copy, so a failed write leaves both unchanged.
 - Environment text must stay out of the cached prompt prefix (`prompt::tests::env_context_is_not_part_of_the_composed_prefix`).

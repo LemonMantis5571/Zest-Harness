@@ -72,6 +72,117 @@ impl Cur {
     }
 }
 
+/// The part of a streaming reply made of complete top-level Markdown blocks, which is what the
+/// "Stream complete blocks" option shows while a reply streams. A block is complete once a blank line is followed by a new block, its
+/// code fence closes, or the text ends in a blank line outside a list or open fence.
+pub fn complete_prefix(text: &str) -> &str {
+    let mut boundary = 0;
+    let mut fence: Option<(char, usize)> = None;
+    let mut in_list = false;
+    let mut blank_pending = false;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let content = line.trim_end_matches(['\n', '\r']);
+        if let Some((ch, len)) = fence {
+            if fence_marker(content).is_some_and(|(c, l, rest)| c == ch && l >= len && rest.trim().is_empty()) {
+                fence = None;
+                in_list = false;
+                blank_pending = false;
+                // A closed fence ends its block only once the line is complete.
+                if line.ends_with('\n') {
+                    boundary = offset;
+                }
+            }
+            continue;
+        }
+        if content.trim().is_empty() {
+            blank_pending = true;
+            continue;
+        }
+        let indent = content.len() - content.trim_start().len();
+        if let Some((ch, len, _)) = fence_marker(content) {
+            boundary = start;
+            fence = Some((ch, len));
+            in_list = false;
+            blank_pending = false;
+            continue;
+        }
+        let item = is_list_item(content.trim_start());
+        if blank_pending {
+            let continues = in_list && (indent >= 2 || item);
+            if !continues {
+                boundary = start;
+                in_list = false;
+            }
+            blank_pending = false;
+        }
+        if item {
+            in_list = true;
+        }
+    }
+    let ends_blank = text.ends_with("\n\n") || text.ends_with("\r\n\r\n");
+    if fence.is_none() && !in_list && ends_blank {
+        return text;
+    }
+    &text[..boundary]
+}
+
+/// A fence line (``` or ~~~, at most three spaces of indent): its character, length and the
+/// text after the run.
+fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let ch = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = rest.chars().take_while(|c| *c == ch).count();
+    (len >= 3).then(|| (ch, len, &rest[len..]))
+}
+
+fn is_list_item(line: &str) -> bool {
+    let bullet = ["- ", "* ", "+ "].iter().any(|b| line.starts_with(b));
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    let ordered = digits > 0
+        && digits <= 9
+        && (line[digits..].starts_with(". ") || line[digits..].starts_with(") "));
+    bullet || ordered
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::complete_prefix;
+
+    #[::core::prelude::v1::test]
+    fn holds_the_growing_paragraph() {
+        assert_eq!(complete_prefix("First para.\n\nSecond is gro"), "First para.\n\n");
+        assert_eq!(complete_prefix("Only one line so far"), "");
+        assert_eq!(complete_prefix("Done.\n\n"), "Done.\n\n");
+    }
+
+    #[::core::prelude::v1::test]
+    fn code_fences_appear_when_closed() {
+        let open = "Intro.\n\n```rust\nfn main() {\n";
+        assert_eq!(complete_prefix(open), "Intro.\n\n");
+        let closed = "Intro.\n\n```rust\nfn main() {}\n```\nAfter";
+        assert_eq!(complete_prefix(closed), "Intro.\n\n```rust\nfn main() {}\n```\n");
+        // A shorter or different closing run does not close the fence.
+        assert_eq!(complete_prefix("````\ncode\n```\nmore"), "");
+        assert_eq!(complete_prefix("~~~\ncode\n```\n"), "");
+    }
+
+    #[::core::prelude::v1::test]
+    fn lists_continue_across_blank_lines() {
+        let list = "- one\n\n- two\n\n  more of two\n\n";
+        assert_eq!(complete_prefix(list), "");
+        let after = "- one\n- two\n\nNext para";
+        assert_eq!(complete_prefix(after), "- one\n- two\n\n");
+        assert_eq!(complete_prefix("1. a\n2. b\n\nText\n\n"), "1. a\n2. b\n\nText\n\n");
+    }
+}
+
 pub fn parse(src: &str) -> Doc {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut doc = Doc::default();

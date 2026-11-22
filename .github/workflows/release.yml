@@ -98,6 +98,8 @@ jobs:
 
       - name: Build installers
         run: npm run gpui:package -- --out release-bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Stage installers and checksums
         shell: pwsh
@@ -157,6 +159,8 @@ jobs:
 
       - name: Build installers
         run: npm run gpui:package -- --out release-bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Stage installers and checksums
         shell: bash

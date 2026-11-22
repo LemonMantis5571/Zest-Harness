@@ -22,6 +22,7 @@ use crate::tools::bash::{classify, Clearance};
 use crate::tools::capture::drain_bounded;
 use crate::tools::isolated_workspace::{prepare, prepare_reviewer};
 use crate::usage::Ledger;
+use crate::worker_activity::{watchdog, WorkerActivity};
 
 pub const MAX_NATIVE_RESULT_CHARS: usize = 16_000;
 const MAX_CHECK_STREAM_BYTES: usize = 60 * 1024;
@@ -50,6 +51,8 @@ pub struct NativeWorkerResult {
     pub final_text: String,
     pub diff: String,
     pub usage: AttemptUsage,
+    /// The snapshot commit the worker started from.
+    pub base_commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -70,10 +73,11 @@ pub async fn run_acceptance_checks(
     root: &Path,
     config: Config,
     worker_diff: &str,
+    worker_base: Option<&str>,
     commands: &[String],
     cancel: Option<&CancelToken>,
 ) -> Result<Vec<AcceptanceCheckResult>> {
-    let mut workspace = prepare_reviewer(root, worker_diff)
+    let mut workspace = prepare_reviewer(root, worker_diff, worker_base)
         .await
         .map_err(HarnessError::Other)?;
     let parent_secret_envs = config.provider_key_env_names();
@@ -111,15 +115,8 @@ async fn run_checks_in_workspace(
         if cancel.map(CancelToken::is_cancelled).unwrap_or(false) {
             return Err(HarnessError::Cancelled);
         }
-        if !config.tools.bash.enabled {
-            results.push(skipped_check(command, "command checks are disabled"));
-            continue;
-        }
-        if classify(command, &settings.extra_allowlist, &settings.denylist) != Clearance::AutoRun {
-            results.push(skipped_check(
-                command,
-                "command is not on the read-only auto-run allowlist",
-            ));
+        if let Some(reason) = acceptance_check_skip_reason(config, command) {
+            results.push(skipped_check(command, &reason));
             continue;
         }
         results.push(
@@ -134,6 +131,41 @@ async fn run_checks_in_workspace(
         );
     }
     Ok(results)
+}
+
+/// Why Zest will record `command` as skipped instead of running it, with
+/// the config change that would let it run. `None` means it auto-runs.
+///
+/// A required check that is skipped can never pass, so the coordinator asks
+/// this before approving a card rather than after a full worker run.
+pub fn acceptance_check_skip_reason(config: &Config, command: &str) -> Option<String> {
+    if !config.tools.bash.enabled {
+        return Some(
+            "command checks are disabled; set `enabled = true` under [tools.bash] in zest.toml"
+                .into(),
+        );
+    }
+    let settings = config.tools.bash.settings();
+    if classify(command, &settings.extra_allowlist, &settings.denylist) == Clearance::AutoRun {
+        return None;
+    }
+    if classify(command, &settings.extra_allowlist, &[]) == Clearance::AutoRun {
+        return Some("command matches the [tools.bash] denylist in zest.toml".into());
+    }
+    if crate::tools::bash::parse_auto_argv(command).is_none() {
+        return Some(
+            "acceptance checks run without a shell, so pipes, redirection, `&&` and backslashes are not allowed"
+                .into(),
+        );
+    }
+    let prefix = command
+        .split_whitespace()
+        .map(|token| format!("{token:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "command is not on the read-only auto-run allowlist; add [{prefix}] to extra_allowlist under [tools.bash] in zest.toml so Zest can run it"
+    ))
 }
 
 fn skipped_check(command: &str, reason: &str) -> AcceptanceCheckResult {
@@ -151,12 +183,22 @@ async fn run_auto_check(
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
 ) -> Result<AcceptanceCheckResult> {
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-    if tokens.is_empty() {
-        return Ok(skipped_check(command, "empty command"));
-    }
+    // The same argv parser `bash` uses for auto-run commands: quotes group an
+    // argument, and anything shell-shaped was already refused by `classify`.
+    let Some(tokens) = crate::tools::bash::parse_auto_argv(command) else {
+        return Ok(AcceptanceCheckResult {
+            command: command.to_string(),
+            status: CheckStatus::Failed,
+            output: format!(
+                "could not run `{command}`: it is not a plain argument list (use quotes only to group arguments, without backslashes)"
+            ),
+        });
+    };
     let timeout = Duration::from_millis(timeout_ms.clamp(1, crate::tools::bash::MAX_TIMEOUT_MS));
-    let mut child = tokio::process::Command::new(tokens[0]);
+    // `npm`, `npx` and `pnpm` are `.cmd` shims on Windows, which
+    // `CreateProcessW` never finds from a bare name.
+    let mut child =
+        tokio::process::Command::new(crate::tools::external_agent::resolve_program(&tokens[0]));
     child
         .args(&tokens[1..])
         .current_dir(root)
@@ -264,6 +306,7 @@ pub async fn run_provider_worker(
     prompt: &str,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
+    activity: &WorkerActivity,
 ) -> Result<NativeWorkerResult> {
     let target = provider_target(root, &config, target)?;
     let mut workspace = prepare(root).await.map_err(HarnessError::Other)?;
@@ -275,6 +318,7 @@ pub async fn run_provider_worker(
         RuntimeRole::DelegationWorker,
         usage,
         cancel,
+        activity,
     )
     .await;
     let diff = match result {
@@ -296,9 +340,15 @@ pub async fn run_provider_worker(
                     final_text: clip(&final_text),
                     diff,
                     usage,
+                    base_commit: workspace.baseline().to_string(),
                 }
             }),
-        Err(error) => Err(error),
+        Err(error) => {
+            if let Ok(diff) = workspace.collect_diff().await {
+                activity.keep_partial_diff(diff);
+            }
+            Err(error)
+        }
     };
     let cleanup = workspace.cleanup().await;
     match (diff, cleanup) {
@@ -313,17 +363,20 @@ pub async fn run_provider_worker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_provider_reviewer(
     root: &Path,
     config: Config,
     target: &DelegationTarget,
     worker_diff: &str,
+    worker_base: Option<&str>,
     prompt: &str,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
+    activity: &WorkerActivity,
 ) -> Result<NativeReviewerResult> {
     let target = provider_target(root, &config, target)?;
-    let mut workspace = prepare_reviewer(root, worker_diff)
+    let mut workspace = prepare_reviewer(root, worker_diff, worker_base)
         .await
         .map_err(HarnessError::Other)?;
     let result = run_in_workspace(
@@ -334,6 +387,7 @@ pub async fn run_provider_reviewer(
         RuntimeRole::DelegationReviewer,
         usage,
         cancel,
+        activity,
     )
     .await;
     let output = match result {
@@ -393,6 +447,7 @@ fn provider_target(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_in_workspace(
     root: &Path,
     config: Config,
@@ -401,6 +456,7 @@ async fn run_in_workspace(
     role: RuntimeRole,
     usage: NativeTaskUsageContext,
     cancel: Option<&CancelToken>,
+    activity: &WorkerActivity,
 ) -> Result<(String, AttemptUsage)> {
     let mut runtime = RuntimeBuilder::new(root)
         .with_config(config)
@@ -424,17 +480,61 @@ async fn run_in_workspace(
     if let Some(run_id) = run_id {
         session.agent.set_next_run_id(run_id);
     }
-    let mut sink = discard_event;
-    session
-        .agent
-        .send_cancellable(prompt, &mut sink, cancel)
-        .await?;
+    activity.progress(Some("started"));
+    let mut sink = |event: StreamEvent<'_>| {
+        activity.progress(stream_event_label(&event).as_deref());
+        record_stream_event(activity, &event);
+    };
+    // A provider stream that stalls, or a turn that never ends, used to hold
+    // the job's lane forever. Dropping the turn is safe here: the worker has
+    // no shell, and its worktree is removed by the caller either way.
+    tokio::select! {
+        result = session.agent.send_cancellable(prompt, &mut sink, cancel) => result?,
+        reason = watchdog(activity) => return Err(HarnessError::Other(reason)),
+    }
     let final_text = final_text(&session.agent);
     let usage = attempt_usage(session.agent.turn_usage().as_ref());
     Ok((final_text, usage))
 }
 
-fn discard_event(_event: StreamEvent<'_>) {}
+/// Copy a native stream event into the run's transcript.
+fn record_stream_event(activity: &WorkerActivity, event: &StreamEvent<'_>) {
+    match event {
+        StreamEvent::Text(text) => activity.record("text", text, true),
+        StreamEvent::Thinking(text) => activity.record("thinking", text, true),
+        StreamEvent::ToolCallStart { name, .. } => activity.record("tool", name, false),
+        StreamEvent::ToolCallResult {
+            name,
+            summary,
+            is_error,
+            path,
+            ..
+        } => {
+            let target = path.map(|path| format!(" {path}")).unwrap_or_default();
+            let outcome = if *is_error { "failed" } else { "done" };
+            activity.record(
+                "tool result",
+                &format!("{name}{target} {outcome}: {summary}"),
+                false,
+            );
+        }
+        _ => {}
+    }
+}
+
+/// What a native stream event shows the worker doing, for the heartbeat.
+fn stream_event_label(event: &StreamEvent<'_>) -> Option<String> {
+    match event {
+        StreamEvent::Text(_) => Some("writing".into()),
+        StreamEvent::Thinking(_) => Some("thinking".into()),
+        StreamEvent::ToolCallStart { name, .. } => Some(format!("tool {name}")),
+        StreamEvent::ToolCallResult { name, path, .. } => Some(match path {
+            Some(path) => format!("tool {name} {path}"),
+            None => format!("tool {name} finished"),
+        }),
+        _ => None,
+    }
+}
 
 fn final_text(agent: &crate::agent::Agent) -> String {
     agent
@@ -522,6 +622,7 @@ mod tests {
             root,
             config,
             "",
+            None,
             &[
                 "rustc --version".into(),
                 "rustc --definitely-not-a-real-flag".into(),
@@ -544,6 +645,107 @@ mod tests {
             .unwrap()
             .stdout;
         assert_eq!(before, after, "acceptance checks must clean their worktree");
+    }
+
+    #[test]
+    fn skip_reason_names_the_config_change_that_lets_a_check_run() {
+        let mut config = Config::default();
+        assert_eq!(acceptance_check_skip_reason(&config, "git status"), None);
+        let reason = acceptance_check_skip_reason(&config, "cargo test --workspace").unwrap();
+        assert!(
+            reason.contains(
+                r#"add ["cargo", "test", "--workspace"] to extra_allowlist under [tools.bash]"#
+            ),
+            "{reason}"
+        );
+        assert!(
+            acceptance_check_skip_reason(&config, "cargo test | tee out")
+                .unwrap()
+                .contains("without a shell")
+        );
+        config.tools.bash.extra_allowlist = vec![vec!["cargo".into(), "test".into()]];
+        assert_eq!(
+            acceptance_check_skip_reason(&config, "cargo test --workspace"),
+            None
+        );
+        config.tools.bash.denylist = vec!["--workspace".into()];
+        assert!(
+            acceptance_check_skip_reason(&config, "cargo test --workspace")
+                .unwrap()
+                .contains("denylist")
+        );
+        config.tools.bash.enabled = false;
+        assert!(acceptance_check_skip_reason(&config, "git status")
+            .unwrap()
+            .contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn acceptance_check_keeps_quoted_arguments_together() {
+        let temp = tempfile::tempdir().unwrap();
+        // Split on spaces, rustc received `"2021"` with its quotes and
+        // rejected the edition.
+        let result = run_auto_check(
+            temp.path(),
+            r#"rustc --edition "2021" --version"#,
+            30_000,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, CheckStatus::Passed, "{}", result.output);
+
+        let result = run_auto_check(temp.path(), r#"rustc "--version"#, 30_000, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(result.status, CheckStatus::Failed);
+        assert!(
+            result.output.contains("not a plain argument list"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_native_worker_whose_provider_goes_silent_is_stopped() {
+        // Accepts the request and never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(stream);
+        });
+        let config = Config::parse(&format!(
+            "[providers.silent]\nkind = \"openai_compatible\"\nbase_url = \"http://{address}/v1\"\nmodel = \"test-model\"\n"
+        ))
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let activity = WorkerActivity::new(crate::worker_activity::WorkerLimits {
+            total: Duration::from_secs(60),
+            idle: Duration::from_millis(500),
+        });
+        let started = std::time::Instant::now();
+        let error = run_in_workspace(
+            temp.path(),
+            config,
+            &ResolvedWorkerMetadata {
+                provider_id: "silent".into(),
+                model: "test-model".into(),
+                effort: "high".into(),
+            },
+            "prompt",
+            RuntimeRole::DelegationWorker,
+            NativeTaskUsageContext::default(),
+            None,
+            &activity,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("made no progress"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(30));
+        server.abort();
     }
 
     #[tokio::test]
@@ -611,6 +813,7 @@ mod tests {
                 correlation_id: Some("job-7".into()),
             },
             None,
+            &WorkerActivity::new(crate::worker_activity::WorkerLimits::default()),
         )
         .await
         .unwrap();

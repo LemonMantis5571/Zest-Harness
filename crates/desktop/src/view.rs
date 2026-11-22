@@ -247,7 +247,7 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
     let mut out = vec![];
     let mut previous_item = false;
     for block in &doc.blocks {
-        // Markdown spacing from the React renderer: 4 px between list items, 12 px elsewhere.
+        // Markdown spacing: 4 px between list items, 12 px elsewhere.
         let item = matches!(block, Block::Item { .. });
         let gap = if out.is_empty() { 0. } else if item && previous_item { 4. } else { 12. };
         previous_item = item;
@@ -539,7 +539,7 @@ pub fn render_trace(
         .into_any_element()
 }
 
-/// The React UI's icon for a tool or recorded step.
+/// The icon for a tool or recorded step.
 fn trace_icon(name: &str) -> crate::theme::Icon {
     use crate::theme::Icon;
     let name = name.to_ascii_lowercase();

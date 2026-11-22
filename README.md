@@ -66,7 +66,9 @@ the session.
 Use a **feature card** when you want a separate worker to handle part of the
 project. Give it an objective, scope, selected context and acceptance checks,
 then select a worker and reviewer. The coordinator manages the queue. A job that
-fails or needs changes waits for you: retrying it takes a new approval.
+fails or needs changes waits for you: retrying it takes a new approval. A
+reviewer that fails is replaced once on its own, and a card whose review never
+finished can be reviewed again without running the worker again.
 
 - **Native provider workers** run through Zest's provider runtime.
 - **External workers** use a configured ACP session or a signed-in CLI, keeping

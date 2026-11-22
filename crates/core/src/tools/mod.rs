@@ -164,6 +164,14 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// One tool's input schema, for repairing arguments a model sent.
+    pub fn input_schema(&self, name: &str) -> Option<serde_json::Value> {
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.input_schema())
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.tools.iter().map(|t| t.name()).collect()
     }

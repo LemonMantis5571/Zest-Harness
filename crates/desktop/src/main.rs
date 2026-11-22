@@ -553,7 +553,13 @@ impl Root {
 
     fn reparse(&mut self, ix: usize) {
         let t = Instant::now();
-        let doc = md::parse(&self.live_text);
+        // While streaming, "Stream complete blocks" holds back the block still being written.
+        let source = if self.live == Some(ix) && self.native.is_some() && theme::block_streaming() {
+            md::complete_prefix(&self.live_text)
+        } else {
+            &self.live_text
+        };
+        let doc = md::parse(source);
         self.stats.parse_us.push(t.elapsed().as_micros() as u64);
         self.msgs[ix].doc = Rc::new(doc);
         self.list.remeasure_items(ix..ix + 1);
@@ -825,7 +831,7 @@ impl Root {
             .when(self.editing.is_some(), |d| d.child(self.queue_input.clone()))
     }
 
-    /// Saves a reply as Markdown where the user chooses, like the React UI's download action.
+    /// Saves a reply as Markdown where the user chooses (the row's Download action).
     fn save_message(&mut self, text: String, cx: &mut Context<Self>) {
         let directory = self
             .native
@@ -871,7 +877,7 @@ impl Root {
                 artifact::card(ix, index, doc.clone(), self.artifact_source == Some((ix, index)), cx)
             })).into_any_element()
         };
-        // Lay the row out like the React transcript: a centered column, "Zest" above each
+        // Lay the row out as a centered column, "Zest" above each
         // assistant turn, and copy under a finished answer.
         let first_of_turn = !m.user && (ix == 0 || self.msgs.get(ix - 1).is_some_and(|p| p.user));
         let answer = !m.user && m.trace.is_none() && self.live != Some(ix);

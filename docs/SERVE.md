@@ -137,6 +137,7 @@ defaults to the same target as `worker`.
 | `delegation_update` | Edit a card that is `awaiting_approval`, `blocked`, or `changes_requested` |
 | `delegation_approve` | Record human approval, pin fingerprints, enqueue the worker |
 | `delegation_retry` | Return a `changes_requested`, `blocked`, `failed`, `apply_conflict`, or `queued` card to `awaiting_approval` |
+| `delegation_review_again` | Review a `blocked` or `failed` card's saved worker diff again with a fresh reviewer, when `canReviewAgain` is true. The worker does not rerun and the approval still applies |
 | `delegation_cancel` | Cancel a non-terminal card |
 | `delegation_apply` | Apply a `ready_to_apply` diff after scope + `git apply --check` |
 
@@ -184,8 +185,11 @@ In `trusted`, poll `delegation_get` until `accepted`. Do not wait for
 
 `changes_requested`, `apply_conflict`, `blocked`, and `failed` are stops.
 `delegation_retry` sends any of them, or a card still `queued`, back to
-`awaiting_approval`. Nothing retries on its own, and a retried card needs a new
-`delegation_approve`.
+`awaiting_approval`. A retried card needs a new `delegation_approve`. A
+reviewer that fails or answers an unreadable report is replaced once
+automatically. When a card still blocks or fails before any verdict, its
+`canReviewAgain` is true and `delegation_review_again` reviews the same diff
+again without rerunning the worker.
 
 ## Policy
 

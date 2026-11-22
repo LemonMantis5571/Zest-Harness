@@ -61,7 +61,7 @@ pub fn button(
     use crate::theme;
     let label = label.into();
     // Panels mark the current choice with a leading check (see `workspace::mark`); draw it
-    // as the React UI's selected chip.
+    // as a selected chip.
     let selected = label.strip_prefix("✓ ").map(|s| SharedString::from(s.to_string()));
     div()
         .id(id)
@@ -513,7 +513,7 @@ impl Root {
                     box_ = box_
                         .child(buttons)
                         .child(self.decision_input.clone())
-                        .child(div().flex().child(ui::button("dismiss-question", Variant::Ghost, None, "Dismiss", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)))));
+                        .child(div().flex().child(ui::button("dismiss-question", Variant::Ghost, None, "Dismiss", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx))).aria_label("Dismiss question")));
                 }
             }
             panel = panel.child(box_);
@@ -572,11 +572,11 @@ impl Root {
     }
 
     /// The card above the composer with the project, branch, changed lines and linked pull
-    /// request (the React UI's BranchChangesBar).
+    /// request (the branch strip above the composer).
     pub fn branch_strip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         use crate::theme::{self, Icon, alpha};
         let chat = self.native.as_ref()?;
-        // As in the React UI: only with changed lines, not during a turn, and a dismissal
+        // Shown only with changed lines and not during a turn; a dismissal
         // lasts until the counts move.
         let stats = self.git_stats.filter(|s| s.changed_files > 0 && s.additions + s.deletions > 0)?;
         if self.turn_active || self.strip_hidden == Some(stats) {

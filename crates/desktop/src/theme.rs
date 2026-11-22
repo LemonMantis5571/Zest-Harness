@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub use crate::icons_generated::Icon;
 
-/// One React theme's tokens.
+/// One theme's color tokens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub id: &'static str,
@@ -113,7 +113,7 @@ pub fn palette() -> &'static Palette {
     &THEMES[ACTIVE.load(Ordering::Relaxed).min(THEMES.len() - 1)]
 }
 
-/// Switches to the theme with `id`; an unknown id falls back to Zest, as in the React UI.
+/// Switches to the theme with `id`; an unknown id falls back to Zest.
 pub fn set_theme(id: &str) -> &'static Palette {
     let index = THEMES.iter().position(|t| t.id == id).unwrap_or(0);
     ACTIVE.store(index, Ordering::Relaxed);
@@ -139,7 +139,7 @@ tokens!(
     foreground, secondary_foreground, muted_foreground, primary, primary_hover, link, destructive,
 );
 
-// Blends the React UI writes as Tailwind opacity classes over a surface.
+// Derived colors: token blends at fixed opacities over a surface.
 /// `border-border/60` on the sidebar.
 pub fn sidebar_line() -> u32 { mix(border(), sidebar(), 0.6) }
 /// `border-border/40` on the sidebar.
@@ -189,7 +189,7 @@ pub struct Face {
     pub bundled: bool,
 }
 
-/// The React UI's font choices that exist natively. Geist ships with the app; the others are
+/// The interface fonts on offer. Geist ships with the app; the others are
 /// offered when installed on this computer.
 pub const FACES: [Face; 6] = [
     Face { id: "geist", name: "Geist", family: "Geist", bundled: true },
@@ -218,7 +218,7 @@ pub fn sans() -> &'static str {
     face().family
 }
 
-/// Switches the interface font; an unknown id falls back to Geist, as in the React UI.
+/// Switches the interface font; an unknown id falls back to Geist.
 pub fn set_face(id: &str) -> &'static Face {
     let index = FACES.iter().position(|f| f.id == id).unwrap_or(0);
     ACTIVE_FACE.store(index, Ordering::Relaxed);
@@ -231,13 +231,50 @@ pub fn available_faces(cx: &App) -> Vec<&'static Face> {
     FACES.iter().filter(|f| f.bundled || installed.iter().any(|n| n == f.family)).collect()
 }
 
-/// The saved theme and font, per machine, like the React UI's `localStorage` keys.
-#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+static BLOCK_STREAMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static COMPACT_SIDEBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Customize > Chat view > "Stream complete blocks" (default on): a streaming reply shows only
+/// its complete Markdown blocks.
+pub fn block_streaming() -> bool {
+    BLOCK_STREAMING.load(Ordering::Relaxed)
+}
+
+pub fn set_block_streaming(on: bool) {
+    BLOCK_STREAMING.store(on, Ordering::Relaxed);
+}
+
+/// Customize > Chat view > Chat history: the compact one-line list instead of the project tree.
+pub fn compact_sidebar() -> bool {
+    COMPACT_SIDEBAR.load(Ordering::Relaxed)
+}
+
+pub fn set_compact_sidebar(on: bool) {
+    COMPACT_SIDEBAR.store(on, Ordering::Relaxed);
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The saved look and chat-view choices, per machine.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Appearance {
     #[serde(default)]
     pub theme: String,
     #[serde(default)]
     pub font: String,
+    /// "project" (default) or "compact", as `zest.chatViewMode`.
+    #[serde(default)]
+    pub chat_view: String,
+    #[serde(default = "yes")]
+    pub block_streaming: bool,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { theme: String::new(), font: String::new(), chat_view: String::new(), block_streaming: true }
+    }
 }
 
 fn appearance_path() -> Option<std::path::PathBuf> {
@@ -252,6 +289,8 @@ pub fn load_appearance() {
         .unwrap_or_default();
     set_theme(&saved.theme);
     set_face(&saved.font);
+    set_compact_sidebar(saved.chat_view == "compact");
+    set_block_streaming(saved.block_streaming);
 }
 
 /// Saves the active theme and font for the next launch.
@@ -260,7 +299,12 @@ pub fn save_appearance() -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let value = Appearance { theme: palette().id.into(), font: face().id.into() };
+    let value = Appearance {
+        theme: palette().id.into(),
+        font: face().id.into(),
+        chat_view: if compact_sidebar() { "compact" } else { "project" }.into(),
+        block_streaming: block_streaming(),
+    };
     zest_core::fsutil::atomic_write_json(&path, &value).map_err(|e| format!("Could not save appearance: {e}"))
 }
 
@@ -300,7 +344,7 @@ impl AssetSource for Assets {
     }
 }
 
-/// Registers Geist (SIL OFL 1.1, see `assets/fonts/Geist-OFL.txt`), the React UI's default face.
+/// Registers Geist (SIL OFL 1.1, see `assets/fonts/Geist-OFL.txt`), the default face.
 pub fn load_fonts(cx: &mut App) {
     let fonts = vec![
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Regular.ttf").as_slice()),
@@ -324,7 +368,7 @@ mod tests {
     use gpui::AssetSource;
 
     #[::core::prelude::v1::test]
-    fn zest_blends_match_the_react_ui() {
+    fn zest_blends_match_their_reference_colors() {
         let zest = &THEMES[0];
         assert_eq!(mix(zest.border, zest.sidebar, 0.6), 0x202225);
         assert_eq!(mix(zest.border, zest.canvas, 0.6), 0x1f2125);
@@ -341,6 +385,9 @@ mod tests {
         assert_eq!(set_face("").id, "geist");
         let saved: Appearance = serde_json::from_str("{}").unwrap();
         assert_eq!(saved, Appearance::default());
+        assert!(saved.block_streaming, "block streaming defaults on");
+        let older: Appearance = serde_json::from_str(r#"{"theme":"nights","font":"inter"}"#).unwrap();
+        assert!(older.block_streaming && older.chat_view.is_empty());
     }
 
     #[::core::prelude::v1::test]

@@ -55,15 +55,17 @@ Provider-facing rules and sources are documented in [QUOTA.md](../QUOTA.md).
   readable. `zest usage --tasks` shows both IDs. Starting a new host run clears
   stale correlation left by a dropped turn, so a side question during
   preparation cannot join an earlier aborted run.
-- Day boundaries follow `usage::set_local_offset_minutes`. Neither the desktop
-  app nor the CLI sets it, so both bucket days in UTC.
+- Day boundaries follow `usage::set_local_offset_minutes`. The desktop app sets
+  it from the OS clock at launch, so its days are local; the CLI does not set
+  it and buckets days in UTC.
 - Headroom is overwritten only when a provider actually reported limits.
 - Customize > Usage (also the sidebar's gauge button) lists, per provider in
   the ledger, measured requests, input tokens and output tokens, or "No
   measured usage yet." The text has a Copy button. The desktop app does not
   show estimated cost, the 7 / 30 / 90-day report, per-day or per-model
-  breakdowns, CLI transcript totals, cache metrics, or a profile heatmap; use
-  `zest usage` for the cost report.
+  breakdowns, CLI transcript totals, or cache metrics; use `zest usage` for the
+  cost report. Your profile has the activity heatmap (see
+  [settings-and-appearance](settings-and-appearance.md)).
 - Cost (CLI report) is an estimate at published API rates, labelled by
   source: provider reported, model priced, mixed, or unpriced. A model with no
   rate stays unpriced (never zero); a missing cache rate bills at the input

@@ -235,6 +235,33 @@ impl HarnessError {
             _ => false,
         }
     }
+
+    /// Whether a failure **after the response started** is worth another try,
+    /// provided nothing reached the user before it.
+    ///
+    /// A dropped or stalled stream, and a provider that reports itself
+    /// overloaded mid-stream, usually succeed on a second try. A provider
+    /// error that names a cause such as a usage limit does not.
+    pub fn is_retryable_stream_failure(&self) -> bool {
+        match self {
+            Self::PrematureEof | Self::StreamIdleTimeout => true,
+            Self::Http(e) => e.is_body() || e.is_decode() || e.is_request(),
+            Self::Stream { kind, .. } => {
+                let kind = kind.strip_prefix(PROVIDER_MESSAGE_PREFIX).unwrap_or(kind);
+                matches!(
+                    kind,
+                    "overloaded_error"
+                        | "api_error"
+                        | "rate_limit_error"
+                        | "server_error"
+                        | "internal_server_error"
+                        | "service_unavailable"
+                        | "timeout"
+                )
+            }
+            _ => false,
+        }
+    }
 }
 
 fn looks_like_auth(text: &str) -> bool {

@@ -49,7 +49,8 @@ chat.
   202.
 - **Tools.** `delegation_targets`, `delegation_create`, `delegation_list`,
   `delegation_get`, `delegation_artifact`, `delegation_update`,
-  `delegation_approve`, `delegation_retry`, `delegation_cancel` and
+  `delegation_approve`, `delegation_retry`, `delegation_review_again`,
+  `delegation_cancel` and
   `delegation_apply`. There is no shell tool.
 - **Results and errors.** A result is `result.content[0].text`, holding JSON
   text of the job view (or `{targets}`, the list, or an artifact page). Tool

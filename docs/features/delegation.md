@@ -9,6 +9,7 @@ paths:
   - crates/core/src/tools/delegate_feature.rs
   - crates/core/src/tools/external_agent.rs
   - crates/core/src/tools/isolated_workspace.rs
+  - crates/core/src/worker_activity.rs
   - crates/coordinator/src/scheduler.rs
   - crates/desktop/src/workspace/board.rs
   - crates/desktop/src/native.rs
@@ -40,7 +41,8 @@ The desktop's **Delegation** tab (under Workbench) uses the same coordinator as 
 - A feature card (title, objective, lane, scope, context, dependsOn,
   acceptanceChecks, worker, reviewer) becomes a job at
   `.zest/delegations/<jobId>.json`. Its artifacts are `worker.diff`,
-  `worker-result.json` and `review-result.json` in `.zest/delegations/<jobId>/`.
+  `worker-result.json`, `review-result.json`, `worker-transcript.jsonl` and,
+  after a failed worker, `worker-partial.diff`, in `.zest/delegations/<jobId>/`.
 - Every new card starts in `awaiting_approval`. No worker runs until an approval
   is recorded. That can be the desktop **Approve and run** button, `delegation_approve`,
   a trusted `zest serve`, or a dispatch receipt written by `delegate_feature`
@@ -53,24 +55,68 @@ The desktop's **Delegation** tab (under Workbench) uses the same coordinator as 
 - Review cannot be turned off: `review_required: false` is rejected. The
   reviewer defaults to `sameAsWorker` but always runs as a fresh process or
   runtime in a fresh worktree.
+- **Limits.** Every worker and reviewer process runs under two limits
+  (`WorkerLimits`, enforced by `worker_activity::watchdog`): a total budget
+  and a no-progress budget. External agents use `timeout_secs` and
+  `idle_timeout_secs` (default 900 s) from their `[agents.<id>]` entry
+  (`delegation_limits`); native provider workers get 60 minutes in total and
+  15 minutes without a stream event. Any output line from a CLI, any ACP
+  message and any native stream event counts as progress. A run that hits
+  either limit is stopped and the job fails with "timed out after …" or
+  "made no progress for … seconds". The no-progress clock starts when the
+  process does, not while its worktree is prepared.
+- **Worker transcript.** Every worker run, finished or not, leaves
+  `worker-transcript.jsonl`: one `{"atMs","kind","text"}` object per line for
+  its text, thinking, tool calls and results, diffs and errors, streamed
+  chunks joined, each entry at most 8000 characters and the file at most
+  1 MiB (`WorkerActivity::record`). External CLI and ACP events and native
+  stream events all feed it. It is not an orchestration transcript of the
+  reviewer.
+- **Process trees.** An external worker or reviewer runs in a Windows job
+  object (started suspended, without a console, then resumed) or its own
+  Unix process group (`process_job`). A timeout, cancel or failure stops the
+  whole tree, and closing the job at the end kills anything the CLI left
+  running.
+- **Partial work.** When a worker fails or is stopped, whatever it had
+  changed in its worktree is saved as `worker-partial.diff` and the card
+  error says so. It is evidence only: never reviewed, never applied by Zest,
+  and it does not make the card reviewable. Read it through the artifact
+  pager (`ALLOWED_ARTIFACTS`, MCP `delegation_artifact`).
 - Workers never edit the user's checkout. Each runs in a temporary detached
   `git worktree` that holds the current dirty snapshot (tracked diff plus
   untracked files), with sensitive files removed and `.zest/` left out. What
   comes back is a diff.
+- The worker's snapshot is a commit in the project's object store. The job
+  records it (`worker_base`) and pins it as `refs/zest/delegations/<jobId>`
+  (`pin_worker_base`) until the job is accepted or cancelled. The acceptance
+  checks and every reviewer start from that commit plus the worker diff
+  (`prepare_reviewer` with a base), so they see exactly the files the worker
+  saw, even if the checkout changed meanwhile. A missing or malformed base
+  falls back to snapshotting the current checkout.
 - The worker diff must be non-empty, and every path in it must be inside the
   card `scope` (`.` means the whole project) and outside `.git`, `.zest` and
   sensitive paths. Otherwise the job fails.
 - Zest runs the acceptance checks itself, in a separate worktree with the worker
   diff applied. It only runs a command that classifies as auto-run under
-  `[tools.bash]`. Any other command is recorded as `skipped`. The reviewer must
-  report these results exactly as Zest recorded them.
+  `[tools.bash]`. Any other command is recorded as `skipped`. The reviewer sees
+  these results as evidence and only returns a verdict and findings; the
+  coordinator writes its own results into `review-result.json`, whatever the
+  reviewer said about them.
 - `ready_to_apply` needs all of the following: a review report that parses,
   decision `accepted`, evidence with `passed` for every required check, and no
   `blocking` finding. A reviewer that edits files sends the job to `blocked`,
-  and its edits are discarded.
+  and its edits are discarded. A reviewer whose process fails or times out,
+  or whose report does not parse, is replaced once by a fresh reviewer
+  (`MAX_REVIEWER_ATTEMPTS`); the card inbox says so. The checks are not run
+  again for that second reviewer.
 - Apply checks the scope again and runs `git apply --check` before `git apply`.
-  If either fails, the job becomes `apply_conflict` and the checkout is left
-  untouched. A successful apply leaves the job `accepted`. Zest saves an
+  When the diff no longer applies as it is (the user changed lines around the
+  worker's edits), `apply_worker_diff` replays the worker's change from its
+  base onto a `git stash create` snapshot of the checkout in temporary
+  worktrees (a cherry-pick) and applies the resulting patch, only if that
+  merge is clean and touches only the reviewed paths. The card inbox says a
+  three-way merge was used. Otherwise the job becomes `apply_conflict` and
+  the checkout is left untouched, with no conflict markers. A successful apply leaves the job `accepted`. Zest saves an
   apply intent before Git touches the checkout. If the coordinator stops
   before recording the outcome, the card becomes `blocked` on reconciliation
   or the next Apply. Inspect the checkout against `worker.diff` before
@@ -79,6 +125,15 @@ The desktop's **Delegation** tab (under Workbench) uses the same coordinator as 
   clears its approval and takes a new workspace snapshot. Only one approval
   follows. The next worker attempt also gets the previous diff and review report
   as evidence.
+- **Review again.** While a saved `worker.diff` has no verdict yet, the job
+  records its hash (`reviewable_diff`). If the card then blocks or fails (the
+  reviewer kept failing, edited files, or timed out), `canReviewAgain` is
+  true and `review_again` (desktop **Review again**, MCP
+  `delegation_review_again`) queues a fresh reviewer on that same diff with
+  `review_only` set. The worker does not run, the approval still covers it,
+  and a config change still sends the card back to `awaiting_approval`. A
+  verdict (`ready_to_apply` or `changes_requested`) clears the hash, so a
+  rejected diff cannot be sent to another reviewer.
 - `accepted` and `cancelled` are final. Provider credentials are never written
   to a job. External worker processes run with secret-looking environment
   variables and the configured provider key names removed.
@@ -96,6 +151,7 @@ awaiting_approval -> queued -> worker_running -> review_running -> ready_to_appl
                                                      |-> changes_requested       |-> apply_conflict
 non-final -> blocked | failed | cancelled
 blocked | failed | changes_requested | apply_conflict | queued -> awaiting_approval  (retry, edit, config drift)
+blocked | failed -> queued -> review_running  (review again, same worker diff)
 ```
 
 ## How it works
@@ -112,8 +168,10 @@ Entry points:
    acceptance checks, a worker and an optional reviewer, and calls
    `create_job` with the active chat as parent. The card list and the
    selected card's detail come from `DelegationJobView`. **Approve and run**,
-   **Apply reviewed diff**, **Prepare retry** and **Cancel delegation** call
-   `approve`, `apply`, `retry` and `cancel` with the displayed `updated_at`,
+   **Apply reviewed diff**, **Prepare retry**, **Cancel delegation** and, on a
+   blocked or failed card whose saved worker diff can be reviewed again
+   (`can_review_again`), **Review again** call `approve`, `apply`, `retry`,
+   `cancel` and `review_again` with the displayed `updated_at`,
    on a blocking task, one at a time. The three artifact buttons call
    `artifact_page` with **Previous page**/**Next page**. Coordinator events
    reach the window through `BoardNotifier`, which only bumps a watch channel;
@@ -169,9 +227,10 @@ The pipeline is `DelegationCoordinator::run_job` in `scheduler.rs`:
 5. The job moves to `review_running`. `run_acceptance_checks` runs the checks.
 6. The reviewer runs through `run_delegation_reviewer` or
    `run_provider_reviewer`. The reviewer role has no write tools.
-7. `ReviewReport::parse`, `validate_review_paths` and
-   `validate_authoritative_checks` run. `can_accept` then chooses
-   `ready_to_apply` or `changes_requested`.
+7. `ReviewReport::parse_verdict` reads the verdict and attaches the recorded
+   check results, then `validate_review_paths` runs. `can_accept` chooses
+   `ready_to_apply` or `changes_requested`; an accepted verdict over a failed
+   or skipped check names that check in the error (`unmet_check`).
 
 `orchestration.rs` keeps an `OrchestrationState` projection inside each job.
 It holds the phase log (at most 128 entries), the decision gates (`approval`,
@@ -225,22 +284,34 @@ for a CLI worker's own model; set it in that agent's `[agents.<id>]` entry.
 ## Pitfalls
 
 - **Acceptance checks that never pass.** Commands such as `cargo test` and
-  `npm test` are not auto-run, so they are recorded as `skipped`. If the
-  reviewer then says `accepted`, the report fails validation with "required
-  check lacks evidence" and the job becomes `blocked`. The card can only reach
-  `ready_to_apply` if the command prefix is in `[tools.bash] extra_allowlist`.
+  `npm test` are not auto-run, and a skipped required check can never pass.
+  Approval (and the start of each worker run) therefore blocks such a card
+  with `acceptance_check_skip_reason`, which names the exact
+  `extra_allowlist` entry to add under `[tools.bash]`, or explains that the
+  command uses shell syntax or matches the denylist. Checks run as argv
+  (`parse_auto_argv`, so quotes group arguments) with the program resolved
+  by `resolve_program`, which finds `npm`/`npx`/`pnpm` `.cmd` shims on
+  Windows.
 - **Reviewer target format.** `ReviewerTarget` is stored adjacently tagged,
   `{"kind":"target","target":{..}}`, the same shape as `ReviewerTargetView`.
   It used to nest one `kind`-tagged enum inside another, writing `kind` twice;
-  such a record failed to load, and `DelegationStore::list` stops at the first
-  unreadable job, so one card with a separate reviewer broke the whole board.
+  such a record failed to load, and `DelegationStore::list` used to stop at
+  the first unreadable job, so one card with a separate reviewer broke the
+  whole board. `list` now skips unreadable job files; `list_all` returns them
+  with the reason, and `reconcile` reports each on stderr.
   Its custom `Deserialize` still reads those legacy records (the last `kind`
   wins, which is the target's own tag). Keep a disk round trip in any test of
   record shapes.
-- **Clipped external diffs.** External worker diffs are cut in the middle at
-  512 KiB (`clip_diff`). A clipped diff will not apply.
-- **No automatic retries.** A failed, blocked or rejected job waits for a
-  manual `retry`, which needs a new approval. Keep the README saying so.
+- **Diff size limits.** A feature-card worker diff is stored whole, binary
+  files included (`git diff --binary`, also for files the worker created). A
+  file the worker created over 2 MB (`MAX_NEW_FILE_BYTES`) fails the run with
+  its name, and a whole diff over 8 MiB (`MAX_WORKER_DIFF_BYTES`) fails with
+  its size, instead of being left out or cut. Only the direct
+  `delegate_external` tool still clips its diff at 512 KiB (`clip_diff`),
+  because that diff goes to the model, not to `git apply`.
+- **No automatic worker retries.** A failed, blocked or rejected job waits
+  for a manual `retry`, which needs a new approval. Only the reviewer is
+  retried automatically, once. Keep the README saying so.
 - **Isolation needs a real repository.** It requires a Git repository with a
   HEAD commit. A folder that only contains repositories gets
   `no_repository_error`. ACP agents cannot use `workspace = "current"`.

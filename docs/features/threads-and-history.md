@@ -9,6 +9,7 @@ paths:
   - crates/core/src/fsutil.rs
   - crates/desktop/src/workspace.rs
   - crates/desktop/src/workspace/chrome.rs
+  - crates/desktop/src/workspace/recent.rs
   - crates/desktop/src/search.rs
   - crates/desktop/src/native.rs
 tests:
@@ -28,8 +29,8 @@ verify:
 
 ## Behavior
 - Interactive HTML source is inline in conversation metadata/fences and follows existing save, checkpoint, fork and deletion ownership. New metadata uses thread format v5; older binaries are not compatible. Future-version files are rejected before typed decoding, not renamed as corrupt.
-- Each chat is `<workspace>/.zest/threads/<id>.json`. The desktop window always has a project open (with no arguments it shows a folder picker), so it has no projectless chats. A new chat gets no history row until its first message or queued input. Until then the sidebar shows it as a draft row: "New chat", or "Draft · <first line of the composer>".
-- The sidebar lists the open project only. Its project row expands to the saved split groups, drafts and chats. Chats are ordered pinned first, then most recently updated. Each row has a glyph (a spinner while its turn runs, a pin, a pull request icon when one is linked, otherwise a message icon), the title, and a short age ("now", "45s", "6m", "8h", "2d").
+- Each chat is `<workspace>/.zest/threads/<id>.json`. A desktop window always has one project open (with no arguments it shows a folder picker). Chats started outside a project live in `<config dir>/zest/free-chats` and are reached through the sidebar's Recent section. A new chat gets no history row until its first message or queued input. Until then the sidebar shows it as a draft row: "New chat", or "Draft · <first line of the composer>".
+- The sidebar lists the open project, as a Project tree (default) or, with Customize > Chat view > Compact list, one line per chat with a single mark (needs input, working, pull request, idle) under the project name. In the tree, the project row expands to the saved split groups, drafts and chats. Chats are ordered pinned first, then most recently updated. Each row has a glyph (a spinner while its turn runs, a pin, a pull request icon when one is linked, otherwise a message icon), the title, and a short age ("now", "45s", "6m", "8h", "2d").
 - Worktree chats open as their own project window from Workbench > Worktrees; see [worktree-chats](worktree-chats.md).
 - When a chat that is not on screen needs an approval or an answer, or its turn fails or finishes, the window shows an "Open · <kind> · <title>" banner. When the window is not focused it sends a system notification instead. Opening the chat clears its banners. The desktop app has no unread marks.
 - The chat header has Pin/Unpin, Rename and Fork for a saved chat. Rename opens a page with the title selected; Enter saves, and an invalid title shows a notice. Fork does nothing while that chat's turn runs. The desktop app has no delete action for chats.
@@ -44,6 +45,8 @@ verify:
   do not support durable stream resume.
 - A chat keeps the provider it first ran with. If that provider is no longer configured, sending fails with "Choose a configured provider. '<id>' is unavailable." Model & permissions shows only the owning provider and says to start a new chat for a different one. There is no flow to copy a chat to another provider.
 - Back and Forward in the sidebar header walk the places visited, each a page and a chat.
+
+- The sidebar's Recent section ("No project" in the compact list) lists the chats with messages in `<config dir>/zest/free-chats`, newest first, up to 30. Opening one opens or focuses a window rooted at that folder, because a native window holds one project.
 
 ## How it works
 - Storage: `ThreadStore` (`thread.rs`) `save` via `fsutil::atomic_write_json` (temp file, sync, atomic replace). `load_typed` migrates older versions, refuses newer ones, moves corrupt files aside as `*.json.corrupt-<ts>`, and `terminalize_interrupted_at` closes running tool/approval cards and running provider activity, then saves the closed projection. `Thread` holds UI `messages`, redacted `agent_messages`, `checkpoints`, `pending_inputs`, and a lifecycle `events` ledger.

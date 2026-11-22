@@ -31,6 +31,11 @@ The desktop app uses the `WhileActive` lock lifetime and submits approved chat-t
   gets "another coordinator already owns this project" (`LOCK_HELD_MESSAGE`,
   checked with `is_lock_held_error`). The lock is taken on the first call to any
   coordinator method (`ensure_lock`/`require_lock`).
+- **Stale worktrees.** Delegation worktrees live in temporary directories
+  named `zest-wt-<pid>-…`. Each time a coordinator takes a project's lock it
+  removes the worktrees whose owning process is no longer running (left by a
+  crash or a killed process) and runs `git worktree prune`
+  (`prune_stale_worktrees`), reporting each on stderr.
 - **How long the lock is kept** depends on `LockRetention`:
   - `Process` (the default, used by `zest serve`): until the process exits.
   - `WhileActive` (the desktop): only while a job in that project is queued,
@@ -59,7 +64,11 @@ The desktop app uses the `WhileActive` lock lifetime and submits approved chat-t
   origin is `desktop_agent_board` (the default). A repeated key returns the
   existing job. MCP sets the origin to `inbound_mcp`.
 - **Heartbeat.** While a worker or reviewer runs, a heartbeat every 15 s updates
-  `orchestration.heartbeatAt` and emits `heartbeat`.
+  `orchestration.heartbeatAt` and emits `heartbeat`. Its detail is the
+  watched run's `WorkerActivity::summary`: how long it has run, how long ago
+  it last showed progress, and what that was (`tool Read`, `writing`, an ACP
+  method). During the review phase it says the checks are running until the
+  first reviewer starts (`ActivitySlot`).
 - **`reconcile`**:
   - approves jobs that have a valid dispatch receipt (`ingest_inner`);
   - marks `worker_running`/`review_running` jobs with no live task as `blocked`
@@ -70,9 +79,12 @@ The desktop app uses the `WhileActive` lock lifetime and submits approved chat-t
   - calls `kick_pending`.
 - **`shutdown`** stops new enqueues, cancels in-flight tokens and waits up to
   8 s. It then marks jobs that are still running as `blocked`, not `cancelled`.
-- **Error classification.** A failed run is marked `blocked` when the error
-  mentions "unavailable", "not configured", "owns its agent loop" or "Connect".
-  Any other error marks it `failed`.
+- **Error classification.** `run_job` returns a `RunError` decided where the
+  error happens: an unreadable config or a worker/reviewer target that no
+  longer resolves (unavailable, not configured, a provider that owns its agent
+  loop) is `Blocked`; anything after that, including a worker or reviewer
+  that crashes, times out or makes no progress, is `Failed`. The message text
+  is never inspected.
 - **Artifacts.** `artifact_page` serves the three allowed artifacts in 64 KiB
   pages with a `nextOffset`.
 
@@ -121,10 +133,22 @@ The desktop app uses the `WhileActive` lock lifetime and submits approved chat-t
 - a process exiting after Git apply but before either the card or the MCP
   command receipt records completion. The same command ID still reports an
   incomplete receipt after restart;
-- cancel idempotency and dependencies;
-- concurrent approve.
+- cancel idempotency and dependencies, and cancelling a running worker
+  (attempt closed, worktree removed);
+- concurrent approve;
+- the reviewer path: coordinator-recorded check results, one automatic
+  reviewer retry, review again on the same diff, reviewer edits, a finding
+  outside the project, and a silent reviewer;
+- workers that go silent (idle limit, partial diff kept) or crash with a
+  connection error (`failed`, not `blocked`);
+- a new binary file applied byte for byte, an oversized new file refused,
+  a three-way apply after the user edited nearby lines, an unreadable job
+  file next to a runnable one, and a card whose check cannot auto-run.
 
-These tests need `git` and `rustc` on PATH to build the fixture worker.
+These tests need `git` and `rustc` on PATH to build the fixture worker
+(`external_agent_fixture.rs`, whose `delegation*` modes play each worker and
+reviewer). They run many fixture jobs at once, so `wait_for_status` allows
+120 s.
 
 ## Pitfalls
 
@@ -143,6 +167,9 @@ These tests need `git` and `rustc` on PATH to build the fixture worker.
   and hides the create and action buttons. Any other listing error is shown
   as the board's message.
 - **Unlock before close.** `CoordinatorLock` drops its OS lock explicitly (`flock(LOCK_UN)` / `UnlockFileEx`) before the file closes. Closing alone releases it only when every copy of the descriptor is gone, and a child another thread is forking (git, a worker) holds one until it execs, so a `WhileActive` release followed by a quick re-acquire failed as "another coordinator". `lock::tests` reproduces it with a cloned handle.
+- **Heartbeat detail is not a liveness proof.** The detail says when the run
+  last showed progress; the watchdog, not the heartbeat, stops a run that
+  shows none.
 - **Unsure means keep.** Under `WhileActive`, anything that leaves
   `has_active_work` unsure (an unreadable store, a poisoned mutex) keeps the
   lock, on purpose.
