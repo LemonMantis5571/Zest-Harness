@@ -1774,6 +1774,13 @@ pub fn validate_review_paths(root: &Path, report: &ReviewReport) -> Result<()> {
     Ok(())
 }
 
+/// A job file in the store that [`DelegationStore::list_all`] could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableJob {
+    pub job_id: String,
+    pub error: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct DelegationStore {
     root: PathBuf,
@@ -1967,9 +1974,19 @@ impl DelegationStore {
             .find(|job| job.idempotency_key.as_deref() == Some(key)))
     }
 
+    /// Every readable job, newest first. A job file that cannot be read is
+    /// left out (see [`Self::list_all`]), so one corrupt card cannot hide the
+    /// board or stall the queue.
     pub fn list(&self) -> Result<Vec<DelegationJob>> {
+        Ok(self.list_all()?.0)
+    }
+
+    /// Every readable job, newest first, and the job files that could not be
+    /// read with the reason.
+    pub fn list_all(&self) -> Result<(Vec<DelegationJob>, Vec<UnreadableJob>)> {
         let _guard = state_lock()?;
         let mut jobs: Vec<DelegationJob> = Vec::new();
+        let mut unreadable = Vec::new();
         let entries = fs::read_dir(self.dir())
             .map_err(|error| HarnessError::Other(format!("list delegation jobs: {error}")))?;
         for entry in entries {
@@ -1981,8 +1998,13 @@ impl DelegationStore {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if let Some(job) = read_job(&path, id)? {
-                jobs.push(job);
+            match read_job(&path, id) {
+                Ok(Some(job)) => jobs.push(job),
+                Ok(None) => {}
+                Err(error) => unreadable.push(UnreadableJob {
+                    job_id: id.to_string(),
+                    error: error.to_string(),
+                }),
             }
         }
         jobs.sort_by(|left, right| {
@@ -1991,7 +2013,7 @@ impl DelegationStore {
                 .cmp(&left.updated_at)
                 .then_with(|| left.job_id.cmp(&right.job_id))
         });
-        Ok(jobs)
+        Ok((jobs, unreadable))
     }
 
     pub fn write_artifact(&self, job_id: &str, name: &str, data: &[u8]) -> Result<()> {
@@ -3375,6 +3397,28 @@ Here is the JSON verdict:
         let worktrees =
             String::from_utf8(run_git_output(&root, &["worktree", "list"]).stdout).unwrap();
         assert_eq!(worktrees.lines().count(), 1, "{worktrees}");
+    }
+
+    #[test]
+    fn list_skips_and_reports_an_unreadable_job_file() {
+        let root = scratch("unreadable-job");
+        let store = DelegationStore::open(&root).unwrap();
+        let job = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        fs::write(store.dir().join("job-broken.json"), "{ not json").unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].job_id, job.job_id);
+        let (jobs, unreadable) = store.list_all().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(unreadable.len(), 1);
+        assert_eq!(unreadable[0].job_id, "job-broken");
+        assert!(
+            unreadable[0].error.contains("corrupt"),
+            "{:?}",
+            unreadable[0]
+        );
     }
 
     #[test]

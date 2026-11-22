@@ -289,8 +289,10 @@ Code and Gemini presets.
 - **Reviewer target format.** `ReviewerTarget` is stored adjacently tagged,
   `{"kind":"target","target":{..}}`, the same shape as `ReviewerTargetView`.
   It used to nest one `kind`-tagged enum inside another, writing `kind` twice;
-  such a record failed to load, and `DelegationStore::list` stops at the first
-  unreadable job, so one card with a separate reviewer broke the whole board.
+  such a record failed to load, and `DelegationStore::list` used to stop at
+  the first unreadable job, so one card with a separate reviewer broke the
+  whole board. `list` now skips unreadable job files; `list_all` returns them
+  with the reason, and `reconcile` reports each on stderr.
   Its custom `Deserialize` still reads those legacy records (the last `kind`
   wins, which is the target's own tag). Keep a disk round trip in any test of
   record shapes.

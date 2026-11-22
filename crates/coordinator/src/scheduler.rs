@@ -1898,7 +1898,14 @@ impl DelegationCoordinator {
             })
             .unwrap_or_default();
         let mut changed = Vec::new();
-        for mut job in store.list().map_err(|error| error.to_string())? {
+        let (jobs, unreadable) = store.list_all().map_err(|error| error.to_string())?;
+        for bad in &unreadable {
+            eprintln!(
+                "zest: skipped unreadable delegation job {}: {}",
+                bad.job_id, bad.error
+            );
+        }
+        for mut job in jobs {
             if matches!(
                 job.status,
                 CoreDelegationStatus::WorkerRunning | CoreDelegationStatus::ReviewRunning
@@ -3433,6 +3440,29 @@ mod tests {
             .inbox
             .iter()
             .any(|message| message.body.contains("three-way merge")));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_job_file_does_not_stall_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project(root);
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, create_request("Next to a broken card"))
+            .unwrap();
+        let store = DelegationStore::open(root).unwrap();
+        std::fs::write(store.dir().join("job-broken.json"), "{ not json").unwrap();
+        assert_eq!(list_views(root).unwrap().len(), 1);
+        coordinator.reconcile(root).unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::ReadyToApply,
+        )
+        .await;
     }
 
     #[tokio::test]

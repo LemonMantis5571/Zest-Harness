@@ -97,8 +97,9 @@ pub use delegation::{
     AttemptUsage, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
     DelegationOrigin, DelegationStatus, DelegationStore, DelegationTarget, DispatchReceipt,
     FeatureCard, ResolvedTargetMetadata, ReviewDecision, ReviewFinding, ReviewReport,
-    ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult, WorkspaceSnapshot,
-    DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION, V2_DELEGATION_FORMAT_VERSION,
+    ReviewSeverity, ReviewerTarget, TargetFingerprint, UnreadableJob, WorkerResult,
+    WorkspaceSnapshot, DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION,
+    V2_DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
