@@ -124,6 +124,14 @@ pub struct ToolsConfig {
     /// requests, one extra round when a tool is first needed. Off by default.
     #[serde(default)]
     pub mcp_discovery: bool,
+    /// Provider rounds one turn may take before the model is asked to wrap up
+    /// without tools. `0` means no limit.
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u32,
+}
+
+fn default_max_steps() -> u32 {
+    crate::agent::DEFAULT_MAX_STEPS
 }
 
 /// Hand-written rather than derived: a derived `usize` default is `0`, which this
@@ -135,6 +143,7 @@ impl Default for ToolsConfig {
             bash: BashConfig::default(),
             max_result_bytes: default_max_result_bytes(),
             mcp_discovery: false,
+            max_steps: default_max_steps(),
         }
     }
 }

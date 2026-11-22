@@ -6822,7 +6822,10 @@ async fn compact_context_inner(state: &AppState) -> Result<CompactionResultView,
             }
             _ => None,
         });
-    let result = session.agent.compact_context_for_run(run_id).await;
+    let result = session
+        .agent
+        .compact_context_for_run(run_id, Some(&turn.cancel))
+        .await;
     let output = match result {
         // Both paths rewrote history, so both need the same persistence handling.
         // The checkpoint written above is kept either way: the UI transcript

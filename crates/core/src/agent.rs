@@ -8,10 +8,12 @@
 //! The loop is provider-agnostic. It describes the turn it wants and lets the
 //! provider decide how to express that on the wire.
 //!
-//! Provider-facing history is **transactional**: mutations are staged and only
-//! committed when the turn reaches a complete terminal state. Errors and
-//! cancellation leave `Agent::messages` unchanged so wire history never contains
-//! a half-built assistant/tool turn. UI transcript is the front-end's job.
+//! Provider-facing history is staged while a turn runs and committed when it
+//! ends. A finished turn commits everything. A failed or cancelled turn commits
+//! the user message and every completed provider round and tool result, closes
+//! any unanswered tool call, and ends with an interruption note, so the model
+//! knows what it already did (tools may have changed files). Wire history never
+//! holds a half-built assistant message. UI transcript is the front-end's job.
 //!
 //! Sensitive tool results are redacted when committed to durable wire history
 //! while the live in-memory turn still sees the real body for the model.
@@ -37,6 +39,56 @@ use crate::tools::prepared::PreparedToolCall;
 use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
 use crate::usage::{Ledger, RequestSourceEstimates, TaskRequestUsage};
+
+/// Provider rounds one turn may take before the model is asked to wrap up
+/// without tools, unless a front-end configures another limit.
+pub const DEFAULT_MAX_STEPS: u32 = 200;
+
+/// Consecutive identical tool calls that make the agent ask whether the model
+/// is stuck.
+pub const REPEATED_CALL_LIMIT: u32 = 3;
+
+/// Rounds in a row the agent asks the model to continue a response that was
+/// empty or cut off before the turn gives up.
+const MAX_CONTINUATIONS: u32 = 3;
+
+/// What the model is told after a response that did not finish, by stop
+/// reason; `None` is an empty response.
+fn continuation_note(reason: Option<&str>) -> String {
+    match reason {
+        None => "[Zest: your last response was empty. Continue with the task, or give \
+                 your final answer.]"
+            .into(),
+        Some("max_tokens") => "[Zest: your last response hit the output token limit and \
+                               was cut off. Continue from where it stopped, in smaller \
+                               pieces: split a large file or edit into several smaller \
+                               tool calls.]"
+            .into(),
+        Some(crate::provider::STREAM_INTERRUPTED) => "[Zest: your last response was cut off \
+                                                      by a connection problem. Continue \
+                                                      exactly where it stopped, without \
+                                                      repeating what you already wrote.]"
+            .into(),
+        Some(other) => format!(
+            "[Zest: your last response stopped unexpectedly (stop reason `{other}`). \
+             Continue the task from where it stopped.]"
+        ),
+    }
+}
+
+/// The error for a turn whose responses kept stopping short.
+fn stopped_after_continuations(reason: &str) -> HarnessError {
+    HarnessError::StoppedEarly(match reason {
+        "max_tokens" => format!(
+            "hit max_tokens {MAX_CONTINUATIONS} times in a row — raise Agent::max_tokens \
+             or lower effort"
+        ),
+        crate::provider::STREAM_INTERRUPTED => {
+            "the provider kept cutting the response off".to_string()
+        }
+        other => format!("stopped with `{other}` {MAX_CONTINUATIONS} times in a row"),
+    })
+}
 
 const REDACTED_SENSITIVE_RESULT: &str =
     "[redacted: sensitive tool result omitted from persisted history]";
@@ -138,6 +190,10 @@ pub struct Agent {
     pub max_tokens: u32,
     /// A request, not a command — providers that have no notion of effort ignore it.
     pub effort: String,
+    /// Provider rounds one turn may take. When it is reached the model gets
+    /// one more round, without tools, to summarize where it stopped. `0`
+    /// means no limit.
+    pub max_steps: u32,
     pub system: Option<SystemPrompt>,
     pub messages: Vec<Message>,
     /// Provider-native continuation state. The desktop copies this to the
@@ -174,6 +230,7 @@ impl Agent {
             model,
             max_tokens: 32_000,
             effort: "high".to_string(),
+            max_steps: DEFAULT_MAX_STEPS,
             system: None,
             messages: Vec::new(),
             provider_session: None,
@@ -312,8 +369,7 @@ impl Agent {
     /// Build a side conversation from a caller-supplied wire snapshot.
     ///
     /// The desktop uses this while a turn is still running: `self.messages`
-    /// intentionally remains transactional until the turn reaches a terminal
-    /// state, but a side question should be able to see the user prompt and
+    /// is only committed when the turn reaches a terminal state, but a side question should be able to see the user prompt and
     /// completed provider rounds that existed when it was opened.
     pub fn side_conversation_with_messages(
         &self,
@@ -407,14 +463,16 @@ impl Agent {
     /// list is still declared where that keeps the cached prefix intact — see
     /// `allow_tool_use`, which is what actually forbids the call.
     pub async fn compact_context(&mut self) -> Result<CompactionOutcome> {
-        self.compact_context_for_run(self.active_run_id.clone())
+        self.compact_context_for_run(self.active_run_id.clone(), None)
             .await
     }
 
     /// Attribute maintenance after an idle host turn to that turn's durable ID.
+    /// `cancel` stops the summarization request, leaving history unchanged.
     pub async fn compact_context_for_run(
         &mut self,
         run_id: Option<String>,
+        cancel: Option<&CancelToken>,
     ) -> Result<CompactionOutcome> {
         let task_id = new_id("task");
         let parent_task_id = self.active_usage_task_id.clone();
@@ -443,17 +501,20 @@ impl Agent {
             }
         }
         let trace = crate::usage::TaskTraceGuard::new(self.ledger.clone(), task_id);
-        let result = self.compact_context_inner().await;
-        trace.finish(if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
+        let result = self.compact_context_inner(cancel).await;
+        trace.finish(match &result {
+            Ok(_) => "completed",
+            Err(HarnessError::Cancelled) => "cancelled",
+            Err(_) => "failed",
         });
         self.active_usage_task_id = prior_task;
         result
     }
 
-    async fn compact_context_inner(&mut self) -> Result<CompactionOutcome> {
+    async fn compact_context_inner(
+        &mut self,
+        cancel: Option<&CancelToken>,
+    ) -> Result<CompactionOutcome> {
         if self.messages.len() < 4 {
             return Err(HarnessError::Other(
                 "there is not enough conversation to compact yet".into(),
@@ -483,15 +544,51 @@ impl Agent {
             });
         }
 
+        let sensitive = self.sensitive_tool_ids.clone();
+        let summary = self.write_checkpoint(pruned, &sensitive, cancel).await;
+        self.provider_session = None;
+        let summary = summary?;
+        self.messages = checkpoint_messages(&summary);
+        self.sensitive_tool_ids.clear();
+        // The compaction request measured the old history, not the compacted
+        // conversation. Do not let that maintenance request masquerade as the
+        // next turn's context usage in the footer.
+        self.last_usage = None;
+        Ok(CompactionOutcome::Summarized { summary })
+    }
+
+    /// Ask the model for a checkpoint of `history` and return its text.
+    ///
+    /// The request receives the persistence-safe history, so a sensitive tool
+    /// result cannot be copied into the durable checkpoint, and is fitted to
+    /// the context window first: when even the history being summarized is too
+    /// long, long tool results are shortened and then the oldest exchanges left
+    /// out. It calls no tools and asks for no thinking, and `cancel` stops it.
+    async fn write_checkpoint(
+        &mut self,
+        history: Vec<Message>,
+        sensitive_ids: &[String],
+        cancel: Option<&CancelToken>,
+    ) -> Result<String> {
+        let window = self.context_window();
+        // An eighth of the window at most, so a small local model still has
+        // room for the history it is summarizing.
+        let max_tokens = self
+            .max_tokens
+            .min(CHECKPOINT_MAX_TOKENS)
+            .min(u32::try_from(window / 8).unwrap_or(u32::MAX))
+            .max(1_024);
+        let tools = self.tools_for_model();
+        let fixed = crate::context_budget::system_tokens(self.system.as_ref())
+            + crate::context_budget::tool_schema_tokens(&tools)
+            + u64::from(max_tokens);
+        // Nine tenths of what is left: the estimate under-counts code and JSON.
+        let budget = (window.saturating_sub(fixed)).saturating_mul(9) / 10;
         // Redaction is last before the wire. It is the safety property, so
         // nothing may run after it that could resurrect a sensitive body.
-        let mut messages = redact_sensitive_staged(pruned, &self.sensitive_tool_ids);
-        messages.push(Message::user_text(
-            "Create a concise context checkpoint for the next coding turn. ".to_string()
-                + "Preserve the user’s goals, decisions, constraints, files changed, "
-                + "unfinished work, and important tool findings. Do not invent facts. "
-                + "Return only the checkpoint, with compact headings.",
-        ));
+        let mut messages =
+            fit_history_for_checkpoint(redact_sensitive_staged(history, sensitive_ids), budget);
+        messages.push(Message::user_text(CHECKPOINT_REQUEST));
         let request = TurnRequest {
             model: self.model.clone(),
             system: self.system.clone(),
@@ -502,18 +599,27 @@ impl Agent {
             // would both miss the session's cached prefix and write a second
             // full copy of it — twice the price of the thing it exists to
             // make cheaper.
-            tools: self.tools_for_model(),
+            tools,
             allow_tool_use: false,
-            max_tokens: 4_096,
+            max_tokens,
             effort: None,
             thinking: false,
             provider_session: self.provider_session.clone(),
             interaction: self.provider_interaction.clone(),
-            cancel: None,
+            cancel: cancel.cloned(),
         };
         let mut sink = |_event: StreamEvent<'_>| {};
         let request_started = tokio::time::Instant::now();
-        let completion = match self.provider.stream_turn(&request, &mut sink).await {
+        let streamed = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err(HarnessError::Cancelled),
+            result = self.provider.stream_turn(&request, &mut sink) => result,
+        };
+        let elapsed_ms = request_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let completion = match streamed {
             Ok(completion) => completion,
             Err(error) => {
                 if let (Some(ledger), Some(task_id)) =
@@ -526,21 +632,15 @@ impl Agent {
                                 "compaction",
                                 self.provider.id(),
                                 &request,
-                                request_started
-                                    .elapsed()
-                                    .as_millis()
-                                    .min(u128::from(u64::MAX))
-                                    as u64,
+                                elapsed_ms,
                                 None,
                             ),
                         );
                     }
                 }
-                self.provider_session = None;
                 return Err(error);
             }
         };
-        self.provider_session = None;
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
                 // The trace first: the spend record's save then persists both.
@@ -551,10 +651,7 @@ impl Agent {
                             "compaction",
                             self.provider.id(),
                             &request,
-                            request_started
-                                .elapsed()
-                                .as_millis()
-                                .min(u128::from(u64::MAX)) as u64,
+                            elapsed_ms,
                             Some(&completion),
                         ),
                     );
@@ -570,11 +667,8 @@ impl Agent {
         let summary = completion
             .content
             .iter()
-            .filter_map(|block| {
-                (block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
-                    .then(|| block.get("text").and_then(|text| text.as_str()))
-                    .flatten()
-            })
+            .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
             .collect::<Vec<_>>()
             .join("\n")
             .trim()
@@ -584,25 +678,101 @@ impl Agent {
                 "provider returned an empty context checkpoint".into(),
             ));
         }
+        Ok(summary)
+    }
 
-        self.messages = vec![
-            Message::user_text(
-                "[Zest context checkpoint] The earlier conversation is represented by the "
-                    .to_string()
-                    + "assistant checkpoint that follows. Use it as working context.",
-            ),
-            Message::assistant(vec![serde_json::json!({
-                "type": "text",
-                "text": summary,
-            })]),
-        ];
-        self.sensitive_tool_ids.clear();
+    /// Compact a running turn's history in place.
+    ///
+    /// The same two steps as [`Self::compact_context`]: shorten long tool
+    /// results, and when that does not bring `used` prompt tokens under the
+    /// threshold (or `used` is `None` because the provider already said the
+    /// prompt is too long) replace the history with a
+    /// checkpoint followed by a note to carry on with the current task. Shown
+    /// as a provider activity row. Returns whether the history changed.
+    async fn compact_staged(
+        &mut self,
+        staged: &mut Vec<Message>,
+        turn_start: &mut usize,
+        turn_sensitive: &[String],
+        used: Option<u64>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Result<bool> {
+        let id = new_id("compact");
+        let turn_start_before = *turn_start;
+        let running = "Compacting the conversation to fit the context window";
+        on_event(StreamEvent::ProviderActivity {
+            id: &id,
+            title: running,
+            status: "running",
+        });
+        let mut pruned = staged.clone();
+        let report =
+            crate::prune::prune_tool_results(&mut pruned, crate::prune::KEEP_RECENT_MESSAGES);
+        let threshold = crate::context_budget::auto_compact_threshold(self.context_window());
+        let pruning_is_enough = used.is_some_and(|used| {
+            report.replaced > 0 && used.saturating_sub(report.tokens_saved_estimate()) < threshold
+        });
+        if pruning_is_enough {
+            *staged = pruned;
+            self.provider_session = None;
+            let title = format!("Trimmed {} long tool results", report.replaced);
+            on_event(StreamEvent::ProviderActivity {
+                id: &id,
+                title: &title,
+                status: "completed",
+            });
+            return Ok(true);
+        }
+
+        let mut sensitive = self.sensitive_tool_ids.clone();
+        sensitive.extend(turn_sensitive.iter().cloned());
+        let summary = self.write_checkpoint(pruned, &sensitive, cancel).await;
         self.provider_session = None;
-        // The compaction request measured the old history, not the compacted
-        // conversation. Do not let that maintenance request masquerade as the
-        // next turn's context usage in the footer.
-        self.last_usage = None;
-        Ok(CompactionOutcome::Summarized { summary })
+        match summary {
+            Ok(summary) => {
+                let mut compacted = checkpoint_messages(&summary);
+                // The request this turn is working on stays word for word.
+                *turn_start = compacted.len();
+                if let Some(request) = staged.get(turn_start_before) {
+                    compacted.push(request.clone());
+                }
+                compacted.push(Message::user_text(MID_TURN_CHECKPOINT_NOTE));
+                *staged = compacted;
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: "Compacted the conversation to fit the context window",
+                    status: "completed",
+                });
+                Ok(true)
+            }
+            Err(error) => {
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: "Could not compact the conversation",
+                    status: "error",
+                });
+                Err(error)
+            }
+        }
+    }
+
+    /// The prompt a request built from `staged` would send, in tokens.
+    ///
+    /// Anchored on the provider's own count of an earlier request where there
+    /// is one (`measured`: its prompt plus the reply, and how many messages it
+    /// covered), with only the messages since then estimated.
+    fn staged_prompt_tokens(&self, staged: &[Message], measured: Option<(u64, usize)>) -> u64 {
+        match measured {
+            Some((tokens, covered)) if covered <= staged.len() => {
+                tokens + crate::context_budget::conversation_tokens(&staged[covered..])
+            }
+            _ => {
+                crate::context_budget::system_tokens(self.system.as_ref())
+                    + crate::context_budget::conversation_tokens(staged)
+                    + crate::context_budget::tool_schema_tokens(&self.tools_for_model())
+            }
+        }
     }
 
     /// Would shortening those tool results alone bring the prompt back under the
@@ -793,26 +963,113 @@ impl Agent {
         inbox: Option<&InputInbox>,
         mut on_side_context: Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
     ) -> Result<()> {
-        let mut staged = self.messages.clone();
         self.turn_usage = None;
         if let Some(advisor) = &self.advisor {
             advisor.begin_request();
         }
-        staged.push(user_message);
-        // Track which tool_use ids were sensitive so tool_result redaction can
-        // strip them from durable history while live memory keeps the body.
-        let mut turn_sensitive: Vec<String> = Vec::new();
-        // Overwritten each provider round; only the final end_turn value is kept.
-        #[allow(unused_assignments)]
-        let mut last_usage: Option<Usage> = None;
+        let mut progress = TurnProgress {
+            staged: self.messages.clone(),
+            sensitive: Vec::new(),
+            last_usage: None,
+        };
+        progress.staged.push(user_message);
+        let result = self
+            .run_turn_steps(&mut progress, on_event, cancel, inbox, &mut on_side_context)
+            .await;
+        match &result {
+            Ok(()) => self.commit_turn(progress),
+            Err(error) => self.commit_interrupted_turn(progress, error),
+        }
+        result
+    }
+
+    /// Commit a finished turn's wire history.
+    fn commit_turn(&mut self, progress: TurnProgress) {
+        self.sensitive_tool_ids.extend(progress.sensitive);
+        // Live memory keeps real tool bodies; persist path redacts.
+        self.messages = progress.staged;
+        self.last_usage = progress.last_usage;
+    }
+
+    /// Commit what a failed or cancelled turn already did.
+    ///
+    /// Tools may have edited files before the failure, and those edits stay.
+    /// Dropping the turn from the wire history would leave the model unaware of
+    /// its own changes, so the user message, every completed provider round and
+    /// every tool result are kept. Tool calls that never got a result are
+    /// closed with an error result (providers reject an unanswered call), and a
+    /// closing note tells the model the turn was interrupted.
+    fn commit_interrupted_turn(&mut self, mut progress: TurnProgress, error: &HarnessError) {
+        let staged = &mut progress.staged;
+        if let Some(last) = staged.last().filter(|message| message.role == "assistant") {
+            let unanswered = tool_uses(&last.content);
+            if !unanswered.is_empty() {
+                let results = unanswered
+                    .iter()
+                    .map(|call| {
+                        tool_result(
+                            &call.id,
+                            "Not run: the turn was interrupted before this tool ran.",
+                            true,
+                        )
+                    })
+                    .collect();
+                staged.push(Message::user_blocks(results));
+            }
+        }
+        staged.push(Message::user_text(interrupted_turn_note(error)));
+        self.sensitive_tool_ids.extend(progress.sensitive);
+        self.messages = progress.staged;
+        // The last completed round still measures the prompt better than the
+        // previous turn did; with no completed round, keep the old reading.
+        if progress.last_usage.is_some() {
+            self.last_usage = progress.last_usage;
+        }
+        // A provider-side thread never saw the interruption note.
+        self.provider_session = None;
+    }
+
+    async fn run_turn_steps(
+        &mut self,
+        progress: &mut TurnProgress,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+        inbox: Option<&InputInbox>,
+        on_side_context: &mut Option<&mut (dyn FnMut(crate::btw::SideConversation) + Send)>,
+    ) -> Result<()> {
+        let TurnProgress {
+            staged,
+            sensitive: turn_sensitive,
+            last_usage,
+        } = progress;
         // Zest's own advisor consultations: at most one before a turn that
         // changed files ends, and one after two failed tool calls in a row.
         let mut wrote_files = false;
         let mut failure_streak = 0u32;
         let mut reviewed_before_finish = false;
         let mut consulted_on_failures = false;
+        // Rounds in a row that ended part-way and were asked to continue.
+        let mut continuations = 0u32;
+        let mut steps = 0u32;
+        // Set once the step limit is reached: the next round may not call tools.
+        let mut wrapping_up = false;
+        let mut repeats = RepeatTracker::default();
+        // The provider's own count of the latest request (prompt plus reply)
+        // and how many staged messages it covered; the previous turn's last
+        // round to begin with.
+        let mut measured: Option<(u64, usize)> = self
+            .last_usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens() + u64::from(usage.output_tokens))
+            .filter(|tokens| *tokens > 0)
+            .map(|tokens| (tokens, self.messages.len()));
+        // Set after compacting because the provider said the prompt was too
+        // long, so a second rejection ends the turn instead of looping.
+        let mut compacted_for_limit = false;
+        // Where this turn's user message sits in `staged`.
+        let mut turn_start = self.messages.len();
 
-        publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+        publish_side_context(self, staged, turn_sensitive, on_side_context);
 
         loop {
             Self::check_cancel(cancel)?;
@@ -830,8 +1087,45 @@ impl Agent {
                     // A side panel opened while this provider call is running
                     // should see injected context that has already been sent,
                     // even though its response is not complete yet.
-                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
+            }
+
+            // Compact before a step whose prompt is near the window, as a
+            // front-end does between turns, so a long turn (or a CLI session,
+            // which has no between-turn compaction) does not run into it.
+            let window = self.context_window();
+            let used = self.staged_prompt_tokens(staged, measured);
+            if crate::context_budget::auto_compaction_due(
+                used,
+                window,
+                crate::context_budget::conversation_tokens(staged),
+                staged.len(),
+            ) {
+                match self
+                    .compact_staged(
+                        staged,
+                        &mut turn_start,
+                        turn_sensitive,
+                        Some(used),
+                        on_event,
+                        cancel,
+                    )
+                    .await
+                {
+                    Ok(_) => measured = None,
+                    Err(HarnessError::Cancelled) => return Err(HarnessError::Cancelled),
+                    // The step may still fit; the provider says so if not.
+                    Err(_) => {}
+                }
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
+            }
+
+            steps += 1;
+            if self.max_steps > 0 && steps > self.max_steps && !wrapping_up {
+                wrapping_up = true;
+                staged.push(Message::user_text(step_limit_note(self.max_steps)));
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
             }
 
             let request = TurnRequest {
@@ -843,7 +1137,7 @@ impl Agent {
                 // model, and do not send an effort request to a model whose
                 // provider has no wire-level effort control.
                 tools: self.tools_for_model(),
-                allow_tool_use: true,
+                allow_tool_use: !wrapping_up,
                 max_tokens: self.max_tokens,
                 effort: self.effort_for_model(),
                 thinking: true,
@@ -876,11 +1170,36 @@ impl Agent {
                             );
                         }
                     }
-                    // Do not commit staged history — keep prior wire messages intact.
                     self.provider_session = None;
+                    // Too long for the model: compact and try the step again,
+                    // once.
+                    if e.is_context_limit() && !compacted_for_limit && staged.len() >= 4 {
+                        compacted_for_limit = true;
+                        Self::check_cancel(cancel)?;
+                        match self
+                            .compact_staged(
+                                staged,
+                                &mut turn_start,
+                                turn_sensitive,
+                                None,
+                                on_event,
+                                cancel,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                measured = None;
+                                publish_side_context(self, staged, turn_sensitive, on_side_context);
+                                continue;
+                            }
+                            Err(HarnessError::Cancelled) => return Err(HarnessError::Cancelled),
+                            Err(_) => return Err(e),
+                        }
+                    }
                     return Err(e);
                 }
             };
+            compacted_for_limit = false;
 
             self.provider_session = completion.provider_session.clone();
 
@@ -927,31 +1246,69 @@ impl Agent {
             self.turn_usage
                 .get_or_insert_with(TurnUsageSummary::default)
                 .record(&completion.usage, completion.usage_available);
-            last_usage = Some(completion.usage.clone());
+            *last_usage = Some(completion.usage.clone());
 
-            Self::check_cancel(cancel)?;
+            // Arguments a model got almost right are repaired here; the rest
+            // are answered with an error result below instead of running.
+            let mut content = completion.content.clone();
+            let invalid_calls = crate::tool_input_repair::repair_tool_calls(&mut content, |name| {
+                self.tools.input_schema(name)
+            });
 
-            if matches!(completion.stop_reason.as_deref(), Some("end_turn") | None)
-                && !Self::has_assistant_output(&completion.content)
-            {
-                return Err(HarnessError::Other(
-                    "provider returned an empty assistant response".into(),
-                ));
+            // The wrap-up round after the step limit ends the turn whatever it
+            // says. A tool call in it is dropped, not run.
+            if wrapping_up {
+                content.retain(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) != Some("tool_use")
+                });
+                if Self::has_assistant_output(&content) {
+                    staged.push(Message::assistant(content));
+                }
+                return Ok(());
+            }
+
+            let stop = completion.stop_reason.as_deref();
+            let has_output = Self::has_assistant_output(&content);
+            let has_calls = !tool_uses(&content).is_empty();
+
+            // A response with nothing in it is asked for again rather than
+            // ending the turn, a few times at most.
+            if matches!(stop, Some("end_turn") | None) && !has_output {
+                Self::check_cancel(cancel)?;
+                continuations += 1;
+                if continuations > MAX_CONTINUATIONS {
+                    return Err(HarnessError::Other(
+                        "provider returned an empty assistant response".into(),
+                    ));
+                }
+                staged.push(Message::user_text(continuation_note(None)));
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
+                continue;
             }
 
             // Echo the assistant turn back verbatim — thinking signatures and
-            // tool_use blocks both have to survive intact.
-            staged.push(Message::assistant(completion.content.clone()));
-            publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+            // tool_use blocks both have to survive intact. Staged before the
+            // cancel check: this response was paid for, and an interrupted turn
+            // still commits it. A response with no visible output (only
+            // thinking, cut off) is not worth sending back.
+            if has_output {
+                staged.push(Message::assistant(content.clone()));
+                publish_side_context(self, staged, turn_sensitive, on_side_context);
+            }
+            let reply_tokens =
+                completion.usage.prompt_tokens() + u64::from(completion.usage.output_tokens);
+            measured = (completion.usage_available && reply_tokens > 0)
+                .then_some((reply_tokens, staged.len()));
+            Self::check_cancel(cancel)?;
 
-            match completion.stop_reason.as_deref() {
+            match stop {
                 Some("end_turn") | None => {
                     if wrote_files && !reviewed_before_finish {
                         reviewed_before_finish = true;
                         let review = self
                             .harness_consult(
-                                &staged,
-                                &turn_sensitive,
+                                staged,
+                                turn_sensitive,
                                 crate::advisor::FINISH_REVIEW_QUESTION,
                                 on_event,
                                 cancel,
@@ -966,33 +1323,54 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::finish_review_note(
                                 &advice,
                             )));
-                            publish_side_context(
-                                self,
-                                &staged,
-                                &turn_sensitive,
-                                &mut on_side_context,
-                            );
+                            publish_side_context(self, staged, turn_sensitive, on_side_context);
                             continue;
                         }
                     }
-                    self.sensitive_tool_ids.extend(turn_sensitive);
-                    // Live memory keeps real tool bodies; persist path redacts.
-                    self.messages = staged;
-                    self.last_usage = last_usage;
                     return Ok(());
                 }
 
-                Some("tool_use") => {
-                    if Self::has_malformed_tool_input(&completion.content) {
-                        return Err(HarnessError::Other(
-                            "provider returned non-object arguments for a tool call".into(),
-                        ));
+                // A server-side tool hit its iteration cap. Resend as-is; the
+                // server picks up where it left off.
+                Some("pause_turn") => continue,
+
+                Some("refusal") => {
+                    return Err(HarnessError::StoppedEarly(
+                        "the model declined this request".into(),
+                    ))
+                }
+
+                // Tool calls run whatever the stop reason says, so a response
+                // cut off at `max_tokens` keeps the calls it finished. Its
+                // cut-off call fails to parse and gets an error result.
+                Some(reason) if reason == "tool_use" || has_calls => {
+                    if reason == "tool_use" {
+                        continuations = 0;
+                    } else {
+                        continuations += 1;
+                        if continuations > MAX_CONTINUATIONS {
+                            return Err(stopped_after_continuations(reason));
+                        }
                     }
-                    let calls = tool_uses(&completion.content);
+                    let calls = tool_uses(&content);
                     if calls.is_empty() {
                         return Err(HarnessError::Other(
                             "stop_reason was tool_use but no tool_use block was present".into(),
                         ));
+                    }
+
+                    let valid = calls
+                        .iter()
+                        .filter(|call| !invalid_calls.contains_key(&call.id));
+                    if let Some(repeated) = repeats.observe(valid) {
+                        if !self.confirm_repeated_call(repeated, on_event, cancel).await {
+                            Self::check_cancel(cancel)?;
+                            return Err(HarnessError::StoppedEarly(format!(
+                                "`{}` was called with the same input {REPEATED_CALL_LIMIT} times \
+                                 in a row",
+                                repeated.name
+                            )));
+                        }
                     }
 
                     Self::check_cancel(cancel)?;
@@ -1012,8 +1390,27 @@ impl Agent {
                             redact_sensitive_staged(staged.clone(), &sensitive_ids);
                         self.tools.update_context(&handoff_messages);
                     }
-                    let outcomes = self.execute_tool_calls(&calls, on_event, cancel).await;
-                    Self::check_cancel(cancel)?;
+                    // Cancellation is honored after the results are staged:
+                    // a tool that ran may have changed files, and an
+                    // interrupted turn commits what it did.
+                    let runnable: Vec<_> = calls
+                        .iter()
+                        .filter(|call| !invalid_calls.contains_key(&call.id))
+                        .cloned()
+                        .collect();
+                    let mut ran = self
+                        .execute_tool_calls(&runnable, on_event, cancel)
+                        .await
+                        .into_iter();
+                    let outcomes: Vec<ToolCallOutcome> = calls
+                        .iter()
+                        .map(|call| match invalid_calls.get(&call.id) {
+                            Some(error) => ToolCallOutcome::failed(error.clone(), ToolRisk::Read),
+                            None => ran.next().unwrap_or_else(|| {
+                                ToolCallOutcome::failed("tool did not report", ToolRisk::Read)
+                            }),
+                        })
+                        .collect();
 
                     // Emission and wire order both follow the order the model
                     // asked in, never completion order.
@@ -1123,12 +1520,13 @@ impl Agent {
 
                     // One user message carrying every result.
                     staged.push(Message::user_blocks(results));
+                    Self::check_cancel(cancel)?;
                     if failure_streak >= 2 && !consulted_on_failures {
                         consulted_on_failures = true;
                         let advice = self
                             .harness_consult(
-                                &staged,
-                                &turn_sensitive,
+                                staged,
+                                turn_sensitive,
                                 crate::advisor::FAILURE_QUESTION,
                                 on_event,
                                 cancel,
@@ -1142,29 +1540,22 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::failure_note(&advice)));
                         }
                     }
-                    publish_side_context(self, &staged, &turn_sensitive, &mut on_side_context);
+                    if reason != "tool_use" {
+                        staged.push(Message::user_text(continuation_note(Some(reason))));
+                    }
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
 
-                // A server-side tool hit its iteration cap. Resend as-is; the
-                // server picks up where it left off.
-                Some("pause_turn") => continue,
-
-                Some("max_tokens") => {
-                    return Err(HarnessError::StoppedEarly(
-                        "hit max_tokens — raise Agent::max_tokens or lower effort".into(),
-                    ))
-                }
-
-                Some("refusal") => {
-                    return Err(HarnessError::StoppedEarly(
-                        "the model declined this request".into(),
-                    ))
-                }
-
-                Some(other) => {
-                    return Err(HarnessError::StoppedEarly(format!(
-                        "unrecognized stop_reason: {other}"
-                    )))
+                // Cut off (`max_tokens`, a broken stream) or stopped for a
+                // reason Zest does not know: keep what arrived and ask the model
+                // to carry on, a few rounds in a row at most.
+                Some(reason) => {
+                    continuations += 1;
+                    if continuations > MAX_CONTINUATIONS {
+                        return Err(stopped_after_continuations(reason));
+                    }
+                    staged.push(Message::user_text(continuation_note(Some(reason))));
+                    publish_side_context(self, staged, turn_sensitive, on_side_context);
                 }
             }
         }
@@ -1181,13 +1572,6 @@ impl Agent {
                 Some(_) => true,
             },
         )
-    }
-
-    fn has_malformed_tool_input(content: &[serde_json::Value]) -> bool {
-        content.iter().any(|block| {
-            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
-                && !block.get("input").is_some_and(|input| input.is_object())
-        })
     }
 
     /// Return only the tools the selected model advertises support for.
@@ -1490,6 +1874,43 @@ impl Agent {
 
     /// One interactive question: reserve the waiter, notify the front-end,
     /// then turn the answer into the ordinary model-visible tool result.
+    /// Ask the user whether a model that keeps repeating one call may go on.
+    /// Without an interactive front-end the answer is no.
+    async fn confirm_repeated_call(
+        &self,
+        call: &crate::anthropic::types::ToolUse,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> bool {
+        let request = crate::tools::QuestionRequest {
+            question_id: new_id("question"),
+            tool_call_id: call.id.clone(),
+            prompt: format!(
+                "The model called `{}` with the same input {REPEATED_CALL_LIMIT} times in a \
+                 row and may be stuck. Let it keep going?",
+                call.name
+            ),
+            choices: vec![KEEP_GOING.into(), STOP_TURN.into()],
+            multiple: false,
+            placeholder: None,
+        };
+        self.questioner.prepare(&request.question_id).await;
+        on_event(StreamEvent::QuestionNeeded {
+            question_id: request.question_id.clone(),
+            tool_call_id: request.tool_call_id.clone(),
+            prompt: request.prompt.clone(),
+            choices: request.choices.clone(),
+            multiple: false,
+            placeholder: None,
+        });
+        let answer = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err("turn cancelled".to_string()),
+            answer = self.questioner.answer(&request) => answer,
+        };
+        matches!(answer, Ok(answer) if answer.trim() == KEEP_GOING)
+    }
+
     async fn run_question_call(
         &self,
         call: &crate::anthropic::types::ToolUse,
@@ -1935,6 +2356,149 @@ pub(crate) fn task_request_usage(
     }
 }
 
+/// Output budget for a checkpoint, capped by `Agent::max_tokens` and by an
+/// eighth of the context window.
+const CHECKPOINT_MAX_TOKENS: u32 = 16_000;
+
+const CHECKPOINT_REQUEST: &str = "Create a concise context checkpoint for the next coding \
+    turn. Preserve the user's goals, decisions, constraints, files changed, unfinished work, \
+    and important tool findings. If a request is still being worked on, say what it is, what \
+    has been done so far, and the next step. Do not invent facts. Return only the checkpoint, \
+    with compact headings.";
+
+const MID_TURN_CHECKPOINT_NOTE: &str = "[Zest: the conversation was compacted to fit the \
+    context window while this turn was running. Continue the current task from the \
+    checkpoint above.]";
+
+/// The two messages a summarized history becomes.
+fn checkpoint_messages(summary: &str) -> Vec<Message> {
+    vec![
+        Message::user_text(
+            "[Zest context checkpoint] The earlier conversation is represented by the ".to_string()
+                + "assistant checkpoint that follows. Use it as working context.",
+        ),
+        Message::assistant(vec![serde_json::json!({
+            "type": "text",
+            "text": summary,
+        })]),
+    ]
+}
+
+/// Make the history sent to the summarizer fit `budget` tokens.
+///
+/// Every long tool result is shortened first, the recent ones too: the
+/// checkpoint needs what they found, not every line. If that is still too
+/// long, the oldest exchanges are left out, always cutting at a user message
+/// that is not a tool result so no call loses its result.
+fn fit_history_for_checkpoint(mut messages: Vec<Message>, budget: u64) -> Vec<Message> {
+    use crate::context_budget::conversation_tokens;
+    if conversation_tokens(&messages) <= budget {
+        return messages;
+    }
+    crate::prune::prune_tool_results(&mut messages, 0);
+    let mut dropped = false;
+    while conversation_tokens(&messages) > budget {
+        let next = messages.iter().skip(1).position(|message| {
+            message.role == "user"
+                && !message.content.iter().any(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                })
+        });
+        let Some(next) = next else { break };
+        messages.drain(..=next);
+        dropped = true;
+    }
+    if dropped {
+        messages.insert(
+            0,
+            Message::user_text(
+                "[Zest: the oldest part of the conversation was left out to fit the context \
+                 window.]",
+            ),
+        );
+    }
+    messages
+}
+
+const KEEP_GOING: &str = "Keep going";
+const STOP_TURN: &str = "Stop the turn";
+
+/// The note that ends a turn at its step limit: one last round, no tools.
+fn step_limit_note(max_steps: u32) -> String {
+    format!(
+        "[Zest: this turn has reached its limit of {max_steps} steps. Do not call any more \
+         tools. Summarize what you did, what is left, and how to continue.]"
+    )
+}
+
+/// Counts how many times in a row the model has made the same tool call.
+#[derive(Default)]
+struct RepeatTracker {
+    last: Option<(String, serde_json::Value)>,
+    count: u32,
+}
+
+impl RepeatTracker {
+    /// Feed one round's calls in order. Returns the call that made
+    /// [`REPEATED_CALL_LIMIT`] identical calls in a row, across rounds (a
+    /// call repeated within one batch counts once), and starts counting
+    /// again from zero so a user who lets it go on is asked again only after
+    /// as many more.
+    fn observe<'c>(
+        &mut self,
+        calls: impl IntoIterator<Item = &'c crate::anthropic::types::ToolUse>,
+    ) -> Option<&'c crate::anthropic::types::ToolUse> {
+        let mut hit = None;
+        let mut previous_in_round: Option<&crate::anthropic::types::ToolUse> = None;
+        for call in calls {
+            // One batch asking for the same call several times is one step.
+            if previous_in_round.is_some_and(|p| p.name == call.name && p.input == call.input) {
+                continue;
+            }
+            previous_in_round = Some(call);
+            let same = self
+                .last
+                .as_ref()
+                .is_some_and(|(name, input)| *name == call.name && *input == call.input);
+            if same {
+                self.count += 1;
+            } else {
+                self.last = Some((call.name.clone(), call.input.clone()));
+                self.count = 1;
+            }
+            if self.count >= REPEATED_CALL_LIMIT && hit.is_none() {
+                hit = Some(call);
+                self.count = 0;
+            }
+        }
+        hit
+    }
+}
+
+/// Wire history a turn has built so far, kept outside the step loop so a
+/// failed or cancelled turn can still commit it.
+struct TurnProgress {
+    staged: Vec<Message>,
+    /// Tool-use ids whose results must be redacted from durable history.
+    sensitive: Vec<String>,
+    /// The latest completed provider round's usage.
+    last_usage: Option<Usage>,
+}
+
+/// The note that closes an interrupted turn in wire history, so the next turn
+/// knows the work above it stopped part-way.
+fn interrupted_turn_note(error: &HarnessError) -> String {
+    let reason = match error {
+        HarnessError::Cancelled => "the user stopped it".to_string(),
+        other => format!("it failed ({})", other.turn_message().trim_end_matches('.')),
+    };
+    format!(
+        "[Zest: this turn was interrupted because {reason}. The tool calls and results above \
+         really happened and any file changes they made are still in place. Do not assume \
+         unfinished steps were done; wait for the user's next message.]"
+    )
+}
+
 fn publish_side_context(
     agent: &Agent,
     messages: &[Message],
@@ -1989,6 +2553,10 @@ fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> 
     }
     out
 }
+
+#[cfg(test)]
+#[path = "agent_resilience_tests.rs"]
+mod resilience_tests;
 
 #[cfg(test)]
 mod billing_tests {
@@ -2048,21 +2616,6 @@ mod tests {
         assert!(Agent::has_assistant_output(&[
             json!({"type":"server_tool_use"})
         ]));
-    }
-
-    #[test]
-    fn tool_calls_require_object_arguments() {
-        assert!(Agent::has_malformed_tool_input(&[json!({
-            "type": "tool_use",
-            "input": null
-        })]));
-        assert!(Agent::has_malformed_tool_input(&[
-            json!({"type":"tool_use"})
-        ]));
-        assert!(!Agent::has_malformed_tool_input(&[json!({
-            "type": "tool_use",
-            "input": {}
-        })]));
     }
 
     struct FakeProvider {
@@ -3006,7 +3559,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_error_does_not_commit_staged_history() {
+    async fn provider_error_commits_staged_history_marked_interrupted() {
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
             calls: AtomicUsize::new(0),
             fail_after: Some(0),
@@ -3018,8 +3571,15 @@ mod tests {
         let mut sink = |_ev: StreamEvent<'_>| {};
         let err = agent.send("new", &mut sink).await.unwrap_err();
         assert!(matches!(err, HarnessError::Other(_)));
-        assert_eq!(agent.messages.len(), prior_len);
+        // The new user message and the interruption note are committed after
+        // the prior history, which is untouched.
+        assert_eq!(agent.messages.len(), prior_len + 2);
         assert_eq!(agent.messages[0].role, "user");
+        assert!(
+            serde_json::to_string(&agent.messages[prior_len + 1].content)
+                .unwrap()
+                .contains("interrupted")
+        );
     }
 
     /// A tool that sleeps for `delay_ms` and reports its own name, so a batch
@@ -3641,7 +4201,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HarnessError::Cancelled));
-        assert!(agent.messages.is_empty());
+        // The provider was never called; the prompt is kept, marked interrupted.
+        assert_eq!(agent.messages.len(), 2);
+        assert!(serde_json::to_string(&agent.messages[1].content)
+            .unwrap()
+            .contains("stopped it"));
     }
 
     /// A warning nobody can trust is worse than no warning: if a healthy turn
@@ -3959,7 +4523,11 @@ mod tests {
                     .await,
                 Err(HarnessError::Cancelled)
             ));
-            assert!(agent.messages.is_empty());
+            assert!(
+                serde_json::to_string(&agent.messages.last().unwrap().content)
+                    .unwrap()
+                    .contains("interrupted")
+            );
             agent
                 .send("A different request", &mut |_| {})
                 .await
