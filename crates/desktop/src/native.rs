@@ -180,6 +180,21 @@ impl Chat {
         Ok(value)
     }
 
+    /// Restores the conversation to a checkpoint in place: later messages and checkpoints are
+    /// discarded and the provider session is dropped. Files the agent changed are not touched.
+    /// Returns the checkpoint's label.
+    pub fn rewind(&self, checkpoint_id: &str) -> Result<String> {
+        let mut live = self.thread.lock().map_err(error)?;
+        let label = live
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.id == checkpoint_id)
+            .map(|checkpoint| checkpoint.label.clone())
+            .ok_or_else(|| HarnessError::Other("That checkpoint is not part of this chat.".into()))?;
+        *live = self.project.store.rewind_to_checkpoint(&live, checkpoint_id)?;
+        Ok(label)
+    }
+
     pub fn enqueue(&self, text: &str, files: Vec<ThreadInputAttachment>) -> Result<ThreadInput> {
         self.edit(|t| {
             t.enqueue_input(ThreadInputTarget::Followup, text, files)
@@ -662,6 +677,36 @@ mod tests {
         assert_eq!(saved.pending_inputs[0].id, input.id);
         assert!(saved.messages.is_empty());
         assert!(saved.agent_messages.is_empty());
+    }
+
+    #[test]
+    fn rewind_restores_a_checkpoint_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path().into(), true).unwrap();
+        let chat = Chat::new(project, Thread::new());
+        let (events, _rx) = mpsc::unbounded();
+        for text in ["First question", "Second question"] {
+            let input = chat.enqueue(text, vec![]).unwrap();
+            executor()
+                .block_on(chat.run(&input.id, &events, &CancelToken::new()))
+                .unwrap();
+        }
+        let (before_second, kept) = {
+            let t = chat.thread.lock().unwrap();
+            assert_eq!(t.checkpoints.len(), 2, "one checkpoint before each turn");
+            (t.checkpoints[1].id.clone(), t.checkpoints[1].message_count)
+        };
+
+        assert_eq!(chat.rewind(&before_second).unwrap(), "Before turn");
+
+        let id = chat.thread.lock().unwrap().id.clone();
+        let saved = chat.project.store.load(&id).unwrap();
+        assert_eq!(saved.messages.len(), kept, "the second turn is gone");
+        assert_eq!(saved.messages[0].searchable_text(), "First question");
+        assert_eq!(saved.checkpoints.len(), 2, "checkpoints up to the restored one stay");
+        assert_eq!(saved.provider_session, None);
+        assert_eq!(chat.thread.lock().unwrap().messages.len(), kept, "the open chat matches");
+        assert!(chat.rewind("not-a-checkpoint").is_err());
     }
 
     #[test]

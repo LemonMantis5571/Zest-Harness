@@ -122,6 +122,8 @@ pub struct Workspace {
     search_cancel: zest_core::CancelToken,
     focus: FocusHandle,
     toasts: toasts::Toasts,
+    /// The checkpoint whose Rewind is waiting for confirmation.
+    rewind_confirm: Option<String>,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -237,6 +239,7 @@ impl Workspace {
             filter,
             focus: cx.focus_handle(),
             toasts: toasts::Toasts::default(),
+            rewind_confirm: None,
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -531,6 +534,107 @@ impl Workspace {
         }
         self.panel = Panel::Chat;
         cx.notify();
+    }
+
+    /// Restores the active chat to a checkpoint in place, after the user confirmed it.
+    fn rewind(&mut self, checkpoint: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.rewind_confirm = None;
+        let root = self.chats[&self.active].clone();
+        if root.read(cx).turn_active {
+            self.toast(ToastKind::Info, "Stop the running turn before rewinding.", cx);
+            return;
+        }
+        match self.chat(cx).rewind(checkpoint) {
+            Ok(label) => {
+                root.update(cx, |r, cx| {
+                    r.native_start = None;
+                    r.restore_native();
+                    cx.notify();
+                });
+                self.refresh(cx);
+                self.toast(ToastKind::Success, format!("Rewound to {label}."), cx);
+                self.page(Panel::Chat, window, cx);
+            }
+            Err(e) => self.toast(ToastKind::Error, e.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    /// One checkpoint in Workbench > Checkpoints: its label and preview, Fork, and Rewind,
+    /// which asks first because it discards everything after the checkpoint.
+    fn checkpoint_row(
+        &self,
+        cp: &zest_core::ThreadCheckpoint,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = cp.id.clone();
+        let label = match cp.preview.as_deref().filter(|p| !p.is_empty()) {
+            Some(preview) => format!("{}  ·  {preview}", cp.label),
+            None => cp.label.clone(),
+        };
+        let confirming = self.rewind_confirm.as_deref() == Some(cp.id.as_str());
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(crate::theme::border()))
+            .bg(rgb(crate::theme::card()))
+            .child(div().flex_1().min_w_0().truncate().child(label.clone()));
+        if confirming {
+            let yes = id.clone();
+            row = row
+                .child(crate::ui::button(
+                    SharedString::from(format!("rewind-yes-{id}")),
+                    crate::ui::Variant::Destructive,
+                    None,
+                    "Discard later messages",
+                    cx.listener(move |ws, _, w, cx| ws.rewind(&yes, w, cx)),
+                ))
+                .child(crate::ui::button(
+                    SharedString::from(format!("rewind-no-{id}")),
+                    crate::ui::Variant::Ghost,
+                    None,
+                    "Cancel",
+                    cx.listener(|ws, _, _, cx| {
+                        ws.rewind_confirm = None;
+                        cx.notify();
+                    }),
+                ));
+        } else {
+            let fork = id.clone();
+            row = row.child(crate::ui::button(
+                SharedString::from(format!("fork-{id}")),
+                crate::ui::Variant::Outline,
+                Some(crate::theme::Icon::Split),
+                "Fork",
+                cx.listener(move |ws, _, w, cx| ws.fork(Some(&fork), w, cx)),
+            ));
+            if !busy {
+                let ask = id.clone();
+                row = row.child(crate::ui::button(
+                    SharedString::from(format!("rewind-{id}")),
+                    crate::ui::Variant::Outline,
+                    Some(crate::theme::Icon::RotateCcw),
+                    "Rewind",
+                    cx.listener(move |ws, _, _, cx| {
+                        ws.rewind_confirm = Some(ask.clone());
+                        cx.notify();
+                    }),
+                ));
+            }
+        }
+        let mut block = div().flex().flex_col().gap_1().child(row);
+        if confirming {
+            block = block.child(crate::ui::hint(
+                "Rewinding deletes the messages after this checkpoint from the chat. Files the agent changed stay as they are.",
+            ));
+        }
+        block.into_any_element()
     }
 
     fn fork(&mut self, checkpoint: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1015,17 +1119,9 @@ impl Workspace {
                 if t.checkpoints.is_empty() {
                     body = body.child(crate::ui::hint("This chat has no checkpoints."));
                 }
+                let busy = self.chats[&self.active].read(cx).turn_active;
                 for cp in t.checkpoints.iter().rev() {
-                    let id = cp.id.clone();
-                    body = body.child(button(
-                        SharedString::from(id.clone()),
-                        format!(
-                            "Fork from {}  ·  {}",
-                            cp.label,
-                            cp.preview.as_deref().unwrap_or("")
-                        ),
-                        cx.listener(move |ws, _, w, cx| ws.fork(Some(&id), w, cx)),
-                    ));
+                    body = body.child(self.checkpoint_row(cp, busy, cx));
                 }
             }
             _ => {
