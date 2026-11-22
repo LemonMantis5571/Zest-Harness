@@ -54,7 +54,7 @@ Run `npm run gpui -- --demo` for a temporary offline workspace. Send `Demo: writ
 | Provider and commands | Choose a configured provider, model, effort and permission mode. The settings panel exposes supported sign-in flows. Use skills, MCP slash commands, plan mode and the independent `/btw` conversation. |
 | Context and history | Fork a thread or checkpoint, inspect context usage, and compact agent history. The usage panel reads the shared ledger and can request provider quota. |
 | Project inspection | Browse project files, preview bounded text content, read the Git diff, and inspect the current chat's background jobs and the project's saved delegations. Each new chat, including a split, records the project's current commit. Changes shows edits since that commit even after committing and reopening the chat. A legacy chat without a saved starting commit shows working tree changes. |
-| Delegation | Create a scoped card, select worker and reviewer targets, approve dispatch, review acceptance evidence, page through the diff, then apply, cancel or prepare a retry. Changes appear in the board while the worker and reviewer run. |
+| Delegation | Create a scoped card, select worker and reviewer targets, approve dispatch, review acceptance evidence, page through the diff, then apply, cancel or prepare a retry. A blocked or failed card whose review never finished also offers Review again, which reviews the saved worker diff without a new worker run. The artifact buttons follow `ALLOWED_ARTIFACTS`, so the worker transcript and a failed worker's partial diff are readable too. Changes appear in the board while the worker and reviewer run. |
 
 ## Implementation and verification
 

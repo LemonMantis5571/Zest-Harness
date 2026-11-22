@@ -616,6 +616,7 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
       { command: "npm test", status: "pending", output: "" },
     ],
     reviewerFindings: [],
+    canReviewAgain: false,
     workerSummary: undefined,
     error: undefined,
     createdAt: 1_700_000_000_000,
@@ -2980,6 +2981,14 @@ export function createFixtureBackend(options: FixtureBackendOptions = {}): Deskt
     async retryDelegationJob(jobId: string): Promise<DelegationJob> {
       if (jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
       updateDelegation("awaiting_approval", "approval_required", { approved: false, error: undefined });
+      return delegationSnapshot();
+    },
+    async reviewDelegationJobAgain(jobId: string): Promise<DelegationJob> {
+      if (jobId !== fixtureDelegationJob.jobId) throw new Error("fixture backend: delegation job was not found");
+      if (!fixtureDelegationJob.canReviewAgain) {
+        throw new Error("fixture backend: this card has no worker diff awaiting a verdict");
+      }
+      updateDelegation("ready_to_apply", "ready_to_apply", { canReviewAgain: false, error: undefined });
       return delegationSnapshot();
     },
     async applyDelegationJob(jobId: string): Promise<DelegationJob> {

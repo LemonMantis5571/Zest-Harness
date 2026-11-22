@@ -156,6 +156,8 @@ timeout_secs = 120
 # allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900
+# A feature-card worker or reviewer that prints nothing for this long is stopped.
+# idle_timeout_secs = 900
 #
 # `mode = "headless"` means this worker is an external CLI. It is not
 # `zest serve` and not `zest run --jsonl`.

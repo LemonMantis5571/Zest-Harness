@@ -40,6 +40,7 @@ use crate::provider::stream_contract::StreamNormalizer;
 use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
 use crate::tools::isolated_workspace;
 use crate::usage::{ExternalCost, ExternalUsageReport};
+use crate::worker_activity::{watchdog, WorkerActivity, WorkerLimits, DEFAULT_WORKER_IDLE};
 
 pub const EXTERNAL_AGENT_TOOL: &str = "delegate_external";
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
@@ -107,6 +108,9 @@ pub struct ExternalAgentResult {
     pub malformed_lines: usize,
     pub usage: Option<ExternalUsageReport>,
     pub session_evidence: Option<ExternalSessionEvidence>,
+    /// For a feature-card worker, the snapshot commit its worktree started
+    /// from (see `isolated_workspace::prepare_reviewer`).
+    pub base_commit: Option<String>,
 }
 
 impl ExternalAgentRun {
@@ -122,6 +126,7 @@ impl ExternalAgentRun {
             malformed_lines: self.malformed_lines,
             usage,
             session_evidence: self.session_evidence,
+            base_commit: None,
         }
     }
 }
@@ -803,6 +808,14 @@ fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
             "timeout_secs must be between 1 and {MAX_TIMEOUT_SECS}"
         ));
     }
+    if config
+        .idle_timeout_secs
+        .is_some_and(|secs| secs == 0 || secs > MAX_TIMEOUT_SECS)
+    {
+        return Err(format!(
+            "idle_timeout_secs must be between 1 and {MAX_TIMEOUT_SECS}"
+        ));
+    }
     if config.mode == ExternalAgentMode::Acp
         && config
             .args
@@ -966,33 +979,51 @@ async fn run_isolated(
     Ok(run)
 }
 
+/// The limits a feature-card worker or reviewer from `config` runs under:
+/// `timeout_secs` in total, and `idle_timeout_secs` (900 s by default)
+/// without any output.
+pub fn delegation_limits(config: &ExternalAgentConfig) -> WorkerLimits {
+    WorkerLimits {
+        total: Duration::from_secs(config.timeout_secs.clamp(1, MAX_TIMEOUT_SECS)),
+        idle: config
+            .idle_timeout_secs
+            .map(|secs| Duration::from_secs(secs.clamp(1, MAX_TIMEOUT_SECS)))
+            .unwrap_or(DEFAULT_WORKER_IDLE),
+    }
+}
+
 /// Run an implementation worker in the same isolated-worktree seam used by
 /// `delegate_external`, with a cancellation token owned by the coordinator.
+/// `activity` carries the run's limits and records its progress.
 pub async fn run_delegation_worker(
     root: &Path,
     config: &ExternalAgentConfig,
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
+    activity: &WorkerActivity,
 ) -> Result<ExternalAgentResult, String> {
     validate_config(config)?;
     if config.workspace != ExternalWorkspace::Isolated {
         return Err("feature-card workers require an isolated workspace".into());
     }
-    run_isolated_with_cancel(root, config, prompt, cancel, parent_secret_envs).await
+    run_isolated_with_cancel(root, config, prompt, cancel, parent_secret_envs, activity).await
 }
 
 /// Prepare a fresh reviewer worktree from the same project snapshot, apply the
 /// worker patch, and run a new external process. The reviewer diff is returned
 /// to the caller only so it can be rejected and discarded; it is never an
 /// integration artifact.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_delegation_reviewer(
     root: &Path,
     config: &ExternalAgentConfig,
     worker_diff: &str,
+    worker_base: Option<&str>,
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
+    activity: &WorkerActivity,
 ) -> Result<ExternalAgentResult, String> {
     validate_config(config)?;
     if config.workspace != ExternalWorkspace::Isolated {
@@ -1002,7 +1033,7 @@ pub async fn run_delegation_reviewer(
         crate::delegation::validate_diff_paths(root, worker_diff)
             .map_err(|error| format!("worker diff is unsafe: {error}"))?;
     }
-    let mut workspace = isolated_workspace::prepare_reviewer(root, worker_diff)
+    let mut workspace = isolated_workspace::prepare_reviewer(root, worker_diff, worker_base)
         .await
         .map_err(|error| {
             if error.contains("worker diff is unsafe") {
@@ -1019,6 +1050,7 @@ pub async fn run_delegation_reviewer(
         cancel,
         None,
         parent_secret_envs,
+        Some(activity),
     )
     .await;
     let reviewer_diff = workspace.collect_diff().await;
@@ -1042,11 +1074,13 @@ async fn run_isolated_with_cancel(
     prompt: &str,
     cancel: Option<&CancelToken>,
     parent_secret_envs: &[String],
+    activity: &WorkerActivity,
 ) -> Result<ExternalAgentResult, String> {
     let mut workspace = isolated_workspace::prepare(root)
         .await
         .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
     let workspace_path = workspace.path().to_path_buf();
+    let base_commit = workspace.baseline().to_string();
     let result = spawn_and_run_with_cancel(
         workspace.path(),
         config,
@@ -1054,21 +1088,29 @@ async fn run_isolated_with_cancel(
         cancel,
         None,
         parent_secret_envs,
+        Some(activity),
     )
     .await;
     let diff = workspace.collect_diff().await;
     let cleanup = workspace.cleanup().await;
+    if let (Err(_), Ok(diff)) = (&result, &diff) {
+        activity.keep_partial_diff(diff.clone());
+    }
     let mut run = result?;
     run.session_evidence = Some(session_evidence_for(&run, &workspace_path, config));
     let diff = diff?;
     cleanup?;
-    run.diff = clip_diff(&diff);
+    // Not clipped: this diff is a job artifact that must apply, and a diff
+    // cut in the middle does not. The coordinator refuses one that is too big.
+    run.diff = diff;
     if !run.diff.trim().is_empty() {
         run.events.push(ExternalAgentEvent::Diff {
             path: "isolated worktree".into(),
         });
     }
-    Ok(run.into_public())
+    let mut result = run.into_public();
+    result.base_commit = Some(base_commit);
+    Ok(result)
 }
 
 async fn spawn_and_run(
@@ -1077,7 +1119,7 @@ async fn spawn_and_run(
     prompt: &str,
     parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
-    spawn_and_run_with_cancel(cwd, config, prompt, None, None, parent_secret_envs).await
+    spawn_and_run_with_cancel(cwd, config, prompt, None, None, parent_secret_envs, None).await
 }
 
 pub(crate) type ExternalEventSink<'a> = dyn FnMut(ExternalAgentEvent) + Send + 'a;
@@ -1102,6 +1144,32 @@ pub(crate) trait ControlResponder: Send {
     async fn respond(&mut self, message: &Value) -> Option<Value>;
 }
 
+/// Resolve once the run is out of budget: `activity`'s total and no-progress
+/// limits when the coordinator watches the run, otherwise `timeout`.
+async fn run_limit(activity: Option<&WorkerActivity>, timeout: Duration) -> String {
+    match activity {
+        Some(activity) => watchdog(activity).await,
+        None => {
+            sleep(timeout).await;
+            format!("timed out after {} seconds", timeout.as_secs())
+        }
+    }
+}
+
+/// Stop a worker and every process it started.
+fn stop_process_tree(job: Option<&crate::process_job::ProcessJob>, child: &Child) {
+    if let Some(job) = job {
+        job.terminate();
+    }
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        crate::process_job::terminate_process_tree(pid);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_run_with_cancel(
     cwd: &Path,
     config: &ExternalAgentConfig,
@@ -1109,6 +1177,7 @@ async fn spawn_and_run_with_cancel(
     cancel: Option<&CancelToken>,
     on_event: Option<&mut ExternalEventSink<'_>>,
     parent_secret_envs: &[String],
+    activity: Option<&WorkerActivity>,
 ) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(resolve_program(&config.command));
@@ -1123,6 +1192,13 @@ async fn spawn_and_run_with_cancel(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The worker and everything it starts live in one job (Windows) or
+    // process group (Unix), so stopping it stops the whole tree. On Windows
+    // it starts suspended until it is in the job, and without a console.
+    #[cfg(windows)]
+    command.creation_flags(crate::process_job::windows_creation_flags());
+    #[cfg(unix)]
+    command.process_group(0);
     prepare_external_command(&mut command);
     if config.allow_mcp {
         scrub_zest_secret_environment(&mut command, parent_secret_envs);
@@ -1133,6 +1209,20 @@ async fn spawn_and_run_with_cancel(
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", config.command))?;
+    // Closing the job (it is dropped on every return) kills what is left.
+    let job = crate::process_job::ProcessJob::new();
+    if let Some(pid) = child.id() {
+        if let Some(job) = job.as_ref() {
+            let _ = job.assign(pid);
+        }
+        #[cfg(windows)]
+        crate::process_job::resume_process(pid);
+    }
+    // Preparing the worktree is not the worker's silence; its no-progress
+    // clock starts with the process.
+    if let Some(activity) = activity {
+        activity.progress(Some("started"));
+    }
     let stdout = child
         .stdout
         .take()
@@ -1158,16 +1248,14 @@ async fn spawn_and_run_with_cancel(
     let run_result = tokio::select! {
         result = async {
             match mode {
-                ExternalAgentMode::Headless => run_headless(stdout, on_event).await,
+                ExternalAgentMode::Headless => run_headless(stdout, on_event, activity).await,
                 ExternalAgentMode::Acp => {
                     let stdin = stdin.ok_or_else(|| "ACP agent stdin was not piped".to_string())?;
-                    run_acp(stdin, stdout, cwd, prompt, parent_secret_envs).await
+                    run_acp(stdin, stdout, cwd, prompt, parent_secret_envs, activity).await
                 }
             }
         } => result,
-        _ = sleep(timeout) => {
-            Err(format!("timed out after {} seconds", timeout.as_secs()))
-        }
+        reason = run_limit(activity, timeout) => Err(reason),
         _ = wait_cancel(cancel) => {
             Err(EXTERNAL_RUN_CANCELLED.to_string())
         }
@@ -1175,6 +1263,7 @@ async fn spawn_and_run_with_cancel(
     let mut result = match run_result {
         Ok(result) => result,
         Err(error) => {
+            stop_process_tree(job.as_ref(), &child);
             let _ = child.kill().await;
             let _ = child.wait().await;
             let stderr = match stderr_task.take() {
@@ -1197,6 +1286,7 @@ async fn spawn_and_run_with_cancel(
     let status = match tokio::select! {
         result = tokio::time::timeout(remaining, child.wait()) => result,
         _ = wait_cancel(cancel) => {
+            stop_process_tree(job.as_ref(), &child);
             let _ = child.start_kill();
             let _ = child.wait().await;
             if let Some(task) = stderr_task.take() {
@@ -1207,6 +1297,7 @@ async fn spawn_and_run_with_cancel(
     } {
         Ok(result) => result.map_err(|error| format!("wait for {}: {error}", config.command))?,
         Err(_) => {
+            stop_process_tree(job.as_ref(), &child);
             let _ = child.start_kill();
             let _ = child.wait().await;
             if let Some(task) = stderr_task.take() {
@@ -1529,7 +1620,16 @@ fn resolve_windows_program(program: &str) -> Option<std::ffi::OsString> {
     // shim for the same name.
     let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     let search = effective_search_path()?;
-    for dir in std::env::split_paths(&search) {
+    resolve_windows_program_in(program, &search, &extensions)
+}
+
+#[cfg(windows)]
+fn resolve_windows_program_in(
+    program: &str,
+    search: &std::ffi::OsStr,
+    extensions: &str,
+) -> Option<std::ffi::OsString> {
+    for dir in std::env::split_paths(search) {
         if dir.as_os_str().is_empty() {
             continue;
         }
@@ -1612,9 +1712,43 @@ fn expand_windows_environment(value: &str) -> String {
     expanded
 }
 
+/// Copy new worker events into the run's transcript.
+fn record_events(activity: Option<&WorkerActivity>, events: &[ExternalAgentEvent]) {
+    let Some(activity) = activity else {
+        return;
+    };
+    for event in events {
+        match event {
+            ExternalAgentEvent::Text(text) | ExternalAgentEvent::TextDelta(text) => {
+                activity.record("text", text, true)
+            }
+            ExternalAgentEvent::Thinking(text) => activity.record("thinking", text, true),
+            ExternalAgentEvent::ToolCall { title, status, .. } => {
+                activity.record("tool", &format!("{title} ({status})"), false)
+            }
+            ExternalAgentEvent::Diff { path } => activity.record("diff", path, false),
+            ExternalAgentEvent::Error(error) => activity.record("error", error, false),
+            ExternalAgentEvent::Done => {}
+        }
+    }
+}
+
+/// A short name for what a worker event shows it doing, for the heartbeat.
+fn activity_label(event: &ExternalAgentEvent) -> Option<String> {
+    match event {
+        ExternalAgentEvent::ToolCall { title, .. } => Some(format!("tool {title}")),
+        ExternalAgentEvent::Text(_) | ExternalAgentEvent::TextDelta(_) => Some("writing".into()),
+        ExternalAgentEvent::Thinking(_) => Some("thinking".into()),
+        ExternalAgentEvent::Diff { path } => Some(format!("edited {path}")),
+        ExternalAgentEvent::Error(_) => Some("reported an error".into()),
+        ExternalAgentEvent::Done => None,
+    }
+}
+
 async fn run_headless(
     stdout: ChildStdout,
     mut on_event: Option<&mut ExternalEventSink<'_>>,
+    activity: Option<&WorkerActivity>,
 ) -> Result<ExternalAgentRun, String> {
     let mut reader = BufReader::new(stdout);
     let mut run = ExternalAgentRun::default();
@@ -1636,6 +1770,14 @@ async fn run_headless(
             Ok(value) => {
                 let event_start = run.events.len();
                 absorb_headless_value(&value, &mut run);
+                if let Some(activity) = activity {
+                    let label = run.events[event_start..]
+                        .iter()
+                        .rev()
+                        .find_map(activity_label);
+                    activity.progress(label.as_deref());
+                }
+                record_events(activity, &run.events[event_start..]);
                 if let Some(on_event) = on_event.as_deref_mut() {
                     for event in run.events[event_start..].iter().cloned() {
                         on_event(event);
@@ -1648,6 +1790,10 @@ async fn run_headless(
                 // not fully structured so a wholly malformed response is
                 // reported explicitly instead of looking like an empty answer.
                 run.malformed_lines += 1;
+                if let Some(activity) = activity {
+                    activity.progress(Some("output"));
+                    activity.record("output", line, false);
+                }
                 let text = line.to_string();
                 run.events.push(ExternalAgentEvent::Text(text.clone()));
                 if let Some(on_event) = on_event.as_deref_mut() {
@@ -2138,6 +2284,7 @@ async fn run_acp(
     cwd: &Path,
     prompt: &str,
     parent_secret_envs: &[String],
+    activity: Option<&WorkerActivity>,
 ) -> Result<ExternalAgentRun, String> {
     let mut reader = BufReader::new(stdout);
     let mut run = ExternalAgentRun::default();
@@ -2158,7 +2305,15 @@ async fn run_acp(
         }),
     )
     .await?;
-    wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session).await?;
+    wait_for_response(
+        &mut reader,
+        &mut stdin,
+        next_id,
+        &mut run,
+        &mut session,
+        activity,
+    )
+    .await?;
     next_id += 1;
 
     send_rpc(
@@ -2168,12 +2323,19 @@ async fn run_acp(
         json!({"cwd": cwd.display().to_string(), "mcpServers": []}),
     )
     .await?;
-    let session_id = wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session)
-        .await?
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "ACP session/new returned no sessionId".to_string())?
-        .to_string();
+    let session_id = wait_for_response(
+        &mut reader,
+        &mut stdin,
+        next_id,
+        &mut run,
+        &mut session,
+        activity,
+    )
+    .await?
+    .get("sessionId")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "ACP session/new returned no sessionId".to_string())?
+    .to_string();
     run.session_id = Some(session_id.clone());
     next_id += 1;
 
@@ -2187,8 +2349,15 @@ async fn run_acp(
         }),
     )
     .await?;
-    let prompt_result =
-        wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session).await?;
+    let prompt_result = wait_for_response(
+        &mut reader,
+        &mut stdin,
+        next_id,
+        &mut run,
+        &mut session,
+        activity,
+    )
+    .await?;
     if let Some(report) = external_usage_from_value(&prompt_result) {
         run.merge_usage(report);
     }
@@ -2230,6 +2399,7 @@ async fn wait_for_response(
     expected_id: u64,
     run: &mut ExternalAgentRun,
     session: &mut AcpSession,
+    activity: Option<&WorkerActivity>,
 ) -> Result<Value, String> {
     let mut line = String::new();
     loop {
@@ -2241,6 +2411,17 @@ async fn wait_for_response(
         if bytes == 0 {
             return Err("ACP agent closed stdout before completing the request".into());
         }
+        if let Some(activity) = activity {
+            let method = serde_json::from_str::<Value>(line.trim())
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            activity.progress(method.as_deref());
+        }
         let value: Value = match serde_json::from_str(line.trim()) {
             Ok(value) => value,
             Err(error) => {
@@ -2249,7 +2430,9 @@ async fn wait_for_response(
             }
         };
         if value.get("method").and_then(Value::as_str) == Some("session/update") {
+            let start = run.events.len();
             absorb_acp_update(&value, run);
+            record_events(activity, &run.events[start..]);
             continue;
         }
         if value.get("method").and_then(Value::as_str) == Some("session/request_permission") {
@@ -2822,6 +3005,7 @@ mod tests {
             model: Some("test-model".into()),
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         }
     }
 
@@ -2896,6 +3080,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -2927,6 +3112,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -2960,6 +3146,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -3002,6 +3189,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         };
         assert_eq!(
             expanded_args(&config, "task"),
@@ -3350,6 +3538,32 @@ mod tests {
         assert_eq!(expanded, format!(r"{profile}\bin"));
     }
 
+    /// `npm`, `npx` and `pnpm` install a `.cmd` shim and no `.exe`. The
+    /// resolved path must spawn and keep each argument whole.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_bare_name_resolves_to_a_cmd_shim_that_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("zest-shim.cmd"), "@echo shim:%~1\r\n").unwrap();
+        let resolved =
+            resolve_windows_program_in("zest-shim", temp.path().as_os_str(), ".EXE;.CMD")
+                .expect("the shim is found through PATHEXT");
+        assert!(resolved
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with("zest-shim.cmd"));
+        let output = tokio::process::Command::new(&resolved)
+            .arg("two words")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "shim:two words"
+        );
+    }
+
     #[test]
     fn malformed_lines_are_visible_when_no_structured_answer_exists() {
         let run = ExternalAgentRun {
@@ -3533,6 +3747,54 @@ mod tests {
         assert_eq!(run.text(), "got user");
     }
 
+    fn process_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_takes_its_child_processes_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let pidfile = temp.path().join("grandchild.pid");
+        let mut config = fixture_config("spawn_grandchild", false);
+        config.args.push(pidfile.to_string_lossy().into_owned());
+        let activity = WorkerActivity::new(WorkerLimits {
+            total: Duration::from_secs(120),
+            idle: Duration::from_secs(4),
+        });
+        let error =
+            spawn_and_run_with_cancel(temp.path(), &config, "", None, None, &[], Some(&activity))
+                .await
+                .unwrap_err();
+        assert!(error.contains("made no progress"), "{error}");
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the worker started its child before going silent")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while process_alive(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker's child {pid} outlived it"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     #[tokio::test]
     async fn a_slow_approval_does_not_eat_the_turn_budget() {
         let temp = tempfile::tempdir().unwrap();
@@ -3701,6 +3963,7 @@ mod tests {
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
+            idle_timeout_secs: None,
         }
     }
 

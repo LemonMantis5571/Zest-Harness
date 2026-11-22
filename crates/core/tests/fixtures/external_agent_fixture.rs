@@ -26,6 +26,100 @@ fn delegation(prompt: &str) {
     send(r#"{"type":"result","response":"{\"summary\":\"fixture worker changed delegated.txt\",\"changedFiles\":[\"delegated.txt\"],\"checksAttempted\":[],\"blockers\":[]}"}"#);
 }
 
+/// Like `delegation`, but the first `failures` reviewer runs answer prose
+/// instead of a JSON verdict. `counter` is a file outside the worktrees that
+/// counts reviewer runs across processes.
+fn delegation_flaky_reviewer(counter: &str, failures: &str, prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        let runs = std::fs::read_to_string(counter)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            + 1;
+        std::fs::write(counter, runs.to_string()).expect("count reviewer runs");
+        if runs <= failures.parse::<u32>().expect("failure count") {
+            send(r#"{"type":"result","response":"I looked at it and it seems fine overall."}"#);
+            return;
+        }
+    }
+    delegation(prompt);
+}
+
+/// A worker that adds a binary file, or with `large` a file over the
+/// delegated-diff file limit.
+fn delegation_file(kind: &str, prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        delegation(prompt);
+        return;
+    }
+    match kind {
+        "large" => std::fs::write("large.txt", vec![b'a'; 2_100_000]),
+        _ => std::fs::write("image.bin", (0..=255u8).cycle().take(4096).collect::<Vec<u8>>()),
+    }
+    .expect("write fixture file");
+    send(r#"{"type":"result","response":"{\"summary\":\"fixture worker added a file\",\"changedFiles\":[],\"checksAttempted\":[],\"blockers\":[]}"}"#);
+}
+
+/// A worker that rewrites line 7 of the project's `notes.txt`.
+fn delegation_line7(prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        delegation(prompt);
+        return;
+    }
+    let notes = std::fs::read_to_string("notes.txt").expect("read notes.txt");
+    let mut lines: Vec<String> = notes.lines().map(str::to_string).collect();
+    lines[6] = "worker line 7".into();
+    std::fs::write("notes.txt", lines.join("
+") + "
+").expect("write notes.txt");
+    send(r#"{"type":"result","response":"{\"summary\":\"fixture worker edited notes.txt\",\"changedFiles\":[\"notes.txt\"],\"checksAttempted\":[],\"blockers\":[]}"}"#);
+}
+
+/// A worker that starts a long-lived child of its own, then goes silent.
+fn spawn_grandchild(pidfile: &str) {
+    std::process::Command::new(env::current_exe().expect("fixture path"))
+        .args(["sleeper", pidfile])
+        .spawn()
+        .expect("start the grandchild");
+    std::thread::sleep(std::time::Duration::from_secs(300));
+}
+
+/// Record this process id, then sleep.
+fn sleeper(pidfile: &str) {
+    std::fs::write(pidfile, std::process::id().to_string()).expect("write pid file");
+    std::thread::sleep(std::time::Duration::from_secs(300));
+}
+
+/// A worker that crashes with an error that mentions a connection.
+fn delegation_crash() {
+    send(r#"{"type":"result","is_error":true,"result":"Connection reset by peer; the service is unavailable"}"#);
+    std::process::exit(3);
+}
+
+/// A normal worker with a misbehaving reviewer: `edit` changes a file,
+/// `escape` reports a finding outside the project, `hang` never answers.
+fn delegation_bad_reviewer(kind: &str, prompt: &str) {
+    if !prompt.contains("independent Zest reviewer") {
+        delegation(prompt);
+        return;
+    }
+    match kind {
+        "edit" => {
+            std::fs::write("reviewer.txt", "reviewer edit\n").expect("write reviewer edit");
+            send(r#"{"type":"result","response":"{\"decision\":\"accepted\",\"summary\":\"fixed it myself\",\"findings\":[]}"}"#);
+        }
+        "escape" => send(r#"{"type":"result","response":"{\"decision\":\"changes_requested\",\"summary\":\"see outside\",\"findings\":[{\"severity\":\"blocking\",\"path\":\"../outside.txt\",\"message\":\"look here\"}]}"}"#),
+        _ => std::thread::sleep(std::time::Duration::from_secs(300)),
+    }
+}
+
+/// A worker that edits a file, then goes silent and never finishes.
+fn delegation_hang() {
+    std::fs::write("partial.txt", "unfinished work
+").expect("write partial fixture change");
+    std::thread::sleep(std::time::Duration::from_secs(300));
+}
+
 fn stream() {
     send(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}}"#);
     send(r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"Read"}}}"#);
@@ -128,6 +222,24 @@ fn main() {
         Some("ask_then_result") => ask_then_result(),
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
+        Some("delegation_hang") => delegation_hang(),
+        Some("delegation_bad_reviewer") => {
+            let kind = args.next().expect("reviewer kind");
+            delegation_bad_reviewer(&kind, &args.next().unwrap_or_default())
+        }
+        Some("delegation_crash") => delegation_crash(),
+        Some("spawn_grandchild") => spawn_grandchild(&args.next().expect("pid file")),
+        Some("sleeper") => sleeper(&args.next().expect("pid file")),
+        Some("delegation_line7") => delegation_line7(&args.next().unwrap_or_default()),
+        Some("delegation_file") => {
+            let kind = args.next().expect("file kind");
+            delegation_file(&kind, &args.next().unwrap_or_default())
+        }
+        Some("delegation_flaky_reviewer") => {
+            let counter = args.next().expect("counter file");
+            let failures = args.next().expect("failure count");
+            delegation_flaky_reviewer(&counter, &failures, &args.next().unwrap_or_default())
+        }
         other => panic!("unknown external-agent fixture mode: {other:?}"),
     }
 }

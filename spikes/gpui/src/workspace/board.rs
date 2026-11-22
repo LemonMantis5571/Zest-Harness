@@ -11,6 +11,7 @@ pub(super) enum Action {
     Approve,
     Apply,
     Retry,
+    ReviewAgain,
     Cancel,
 }
 
@@ -20,16 +21,21 @@ impl Action {
             Self::Approve => "Approve and run",
             Self::Apply => "Apply reviewed diff",
             Self::Retry => "Prepare retry",
+            Self::ReviewAgain => "Review again",
             Self::Cancel => "Cancel delegation",
         }
     }
 }
 
-fn actions(status: Status) -> &'static [Action] {
+/// The actions a card offers. `can_review_again` adds a fresh review of the
+/// saved worker diff to a blocked or failed card.
+fn actions(status: Status, can_review_again: bool) -> &'static [Action] {
     use self::Action::*;
     match status {
         Status::Planned | Status::AwaitingApproval => &[Approve, Cancel],
         Status::ReadyToApply => &[Apply, Cancel],
+        Status::Blocked if can_review_again => &[ReviewAgain, Retry, Cancel],
+        Status::Failed if can_review_again => &[ReviewAgain, Retry],
         Status::Blocked | Status::ChangesRequested | Status::ApplyConflict => &[Retry, Cancel],
         Status::Failed => &[Retry],
         Status::Queued | Status::WorkerRunning | Status::ReviewRunning => &[Cancel],
@@ -304,6 +310,7 @@ impl Workspace {
             Action::Apply => p.delegations.apply(&p.path, &id, Some(updated_at)),
             Action::Cancel => p.delegations.cancel(&p.path, &id, Some(updated_at)),
             Action::Retry => p.delegations.retry(&p.path, &id, Some(updated_at)),
+            Action::ReviewAgain => p.delegations.review_again(&p.path, &id, Some(updated_at)),
         });
     }
 
@@ -495,7 +502,7 @@ impl Workspace {
         }
         let mut controls = div().flex().flex_wrap().gap_2();
         if !b.readonly && !b.busy {
-            for &action in actions(j.status) {
+            for &action in actions(j.status, j.can_review_again) {
                 let id = j.job_id.clone();
                 let rev = j.updated_at;
                 controls = controls.child(button(

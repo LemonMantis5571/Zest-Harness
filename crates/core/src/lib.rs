@@ -54,6 +54,7 @@ pub mod tool_input_repair;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;
+pub mod worker_activity;
 pub mod workspace_changes;
 pub mod worktree_chat;
 pub mod worktree_registry;
@@ -87,16 +88,18 @@ pub use config::{
     Target, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use delegated_worker::{
-    run_acceptance_checks, run_provider_reviewer, run_provider_worker, NativeReviewerResult,
-    NativeTaskUsageContext, NativeWorkerResult, ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
+    acceptance_check_skip_reason, run_acceptance_checks, run_provider_reviewer,
+    run_provider_worker, NativeReviewerResult, NativeTaskUsageContext, NativeWorkerResult,
+    ResolvedWorkerMetadata, MAX_NATIVE_RESULT_CHARS,
 };
 pub use delegation::{
-    apply_diff_checked, capture_workspace_snapshot, capture_worktree_lineage, dependency_blocker,
-    diff_paths, validate_diff_paths, validate_diff_scope, validate_review_paths,
-    AcceptanceCheckResult, AttemptRole, AttemptUsage, CheckStatus, DelegationArtifacts,
-    DelegationAttempt, DelegationJob, DelegationOrigin, DelegationStatus, DelegationStore,
-    DelegationTarget, DispatchReceipt, FeatureCard, ResolvedTargetMetadata, ReviewDecision,
-    ReviewFinding, ReviewReport, ReviewSeverity, ReviewerTarget, TargetFingerprint, WorkerResult,
+    apply_diff_checked, apply_worker_diff, capture_workspace_snapshot, capture_worktree_lineage,
+    dependency_blocker, diff_paths, validate_diff_paths, validate_diff_scope,
+    validate_review_paths, worker_diff_hash, AcceptanceCheckResult, ApplyOutcome, AttemptRole,
+    AttemptUsage, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
+    DelegationOrigin, DelegationStatus, DelegationStore, DelegationTarget, DispatchReceipt,
+    FeatureCard, ResolvedTargetMetadata, ReviewDecision, ReviewFinding, ReviewReport,
+    ReviewSeverity, ReviewerTarget, TargetFingerprint, UnreadableJob, WorkerResult,
     WorkspaceSnapshot, DELEGATION_FORMAT_VERSION, LEGACY_DELEGATION_FORMAT_VERSION,
     V2_DELEGATION_FORMAT_VERSION,
 };
@@ -173,11 +176,12 @@ pub use tools::approval::{
 };
 pub use tools::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
 pub use tools::external_agent::{
-    prepare_external_command, resolve_program, run_delegation_reviewer, run_delegation_worker,
-    ExternalAgent, ExternalAgentResult, EXTERNAL_AGENT_TOOL,
+    delegation_limits, prepare_external_command, resolve_program, run_delegation_reviewer,
+    run_delegation_worker, ExternalAgent, ExternalAgentResult, EXTERNAL_AGENT_TOOL,
 };
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
+pub use tools::isolated_workspace::{pin_worker_base, prune_stale_worktrees, unpin_worker_base};
 pub use tools::list_dir::ListDir;
 pub use tools::prepared::{PreImage, PreparedToolCall};
 pub use tools::question::{
@@ -200,6 +204,7 @@ pub use usage::{
     UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, MAX_TASK_USAGE_RECORDS,
     TASK_USAGE_RETENTION_SECS,
 };
+pub use worker_activity::{WorkerActivity, WorkerLimits};
 pub use workspace_changes::{
     inspect_merge_base, snapshot_from_unified_diff, FileChangeSummary, WorkspaceChangeSet,
 };
