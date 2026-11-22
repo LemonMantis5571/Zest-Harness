@@ -32,11 +32,12 @@ use serde_json::json;
 use std::time::Duration;
 
 use super::rig_convert::{from_rig_content, to_rig_history, to_rig_tools};
-use super::{Completion, StreamEvent, TurnRequest};
+use super::{Completion, StreamEvent, TurnRequest, STREAM_INTERRUPTED};
 use crate::anthropic::types::Usage;
 use crate::cancel::wait_cancel;
 use crate::codex_oauth::CodexOAuthSession;
 use crate::error::{HarnessError, Result};
+use crate::retry::{self, AttemptError, RetryPolicy};
 
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -50,8 +51,122 @@ pub async fn stream_turn(
     req: &TurnRequest,
     on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
 ) -> Result<Completion> {
+    let mut attempt = CodexAttempt { session, req };
+    retry::run_with_retry(
+        &RetryPolicy::default(),
+        &mut attempt,
+        on_event,
+        req.cancel.as_ref(),
+    )
+    .await
+}
+
+struct CodexAttempt<'c> {
+    session: &'c CodexOAuthSession,
+    req: &'c TurnRequest,
+}
+
+#[async_trait::async_trait]
+impl retry::Attempt for CodexAttempt<'_> {
+    async fn run(
+        &mut self,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> std::result::Result<Completion, AttemptError> {
+        try_once(self.session, self.req, on_event).await
+    }
+}
+
+/// One request and its stream. Fails with nothing streamed, or returns the
+/// text that streamed before a retryable failure.
+async fn try_once(
+    session: &CodexOAuthSession,
+    req: &TurnRequest,
+    on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+) -> std::result::Result<Completion, AttemptError> {
+    let mut streamed_text = String::new();
+    let result = {
+        let mut tracking = |event: StreamEvent<'_>| {
+            if let StreamEvent::Text(text) = &event {
+                streamed_text.push_str(text);
+            }
+            on_event(event);
+        };
+        stream_once(session, req, &mut tracking).await
+    };
+    match result {
+        Ok(completion) => Ok(completion),
+        Err((error, retry_after)) => {
+            if error.is_retryable_stream_failure() && !streamed_text.trim().is_empty() {
+                return Ok(Completion {
+                    content: vec![json!({ "type": "text", "text": streamed_text })],
+                    stop_reason: Some(STREAM_INTERRUPTED.into()),
+                    usage: Usage::default(),
+                    usage_available: false,
+                    limits: None,
+                    served_model: None,
+                    provider_session: None,
+                });
+            }
+            Err((error, retry_after))
+        }
+    }
+}
+
+/// Rig's error as Zest's, keeping what retry needs: the HTTP status, the
+/// server's `retry-after`, and whether the request reached a server at all.
+fn from_rig_error(error: rig_core::completion::CompletionError) -> AttemptError {
+    use rig_core::completion::CompletionError;
+    use rig_core::http_client::Error as HttpError;
+    match error {
+        CompletionError::HttpError(HttpError::InvalidStatusCode(status)) => (
+            HarnessError::Api {
+                status: status.as_u16(),
+                body: String::new(),
+            },
+            None,
+        ),
+        CompletionError::HttpError(HttpError::InvalidStatusCodeWithMessage(status, body)) => (
+            HarnessError::Api {
+                status: status.as_u16(),
+                body,
+            },
+            None,
+        ),
+        CompletionError::HttpError(HttpError::InvalidStatusCodeWithDetails {
+            status,
+            body,
+            headers,
+        }) => (
+            HarnessError::Api {
+                status: status.as_u16(),
+                body,
+            },
+            retry::retry_after_from_headers(&headers),
+        ),
+        CompletionError::HttpError(HttpError::StreamEnded) => (HarnessError::PrematureEof, None),
+        CompletionError::HttpError(HttpError::Instance(inner)) => {
+            match inner.downcast::<reqwest::Error>() {
+                Ok(error) => (HarnessError::Http(*error), None),
+                Err(inner) => (
+                    HarnessError::Other(format!("ChatGPT stream: {inner}")),
+                    None,
+                ),
+            }
+        }
+        other => (
+            HarnessError::Other(format!("ChatGPT stream: {other}")),
+            None,
+        ),
+    }
+}
+
+async fn stream_once(
+    session: &CodexOAuthSession,
+    req: &TurnRequest,
+    on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+) -> std::result::Result<Completion, AttemptError> {
     let (preamble, chat_history) = to_rig_history(req.system.as_ref(), &req.messages)
-        .map_err(|error| HarnessError::Other(error.to_string()))?;
+        .map_err(|error| (HarnessError::Other(error.to_string()), None))?;
 
     let client = ClientBuilder::<ChatGPTBuilder>::default()
         .api_key(ChatGPTAuth::AccessToken {
@@ -59,7 +174,12 @@ pub async fn stream_turn(
             account_id: Some(session.account_id.clone()),
         })
         .build()
-        .map_err(|error| HarnessError::Other(format!("ChatGPT client: {error}")))?;
+        .map_err(|error| {
+            (
+                HarnessError::Other(format!("ChatGPT client: {error}")),
+                None,
+            )
+        })?;
 
     let model = client.completion_model(req.model.clone());
 
@@ -94,11 +214,11 @@ pub async fn stream_turn(
 
     let mut stream = tokio::select! {
         biased;
-        _ = wait_cancel(req.cancel.as_ref()) => return Err(HarnessError::Cancelled),
+        _ = wait_cancel(req.cancel.as_ref()) => return Err((HarnessError::Cancelled, None)),
         result = tokio::time::timeout(STREAM_IDLE_TIMEOUT, model.stream(request)) => {
             result
-                .map_err(|_| HarnessError::StreamIdleTimeout)?
-                .map_err(|error| HarnessError::Other(format!("ChatGPT stream: {error}")))?
+                .map_err(|_| (HarnessError::StreamIdleTimeout, None))?
+                .map_err(from_rig_error)?
         }
     };
 
@@ -112,18 +232,18 @@ pub async fn stream_turn(
     loop {
         let idle_remaining = STREAM_IDLE_TIMEOUT.saturating_sub(last_progress.elapsed());
         if idle_remaining.is_zero() {
-            return Err(HarnessError::StreamIdleTimeout);
+            return Err((HarnessError::StreamIdleTimeout, None));
         }
         let next = tokio::select! {
             biased;
-            _ = wait_cancel(req.cancel.as_ref()) => return Err(HarnessError::Cancelled),
+            _ = wait_cancel(req.cancel.as_ref()) => return Err((HarnessError::Cancelled, None)),
             next = stream.next() => next,
             _ = tokio::time::sleep(idle_remaining) => {
-                return Err(HarnessError::StreamIdleTimeout);
+                return Err((HarnessError::StreamIdleTimeout, None));
             }
         };
         let Some(item) = next else { break };
-        let item = item.map_err(|error| HarnessError::Other(format!("ChatGPT stream: {error}")))?;
+        let item = item.map_err(from_rig_error)?;
 
         match item {
             StreamedAssistantContent::Text(text) => {
@@ -180,11 +300,12 @@ pub async fn stream_turn(
         }
     }
 
-    ensure_final_record(saw_final)?;
+    ensure_final_record(saw_final).map_err(|error| (error, None))?;
     let content = from_rig_content(&stream.choice);
     if content.is_empty() {
-        return Err(HarnessError::Other(
-            "ChatGPT stream returned no assistant content".into(),
+        return Err((
+            HarnessError::Other("ChatGPT stream returned no assistant content".into()),
+            None,
         ));
     }
 
@@ -254,6 +375,22 @@ fn map_usage(usage: &rig_core::completion::Usage) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_rate_limit_status_from_rig_keeps_its_retry_after() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+        let (error, retry_after) =
+            from_rig_error(rig_core::completion::CompletionError::HttpError(
+                rig_core::http_client::Error::InvalidStatusCodeWithDetails {
+                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    body: "slow down".into(),
+                    headers: Box::new(headers),
+                },
+            ));
+        assert!(matches!(error, HarnessError::Api { status: 429, .. }));
+        assert_eq!(retry_after, Some(Duration::from_secs(7)));
+    }
 
     #[test]
     fn a_stream_without_a_final_record_is_not_a_completed_turn() {

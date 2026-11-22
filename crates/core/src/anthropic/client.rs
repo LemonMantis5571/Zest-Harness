@@ -15,19 +15,17 @@ use super::types::{Request, API_BASE, API_VERSION, THINKING_BINDING_BETA};
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Completion, RateLimitSnapshot, StreamEvent};
+use crate::retry::{self, RetryPolicy};
 
 /// TCP/TLS connect budget.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Max silence between SSE chunks before the turn fails.
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-/// Tries for a request that has produced no output yet. Small on purpose: a
-/// coding turn is long, and the user is watching.
-pub const MAX_ATTEMPTS: u32 = 3;
-
 pub struct AnthropicClient {
     http: reqwest::Client,
     api_key: String,
     base_url: String,
+    retry: RetryPolicy,
 }
 
 impl AnthropicClient {
@@ -38,7 +36,14 @@ impl AnthropicClient {
                 .build()?,
             api_key,
             base_url: API_BASE.to_string(),
+            retry: RetryPolicy::default(),
         })
+    }
+
+    /// Replace the retry budget, e.g. with [`RetryPolicy::immediate`] in tests.
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Point at something other than the Anthropic API — a gateway that speaks
@@ -69,33 +74,30 @@ impl AnthropicClient {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<Completion> {
-        // Retry only covers getting a successful response. Once the body starts
-        // streaming a second attempt would replay text the caller already saw,
-        // so everything below the loop happens exactly once.
-        let mut attempt = 0u32;
-        let resp = loop {
-            attempt += 1;
-            let (error, retry_after) = match self.send_once(req, cancel).await {
-                Ok(resp) => break resp,
-                Err(pair) => pair,
-            };
-
-            let exhausted = attempt >= MAX_ATTEMPTS;
-            if exhausted || !error.is_transient() {
-                return Err(if attempt > 1 {
-                    annotate_attempts(error, attempt)
-                } else {
-                    error
-                });
-            }
-
-            let delay = retry_after.unwrap_or_else(|| backoff(attempt));
-            tokio::select! {
-                biased;
-                _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
-                _ = tokio::time::sleep(delay) => {}
-            }
+        // A try that failed before anything reached the user is retried; one
+        // that already streamed text returns that text instead (see
+        // `try_once`), so a retry never replays output the caller has seen.
+        let mut attempt = AnthropicAttempt {
+            client: self,
+            req,
+            cancel,
         };
+        retry::run_with_retry(&self.retry, &mut attempt, on_event, cancel).await
+    }
+
+    /// One request and its stream.
+    ///
+    /// A stream that drops, stalls or reports an overload after visible text
+    /// has streamed returns that text as a completion stopped with
+    /// [`crate::provider::STREAM_INTERRUPTED`], and the agent asks the model to continue. With
+    /// nothing visible yet it is an error the caller may retry.
+    async fn try_once(
+        &self,
+        req: &Request,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> std::result::Result<Completion, retry::AttemptError> {
+        let resp = self.send_once(req, cancel).await?;
 
         // Read the headers before touching the body — `bytes_stream()` consumes
         // the response.
@@ -105,42 +107,52 @@ impl AnthropicClient {
         let mut parser = SseParser::default();
         let mut body = resp.bytes_stream();
 
-        loop {
+        let failure = 'read: loop {
             tokio::select! {
                 biased;
 
                 _ = wait_cancel(cancel) => {
                     // Dropping `body` aborts the HTTP connection.
-                    return Err(HarnessError::Cancelled);
+                    return Err((HarnessError::Cancelled, None));
                 }
 
                 chunk = body.next() => {
                     match chunk {
                         Some(Ok(chunk)) => {
                             for payload in parser.feed(&chunk) {
-                                let event: Value = serde_json::from_str(&payload)?;
-                                accumulator.push(&event, on_event)?;
+                                let pushed = serde_json::from_str::<Value>(&payload)
+                                    .map_err(HarnessError::from)
+                                    .and_then(|event| accumulator.push(&event, on_event));
+                                if let Err(error) = pushed {
+                                    break 'read Some(error);
+                                }
                             }
                             if accumulator.is_done() {
-                                break;
+                                break None;
                             }
                         }
-                        Some(Err(e)) => return Err(e.into()),
-                        None => break,
+                        Some(Err(e)) => break Some(e.into()),
+                        None => break None,
                     }
                 }
 
                 _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                    return Err(HarnessError::StreamIdleTimeout);
+                    break Some(HarnessError::StreamIdleTimeout);
                 }
             }
-        }
+        };
 
-        if !accumulator.is_done() {
-            return Err(HarnessError::PrematureEof);
+        let failure =
+            failure.or_else(|| (!accumulator.is_done()).then_some(HarnessError::PrematureEof));
+        let Some(error) = failure else {
+            return Ok(accumulator.finish(limits));
+        };
+        if error.is_retryable_stream_failure() {
+            if let Some(partial) = accumulator.salvage(limits) {
+                return Ok(partial);
+            }
         }
-
-        Ok(accumulator.finish(limits))
+        Err((error, None))
     }
 
     /// One attempt at getting a streaming response.
@@ -177,7 +189,7 @@ impl AnthropicClient {
             return Ok(resp);
         }
 
-        let retry_after = retry_after_from_headers(resp.headers());
+        let retry_after = retry::retry_after_from_headers(resp.headers());
         let body = resp.text().await.unwrap_or_default();
         Err((
             HarnessError::Api {
@@ -189,52 +201,19 @@ impl AnthropicClient {
     }
 }
 
-/// Exponential backoff with jitter: ~1s, ~2s, ~4s.
-///
-/// The jitter is derived from the wall clock rather than a PRNG to avoid a
-/// dependency for something this small. Its only job is to stop two concurrent
-/// delegated workers from retrying in lockstep.
-fn backoff(attempt: u32) -> Duration {
-    let base = Duration::from_secs(1 << attempt.min(4).saturating_sub(1));
-    let jitter_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::from(d.subsec_nanos() % 250_000_000) / 1_000_000)
-        .unwrap_or(0);
-    base + Duration::from_millis(jitter_ms)
+struct AnthropicAttempt<'c> {
+    client: &'c AnthropicClient,
+    req: &'c Request,
+    cancel: Option<&'c CancelToken>,
 }
 
-/// `retry-after` as either delay-seconds or an HTTP date. Only the seconds form
-/// is honoured; a date would need a date library for a marginal gain.
-fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let secs: u64 = headers
-        .get("retry-after")?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    // Do not let a server park the turn for minutes; fall through to our own
-    // backoff by reporting nothing.
-    (secs <= 60).then(|| Duration::from_secs(secs))
-}
-
-/// Make an exhausted retry visible in the message the user actually reads.
-///
-/// Wraps rather than reformats. Editing the failure into a string used to cost
-/// two things: `Http` lost `is_connect()`, so a gateway that was not running
-/// reported as a broken session, and the suffix appended to an `Api` body left
-/// it no longer parseable as the JSON error envelope it is.
-///
-/// `Cancelled` is passed through untouched: the caller branches on that variant
-/// to distinguish "the user stopped it" from "it broke", and wrapping it would
-/// report a deliberate Stop as a failure.
-fn annotate_attempts(error: HarnessError, attempts: u32) -> HarnessError {
-    match error {
-        HarnessError::Cancelled => HarnessError::Cancelled,
-        other => HarnessError::Exhausted {
-            attempts,
-            source: Box::new(other),
-        },
+#[async_trait::async_trait]
+impl retry::Attempt for AnthropicAttempt<'_> {
+    async fn run(
+        &mut self,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> std::result::Result<Completion, retry::AttemptError> {
+        self.client.try_once(self.req, on_event, self.cancel).await
     }
 }
 
@@ -367,6 +346,117 @@ mod tests {
         (format!("http://{addr}"), hits)
     }
 
+    /// Replies to the nth request with `responses[n]` verbatim and closes the
+    /// connection, so a response can stop part-way through its stream.
+    fn spawn_raw_server(responses: Vec<String>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = std::io::Read::read_exact(&mut reader, &mut body);
+                let Some(response) = responses.get(n) else {
+                    break;
+                };
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// An SSE body cut off after `events`, with no `message_stop`.
+    fn truncated_stream(events: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{events}",
+            events.len()
+        )
+    }
+
+    const START: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n";
+    const TEXT_BLOCK: &str = concat!(
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Half an answer\"}}\n\n",
+    );
+    const FINISH: &str = concat!(
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    #[tokio::test]
+    async fn a_stream_that_drops_before_any_text_is_retried() {
+        let _guard = network_test_guard().await;
+        let overloaded = format!(
+            "{START}event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}}}\n\n"
+        );
+        let (base, hits) = spawn_raw_server(vec![
+            truncated_stream(START),
+            truncated_stream(&overloaded),
+            truncated_stream(&format!("{START}{TEXT_BLOCK}{FINISH}")),
+        ]);
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(base)
+            .with_retry_policy(RetryPolicy::immediate());
+        let mut retries = 0;
+        let mut sink = |event: StreamEvent<'_>| {
+            if matches!(
+                event,
+                StreamEvent::ProviderActivity {
+                    status: "running",
+                    ..
+                }
+            ) {
+                retries += 1;
+            }
+        };
+        let completion = client.stream(&request(), &mut sink).await.unwrap();
+        assert_eq!(completion.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(retries, 2);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_drops_after_text_keeps_the_text() {
+        let _guard = network_test_guard().await;
+        let (base, hits) =
+            spawn_raw_server(vec![truncated_stream(&format!("{START}{TEXT_BLOCK}"))]);
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(base)
+            .with_retry_policy(RetryPolicy::immediate());
+        let mut seen = String::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::Text(text) = event {
+                seen.push_str(text);
+            }
+        };
+        let completion = client.stream(&request(), &mut sink).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "must not replay seen text");
+        assert_eq!(seen, "Half an answer");
+        assert_eq!(
+            completion.stop_reason.as_deref(),
+            Some(crate::provider::STREAM_INTERRUPTED)
+        );
+        assert_eq!(completion.content[0]["text"], "Half an answer");
+    }
+
     fn request() -> Request {
         Request {
             model: "test".into(),
@@ -397,15 +487,20 @@ mod tests {
     #[tokio::test]
     async fn gives_up_after_max_attempts_and_says_so() {
         let _guard = network_test_guard().await;
-        let (base, hits) = spawn_server(vec![529, 529, 529, 529]);
+        let policy = RetryPolicy::immediate();
+        let (base, hits) = spawn_server(vec![529; policy.max_attempts as usize + 1]);
         let client = AnthropicClient::new("k".into())
             .unwrap()
-            .with_base_url(base);
+            .with_base_url(base)
+            .with_retry_policy(policy.clone());
         let mut sink = |_ev: StreamEvent<'_>| {};
         let err = client.stream(&request(), &mut sink).await.unwrap_err();
-        assert_eq!(hits.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+        assert_eq!(hits.load(Ordering::SeqCst), policy.max_attempts as usize);
         let message = err.to_string();
-        assert!(message.contains("failed after 3 attempts"), "{message}");
+        assert!(
+            message.contains(&format!("failed after {} attempts", policy.max_attempts)),
+            "{message}"
+        );
         // Giving up must not rewrite the body: it is the API's error envelope,
         // and the desktop parses it to show the provider's own wording.
         assert!(
@@ -488,7 +583,8 @@ mod tests {
         };
         let client = AnthropicClient::new("k".into())
             .unwrap()
-            .with_base_url(format!("http://{addr}"));
+            .with_base_url(format!("http://{addr}"))
+            .with_retry_policy(RetryPolicy::immediate());
         let mut sink = |_ev: StreamEvent<'_>| {};
         let err = client.stream(&request(), &mut sink).await.unwrap_err();
 
@@ -545,22 +641,5 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(hits.load(Ordering::SeqCst), 1, "must not keep retrying");
-    }
-
-    #[test]
-    fn retry_after_ignores_absurd_delays() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("retry-after", "5".parse().unwrap());
-        assert_eq!(
-            retry_after_from_headers(&headers),
-            Some(Duration::from_secs(5))
-        );
-        headers.insert("retry-after", "3600".parse().unwrap());
-        assert_eq!(retry_after_from_headers(&headers), None);
-        headers.insert(
-            "retry-after",
-            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
-        );
-        assert_eq!(retry_after_from_headers(&headers), None);
     }
 }
