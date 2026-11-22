@@ -947,7 +947,10 @@ fn resolve_job_targets(
 /// The run the heartbeat reports on. The review phase swaps in each
 /// reviewer's activity; before the first one it reports the checks.
 #[derive(Clone, Default)]
-struct ActivitySlot(Arc<Mutex<Option<(&'static str, Arc<WorkerActivity>)>>>);
+struct ActivitySlot(Arc<Mutex<Option<WatchedRun>>>);
+
+/// A role (`worker`, `reviewer`) and the activity of its current run.
+type WatchedRun = (&'static str, Arc<WorkerActivity>);
 
 impl ActivitySlot {
     fn watching(role: &'static str, activity: Arc<WorkerActivity>) -> Self {

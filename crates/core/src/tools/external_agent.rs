@@ -1014,6 +1014,7 @@ pub async fn run_delegation_worker(
 /// worker patch, and run a new external process. The reviewer diff is returned
 /// to the caller only so it can be rejected and discarded; it is never an
 /// integration artifact.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_delegation_reviewer(
     root: &Path,
     config: &ExternalAgentConfig,

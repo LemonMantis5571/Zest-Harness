@@ -363,6 +363,7 @@ pub async fn run_provider_worker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_provider_reviewer(
     root: &Path,
     config: Config,
