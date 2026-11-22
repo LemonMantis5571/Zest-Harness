@@ -19,6 +19,8 @@ futures-util.workspace = true
 # direct dependency so the intent is visible rather than incidental.
 getrandom = "0.4"
 globset.workspace = true
+# `retry-after` as an HTTP date. Already in the tree via hyper.
+httpdate = "1"
 ignore.workspace = true
 regex.workspace = true
 rusqlite = { version = "0.43", default-features = false, features = ["bundled", "libsqlite3-sys"] }

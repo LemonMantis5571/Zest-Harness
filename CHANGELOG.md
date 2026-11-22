@@ -5,6 +5,27 @@ a replacement for the commit history.
 
 ## Unreleased
 
+### Changed
+
+- A turn survives provider hiccups instead of ending and losing its history.
+  A request or stream that fails before any text reached you is retried with
+  backoff (2 s doubling to 30 s, up to 10 tries, 15 when the provider is
+  unreachable, a server's `retry-after` honored), shown as an activity row
+  that Stop ends. A stream that breaks after text keeps the text and the model
+  continues. This covers Anthropic, OpenAI-compatible endpoints and ChatGPT
+  Codex.
+- A failed or stopped turn keeps its completed work in the model's history,
+  marked as interrupted, so the next message knows which files were changed.
+- Malformed tool-call arguments go back to the model as an error for that call;
+  unambiguous mistakes (stringified JSON, quoted numbers) are repaired.
+- A response cut off at the output limit, an empty response, or an unknown
+  stop reason is continued, up to three times in a row.
+- `[tools] max_steps` (default 200, `0` = no limit) caps provider rounds per
+  turn; at the limit the model summarizes without tools. The same tool called
+  with identical input three rounds in a row asks whether to keep going.
+- The conversation is compacted inside a turn when it nears the context window,
+  and when the provider rejects a request as too long, including in the CLI.
+
 ## 0.3.0 stable - 2026-10-18
 
 ### Added
