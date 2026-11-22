@@ -470,6 +470,11 @@ impl Chat {
                 Err(e) => {
                     t.terminalize_interrupted();
                     t.apply_error(&assistant, &e.to_string());
+                    // The agent committed the completed part of the turn, closed with an
+                    // interruption note: tools may already have changed files, so the next turn
+                    // must see it. A provider session cannot resume a broken turn, so drop it.
+                    t.set_agent_messages(agent.messages_for_persist());
+                    t.provider_session = None;
                 }
             }
             let status = if cancel.is_cancelled() {
@@ -657,6 +662,33 @@ mod tests {
         assert_eq!(saved.pending_inputs[0].id, input.id);
         assert!(saved.messages.is_empty());
         assert!(saved.agent_messages.is_empty());
+    }
+
+    #[test]
+    fn a_stopped_turn_keeps_its_interrupted_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path().into(), true).unwrap();
+        let chat = Chat::new(project, Thread::new());
+        chat.thread.lock().unwrap().provider_session =
+            Some(zest_core::provider::ProviderSessionRef::CursorAcp { session_id: "stale".into() });
+        let input = chat.enqueue("Explain the stop button", vec![]).unwrap();
+        let (events, _rx) = mpsc::unbounded();
+        let cancel = CancelToken::new();
+        let stopper = cancel.clone();
+        // The demo provider streams a word every 35 ms, so this stops it partway through.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            stopper.cancel();
+        });
+        let result = executor().block_on(chat.run(&input.id, &events, &cancel));
+        assert!(matches!(result, Err(HarnessError::Cancelled)), "{result:?}");
+
+        let id = chat.thread.lock().unwrap().id.clone();
+        let saved = chat.project.store.load(&id).unwrap();
+        let wire = serde_json::to_string(&saved.agent_messages).unwrap();
+        assert!(wire.contains("Explain the stop button"), "the user message is kept: {wire}");
+        assert!(wire.contains("this turn was interrupted"), "the interruption note is kept: {wire}");
+        assert_eq!(saved.provider_session, None, "a provider session cannot resume a broken turn");
     }
 
     #[test]

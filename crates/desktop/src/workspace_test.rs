@@ -394,10 +394,20 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
         }
         settle(cx, 50).await;
     }
+    // A stopped turn keeps what it committed, closed with an interruption note, so the next
+    // turn knows a tool may already have run.
+    let stopped_len = handle
+        .update(cx, |ws, _, _| {
+            let t = ws.project.store.load(&first).unwrap();
+            assert!(t.agent_messages.len() > wire_len, "the stopped turn is in the wire history");
+            let last = serde_json::to_string(t.agent_messages.last().unwrap()).unwrap();
+            assert!(last.contains("this turn was interrupted"), "{last}");
+            t.agent_messages.len()
+        })
+        .unwrap();
     let restored = handle
         .update(cx, |ws, w, cx| {
             let t = ws.project.store.load(&first).unwrap();
-            assert_eq!(t.agent_messages.len(), wire_len);
             assert_eq!(t.pending_inputs.len(), 1);
             let runs = zest_core::ChatPersistence::open(&ws.project.path)
                 .unwrap()
@@ -452,7 +462,7 @@ pub(super) async fn check(handle: WindowHandle<Workspace>, cx: &mut AsyncApp) {
         let chat = r.native.as_ref().unwrap();
         let t = chat.project.store.load(&first).unwrap();
         assert!(t.pending_inputs.is_empty());
-        assert_eq!(t.agent_messages.len(), wire_len + 2);
+        assert_eq!(t.agent_messages.len(), stopped_len + 2);
         assert_eq!(
             t.messages[t.messages.len() - 2].searchable_text(),
             "Edited after restart"
