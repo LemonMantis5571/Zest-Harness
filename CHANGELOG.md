@@ -26,6 +26,13 @@ a replacement for the commit history.
 - The conversation is compacted inside a turn when it nears the context window,
   and when the provider rejects a request as too long, including in the CLI.
 
+### Fixed
+
+- A stopped or failed turn in the desktop app keeps its completed work in the
+  model's history, so the next message knows which tools already ran. The
+  agent recorded it, but the desktop saved the history only after a turn that
+  succeeded.
+
 ### Removed
 
 - The Tauri desktop app and its React UI. The native GPUI app, which releases

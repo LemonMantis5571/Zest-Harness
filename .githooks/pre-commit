@@ -5,3 +5,14 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 node ./scripts/check-output-artifacts.mjs --staged
 node ./scripts/feature-map.mjs check --staged
+
+# The desktop app has its own Cargo.lock. A dependency added to a shared crate must land there
+# too, or the desktop CI jobs fail on --locked; catch it before the commit instead.
+if git diff --cached --name-only | grep -qE '(^|/)Cargo\.(toml|lock)$' && command -v cargo >/dev/null 2>&1; then
+  if ! cargo tree --locked --depth 0 --manifest-path crates/desktop/Cargo.toml >/dev/null 2>&1; then
+    echo "crates/desktop/Cargo.lock is out of date with the crates it uses." >&2
+    echo "Update it with: cargo check --manifest-path crates/desktop/Cargo.toml" >&2
+    echo "then stage crates/desktop/Cargo.lock." >&2
+    exit 1
+  fi
+fi
