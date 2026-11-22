@@ -1805,6 +1805,12 @@ impl DelegationCoordinator {
             if let Err(error) = job.transition(CoreDelegationStatus::Cancelled) {
                 return Err(error.to_string());
             }
+            // The worker task cannot record this later: a cancelled job is
+            // never saved over.
+            job.finish_active_attempts_with_status(
+                zest_core::DispatchStatus::Cancelled,
+                "cancelled by the user",
+            );
             let job = match store.update(job) {
                 Ok(job) => job,
                 Err(error) => return Err(error.to_string()),
@@ -3514,6 +3520,62 @@ mod tests {
         assert!(error.starts_with("worker failed:"), "{error}");
         assert!(error.contains("Connection reset"), "{error}");
         assert!(failed
+            .attempts
+            .iter()
+            .all(|attempt| attempt.finished_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_a_running_worker_and_cleans_its_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_fixture_project_with(root, &fixture_agent("hang", &["delegation_hang"]));
+        let coordinator = Arc::new(DelegationCoordinator::new());
+        let created = coordinator
+            .create_job(root, worker_request("Cancelled worker", "hang"))
+            .unwrap();
+        coordinator.approve(root, &created.job_id, None).unwrap();
+        let running = wait_for_status(
+            &coordinator,
+            root,
+            &created.job_id,
+            DelegationStatus::WorkerRunning,
+        )
+        .await;
+        let cancelled = coordinator
+            .cancel(root, &created.job_id, Some(running.updated_at))
+            .unwrap();
+        assert_eq!(cancelled.status, DelegationStatus::Cancelled);
+        // The worker task notices, stops the process and removes its worktree;
+        // the card stays cancelled.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let list = Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            let worktrees = String::from_utf8_lossy(&list.stdout)
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count();
+            let idle = coordinator
+                .running
+                .lock()
+                .map(|running| running.is_empty())
+                .unwrap_or(false);
+            if worktrees == 1 && idle {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "worker worktree was not cleaned up"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let view = get_view(root, &created.job_id).unwrap();
+        assert_eq!(view.status, DelegationStatus::Cancelled);
+        assert!(view
             .attempts
             .iter()
             .all(|attempt| attempt.finished_at.is_some()));
