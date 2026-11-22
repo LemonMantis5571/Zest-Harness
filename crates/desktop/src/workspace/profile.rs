@@ -208,7 +208,7 @@ impl Workspace {
     pub(super) fn save_profile_name(&mut self, name: &str, cx: &mut Context<Self>) {
         match save_name(name) {
             Ok(()) => self.profile.name = name.trim().to_owned(),
-            Err(e) => self.note = e,
+            Err(e) => self.toast(ToastKind::Error, e, cx),
         }
         cx.notify();
     }
@@ -234,7 +234,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| {
                 match result {
                     Ok(jpeg) => ws.profile.avatar = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, jpeg))),
-                    Err(e) => ws.note = e,
+                    Err(e) => ws.toast(ToastKind::Error, e, cx),
                 }
                 cx.notify();
             });
@@ -288,7 +288,7 @@ impl Workspace {
                                 d.child(ui::button("remove-avatar", ui::Variant::Ghost, Some(Icon::Trash2), "Remove photo", cx.listener(|ws, _, _, cx| {
                                     match save_avatar(None) {
                                         Ok(()) => ws.profile.avatar = None,
-                                        Err(e) => ws.note = e,
+                                        Err(e) => ws.toast(ToastKind::Error, e, cx),
                                     }
                                     cx.notify();
                                 })))

@@ -1,14 +1,16 @@
 ---
 title: Notifications and alerts
-summary: Zest pings only when something needs the user and they are not looking at it, as an Open banner when focused or an OS notification when away, naming the chat and offering to open it.
+summary: Zest pings only when something needs the user and they are not looking at it, as an Open toast when focused or an OS notification when away, and shows workspace notices as toasts that errors keep until dismissed.
 paths:
   - crates/desktop/src/workspace.rs
+  - crates/desktop/src/workspace/toasts.rs
   - crates/desktop/src/main.rs
   - crates/desktop/src/native_view.rs
 tests:
   - crates/desktop/src/workspace_test.rs
 verify:
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- attention_route_follows_window_and_chat_visibility
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace::toasts::
 ---
 
 # Notifications and alerts
@@ -18,18 +20,20 @@ verify:
 - Attention events: "Approval needed", "Input needed" (a question), "Request failed", and "Response ready" (only for turns of 10 s or more that were not stopped, cancelled or a manual compaction).
 - When the Zest window is not active, every attention event becomes an OS notification. Its title is the event and its body the chat's title (else "New chat"). Selecting it opens that chat in its window and brings the window forward.
 - When the window is active and the chat is on screen, nothing is added: the approval or question card, the answer, or the error is already in front of the user.
-- When the window is active and the chat is not on screen, a banner button appears at the top of the workspace: "Open · Approval needed · Fix the login redirect". Clicking it opens the chat. Each chat and event kind has at most one banner.
+- When the window is active and the chat is not on screen, an alert toast appears in the bottom-right corner: "Approval needed · Fix the login redirect" with **Open** and a dismiss button. Open shows the chat. Each chat and event kind has at most one alert.
 - A chat is on screen when the chat page is showing (no Customize, Workbench or other panel covering it) and the chat is the active one or a visible pane of the split group. A minimized pane, or one hidden behind a zoomed pane, is not on screen.
 - Approval and question alerts are raised only while their card is still pending. When the chat next changes (it sends a message or its turn ends), its approval and question banners whose request was answered or dropped go away. Opening a chat removes all its banners; "Request failed" and "Response ready" banners stay until then.
-- Errors and other messages for the chat on screen go to the notice card above the composer, which stays until dismissed. Workspace-level problems (for example a chat that cannot be loaded, or a cancelled sign-in) show in a notice bar at the top of the workspace.
-- The desktop app does not show toasts, and does not notify about background jobs or delegation outcomes; those are visible in Workbench > Jobs and the Delegation board. It does not ask for notification permission itself; the OS decides whether a notification is shown.
+- Errors and other messages for the chat on screen go to the notice card above the composer, which stays until dismissed.
+- Workspace-level messages are toasts in the same corner, below the alerts: errors (a chat that cannot be loaded, a failed save or sign-in) stay until dismissed, confirmations ("Signed in.") leave after 3 s, and other notices and warnings after 5 s. The browser sign-in instructions stay until dismissed. A message that repeats while its toast is showing adds "×2" and restarts its timer instead of stacking a copy. At most five toasts are kept; the oldest goes first.
+- Toasts are announced to screen readers: errors and alerts with the alert role, the rest as status.
+- The desktop app does not notify about background jobs or delegation outcomes; those are visible in Workbench > Jobs and the Delegation board. It does not ask for notification permission itself; the OS decides whether a notification is shown.
 
 ## How it works
 - `main.rs` `Root::apply` emits `workspace::ChatAttention` events: `Approval` or `Question` when an `EvKind::Card` arrives, `Failed` on `EvKind::Failure`, and `Ready` on `End` when the turn ran at least 10 s and was not stopped, cancelled or compacting.
 - `workspace.rs` subscribes to each chat view it adds. The handler first checks `ChatAttention::pending` (a matching card is still queued; always true for `Failed` and `Ready`), works out visibility from the current panel, the active chat and the split layout, and asks `chat_alert_route(window_active, visible)` for `Quiet`, `Banner` or `System`.
 - `System` calls `cx.show_system_notification` with the tag `<workspace entity id>/<chat id>`. The handler registered with `cx.on_system_notification_response` at startup splits the tag, finds the matching workspace window, opens the chat, and activates the window.
-- `Banner` pushes `(chat id, kind, label)` onto `Workspace::alerts` unless the same chat and kind is already there; `Workspace::render` draws them as "Open · …" buttons. The `ChatChanged` subscription drops alerts whose request is no longer pending, and `select_chat` drops every alert for the chat being opened.
-- The notice card is `Root::note`, drawn by `native_view.rs` `native_controls` with a dismiss button; the workspace notice bar is `Workspace::note`.
+- `Banner` pushes `(chat id, kind, label)` onto `Workspace::alerts` unless the same chat and kind is already there; `Workspace::toast_stack` (`workspace/toasts.rs`) draws them as alert toasts. The `ChatChanged` subscription drops alerts whose request is no longer pending, and `select_chat` drops every alert for the chat being opened.
+- The notice card is `Root::note`, drawn by `native_view.rs` `native_controls` with a dismiss button; workspace messages go through `Workspace::toast(kind, text)`, which groups repeats in `Toasts::push` and schedules `Toasts::expire` for kinds with a lifetime.
 
 ## Verify
 - `attention_route_follows_window_and_chat_visibility` (in `workspace_test.rs`) checks the route table: active and visible is quiet, active and hidden is a banner, inactive is a system notification either way.

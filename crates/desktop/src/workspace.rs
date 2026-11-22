@@ -13,6 +13,8 @@ mod profile;
 mod recent;
 mod extras;
 mod projects;
+mod toasts;
+use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
 
@@ -119,7 +121,7 @@ pub struct Workspace {
     search_task: Option<Task<()>>,
     search_cancel: zest_core::CancelToken,
     focus: FocusHandle,
-    note: String,
+    toasts: toasts::Toasts,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -179,7 +181,7 @@ impl Workspace {
                             });
                             match result {
                                 Ok(_) => this.panel = Panel::Chat,
-                                Err(e) => this.note = e.to_string(),
+                                Err(e) => this.toast(ToastKind::Error, e.to_string(), cx),
                             }
                             this.refresh(cx);
                         }
@@ -234,7 +236,7 @@ impl Workspace {
             panel: Panel::Chat,
             filter,
             focus: cx.focus_handle(),
-            note: String::new(),
+            toasts: toasts::Toasts::default(),
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -291,7 +293,7 @@ impl Workspace {
                             .retain(|id| !ws.history.iter().any(|row| row.id == *id));
                         ws.refresh_search(cx);
                     }
-                    Err(e) => ws.note = e.to_string(),
+                    Err(e) => ws.toast(ToastKind::Error, e.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -362,7 +364,7 @@ impl Workspace {
                 if ws.search_term == term && ws.panel == Panel::Search {
                     match hits {
                         Ok(hits) => ws.hits = hits,
-                        Err(e) => ws.note = e.to_string(),
+                        Err(e) => ws.toast(ToastKind::Error, e.to_string(), cx),
                     }
                     cx.notify();
                 }
@@ -504,10 +506,10 @@ impl Workspace {
         } else {
             match self.project.store.load_with_recovery(id) {
                 Ok(loaded) => {
-                    self.note = loaded.warning.unwrap_or_default();
+                    self.toast(ToastKind::Warning, loaded.warning.unwrap_or_default(), cx);
                     self.add(loaded.thread, window, cx);
                 }
-                Err(e) => self.note = e.to_string(),
+                Err(e) => self.toast(ToastKind::Error, e.to_string(), cx),
             }
         }
         cx.notify();
@@ -546,7 +548,7 @@ impl Workspace {
                 self.add(child, window, cx);
                 self.refresh(cx);
             }
-            Err(e) => self.note = e.to_string(),
+            Err(e) => self.toast(ToastKind::Error, e.to_string(), cx),
         }
         cx.notify();
     }
@@ -721,14 +723,14 @@ impl Workspace {
         }
         let owner = chat.thread.lock().unwrap().provider_id.clone();
         if owner.as_deref().is_some_and(|id| id != provider) {
-            self.note = "Start a new chat to choose a different provider.".into();
+            self.toast(ToastKind::Info, "Start a new chat to choose a different provider.", cx);
         } else {
             let mut prefs = zest_core::ProjectSessionState::load(&self.project.path, provider);
             let saved = prefs.providers.entry(provider.to_owned()).or_default();
             saved.model = model.clone();
             saved.effort = effort.clone();
             if let Err(e) = prefs.save(&self.project.path) {
-                self.note = e.to_string();
+                self.toast(ToastKind::Error, e.to_string(), cx);
             }
             *chat.options.lock().unwrap() = native::Selection {
                 provider: provider.into(),
@@ -836,7 +838,7 @@ impl Workspace {
                                 if let Some(mut login) = ws.login.take() {
                                     let _ = login.kill();
                                 }
-                                ws.note = "Sign-in cancelled.".into();
+                                ws.toast(ToastKind::Info, "Sign-in cancelled.", cx);
                                 cx.notify();
                             }),
                         ));
@@ -1079,7 +1081,7 @@ impl Workspace {
                     let result = cx.update(|cx| open_window(path, false, false, cx));
                     if let Err(e) = result {
                         let _ = this.update(cx, |ws, cx| {
-                            ws.note = e;
+                            ws.toast(ToastKind::Error, e, cx);
                             cx.notify();
                         });
                     }
@@ -1153,11 +1155,11 @@ impl Workspace {
         };
         match result {
             Ok(login) => {
-                self.note = login.spawn.browser_body.into();
+                self.toast_pinned(ToastKind::Info, login.spawn.browser_body, cx);
                 self.login = Some(login);
             }
             Err(e) => {
-                self.note = e;
+                self.toast(ToastKind::Error, e, cx);
                 cx.notify();
                 return;
             }
@@ -1173,9 +1175,9 @@ impl Workspace {
                     };
                     match login.poll_status() {
                         Ok(auth::LoginPoll::Running) => return true,
-                        Ok(auth::LoginPoll::Succeeded) => ws.note = "Signed in.".into(),
-                        Ok(auth::LoginPoll::Failed(detail)) => ws.note = detail,
-                        Err(e) => ws.note = e.to_string(),
+                        Ok(auth::LoginPoll::Succeeded) => ws.toast(ToastKind::Success, "Signed in.", cx),
+                        Ok(auth::LoginPoll::Failed(detail)) => ws.toast(ToastKind::Error, detail, cx),
+                        Err(e) => ws.toast(ToastKind::Error, e.to_string(), cx),
                     }
                     ws.login = None;
                     cx.notify();
@@ -1304,37 +1306,7 @@ impl Render for Workspace {
         } else {
             self.page_frame(self.panel_body(cx), cx)
         };
-        let alerts = self.alerts.iter().enumerate().map(|(i, (id, _, label))| {
-            let target = id.clone();
-            crate::ui::button(
-                SharedString::from(format!("alert-{i}")),
-                crate::ui::Variant::Outline,
-                Some(crate::theme::Icon::Bell),
-                format!("Open · {label}"),
-                cx.listener(move |ws, _, w, cx| ws.open(&target, w, cx)),
-            )
-        }).collect::<Vec<_>>();
-        let notice = (!self.note.is_empty()).then(|| {
-            div()
-                .mx_4()
-                .mt_2()
-                .px_3()
-                .py_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(rgb(crate::theme::border()))
-                .bg(rgb(crate::theme::card()))
-                .text_size(px(13.))
-                .child(crate::theme::icon(crate::theme::Icon::CircleAlert, 14.).text_color(rgb(crate::theme::WARNING)))
-                .child(div().flex_1().min_w_0().child(self.note.clone()))
-                .child(crate::ui::icon_button_xs("dismiss", crate::theme::Icon::X, "Dismiss", cx.listener(|ws, _, _, cx| {
-                    ws.note.clear();
-                    cx.notify();
-                })))
-        });
+        let toasts = self.toast_stack(cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1371,10 +1343,9 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .child(self.header(cx))
-                    .when(!self.alerts.is_empty(), |d| d.child(div().px_4().pt_2().flex().flex_wrap().gap_2().children(alerts)))
-                    .children(notice)
                     .child(main),
             )
+            .children(toasts)
     }
 }
 
