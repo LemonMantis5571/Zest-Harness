@@ -220,3 +220,71 @@ pub fn hint(text: impl Into<SharedString>) -> Div {
         .text_color(rgb(theme::muted_foreground()))
         .child(text.into())
 }
+
+/// On/off switch following UI SDK's switch behavior: the switch role with a toggled state,
+/// toggled by click, Enter or Space. 36 x 20 like the React UI's Customize switches.
+pub fn switch(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+    toggle: impl Fn(&bool, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Switch)
+        .aria_label(label.into())
+        .aria_toggled(if checked { accesskit::Toggled::True } else { accesskit::Toggled::False })
+        .tab_index(0)
+        .cursor_pointer()
+        .w(px(36.))
+        .h(px(20.))
+        .flex_none()
+        .relative()
+        .rounded_full()
+        .bg(rgb(if checked { theme::primary() } else { theme::secondary() }))
+        .border_1()
+        .border_color(rgb(if checked { theme::primary() } else { theme::border() }))
+        .focus_visible(|s| s.border_color(rgb(theme::primary_hover())))
+        .child(
+            div()
+                .absolute()
+                .top(px(1.))
+                .left(px(if checked { 17. } else { 1. }))
+                .size(px(16.))
+                .rounded_full()
+                .bg(rgb(if checked { theme::ON_PRIMARY } else { theme::muted_foreground() })),
+        )
+        .on_click(move |_, window, cx| toggle(&!checked, window, cx))
+}
+
+/// A labelled row holding a switch, like the React UI's settings rows.
+pub fn switch_row(
+    id: impl Into<ElementId>,
+    title: &'static str,
+    hint: &'static str,
+    checked: bool,
+    toggle: impl Fn(&bool, &mut Window, &mut App) + 'static,
+) -> Div {
+    card()
+        .rounded(px(8.))
+        .px_3()
+        .py(px(10.))
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
+                .child(hint_text(hint)),
+        )
+        .child(switch(id, title, checked, toggle))
+}
+
+fn hint_text(text: &'static str) -> Div {
+    div().text_size(px(11.)).text_color(rgb(theme::muted_foreground())).child(text)
+}

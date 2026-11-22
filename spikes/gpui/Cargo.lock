@@ -9744,6 +9744,7 @@ dependencies = [
  "accesskit",
  "async-trait",
  "base64 0.23.1",
+ "chrono",
  "dirs 6.0.0",
  "embed-resource",
  "futures",

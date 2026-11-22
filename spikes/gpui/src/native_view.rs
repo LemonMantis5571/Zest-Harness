@@ -513,7 +513,7 @@ impl Root {
                     box_ = box_
                         .child(buttons)
                         .child(self.decision_input.clone())
-                        .child(div().flex().child(ui::button("dismiss-question", Variant::Ghost, None, "Dismiss", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)))));
+                        .child(div().flex().child(ui::button("dismiss-question", Variant::Ghost, None, "Dismiss", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx))).aria_label("Dismiss question")));
                 }
             }
             panel = panel.child(box_);

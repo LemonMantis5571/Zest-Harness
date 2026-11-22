@@ -9,6 +9,8 @@ mod board;
 mod panes;
 use panes::{Direction, Layout};
 mod chrome;
+mod profile;
+mod recent;
 mod extras;
 mod projects;
 #[path = "workspace_test.rs"]
@@ -30,7 +32,9 @@ actions!(
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Chat,
+    Profile,
     Appearance,
+    ChatView,
     Search,
     Settings,
     Commands,
@@ -126,13 +130,20 @@ pub struct Workspace {
     nav: Vec<(Panel, String)>,
     nav_index: usize,
     sidebar_open: bool,
+    profile: profile::ProfileState,
+    /// Chats started outside a project, for the sidebar's Recent section.
+    free_chats: Vec<ThreadSummary>,
+    /// Focus targets for the page tabs, so arrow keys can move focus with the selection.
+    tab_focus: Vec<FocusHandle>,
     project_open: bool,
     /// The checkout's branch when the window opened, for chats without a recorded one.
     branch: Option<String>,
 }
 
 const PAGES: &[(Panel, &str)] = &[
+    (Panel::Profile, "Your profile"),
     (Panel::Appearance, "Appearance"),
+    (Panel::ChatView, "Chat view"),
     (Panel::Search, "Find chats"),
     (Panel::Settings, "Model & permissions"),
     (Panel::Commands, "Skills & MCP"),
@@ -161,6 +172,7 @@ impl Workspace {
             |this, _, ev: &ComposerEvent, window, cx| {
                 if let ComposerEvent::Send { text, .. } = ev {
                     match this.panel {
+                        Panel::Profile => this.save_profile_name(text, cx),
                         Panel::Rename => {
                             let result = this.chat(cx).edit(|t| {
                                 t.set_title(text).map_err(zest_core::HarnessError::Other)
@@ -236,11 +248,16 @@ impl Workspace {
             nav: Vec::new(),
             nav_index: 0,
             sidebar_open: true,
+            profile: profile::ProfileState::default(),
+            free_chats: Vec::new(),
+            tab_focus: (0..8).map(|_| cx.focus_handle()).collect(),
             project_open: true,
             branch,
         };
         ws.new_chat(window, cx);
         ws.load_history(cx);
+        ws.load_free_chats(cx);
+        (ws.profile.name, ws.profile.avatar) = profile::load_user();
         ws.load_extras(cx);
         ws
     }
@@ -676,6 +693,7 @@ impl Workspace {
                     self.report = "No measured usage yet.".into();
                 }
             }
+            Panel::Profile => self.load_profile(cx),
             Panel::Chat => window.focus(
                 &self.chats[&self.active]
                     .read(cx)
@@ -743,7 +761,9 @@ impl Workspace {
             .flex_col()
             .gap_2();
         match self.panel {
+            Panel::Profile => body = body.child(self.profile_body(cx)),
             Panel::Appearance => body = body.child(self.appearance_body(cx)),
+            Panel::ChatView => body = body.child(self.chat_view_body(cx)),
             Panel::Worktrees => body = body.child(self.worktrees_body(cx)),
             Panel::PullRequests => body = body.child(self.pull_requests_body(cx)),
             Panel::Extras => body = body.child(self.extras_body(cx)),
@@ -1358,6 +1378,9 @@ impl Render for Workspace {
     }
 }
 
+/// Set by `--no-focus`: windows open without taking focus from the app the user is in.
+static NO_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn open_window(path: PathBuf, demo: bool, test: bool, cx: &mut App) -> Result<(), String> {
     let project = Project::open(path, demo).map_err(|e| e.to_string())?;
     open_project_window(project, test, cx).map(|_| ())
@@ -1390,7 +1413,7 @@ fn open_project_window(
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                focus: !test,
+                focus: !test && !NO_FOCUS.load(std::sync::atomic::Ordering::Relaxed),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Zest".into()),
                     ..Default::default()
@@ -1507,12 +1530,14 @@ pub fn launch_if_requested() -> bool {
             })));
         } else if arg == "--demo" {
             demo = true;
+        } else if arg == "--no-focus" {
+            NO_FOCUS.store(true, std::sync::atomic::Ordering::Relaxed);
         } else if arg == "--selftest-workspace" {
             demo = true;
             test = true;
         } else if arg == "--help" || arg == "-h" {
             println!(
-                "Zest native workspace\n  --project DIRECTORY    Open a project (default: choose a folder)\n  --demo                 Open a temporary offline project\n  --selftest-workspace   Exercise the native workspace offline\n  --selftest-queue       Exercise the original stream fixture"
+                "Zest native workspace\n  --project DIRECTORY    Open a project (default: choose a folder)\n  --demo                 Open a temporary offline project\n  --no-focus             Open without taking focus (for automation)\n  --selftest-workspace   Exercise the native workspace offline\n  --selftest-queue       Exercise the original stream fixture"
             );
             return true;
         } else if arg.to_str().is_some_and(|s| {
@@ -1558,6 +1583,8 @@ pub fn launch_if_requested() -> bool {
     if test {
         workspace_test::init_repository(root.as_deref().expect("temporary test directory"));
     }
+    // Usage days and streaks are bucketed by local date, as the React UI sets at boot.
+    zest_core::usage::set_local_offset_minutes(chrono::Local::now().offset().local_minus_utc() / 60);
     crate::theme::application().run(move |cx| {
         crate::theme::load_fonts(cx);
         cx.set_app_identity("dev.zest.app", "Zest");
