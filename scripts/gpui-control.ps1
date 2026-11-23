@@ -17,6 +17,7 @@ using System; using System.Runtime.InteropServices;
 public static class ZestWin {
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
   public struct RECT { public int L, T, R, B; }
 }
 '@
@@ -117,7 +118,9 @@ switch ($Command) {
     }
     'click' { $result.action = Activate (Find-Named $root $Name $Nth); Start-Sleep -Milliseconds 400; $result.state = Get-State $root }
     'type' {
-        (Get-Composer $root).GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Text)
+        # With -Name, type into that field (matched by accessible name) instead of the message box.
+        $field = if ($Name) { Find-Named $root $Name $Nth } else { Get-Composer $root }
+        $field.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Text)
         $result.state = Get-State $root
     }
     'send' {
@@ -145,10 +148,16 @@ switch ($Command) {
         $r = New-Object ZestWin+RECT
         [ZestWin]::DwmGetWindowAttribute($h, 9, [ref]$r, 16) | Out-Null
         $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
-        [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+        # PrintWindow renders Zest's own window, so other windows on top of it never appear in
+        # the image. PW_RENDERFULLCONTENT (2) includes GPU-drawn content.
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $dc = $g.GetHdc()
+        $ok = [ZestWin]::PrintWindow($h, $dc, 2)
+        $g.ReleaseHdc($dc)
+        $g.Dispose()
+        if (-not $ok) { throw 'PrintWindow could not render the Zest window.' }
         $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
         $result.file = $Out
-        $result.note = 'Captured from the screen; other windows on top of Zest appear in the image.'
     }
     default { throw "Unknown command: $Command" }
 }

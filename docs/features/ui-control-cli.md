@@ -19,10 +19,10 @@ verify:
 - `doctor` reports the platform, whether the release binary is built (with the build command when it is not), and the running session.
 - `start` launches the release build of `zest-desktop`: the offline `--demo` project unless `--project DIR` is given, and `--build` rebuilds first (it also builds when the binary is missing). The app runs with `--no-focus`, so its window does not take focus from whatever the user is doing, and its output goes to a log under `<tmp>/zest-gpui-control/`. A second `start` reuses the running session.
 - `inspect` returns the turn state, the transcript rows, the composer text and the page tabs; `messages` returns only the transcript rows as screen readers hear them; `snapshot` lists every named control with its role and state.
-- `click NAME [--nth N]` presses a button, tab, switch or radio by accessible name. `type TEXT` puts text in the message box. `send TEXT [--timeout S]` types and sends, then waits until the reply finishes or an approval or question card appears. `wait-settle [--timeout S]` waits until no turn is running.
+- `click NAME [--nth N]` presses a button, tab, switch or radio by accessible name. `type TEXT [--into NAME]` puts text in the message box, or in the field whose accessible name is NAME (a settings form field, for example). `send TEXT [--timeout S]` types and sends, then waits until the reply finishes or an approval or question card appears. `wait-settle [--timeout S]` waits until no turn is running.
 - Every action goes through UI Automation patterns (Invoke, SelectionItem, Toggle, Value), never simulated keystrokes or mouse input, so nothing is typed into another window.
 - `errors [--clear]` lists panics and error lines from the app's log since start, or since the last `--clear`. Every reply also carries the newest of them under `newErrors`.
-- `screenshot FILE` captures the app's window.
+- `screenshot FILE` renders the app's window with `PrintWindow`, so other windows on top of Zest never appear in the image.
 - `stop` ends the app and removes the session file.
 - It is Windows-only. On Linux it says so and points to the desktop tests.
 
@@ -43,4 +43,5 @@ verify:
 - It drives the release build in `crates/desktop/target/release`. After changing the app, pass `--build` or rebuild before `start`, or you test the old binary.
 - A control without an accessible name cannot be clicked. Name new controls (the Windows CI accessibility check fails on unnamed buttons anyway).
 - One session at a time per machine: the session file is not per checkout.
+- Do not drive the app while someone is typing in another window. On one run, a key pressed in a game reached a Zest form field during `type --into`; the window was started with `--no-focus`, so the cause is not known yet.
 - If you find yourself scripting the same interaction twice, add a command to both scripts instead.
