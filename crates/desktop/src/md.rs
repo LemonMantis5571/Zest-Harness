@@ -197,6 +197,25 @@ After");
 }
 
 #[cfg(test)]
+mod math_tests {
+    use super::{parse, Block, SpanKind};
+
+    #[::core::prelude::v1::test]
+    fn math_reads_as_its_source_in_code_style() {
+        let doc = parse(r"Area is $\pi r^2$ and
+
+$$\int_0^1 x\,dx$$
+
+prices like $5 and $10 stay text.");
+        let text: Vec<&str> = doc.units.iter().map(|u| u.text.as_ref()).collect();
+        assert_eq!(text, [r"Area is $\pi r^2$ and", r"$$\int_0^1 x\,dx$$", "prices like $5 and $10 stay text."]);
+        assert!(matches!(doc.units[0].spans.as_slice(), [(r, SpanKind::Code)] if *r == (8..17)));
+        assert!(doc.units[2].spans.is_empty());
+        assert_eq!(doc.blocks.iter().filter(|b| matches!(b, Block::Para { .. })).count(), 3);
+    }
+}
+
+#[cfg(test)]
 mod block_tests {
     use super::complete_prefix;
 
@@ -228,8 +247,14 @@ mod block_tests {
     }
 }
 
+/// The Markdown dialect replies are read in. Math is `$…$` and `$$…$$`, as on GitHub.
+pub const OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_MATH);
+
 pub fn parse(src: &str) -> Doc {
-    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let opts = OPTIONS;
     let mut doc = Doc::default();
     let mut cur: Option<Cur> = None;
     let mut lists: Vec<Option<u64>> = vec![];
@@ -405,6 +430,15 @@ pub fn parse(src: &str) -> Doc {
                 c.text.push_str(&t);
                 c.spans.push((start..c.text.len(), SpanKind::Code));
             }
+            // Math reads as its source, delimiters kept so copy gives it back; the message card draws it.
+            Event::InlineMath(t) => {
+                other_text |= image.is_none();
+                push_math(&mut cur, "$", &t);
+            }
+            Event::DisplayMath(t) => {
+                other_text |= image.is_none();
+                push_math(&mut cur, "$$", &t);
+            }
             Event::SoftBreak => cur.get_or_insert_with(Cur::new).text.push(' '),
             Event::HardBreak => cur.get_or_insert_with(Cur::new).text.push('\n'),
             Event::Html(t) | Event::InlineHtml(t) => cur.get_or_insert_with(Cur::new).text.push_str(&t),
@@ -417,6 +451,15 @@ pub fn parse(src: &str) -> Doc {
     }
     flush_text!();
     doc
+}
+
+fn push_math(cur: &mut Option<Cur>, fence: &str, tex: &str) {
+    let c = cur.get_or_insert_with(Cur::new);
+    let start = c.text.len();
+    c.text.push_str(fence);
+    c.text.push_str(tex);
+    c.text.push_str(fence);
+    c.spans.push((start..c.text.len(), SpanKind::Code));
 }
 
 fn open(cur: &mut Option<Cur>, kind: SpanKind) {

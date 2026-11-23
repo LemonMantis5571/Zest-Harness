@@ -7,6 +7,7 @@ paths:
   - crates/desktop/src/main.rs
   - crates/desktop/src/native_view.rs
   - crates/desktop/src/theme.rs
+  - crates/desktop/src/visual.rs
 tests:
   - crates/desktop/src/selftest.rs
   - crates/desktop/src/selftest_trace.rs
@@ -17,6 +18,9 @@ verify:
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- native_view::tests
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- md::image_tests
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- view::image_source_tests
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- md::math_tests
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- visual::
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- artifact::visual_tests
 ---
 
 # Message rendering
@@ -31,7 +35,7 @@ verify:
 - Only `http(s)` links are followed: clicking one opens the system browser. Other schemes are coloured like links but do nothing. There are no link-preview cards.
 - Fenced code shows an uppercase language chip ("TEXT" when the fence has no tag) and a "Copy code" button, and scrolls horizontally instead of wrapping. Highlighting uses syntect: the default pack, or the larger bat/two-face pack with `--features grammars`. A few fence spellings map to syntect tokens (`csharp`, `docker`, `kotlin`, `typescript`, `sh`/`shell`/`zsh`, `ps1`, `rs`, `py`); TypeScript, TSX and JSX fall back to the JavaScript grammar and PowerShell to Bash. A tag with no grammar keeps its label and renders uncoloured. Code colours follow the theme's brightness for newly rendered messages.
 - Markdown images (`![alt](src)`) render inline when they are local raster files (an absolute path or a `file://` URL) or raster `data:` URLs (PNG, JPEG, GIF, WebP, BMP), up to 560 x 420 px, with the alt text as their accessible name. An http(s) image is not fetched: it shows "View image: <alt> (<host>)", which opens it in the browser. Relative paths, SVG and other schemes show `[image: <alt>]`. An image alone in its paragraph or list item replaces its alt-text line; one inside other text follows that text.
-- The desktop app does not render Mermaid diagrams or math: a Mermaid fence is a code block and math stays as its source text.
+- Mermaid diagrams and TeX math are drawn by the bundled mermaid 12.3.0 and KaTeX 0.19.1. In the transcript a ```mermaid fence stays a code block, and `$…$` or `$$…$$` math shows as its source (delimiters kept) in code style, so copy returns it unchanged. A finished reply gets a "Diagram" card per non-empty Mermaid fence and one "Math" card for all its expressions, after any HTML artifact cards. Open (Windows) draws them in the sandboxed document window; Source shows the source. Dollar amounts such as "$5 and $10" stay text, following GitHub's rules.
 - Text in any row can be selected by dragging, across messages and off-screen rows, and copied with Ctrl+C. Collapsed rows are left out of the copy.
 - A streaming answer shows a block cursor at its end. Each finished answer shows "Copy message" (the rendered text of its blocks, separated by blank lines, not the raw Markdown source) and "Download message" (a save dialog starting in the project folder with `zest-reply.md`; `.md` is added when the name has no extension). Neither shows while the answer streams.
 - "Zest" labels the first row of each assistant turn. The transcript is a centered 720 px column that follows the newest row until the user scrolls up.
@@ -39,8 +43,9 @@ verify:
 ## How it works
 - `main.rs` `Root::apply` turns bridge events into rows (`Msg`): `Thinking` opens a live reasoning row, `ToolStart`/`ToolResult` add and settle tool rows, `Activity` goes to `update_activity` (`native_view.rs`), and `Text` appends to `live_text`. After each event batch, `reparse` runs `md::parse` over the whole live answer; `End` reparses once more, then `restore_native` rebuilds the turn's rows from the saved thread (`append_saved_rows` in `native_view.rs`).
 - `main.rs` `Root::reparse` parses `md::complete_prefix(live_text)` for the streaming message when the setting is on; `complete_prefix` cuts at the last blank line outside a fence, keeping list items together.
-- `md.rs` `parse` walks `pulldown-cmark` events (tables, strikethrough and task lists enabled) into a flat `Doc` of `Block`s and inline `Unit`s with spans (bold, italic, strike, code, link, colour). Code blocks call `highlight`, which caches spans by language, source and theme brightness and resolves grammars with `find_syntax`.
+- `md.rs` `parse` walks `pulldown-cmark` events (`md::OPTIONS`: tables, strikethrough, task lists and math) into a flat `Doc` of `Block`s and inline `Unit`s with spans (bold, italic, strike, code, link, colour). Code blocks call `highlight`, which caches spans by language, source and theme brightness and resolves grammars with `find_syntax`.
 - `view.rs` draws blocks (`render_blocks`), user bubbles (`render_user`), answers (`render_assistant`) and step rows (`render_trace`, with `trace_icon` choosing the icon). Each unit is a selectable text element registered in the shared selection state.
+- `artifact.rs` `from_reply` builds a finished reply's cards: `zest-html` documents, then `visuals` (Mermaid fences and math, read with the same `md::OPTIONS`). `visual.rs` builds the drawing page: the source goes in as JSON with `<` escaped inside a non-script data block, and the page loads `vendor/mermaid.min.js` (`securityLevel: strict`) or KaTeX (`trust: false`, `maxExpand: 1000`). `web_content::show_visual` starts the document window in `RENDER` mode, which serves the embedded libraries under the page's random token (`visual::vendor_file`) with a policy that adds only that path for scripts, styles and fonts (`visual::csp`).
 - `main.rs` `selection_text` builds the copied text from units and their separators; `click_link` opens `http(s)` links with `cx.open_url`; `render_item` adds the "Zest" label, artifact cards and the Copy/Download buttons; `save_message` writes the reply with `zest_core::atomic_write`.
 - `npm run gpui -- --langs` prints which of Zest's fence languages the loaded pack colours natively, approximately, or not at all.
 
