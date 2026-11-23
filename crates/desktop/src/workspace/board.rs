@@ -112,6 +112,7 @@ impl Board {
             while events.changed().await.is_ok() {
                 if this
                     .update(cx, |ws, cx| {
+                        ws.check_delegations(cx);
                         if ws.panel == Panel::Delegation {
                             ws.load_board(false, cx);
                         }

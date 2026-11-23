@@ -17,6 +17,7 @@ mod toasts;
 mod palette;
 mod mcp;
 mod providers;
+mod background;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -133,6 +134,8 @@ pub struct Workspace {
     delete_confirm: Option<String>,
     /// Chats whose turn finished or failed while they were not on screen, until opened.
     unread: std::collections::HashSet<String>,
+    /// Delegation card statuses at the last check, for alerting on changes; `None` before the first.
+    delegation_seen: Option<HashMap<String, zest_coordinator::DelegationStatus>>,
     palette: Option<palette::Palette>,
     mcp_page: mcp::McpPage,
     providers_page: providers::ProvidersPage,
@@ -256,6 +259,7 @@ impl Workspace {
             rewind_confirm: None,
             delete_confirm: None,
             unread: Default::default(),
+            delegation_seen: None,
             palette: None,
             mcp_page: mcp::McpPage::default(),
             providers_page: providers::ProvidersPage::default(),
@@ -281,6 +285,8 @@ impl Workspace {
         ws.new_chat(window, cx);
         ws.load_history(cx);
         ws.load_free_chats(cx);
+        ws.watch_jobs(cx);
+        ws.check_delegations(cx);
         // Nothing can answer a chat yet: open on the page that fixes that.
         if !ws.project.demo && ws.project.config.providers.is_empty() {
             ws.panel = Panel::Providers;
