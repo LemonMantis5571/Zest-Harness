@@ -564,7 +564,7 @@ impl RuntimeBuilder {
                 // expect its tools, and would otherwise only learn they are
                 // missing from the model failing to use them.
                 warnings.push(format!(
-                    "No tools loaded for the MCP server{} {}. Check {} in Customize → MCPs.",
+                    "No tools loaded for the MCP server{} {}. Check {} in Customize > MCP servers.",
                     if uncatalogued.len() == 1 { "" } else { "s" },
                     uncatalogued.join(", "),
                     if uncatalogued.len() == 1 {

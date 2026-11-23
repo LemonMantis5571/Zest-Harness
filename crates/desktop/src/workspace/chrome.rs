@@ -10,6 +10,7 @@ pub(super) const CUSTOMIZE: &[(Panel, &str, Icon)] = &[
     (Panel::ChatView, "Chat view", Icon::MessageSquare),
     (Panel::Settings, "Models", Icon::Layers),
     (Panel::Commands, "Skills & MCP", Icon::Plug),
+    (Panel::Mcp, "MCP servers", Icon::Server),
     (Panel::Extras, "Add-ons", Icon::Puzzle),
     (Panel::Usage, "Usage", Icon::Gauge),
 ];

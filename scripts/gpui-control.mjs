@@ -29,7 +29,7 @@ const USAGE = `Usage: node scripts/gpui-control.mjs <command>
   messages                    transcript rows as screen readers hear them
   snapshot                    every named control with its role and state
   click NAME [--nth N]        press a button, tab, switch or radio by accessible name
-  type TEXT                   put TEXT in the message box
+  type TEXT [--into NAME]     put TEXT in the message box, or in the field named NAME
   send TEXT [--timeout S]     type and send, then wait for the reply or a card
   wait-settle [--timeout S]   wait until no turn is running
   screenshot FILE             capture the window
@@ -190,8 +190,9 @@ switch (command) {
   case "send": {
     const state = session();
     const timeout = option(args, "--timeout");
+    const into = command === "type" ? option(args, "--into") : undefined;
     if (args[0] === undefined) fail(`${command} needs text`, 2);
-    const result = drive(state, command, { Text: args[0], TimeoutSeconds: timeout });
+    const result = drive(state, command, { Text: args[0], TimeoutSeconds: timeout, Name: into });
     reply(result, result.ok ? 0 : 1);
     break;
   }

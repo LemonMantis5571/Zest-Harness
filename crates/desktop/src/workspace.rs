@@ -15,6 +15,7 @@ mod extras;
 mod projects;
 mod toasts;
 mod palette;
+mod mcp;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -41,6 +42,7 @@ enum Panel {
     Search,
     Settings,
     Commands,
+    Mcp,
     Files,
     Changes,
     Usage,
@@ -126,6 +128,7 @@ pub struct Workspace {
     /// The checkpoint whose Rewind is waiting for confirmation.
     rewind_confirm: Option<String>,
     palette: Option<palette::Palette>,
+    mcp_page: mcp::McpPage,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -153,6 +156,7 @@ const PAGES: &[(Panel, &str)] = &[
     (Panel::Search, "Find chats"),
     (Panel::Settings, "Model & permissions"),
     (Panel::Commands, "Skills & MCP"),
+    (Panel::Mcp, "MCP servers"),
     (Panel::Files, "Files"),
     (Panel::Changes, "Changes"),
     (Panel::Worktrees, "Worktrees"),
@@ -243,6 +247,7 @@ impl Workspace {
             toasts: toasts::Toasts::default(),
             rewind_confirm: None,
             palette: None,
+            mcp_page: mcp::McpPage::default(),
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -766,6 +771,7 @@ impl Workspace {
                 self.load_pull_requests(cx);
             }
             Panel::Extras => self.load_extras(cx),
+            Panel::Mcp => self.load_mcp(cx),
             Panel::Delegation => self.load_board(true, cx),
             Panel::Jobs => {
                 let thread = &self.active;
@@ -876,6 +882,7 @@ impl Workspace {
             Panel::Worktrees => body = body.child(self.worktrees_body(cx)),
             Panel::PullRequests => body = body.child(self.pull_requests_body(cx)),
             Panel::Extras => body = body.child(self.extras_body(cx)),
+            Panel::Mcp => body = body.child(self.mcp_body(cx)),
             Panel::Search => {
                 let query = self.filter.read(cx).text.to_lowercase();
                 body = body.child(self.filter.clone());

@@ -31,6 +31,7 @@ pub mod html_preview;
 pub mod inbox;
 pub mod jobs;
 pub mod mcp;
+pub mod mcp_admin;
 pub mod orchestration;
 pub mod persist;
 pub mod prefs;

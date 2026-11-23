@@ -35,6 +35,17 @@ pub struct Project {
 }
 
 impl Project {
+    /// Reloads `zest.toml` and the MCP slash commands after a settings page edited them.
+    /// Open chats keep the configuration they started with.
+    pub fn reload_config(&mut self) -> Result<()> {
+        if self.demo {
+            return Ok(());
+        }
+        self.config = Config::find(&self.config_root)?;
+        self.mcp = mcp_slashes(&self.config.mcp, &McpCatalog::load());
+        Ok(())
+    }
+
     pub fn open(path: PathBuf, demo: bool) -> Result<Self> {
         let registry_dir = if demo {
             path.join(".zest/demo-desktop")
