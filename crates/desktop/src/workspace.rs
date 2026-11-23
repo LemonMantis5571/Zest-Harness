@@ -19,6 +19,7 @@ mod mcp;
 mod providers;
 mod background;
 mod advisor;
+mod activity;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -48,6 +49,8 @@ enum Panel {
     Advisor,
     Commands,
     Mcp,
+    Activity,
+    Outline,
     Files,
     Changes,
     Usage,
@@ -142,6 +145,8 @@ pub struct Workspace {
     mcp_page: mcp::McpPage,
     providers_page: providers::ProvidersPage,
     advisor_draft: advisor::AdvisorDraft,
+    /// The last Workbench > Activity workspace check result.
+    workspace_check: Option<String>,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -172,6 +177,8 @@ const PAGES: &[(Panel, &str)] = &[
     (Panel::Advisor, "Advisor"),
     (Panel::Commands, "Skills & MCP"),
     (Panel::Mcp, "MCP servers"),
+    (Panel::Activity, "Activity"),
+    (Panel::Outline, "Outline"),
     (Panel::Files, "Files"),
     (Panel::Changes, "Changes"),
     (Panel::Worktrees, "Worktrees"),
@@ -268,6 +275,7 @@ impl Workspace {
             mcp_page: mcp::McpPage::default(),
             providers_page: providers::ProvidersPage::default(),
             advisor_draft: advisor::AdvisorDraft::default(),
+            workspace_check: None,
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -1002,6 +1010,8 @@ impl Workspace {
             Panel::Mcp => body = body.child(self.mcp_body(cx)),
             Panel::Providers => body = body.child(self.providers_body(cx)),
             Panel::Advisor => body = body.child(self.advisor_body(cx)),
+            Panel::Activity => body = body.child(self.activity_body(cx)),
+            Panel::Outline => body = body.child(self.outline_body(cx)),
             Panel::Search => {
                 let query = self.filter.read(cx).text.to_lowercase();
                 body = body.child(self.filter.clone());

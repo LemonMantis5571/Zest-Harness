@@ -1,15 +1,17 @@
 ---
 title: Workbench panel
-summary: A project page with Changes, Files, Jobs, Checkpoints, Delegation, and Worktrees tabs, including checkpoint forks and rewind and a read-only file browser.
+summary: A project page with Activity, Outline, Changes, Files, Jobs, Checkpoints, Delegation, and Worktrees tabs, including checkpoint forks and rewind and a read-only file browser.
 paths:
   - crates/desktop/src/workspace.rs
   - crates/desktop/src/workspace/chrome.rs
   - crates/desktop/src/workspace_files.rs
+  - crates/desktop/src/workspace/activity.rs
 tests:
   - crates/desktop/src/workspace_test.rs
 verify:
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace_files::
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace::
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace::activity::
   - npm run gpui:test
 ---
 
@@ -20,7 +22,7 @@ verify:
   replaces the chat area with a page titled "Workbench"; **Back to chat** or Esc
   returns to the chat. Every window has a project, so it is available for every
   chat. Back and Forward in the sidebar also step through Workbench tabs.
-- Tabs, in order: Changes, Files, Jobs, Checkpoints, Delegation, Worktrees. Each
+- Tabs, in order: Activity, Outline, Changes, Files, Jobs, Checkpoints, Delegation, Worktrees. Each
   tab reads its data when it is opened; nothing refreshes while it stays open.
   The Workbench button always opens on Changes.
 - Changes shows the active chat's Git changes since its start commit; see
@@ -48,9 +50,16 @@ verify:
   retry, apply); its behavior belongs to the delegation feature.
 - Worktrees creates and lists worktree chats; see
   [worktree-chats](worktree-chats.md).
-- The desktop app does not have the old Activity tab (provider state, subagent
-  and tool task list, the `git diff --check` workspace check), the Outline tab,
-  or jumping from a delegation job in the sidebar to its card.
+- Activity shows the session (provider, model and effort, with Working,
+  Compacting or Ready), the chat's last 30 tool calls newest first (name, first
+  line of the summary, status), and **Run check**, which runs `git diff --check HEAD`
+  in the project and lists whitespace problems in staged and unstaged changes (or
+  says there are none, or why git could not run).
+- Outline lists your prompts and the first line of each reply ("N tool calls" for a
+  reply that only used tools). A row in Activity or Outline opens the chat at that
+  message.
+- The desktop app does not have the old subagent list, or jumping from a
+  delegation job in the sidebar to its card.
 
 ## How it works
 1. `chrome.rs` defines the tabs in `WORKBENCH` and draws them in `page_frame`.
