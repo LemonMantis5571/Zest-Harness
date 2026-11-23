@@ -637,7 +637,7 @@ pub fn render_trace(
 }
 
 /// The icon for a tool or recorded step.
-fn trace_icon(name: &str) -> crate::theme::Icon {
+pub(crate) fn trace_icon(name: &str) -> crate::theme::Icon {
     use crate::theme::Icon;
     let name = name.to_ascii_lowercase();
     match name.as_str() {
