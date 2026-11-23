@@ -58,4 +58,5 @@ On Windows, build the release binary and run `node docs/gpui-spike/benchmark/web
 
 - A streaming answer has no cards; they are computed from the saved text when the turn ends, so an unclosed fence never becomes a card mid-stream.
 - The viewer runs in a separate process on purpose. Do not add an IPC handler, a file protocol, or navigation beyond the wrapper and document URLs.
+- Diagram and math cards use the same window in `RENDER` mode (see [Message rendering](message-rendering.md)). Its only extra route is `/{token}/vendor/`, which serves the embedded mermaid and KaTeX files with `Access-Control-Allow-Origin: *` because the sandboxed frame fetches KaTeX fonts in CORS mode. HTML artifacts never get that route or its policy.
 - Toggling Source changes a row's height; `artifact::card` remeasures the old and new rows.

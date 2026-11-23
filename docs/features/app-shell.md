@@ -32,7 +32,7 @@ verify:
 - On Windows the executable carries Zest's icon and the release version, which GPUI also uses for its window and taskbar icon.
 
 ## How it works
-1. `main.rs` first calls `web_window::dispatch()`. When the first argument names a browser or HTML-artifact helper mode, the same executable runs as an isolated web window process and exits. Otherwise `workspace::launch_if_requested()` parses the workspace options and returns `true` once the app has run. Only spike modes fall through to the old fixture code in `main.rs`.
+1. `main.rs` first calls `web_window::dispatch()`. When the first argument names a browser, HTML-artifact or diagram/math helper mode, the same executable runs as an isolated web window process and exits. Otherwise `workspace::launch_if_requested()` parses the workspace options and returns `true` once the app has run. Only spike modes fall through to the old fixture code in `main.rs`.
 2. `launch_if_requested` creates the temporary demo directory, loads the environment and user config, then starts the GPUI application from `theme::application()` with the fonts loaded, the app identity `dev.zest.app`, the notification handler and the key bindings, and opens the workspace window.
 3. `build.rs` reads the version from the root `Cargo.toml` (`[workspace.package]`) and, on Windows, compiles `zest.rc` with `embed-resource` so the icon (`crates/desktop/icons/icon.ico`) and version resource are linked in.
 4. Core plumbing shared by every feature: `crates/core/src/lib.rs` re-exports the headless API, `error.rs` defines `HarnessError` and its classifiers (`is_transient`, `is_auth_problem`, `is_context_limit`, `is_unreachable`, `provider_user_message`), and `fsutil.rs` provides `atomic_write` for all durable state.

@@ -1,5 +1,6 @@
 //! A separate system webview process. Only the desktop's private stdin can issue typed actions.
-use crate::web_content::{ARTIFACT, BROWSER, Reply};
+use crate::visual::{self, Visual};
+use crate::web_content::{ARTIFACT, BROWSER, RENDER, Reply};
 use serde_json::{Value, json};
 use std::{
     borrow::Cow,
@@ -55,10 +56,16 @@ pub fn dispatch() -> bool {
     let Some(mode) = std::env::args_os().nth(1) else {
         return false;
     };
-    if mode != BROWSER && mode != ARTIFACT {
+    let shown = if mode == ARTIFACT {
+        Some(Shown::Html)
+    } else if mode == RENDER {
+        Some(Shown::Visual)
+    } else if mode == BROWSER {
+        None
+    } else {
         return false;
-    }
-    if let Err(e) = run(mode == ARTIFACT) {
+    };
+    if let Err(e) = run(shown) {
         reply(Err(e));
     }
     true
@@ -93,19 +100,48 @@ fn external_url(raw: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
 }
 
-fn run(artifact: bool) -> Result<(), String> {
-    let document = if artifact {
-        let line = read_line(&mut io::stdin().lock())?.ok_or("No HTML document supplied")?;
-        Some(serde_json::from_slice::<HtmlDocument>(&line).map_err(|e| e.to_string())?)
-    } else {
-        None
+#[derive(Clone, Copy)]
+enum Shown {
+    Html,
+    Visual,
+}
+
+/// What a document window shows: the title, the page, and whether it may load the libraries.
+struct Page {
+    title: String,
+    html: String,
+    libraries: bool,
+}
+
+fn read_page(shown: Shown, line: &[u8]) -> Result<Page, String> {
+    Ok(match shown {
+        Shown::Html => {
+            let doc = serde_json::from_slice::<HtmlDocument>(line).map_err(|e| e.to_string())?;
+            Page { title: doc.title().to_owned(), html: doc.isolated_html(), libraries: false }
+        }
+        Shown::Visual => {
+            let visual = serde_json::from_slice::<Visual>(line).map_err(|e| e.to_string())?;
+            visual.validate()?;
+            Page { title: visual.title(), html: visual.page()?, libraries: true }
+        }
+    })
+}
+
+fn run(shown: Option<Shown>) -> Result<(), String> {
+    let artifact = shown.is_some();
+    let document = match shown {
+        Some(shown) => {
+            let line = read_line(&mut io::stdin().lock())?.ok_or("No document supplied")?;
+            Some(read_page(shown, &line)?)
+        }
+        None => None,
     };
     let event_loop = EventLoopBuilder::<Command>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title(
             document
                 .as_ref()
-                .map_or("Zest Browser", HtmlDocument::title),
+                .map_or("Zest Browser", |page| page.title.as_str()),
         )
         .with_inner_size(LogicalSize::new(1080., 760.))
         .build(&event_loop)
@@ -244,6 +280,9 @@ fn run(artifact: bool) -> Result<(), String> {
 }
 
 struct ArtifactRoutes {
+    /// `/{token}/vendor/` when the page may load the bundled libraries.
+    vendor_path: Option<String>,
+    document_policy: String,
     wrapper_url: String,
     document_url: String,
     wrapper_path: String,
@@ -253,7 +292,7 @@ struct ArtifactRoutes {
     created: Instant,
 }
 impl ArtifactRoutes {
-    fn new(doc: &HtmlDocument) -> Result<Self, String> {
+    fn new(page: &Page) -> Result<Self, String> {
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|e| e.to_string())?;
         let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
@@ -266,14 +305,21 @@ impl ArtifactRoutes {
         let document_path = format!("{wrapper_path}/document");
         let wrapper_url = format!("{origin}{wrapper_path}");
         let document_url = format!("{origin}{document_path}");
+        let vendor_path = page.libraries.then(|| format!("{wrapper_path}/vendor/"));
+        let document_policy = match &vendor_path {
+            Some(path) => visual::csp(&format!("{origin}{path}")),
+            None => HTML_CSP.to_owned(),
+        };
         let wrapper=format!(r#"<!doctype html><meta charset="utf-8"><title>Interactive document</title><style>body{{margin:0;height:100vh;display:flex;flex-direction:column;font:14px system-ui;background:#fff}}header{{padding:4px}}iframe{{border:0;flex:1}}</style><header><a href="{wrapper_url}">Reset document</a></header><iframe title="Interactive document" sandbox="allow-scripts" referrerpolicy="no-referrer" src="{document_url}"></iframe>"#).into_bytes();
         Ok(Self {
+            vendor_path,
+            document_policy,
             wrapper_url,
             document_url,
             wrapper_path,
             document_path,
             wrapper,
-            document: doc.isolated_html().into_bytes(),
+            document: page.html.clone().into_bytes(),
             created: Instant::now(),
         })
     }
@@ -283,6 +329,9 @@ impl ArtifactRoutes {
             && uri.query().is_none()
             && matches!(uri.host(), Some("localhost" | "zest-artifact.localhost"))
             && self.created.elapsed() < Duration::from_secs(1800);
+        if let Some(file) = self.vendor_path.as_deref().and_then(|base| uri.path().strip_prefix(base)).filter(|_| allowed) {
+            return library_response(file);
+        }
         let (status, policy, body) = if allowed && uri.path() == self.wrapper_path {
             (
                 200,
@@ -293,7 +342,7 @@ impl ArtifactRoutes {
                 self.wrapper.clone(),
             )
         } else if allowed && uri.path() == self.document_path {
-            (200, HTML_CSP.to_owned(), self.document.clone())
+            (200, self.document_policy.clone(), self.document.clone())
         } else {
             (404, "default-src 'none'".into(), vec![])
         };
@@ -302,4 +351,19 @@ impl ArtifactRoutes {
             .header("Permissions-Policy","camera=(), microphone=(), geolocation=(), payment=(), usb=(), clipboard-read=(), clipboard-write=()")
             .body(Cow::Owned(body)).expect("constant response headers")
     }
+}
+
+/// A bundled library file. Fonts load in CORS mode from the sandboxed (opaque-origin) frame,
+/// so every library answer allows any origin; they are public, read-only and carry no data.
+fn library_response(file: &str) -> Response<Cow<'static, [u8]>> {
+    let builder = Response::builder()
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Cross-Origin-Resource-Policy", "cross-origin");
+    match visual::vendor_file(file) {
+        Some((bytes, kind)) => builder.status(200).header("Content-Type", kind).body(Cow::Borrowed(bytes)),
+        None => builder.status(404).header("Content-Type", "text/plain").body(Cow::Borrowed(&[][..])),
+    }
+    .expect("constant response headers")
 }

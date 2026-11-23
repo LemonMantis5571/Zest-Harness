@@ -1,12 +1,65 @@
-//! Inert chat cards for explicitly published interactive documents.
+//! Inert chat cards for explicitly published interactive documents, and for the Mermaid
+//! diagrams and TeX math in a reply, which open drawn in the same sandboxed window.
+use crate::visual::{Expression, Visual};
 use crate::{Root, native, native_view::button, web_content};
 use gpui::{prelude::*, *};
-use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::{path::Path, sync::Arc};
 use zest_core::{
     html::{HTML_CSP, HtmlDocument},
     tools::ToolMetadata,
 };
+
+/// A card under a chat row.
+#[derive(Clone)]
+pub enum Artifact {
+    Html(Arc<HtmlDocument>),
+    Visual(Arc<Visual>),
+}
+
+impl Artifact {
+    fn title(&self) -> String {
+        match self {
+            Artifact::Html(doc) => doc.title().to_owned(),
+            Artifact::Visual(visual) => visual.title(),
+        }
+    }
+    fn source(&self) -> String {
+        match self {
+            Artifact::Html(doc) => doc.source().to_owned(),
+            Artifact::Visual(visual) => visual.source(),
+        }
+    }
+}
+
+/// The cards for a finished reply: its `zest-html` documents, then each Mermaid diagram, then
+/// one card for all of its math.
+pub fn from_reply(text: &str) -> Vec<Artifact> {
+    let mut cards: Vec<Artifact> = fenced_documents(text).into_iter().map(Artifact::Html).collect();
+    cards.extend(visuals(text).into_iter().map(|v| Artifact::Visual(Arc::new(v))));
+    cards
+}
+
+/// Closed ```mermaid fences, and the reply's math in order, as the Markdown view parses them.
+pub fn visuals(text: &str) -> Vec<Visual> {
+    let mut out = Vec::new();
+    let mut math = Vec::new();
+    let mut diagram: Option<String> = None;
+    for event in Parser::new_ext(text, crate::md::OPTIONS) {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if info.split_whitespace().next() == Some("mermaid") => {
+                diagram = Some(String::new())
+            }
+            Event::Text(t) if diagram.is_some() => diagram.as_mut().expect("open diagram").push_str(&t),
+            Event::End(TagEnd::CodeBlock) => out.extend(diagram.take().and_then(|source| Visual::diagram(&source))),
+            Event::InlineMath(tex) => math.push(Expression { tex: tex.into_string(), display: false }),
+            Event::DisplayMath(tex) => math.push(Expression { tex: tex.into_string(), display: true }),
+            _ => {}
+        }
+    }
+    out.extend(Visual::math(math));
+    out
+}
 
 pub fn metadata_document(metadata: Option<&ToolMetadata>) -> Option<Arc<HtmlDocument>> {
     let ToolMetadata::HtmlDocument { title, html } = metadata? else {
@@ -59,17 +112,25 @@ pub fn fenced_documents(text: &str) -> Vec<Arc<HtmlDocument>> {
 pub fn card(
     row: usize,
     index: usize,
-    document: Arc<HtmlDocument>,
+    artifact: &Artifact,
     source_visible: bool,
     cx: &mut Context<Root>,
 ) -> impl IntoElement + use<> {
-    let open = document.clone();
-    let save = document.clone();
+    let open = artifact.clone();
+    let save = match artifact {
+        Artifact::Html(doc) => Some(doc.clone()),
+        Artifact::Visual(_) => None,
+    };
     let id = |action: &str| SharedString::from(format!("html-{row}-{index}-{action}"));
-    let controls = div().flex().items_center().gap_2().child(document.title().to_owned())
+    let controls = div().flex().items_center().gap_2().child(artifact.title())
         .when(cfg!(windows),|controls|controls.child(button(id("open"),"Open",cx.listener(move |_,_,_,cx| {
-            let doc = open.clone();
-            let task = native::executor().spawn(async move {web_content::show_artifact(&doc).await});
+            let shown = open.clone();
+            let task = native::executor().spawn(async move {
+                match shown {
+                    Artifact::Html(doc) => web_content::show_artifact(&doc).await,
+                    Artifact::Visual(visual) => web_content::show_visual(&visual).await,
+                }
+            });
             cx.spawn(async move |this,cx| {
                 let result = task.await.map_err(|e|e.to_string()).and_then(|r|r);
                 if let Err(e)=result {let _=this.update(cx,|root,cx|{root.note=e;cx.notify();});}
@@ -82,7 +143,7 @@ pub fn card(
             root.list.remeasure_items(row..row+1);
             cx.notify();
         })))
-        .child(button(id("save"),"Save HTML",cx.listener(move |root,_,_,cx| {
+        .when_some(save, |controls, save| controls.child(button(id("save"),"Save HTML",cx.listener(move |root,_,_,cx| {
             let directory = root.native.as_ref().map(|chat|chat.project.path.as_path()).unwrap_or(Path::new("."));
             let picker = cx.prompt_for_new_path(directory,Some("document.html"));
             let doc = save.clone();
@@ -97,7 +158,7 @@ pub fn card(
                 }.await;
                 if let Err(e)=result {let _=this.update(cx,|root,cx|{root.note=e;cx.notify();});}
             }).detach();
-        })));
+        }))));
     div()
         .my_1()
         .p_3()
@@ -122,7 +183,7 @@ pub fn card(
                     .p(px(10.))
                     .font_family(crate::theme::MONO)
                     .text_size(px(12.))
-                    .child(document.source().to_owned()),
+                    .child(artifact.source()),
             )
         })
 }
@@ -148,5 +209,30 @@ mod tests {
         assert!(
             fenced_documents("~~~~example\n~~~zest-html Nested\n<p>x</p>\n~~~\n~~~~").is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod visual_tests {
+    use super::{from_reply, visuals, Artifact};
+    use crate::visual::Visual;
+
+    #[::core::prelude::v1::test]
+    fn a_reply_gets_a_card_per_diagram_and_one_for_its_math() {
+        let reply = "Flow:\n\n```mermaid\ngraph TD\n  A --> B\n```\n\nWith $e^{i\\pi}$ and\n\n$$\\sum_k k$$\n\n```rust\nlet x = 1;\n```\n";
+        let found = visuals(reply);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], Visual::Diagram { source: "graph TD\n  A --> B".into() });
+        let Visual::Math { expressions } = &found[1] else { panic!("math card") };
+        assert_eq!(expressions.iter().map(|e| (e.tex.as_str(), e.display)).collect::<Vec<_>>(), [(r"e^{i\pi}", false), (r"\sum_k k", true)]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn html_documents_come_first_and_plain_replies_get_no_cards() {
+        let reply = "~~~zest-html Counter\n<button>1</button>\n~~~\n\n```mermaid\nflowchart LR\n  a --> b\n```\n";
+        let cards = from_reply(reply);
+        assert!(matches!(cards.as_slice(), [Artifact::Html(_), Artifact::Visual(_)]));
+        assert!(from_reply("No math here, it costs $5 and $10.\n\n```js\n1\n```").is_empty());
+        assert!(visuals("```mermaid\n   \n```").is_empty(), "an empty diagram is not drawn");
     }
 }

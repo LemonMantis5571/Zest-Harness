@@ -11,6 +11,8 @@ use zest_core::{BrowserAction, BrowserAdapter, BrowserRequest, html::HtmlDocumen
 
 pub const BROWSER: &str = "--zest-browser-window";
 pub const ARTIFACT: &str = "--zest-artifact-window";
+/// The document window drawing a diagram or math with the bundled libraries.
+pub const RENDER: &str = "--zest-render-window";
 const MAX_REPLY: u64 = 2 * 1024 * 1024;
 pub type Reply = Result<Value, String>;
 
@@ -160,8 +162,16 @@ impl BrowserAdapter for Browser {
 }
 
 pub async fn show_artifact(document: &HtmlDocument) -> Result<(), String> {
-    let mut session = Session::launch(ARTIFACT).map_err(|e| e.to_string())?;
-    session.send(document).await?;
+    show(ARTIFACT, document).await
+}
+
+pub async fn show_visual(visual: &crate::visual::Visual) -> Result<(), String> {
+    show(RENDER, visual).await
+}
+
+async fn show(mode: &str, request: &impl serde::Serialize) -> Result<(), String> {
+    let mut session = Session::launch(mode).map_err(|e| e.to_string())?;
+    session.send(request).await?;
     tokio::time::timeout(Duration::from_secs(20), session.reply())
         .await
         .map_err(|_| "The interactive document took too long to open".to_owned())??;

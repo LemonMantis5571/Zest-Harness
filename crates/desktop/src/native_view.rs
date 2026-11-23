@@ -149,7 +149,7 @@ fn append_saved_rows(
                         first_line(summary),
                         tool_body(summary, t.diff.as_deref()),
                     );
-                    row.artifacts.extend(crate::artifact::metadata_document(t.metadata.as_ref()));
+                    row.artifacts.extend(crate::artifact::metadata_document(t.metadata.as_ref()).map(crate::artifact::Artifact::Html));
                     row
                 };
                 let activity = |a: &zest_core::thread::ActivityPart| {
@@ -184,7 +184,7 @@ fn append_saved_rows(
                 if !text.is_empty() {
                     text_rows.insert(id.clone(), rows.len());
                     let mut row = Msg::assistant(md::parse(text));
-                    row.artifacts = crate::artifact::fenced_documents(text);
+                    row.artifacts = crate::artifact::from_reply(text);
                     rows.push(row);
                 }
                 if let Some(message) = error {
