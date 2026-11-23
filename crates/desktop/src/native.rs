@@ -206,6 +206,23 @@ impl Chat {
         Ok(label)
     }
 
+    /// Takes a sent user message back so it can be edited: the conversation returns to just
+    /// before it (the message and everything after it are discarded, like a rewind), and the
+    /// message's text is returned for the composer. Files the agent changed are not touched.
+    pub fn edit_message(&self, message_id: &str) -> Result<String> {
+        let mut live = self.thread.lock().map_err(error)?;
+        let text = live
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                StoredMessage::User { id, text, .. } if id == message_id => Some(text.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| HarnessError::Other("Only your own messages can be edited.".into()))?;
+        *live = self.project.store.rewind_before_user_message(&live, message_id)?;
+        Ok(text)
+    }
+
     pub fn enqueue(&self, text: &str, files: Vec<ThreadInputAttachment>) -> Result<ThreadInput> {
         self.edit(|t| {
             t.enqueue_input(ThreadInputTarget::Followup, text, files)
@@ -718,6 +735,43 @@ mod tests {
         assert_eq!(saved.provider_session, None);
         assert_eq!(chat.thread.lock().unwrap().messages.len(), kept, "the open chat matches");
         assert!(chat.rewind("not-a-checkpoint").is_err());
+    }
+
+    #[test]
+    fn editing_a_message_returns_to_just_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path().into(), true).unwrap();
+        let chat = Chat::new(project, Thread::new());
+        let (events, _rx) = mpsc::unbounded();
+        for text in ["First question", "Second question"] {
+            let input = chat.enqueue(text, vec![]).unwrap();
+            executor()
+                .block_on(chat.run(&input.id, &events, &CancelToken::new()))
+                .unwrap();
+        }
+        let user_ids: Vec<String> = chat
+            .thread
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                StoredMessage::User { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_ids.len(), 2);
+
+        assert_eq!(chat.edit_message(&user_ids[1]).unwrap(), "Second question");
+        let id = chat.thread.lock().unwrap().id.clone();
+        let saved = chat.project.store.load(&id).unwrap();
+        assert_eq!(saved.messages.len(), 2, "only the first turn is left");
+        assert_eq!(saved.messages[0].searchable_text(), "First question");
+        assert_eq!(saved.provider_session, None);
+
+        assert_eq!(chat.edit_message(&user_ids[0]).unwrap(), "First question");
+        assert!(chat.thread.lock().unwrap().messages.is_empty(), "editing the first message empties the chat");
+        assert!(chat.edit_message("not-a-message").is_err());
     }
 
     #[test]

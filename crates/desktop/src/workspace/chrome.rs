@@ -53,8 +53,10 @@ pub(super) fn chat_row(
     age: String,
     selected: bool,
     busy: bool,
+    unread: bool,
     click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let label = if unread { format!("{title}, unread") } else { title.clone() };
     div()
         .h(px(30.))
         .py(px(1.))
@@ -62,7 +64,7 @@ pub(super) fn chat_row(
             div()
                 .id(id)
                 .role(Role::Button)
-                .aria_label(SharedString::from(title.clone()))
+                .aria_label(SharedString::from(label))
                 .tab_index(0)
                 .cursor_pointer()
                 .relative()
@@ -93,7 +95,8 @@ pub(super) fn chat_row(
                     icon(glyph, 16.)
                         .text_color(if busy { rgb(theme::primary()) } else { rgb(theme::muted_foreground()) }),
                 )
-                .child(div().flex_1().min_w_0().truncate().child(title))
+                .child(div().flex_1().min_w_0().truncate().when(unread, |d| d.font_weight(FontWeight::SEMIBOLD)).child(title))
+                .when(unread, |d| d.child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(theme::primary()))))
                 .child(
                     div()
                         .flex_none()
@@ -230,6 +233,7 @@ impl Workspace {
                             when,
                             selected,
                             busy,
+                            !selected && ws.unread.contains(id),
                             cx.listener(move |ws, _, w, cx| ws.open(&target, w, cx)),
                         ))
                     })
@@ -359,6 +363,7 @@ impl Workspace {
                 Icon::Columns2,
                 format!("Split view with {} chats", group.ids().len()),
                 String::new(),
+                false,
                 false,
                 false,
                 cx.listener(move |ws, _, w, cx| ws.reopen_group(index, w, cx)),
@@ -515,6 +520,20 @@ impl Workspace {
                 })))
                 .child(ui::icon_button("rename", Icon::Pencil, "Rename", cx.listener(|ws, _, w, cx| ws.page(Panel::Rename, w, cx))))
                 .child(ui::icon_button("fork", Icon::GitFork, "Fork", cx.listener(|ws, _, w, cx| ws.fork(None, w, cx))));
+            if self.delete_confirm.as_deref() == Some(self.active.as_str()) {
+                let id = self.active.clone();
+                actions = actions
+                    .child(ui::button("delete-chat-yes", ui::Variant::Destructive, None, "Delete chat", cx.listener(move |ws, _, w, cx| ws.delete_chat(&id, w, cx))))
+                    .child(ui::button("delete-chat-no", ui::Variant::Ghost, None, "Cancel", cx.listener(|ws, _, _, cx| {
+                        ws.delete_confirm = None;
+                        cx.notify();
+                    })));
+            } else {
+                actions = actions.child(ui::icon_button("delete-chat", Icon::Trash2, "Delete chat", cx.listener(|ws, _, _, cx| {
+                    ws.delete_confirm = Some(ws.active.clone());
+                    cx.notify();
+                })));
+            }
         }
         if self.panel == Panel::Chat && self.layout.is_some() {
             actions = actions

@@ -209,6 +209,33 @@ impl Root {
         view
     }
 
+    /// The saved user message shown at transcript row `row`, if any.
+    pub fn message_at(&self, row: usize) -> Option<String> {
+        self.native_text_rows.iter().find(|(_, r)| **r == row).map(|(id, _)| id.clone())
+    }
+
+    /// Takes a sent message back into the composer: the chat returns to just before it.
+    pub fn edit_message(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        if self.turn_active {
+            return;
+        }
+        let Some(chat) = self.native.clone() else { return };
+        match chat.edit_message(message_id) {
+            Ok(text) => {
+                self.native_start = None;
+                self.restore_native();
+                self.composer.update(cx, |field, cx| {
+                    field.sel = text.len()..text.len();
+                    field.text = text;
+                    cx.notify();
+                });
+                cx.emit(ChatChanged);
+            }
+            Err(e) => self.note = e.to_string(),
+        }
+        cx.notify();
+    }
+
     pub fn restore_native(&mut self) {
         let chat = self.native.as_ref().unwrap();
         let t = chat.thread.lock().unwrap();
