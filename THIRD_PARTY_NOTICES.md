@@ -47,6 +47,8 @@ The desktop app embeds these files from `crates/desktop/assets/`:
 | --- | --- | --- |
 | Geist Regular, Medium and SemiBold 1.9.2 (`assets/fonts/`, license in `Geist-OFL.txt`) | SIL OFL-1.1 | [vercel/geist-font](https://github.com/vercel/geist-font) |
 | Lucide icons from lucide-react 1.48.0 (`assets/icons/`, license in `LICENSE`) | ISC | [Lucide](https://github.com/lucide-icons/lucide) |
+| mermaid 12.3.0 (`assets/vendor/mermaid/mermaid.min.js`, license in `LICENSE`) | MIT | [mermaid-js/mermaid](https://github.com/mermaid-js/mermaid) |
+| KaTeX 0.19.1 with its fonts (`assets/vendor/katex/`, license in `LICENSE`) | MIT | [KaTeX](https://github.com/KaTeX/KaTeX) |
 
 For an exact package-by-package list, inspect the `license` field in each
 resolved package under `package-lock.json`/`node_modules` and retain the

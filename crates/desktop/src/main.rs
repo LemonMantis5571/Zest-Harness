@@ -21,6 +21,7 @@ mod wv;
 mod web_content;
 mod web_window;
 mod artifact;
+mod visual;
 mod icons_generated;
 mod theme;
 mod ui;
@@ -97,7 +98,7 @@ fn parse_args() -> Args {
 }
 
 struct Msg {
-    artifacts: Vec<std::sync::Arc<zest_core::html::HtmlDocument>>,
+    artifacts: Vec<artifact::Artifact>,
     user: bool,
     doc: Rc<Doc>,
     attachments: usize,
@@ -470,7 +471,7 @@ impl Root {
                     if let Some(pos) = self.tools.iter().position(|t| t.0 == id) {
                         let (_, ix, started) = self.tools.remove(pos);
                         let m = &mut self.msgs[ix];
-                        m.artifacts.extend(artifact);
+                        m.artifacts.extend(artifact.map(crate::artifact::Artifact::Html));
                         m.doc = Rc::new(tool_body(&summary, diff.as_deref()));
                         if let Some(Trace { kind: TraceKind::Tool { status, secs, .. }, title, .. }) = m.trace.as_mut() {
                             *status = if is_error { ToolStatus::Error } else { ToolStatus::Ok };
@@ -876,7 +877,7 @@ impl Root {
         };
         let el = if m.artifacts.is_empty() { el } else {
             div().child(el).children(m.artifacts.iter().enumerate().map(|(index, doc)| {
-                artifact::card(ix, index, doc.clone(), self.artifact_source == Some((ix, index)), cx)
+                artifact::card(ix, index, doc, self.artifact_source == Some((ix, index)), cx)
             })).into_any_element()
         };
         // Lay the row out as a centered column, "Zest" above each
