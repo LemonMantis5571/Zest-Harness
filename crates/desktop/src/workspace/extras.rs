@@ -115,7 +115,7 @@ impl Workspace {
                     }
                     Ok(Update::Media(media)) => ws.extras.media = Some(media),
                     Ok(Update::Wallpaper(wallpaper)) => ws.extras.set_wallpaper(Some(wallpaper)),
-                    Err(error) => ws.note = error,
+                    Err(error) => ws.toast(ToastKind::Error, error, cx),
                 }
                 if ws.extras.media.is_some() {
                     ws.poll_music(cx);
@@ -187,7 +187,7 @@ impl Workspace {
                 cx.listener(|ws, _, _, cx| match plugins::ensure_plugin_folder() {
                     Ok(path) => cx.open_with_system(&path),
                     Err(e) => {
-                        ws.note = e;
+                        ws.toast(ToastKind::Error, e, cx);
                         cx.notify();
                     }
                 }),

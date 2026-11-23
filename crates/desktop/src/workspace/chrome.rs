@@ -134,7 +134,7 @@ impl Workspace {
         }
     }
 
-    fn go(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn go(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.nav_index.checked_add_signed(step).filter(|i| *i < self.nav.len()) else {
             return;
         };
@@ -507,7 +507,7 @@ impl Workspace {
             actions = actions
                 .child(ui::icon_button("pin", if pinned { Icon::PinOff } else { Icon::Pin }, if pinned { "Unpin" } else { "Pin" }, cx.listener(|ws, _, _, cx| {
                     if let Err(e) = ws.chat(cx).edit(|t| Ok(t.set_pinned(!t.pinned))) {
-                        ws.note = e.to_string();
+                        ws.toast(ToastKind::Error, e.to_string(), cx);
                     }
                     ws.refresh(cx);
                 })))
@@ -833,7 +833,7 @@ impl Workspace {
 
     fn save_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = theme::save_appearance() {
-            self.note = error;
+            self.toast(ToastKind::Error, error, cx);
         }
         window.refresh();
         cx.refresh_windows();

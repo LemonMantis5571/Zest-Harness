@@ -169,7 +169,7 @@ impl Workspace {
             });
             if let Err(e) = result {
                 let _ = this.update(cx, |ws, cx| {
-                    ws.note = e;
+                    ws.toast(ToastKind::Error, e, cx);
                     cx.notify();
                 });
             }
@@ -198,7 +198,7 @@ impl Workspace {
                             ws.load_worktrees(cx);
                         }
                     }
-                    Err(e) => ws.note = e,
+                    Err(e) => ws.toast(ToastKind::Error, e, cx),
                 }
                 cx.notify();
             });
@@ -260,7 +260,7 @@ impl Workspace {
                                 false,
                             ) {
                                 Ok(()) => ws.page(Panel::Worktrees, w, cx),
-                                Err(e) => ws.note = e,
+                                Err(e) => ws.toast(ToastKind::Error, e, cx),
                             }
                         }),
                     )),
@@ -553,7 +553,7 @@ impl Workspace {
 
     fn open_web_link(&mut self, url: &str, cx: &mut Context<Self>) {
         if let Err(e) = zest_core::codex_oauth::open_http_url(url) {
-            self.note = e;
+            self.toast(ToastKind::Error, e, cx);
             cx.notify();
         }
     }
