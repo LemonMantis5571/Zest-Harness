@@ -572,7 +572,17 @@ impl Element for ComposerText {
         self.inner.request_layout(id, ii, w, cx)
     }
     fn prepaint(&mut self, id: Option<&GlobalElementId>, ii: Option<&InspectorElementId>, b: Bounds<Pixels>, st: &mut (), w: &mut Window, cx: &mut App) {
-        self.inner.prepaint(id, ii, b, st, w, cx)
+        self.inner.prepaint(id, ii, b, st, w, cx);
+        // Keep the caret in view. GPUI takes autoscroll requests only while prepainting.
+        let (focused, cursor, collapsed) = {
+            let c = self.input.read(cx);
+            (c.focus.is_focused(w), c.cursor(), c.sel.is_empty())
+        };
+        if focused && collapsed {
+            let layout = self.inner.layout();
+            let origin = layout.position_for_index(cursor).unwrap_or(b.origin);
+            w.request_autoscroll(Bounds::new(origin, size(px(1.5), layout.line_height())));
+        }
     }
     fn paint(&mut self, id: Option<&GlobalElementId>, ii: Option<&InspectorElementId>, bounds: Bounds<Pixels>, rl: &mut (), pp: &mut (), w: &mut Window, cx: &mut App) {
         let focus = self.input.read(cx).focus.clone();
@@ -587,7 +597,6 @@ impl Element for ComposerText {
             let origin = layout.position_for_index(cursor).unwrap_or(bounds.origin);
             let lh = layout.line_height();
             w.paint_quad(fill(Bounds::new(origin, size(px(1.5), lh)), rgb(fg())));
-            w.request_autoscroll(Bounds::new(origin, size(px(1.5), lh)));
         }
         let input = self.input.clone();
         input.update(cx, |c, _| {
