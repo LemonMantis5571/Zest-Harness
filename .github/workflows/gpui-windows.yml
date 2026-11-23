@@ -1,6 +1,21 @@
 name: Native GPUI
 
 on:
+  # Pushes to master run too: they are the only runs that save the Rust cache, so PR runs
+  # restore a warm desktop build instead of compiling GPUI from scratch.
+  push:
+    branches: [main, master]
+    paths:
+      - 'crates/desktop/**'
+      - 'crates/core/**'
+      - 'crates/coordinator/**'
+      - 'crates/plugin-api/**'
+      - 'Cargo.toml'
+      - 'packaging/gpui/**'
+      - 'scripts/package-gpui.mjs'
+      - 'scripts/install-installer-tools.ps1'
+      - 'scripts/check-desktop-accessibility.ps1'
+      - '.github/workflows/gpui-windows.yml'
   pull_request:
     paths:
       - 'crates/desktop/**'
@@ -15,14 +30,15 @@ on:
       - '.github/workflows/gpui-windows.yml'
 
 concurrency:
-  group: gpui-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: gpui-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows:
     name: GPUI Windows build and tests
     runs-on: windows-latest
-    timeout-minutes: 45
+    # A cold Windows build (no cache yet) takes about 50 minutes.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -31,9 +47,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/desktop -> target
-          save-if: false
+          save-if: ${{ github.ref_name == github.event.repository.default_branch }}
       - name: Test native workspace, including offline agent and delegation flows
-        timeout-minutes: 40
+        timeout-minutes: 60
         shell: pwsh
         run: |
           cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- --nocapture | Tee-Object -Variable testLog
@@ -71,7 +87,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/desktop -> target
-          save-if: false
+          save-if: ${{ github.ref_name == github.event.repository.default_branch }}
       - name: Install GPUI and WebKitGTK build dependencies
         run: |
           sudo apt-get update
