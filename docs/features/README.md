@@ -24,7 +24,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 <!-- feature-index:start -->
 | Feature | What it does | Checks |
 | --- | --- | --- |
-| [Advisor](advisor.md) | The chat model can consult a stronger model mid-turn with consult_advisor, on any provider Zest drives, behind an approval when the advisor is on a second provider. | 5 commands |
+| [Advisor](advisor.md) | The chat model can consult a stronger model mid-turn with consult_advisor, on any provider Zest drives, behind an approval when the advisor is on a second provider. | 6 commands |
 | [App shell and desktop plumbing](app-shell.md) | How the desktop process starts, which command-line modes it has, how it is stamped and packaged, and the core plumbing every feature shares. | 1 test file, 4 commands |
 | [Attachments](attachments.md) | Attach files, PDFs, and images to a message from the file picker or by pasting, within per-image and per-message limits. | 2 test files, 2 commands |
 | [Local browser and web search](browser-and-web.md) | The agent can drive a Zest browser window (open, read, click, type) behind approvals, and search the public web through DuckDuckGo without an API key. | 2 commands |
@@ -39,7 +39,7 @@ npm run features -- where crates/desktop/src/ --json      # machine-readable
 | [Desktop app (GPUI)](gpui-workspace.md) | The native Zest window for Windows and Linux in crates/desktop. Open a project, run agent turns, review changes and delegations, and build installers. | 4 test files, 2 commands |
 | [Interactive HTML artifacts](html-artifacts.md) | Agents publish self-contained interactive HTML cards in chat, with isolated execution, source/export controls, and optional real screenshot feedback. | 1 test file, 4 commands |
 | [MCP servers](mcp-servers.md) | Users add, check, switch and remove outbound MCP servers (local command or Streamable HTTP URL) in Customize > MCP servers or zest.toml, and the parent chat calls their tools behind the approval card. | 3 commands |
-| [Message rendering](message-rendering.md) | Assistant answers render as Markdown with highlighted code, tables, selectable text, safe links, and copy/save actions, even while they stream. | 2 test files, 4 commands |
+| [Message rendering](message-rendering.md) | Assistant answers render as Markdown with highlighted code, tables, selectable text, safe links, and copy/save actions, even while they stream. | 2 test files, 6 commands |
 | [Model and effort selection](model-and-effort-selection.md) | Pick a provider, model and reasoning effort for a chat in Customize > Models, and have the choice remembered per provider in each project. | 1 test file, 4 commands |
 | [Notifications and alerts](notifications.md) | Zest pings only when something needs the user and they are not looking at it, as an Open toast when focused or an OS notification when away, and shows workspace notices as toasts that errors keep until dismissed. | 1 test file, 2 commands |
 | [Offline demo mode](offline-fixture-mode.md) | Run the desktop app with no provider or credentials in a temporary project, with a built-in offline provider that can stream a reply, request a file write, or ask a question. | 2 test files, 2 commands |

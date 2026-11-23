@@ -4,6 +4,7 @@ summary: The chat model can consult a stronger model mid-turn with consult_advis
 paths:
   - crates/core/src/advisor.rs
   - crates/core/src/tools/consult_advisor.rs
+  - crates/desktop/src/workspace/advisor.rs
   - docs/plans/advisor.md
 verify:
   - cargo test -p zest-core --lib -- advisor
@@ -11,6 +12,7 @@ verify:
   - cargo test -p zest-core --lib -- config::tests::an_advisor_section_parses_with_defaults_and_lints_clean
   - cargo test -p zest-core --lib -- runtime::tests::the_advisor_joins_parent_chats_only_and_a_broken_one_is_a_warning
   - cargo test -p zest-core --lib -- config_edit::tests::set_advisor
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace::advisor::
 ---
 
 # Advisor
@@ -18,7 +20,7 @@ verify:
 Design, later steps, and open questions: [docs/plans/advisor.md](../plans/advisor.md). This entry describes what is built: the tool (step 1), the config writer behind the Settings picker (step 5), and Zest's own consultations (step 2).
 
 ## Behavior
-- Chosen by editing `[advisor]` in `zest.toml`. The desktop app has no Advisor settings panel; `config_edit::set_advisor` is in core for a front-end that offers one, but nothing calls it now. The desktop app reads `zest.toml` when it opens the project, so restart it (or reopen the project) after editing the section.
+- Chosen in Customize > Advisor, or by editing `[advisor]` in `zest.toml`. The page lists only providers on Zest's own loop (API keys, ChatGPT sign-in); with none it points to Customize > Providers. It offers the provider, its model (Default or one of up to 12 catalogue models), consultations per request (1, 2, 3, 5 or 10), and "Consult on its own" (`auto_review`). **Save advisor** writes through `config_edit::set_advisor`, which validates the selection first; **Turn off** removes `[advisor]`. New chats use the result. Open chats keep the config they started with; the desktop app reads `zest.toml` when it opens the project, so restart it (or reopen the project) after editing the section.
 - Stored as `[advisor]` in `zest.toml` (the project file when one exists, otherwise the user file): `provider` (a provider id), optional `model` (the provider's default otherwise) and `effort`, `max_uses` per user request (default 3, 1 to 20), `max_tokens` per consultation (default 4096, 1024 to 64000), `timeout_secs` (default 120, 1 to 600), `auto_review` (default true). Without the section nothing is registered.
 - Parent chats on a provider Zest drives (Anthropic API, OpenAI-compatible, ChatGPT sign-in) get the `consult_advisor` tool and a short system-prompt paragraph about when to use it. Chats on Claude Code, Codex CLI, or Cursor do not, and neither do delegated workers or reviewers.
 - The advisor provider must also be one Zest drives. An advisor that cannot load (unknown provider, CLI provider, model not offered, limits out of range) is skipped with the session warning "The advisor is off for this chat: …"; the chat still starts. `Config::lint` reports the same problems.

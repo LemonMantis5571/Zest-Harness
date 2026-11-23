@@ -43,6 +43,8 @@ pub enum Block {
     Code { lang: String, unit: usize, indent: usize },
     Table { rows: Vec<Vec<usize>>, indent: usize },
     Rule,
+    /// A Markdown image (`![alt](src)`). `src` is shown only when `view::image_source` accepts it.
+    Image { src: String, alt: String, indent: usize },
 }
 
 #[derive(Clone, Default)]
@@ -152,6 +154,49 @@ fn is_list_item(line: &str) -> bool {
 }
 
 #[cfg(test)]
+mod image_tests {
+    use super::{parse, Block};
+
+    fn images(src: &str) -> (usize, Vec<(String, String)>) {
+        let doc = parse(src);
+        let paras = doc.blocks.iter().filter(|b| matches!(b, Block::Para { .. })).count();
+        let found = doc
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Image { src, alt, .. } => Some((src.clone(), alt.clone())),
+                _ => None,
+            })
+            .collect();
+        (paras, found)
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_image_alone_replaces_its_alt_text_line() {
+        let (paras, found) = images("Before
+
+![a chart](C:/out/chart.png)
+
+After");
+        assert_eq!(paras, 2, "only the text paragraphs remain");
+        assert_eq!(found, [("C:/out/chart.png".to_string(), "a chart".to_string())]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_image_inside_text_keeps_the_text_and_follows_it() {
+        let (paras, found) = images("See ![logo](https://x.test/l.png) here, and `code`.");
+        assert_eq!(paras, 1);
+        assert_eq!(found.len(), 1);
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_image_in_a_list_item_is_kept() {
+        let (_, found) = images("- ![shot](/tmp/s.png)");
+        assert_eq!(found, [("/tmp/s.png".to_string(), "shot".to_string())]);
+    }
+}
+
+#[cfg(test)]
 mod block_tests {
     use super::complete_prefix;
 
@@ -194,6 +239,11 @@ pub fn parse(src: &str) -> Doc {
     let mut heading: Option<u8> = None;
     let mut table: Option<Vec<Vec<usize>>> = None;
     let mut row: Vec<usize> = vec![];
+    // Images found in the current paragraph or list item, and the alt text of the one open.
+    let mut images: Vec<(String, String)> = vec![];
+    let mut image: Option<(String, String)> = None;
+    // Whether the current paragraph has text besides its images' alt text.
+    let mut other_text = false;
 
     fn push_unit(doc: &mut Doc, c: Cur, sep: &'static str) -> usize {
         doc.units.push(Unit { text: c.text.into(), spans: c.spans, sep, mono: false });
@@ -217,6 +267,23 @@ pub fn parse(src: &str) -> Doc {
             }
         };
     }
+
+    // Ends a paragraph or list item: an image that stood alone replaces its alt-text line;
+    // an image inside other text keeps the line and follows it.
+    macro_rules! flush_with_images {
+        () => {{
+            if !images.is_empty() && !other_text {
+                cur = None;
+            } else {
+                flush_text!();
+            }
+            for (src, alt) in images.drain(..) {
+                doc.blocks.push(Block::Image { src, alt, indent: lists.len() });
+            }
+            other_text = false;
+        }};
+    }
+
 
     for ev in Parser::new_ext(src, opts) {
         match ev {
@@ -261,13 +328,15 @@ pub fn parse(src: &str) -> Doc {
                 Tag::Emphasis => open(&mut cur, SpanKind::Italic),
                 Tag::Strong => open(&mut cur, SpanKind::Bold),
                 Tag::Strikethrough => open(&mut cur, SpanKind::Strike),
-                Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
+                Tag::Link { dest_url, .. } => open(&mut cur, SpanKind::Link(dest_url.to_string())),
+                Tag::Image { dest_url, .. } => {
+                    image = Some((dest_url.to_string(), String::new()));
                     open(&mut cur, SpanKind::Link(dest_url.to_string()))
                 }
                 _ => {}
             },
             Event::End(tag) => match tag {
-                TagEnd::Paragraph => flush_text!(),
+                TagEnd::Paragraph => flush_with_images!(),
                 TagEnd::Heading(_) => {
                     if let Some(c) = cur.take() {
                         let unit = push_unit(&mut doc, c, "\n\n");
@@ -289,7 +358,7 @@ pub fn parse(src: &str) -> Doc {
                     flush_text!();
                     lists.pop();
                 }
-                TagEnd::Item => flush_text!(),
+                TagEnd::Item => flush_with_images!(),
                 TagEnd::TableCell => {
                     if let Some(c) = cur.take() {
                         row.push(push_unit(&mut doc, c, "\t"));
@@ -311,19 +380,26 @@ pub fn parse(src: &str) -> Doc {
                         doc.blocks.push(Block::Table { rows, indent: lists.len() });
                     }
                 }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link | TagEnd::Image => {
+                TagEnd::Image => {
+                    images.extend(image.take());
                     close(&mut cur)
                 }
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => close(&mut cur),
                 _ => {}
             },
             Event::Text(t) => {
                 if let Some((_, buf)) = code.as_mut() {
                     buf.push_str(&t);
                 } else {
+                    match image.as_mut() {
+                        Some((_, alt)) => alt.push_str(&t),
+                        None => other_text |= !t.trim().is_empty(),
+                    }
                     cur.get_or_insert_with(Cur::new).text.push_str(&t);
                 }
             }
             Event::Code(t) => {
+                other_text |= image.is_none();
                 let c = cur.get_or_insert_with(Cur::new);
                 let start = c.text.len();
                 c.text.push_str(&t);

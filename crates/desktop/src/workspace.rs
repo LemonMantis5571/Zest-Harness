@@ -18,6 +18,7 @@ mod palette;
 mod mcp;
 mod providers;
 mod background;
+mod advisor;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -44,6 +45,7 @@ enum Panel {
     Search,
     Settings,
     Providers,
+    Advisor,
     Commands,
     Mcp,
     Files,
@@ -139,6 +141,7 @@ pub struct Workspace {
     palette: Option<palette::Palette>,
     mcp_page: mcp::McpPage,
     providers_page: providers::ProvidersPage,
+    advisor_draft: advisor::AdvisorDraft,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -166,6 +169,7 @@ const PAGES: &[(Panel, &str)] = &[
     (Panel::Search, "Find chats"),
     (Panel::Providers, "Providers"),
     (Panel::Settings, "Model & permissions"),
+    (Panel::Advisor, "Advisor"),
     (Panel::Commands, "Skills & MCP"),
     (Panel::Mcp, "MCP servers"),
     (Panel::Files, "Files"),
@@ -263,6 +267,7 @@ impl Workspace {
             palette: None,
             mcp_page: mcp::McpPage::default(),
             providers_page: providers::ProvidersPage::default(),
+            advisor_draft: advisor::AdvisorDraft::default(),
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -834,6 +839,7 @@ impl Workspace {
             Panel::Extras => self.load_extras(cx),
             Panel::Mcp => self.load_mcp(cx),
             Panel::Providers => self.load_providers(cx),
+            Panel::Advisor => self.load_advisor(cx),
             Panel::Delegation => self.load_board(true, cx),
             Panel::Jobs => {
                 let thread = &self.active;
@@ -995,6 +1001,7 @@ impl Workspace {
             Panel::Extras => body = body.child(self.extras_body(cx)),
             Panel::Mcp => body = body.child(self.mcp_body(cx)),
             Panel::Providers => body = body.child(self.providers_body(cx)),
+            Panel::Advisor => body = body.child(self.advisor_body(cx)),
             Panel::Search => {
                 let query = self.filter.read(cx).text.to_lowercase();
                 body = body.child(self.filter.clone());
