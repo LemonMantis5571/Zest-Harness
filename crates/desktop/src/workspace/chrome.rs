@@ -19,6 +19,8 @@ pub(super) const CUSTOMIZE: &[(Panel, &str, Icon)] = &[
 
 /// Project tools, shown as tabs under Workbench.
 pub(super) const WORKBENCH: &[(Panel, &str, Icon)] = &[
+    (Panel::Activity, "Activity", Icon::Activity),
+    (Panel::Outline, "Outline", Icon::Layers),
     (Panel::Changes, "Changes", Icon::FileDiff),
     (Panel::Files, "Files", Icon::Files),
     (Panel::Jobs, "Jobs", Icon::SquareTerminal),
