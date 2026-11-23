@@ -8,6 +8,7 @@ use crate::ui;
 pub(super) const CUSTOMIZE: &[(Panel, &str, Icon)] = &[
     (Panel::Appearance, "Appearance", Icon::Palette),
     (Panel::ChatView, "Chat view", Icon::MessageSquare),
+    (Panel::Providers, "Providers", Icon::Sparkles),
     (Panel::Settings, "Models", Icon::Layers),
     (Panel::Commands, "Skills & MCP", Icon::Plug),
     (Panel::Mcp, "MCP servers", Icon::Server),

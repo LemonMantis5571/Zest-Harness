@@ -902,6 +902,37 @@ pub fn set_advisor(path: &Path, input: Option<&AdvisorInput>) -> Result<(), Stri
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// Sets `[default] provider = "<id>"`, keeping the default's model and effort only when the
+/// provider does not change.
+pub fn set_default_provider(path: &Path, id: &str) -> Result<(), String> {
+    let id = id.trim();
+    validate_id(id, "provider")?;
+    let original = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("default") {
+        doc["default"] = Item::Table(Table::new());
+    }
+    let default = doc["default"]
+        .as_table_mut()
+        .ok_or_else(|| "[default] is not a table".to_string())?;
+    if default.get("provider").and_then(Item::as_str) != Some(id) {
+        // A model or effort chosen for another provider would not apply to this one.
+        default.remove("model");
+        default.remove("effort");
+    }
+    default["provider"] = toml_edit::value(id);
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 fn validate_id(id: &str, noun: &str) -> Result<(), String> {
     if id.is_empty()
         || !id

@@ -16,6 +16,7 @@ mod projects;
 mod toasts;
 mod palette;
 mod mcp;
+mod providers;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -41,6 +42,7 @@ enum Panel {
     ChatView,
     Search,
     Settings,
+    Providers,
     Commands,
     Mcp,
     Files,
@@ -129,6 +131,7 @@ pub struct Workspace {
     rewind_confirm: Option<String>,
     palette: Option<palette::Palette>,
     mcp_page: mcp::McpPage,
+    providers_page: providers::ProvidersPage,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -154,6 +157,7 @@ const PAGES: &[(Panel, &str)] = &[
     (Panel::Appearance, "Appearance"),
     (Panel::ChatView, "Chat view"),
     (Panel::Search, "Find chats"),
+    (Panel::Providers, "Providers"),
     (Panel::Settings, "Model & permissions"),
     (Panel::Commands, "Skills & MCP"),
     (Panel::Mcp, "MCP servers"),
@@ -248,6 +252,7 @@ impl Workspace {
             rewind_confirm: None,
             palette: None,
             mcp_page: mcp::McpPage::default(),
+            providers_page: providers::ProvidersPage::default(),
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -263,13 +268,18 @@ impl Workspace {
             sidebar_open: true,
             profile: profile::ProfileState::default(),
             free_chats: Vec::new(),
-            tab_focus: (0..8).map(|_| cx.focus_handle()).collect(),
+            tab_focus: (0..12).map(|_| cx.focus_handle()).collect(),
             project_open: true,
             branch,
         };
         ws.new_chat(window, cx);
         ws.load_history(cx);
         ws.load_free_chats(cx);
+        // Nothing can answer a chat yet: open on the page that fixes that.
+        if !ws.project.demo && ws.project.config.providers.is_empty() {
+            ws.panel = Panel::Providers;
+            ws.load_providers(cx);
+        }
         (ws.profile.name, ws.profile.avatar) = profile::load_user();
         ws.load_extras(cx);
         ws
@@ -772,6 +782,7 @@ impl Workspace {
             }
             Panel::Extras => self.load_extras(cx),
             Panel::Mcp => self.load_mcp(cx),
+            Panel::Providers => self.load_providers(cx),
             Panel::Delegation => self.load_board(true, cx),
             Panel::Jobs => {
                 let thread = &self.active;
@@ -828,6 +839,7 @@ impl Workspace {
         provider: &str,
         model: Option<String>,
         effort: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let chat = self.chat(cx);
@@ -835,9 +847,12 @@ impl Workspace {
             return;
         }
         let owner = chat.thread.lock().unwrap().provider_id.clone();
-        if owner.as_deref().is_some_and(|id| id != provider) {
-            self.toast(ToastKind::Info, "Start a new chat to choose a different provider.", cx);
-        } else {
+        if owner.as_deref().is_some_and(|id| id != provider) && !self.switch_provider(provider, window, cx) {
+            // The conversation continues in a copy on the new provider, or the switch failed.
+            cx.notify();
+            return;
+        }
+        {
             let mut prefs = zest_core::ProjectSessionState::load(&self.project.path, provider);
             let saved = prefs.providers.entry(provider.to_owned()).or_default();
             saved.model = model.clone();
@@ -864,6 +879,51 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Moves the active chat to another provider. When both use Zest's own agent loop, or the
+    /// chat has no messages yet, the chat keeps its id and history (returns `true`). When a
+    /// vendor CLI owns either side the history cannot be handed over, so the conversation
+    /// continues in a copy on the new provider, which opens (returns `false`).
+    fn switch_provider(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let config = self.project.config.clone();
+        let Some(target) = config.providers.get(provider) else {
+            self.toast(ToastKind::Error, format!("{provider} is not configured."), cx);
+            return false;
+        };
+        let chat = self.chat(cx);
+        let (owner, empty) = {
+            let t = chat.thread.lock().unwrap();
+            (t.provider_id.clone(), t.messages.is_empty())
+        };
+        let current = owner.as_deref().and_then(|id| config.providers.get(id));
+        let handoff = zest_core::provider::thread_provider_handoff(owner.as_deref(), provider, current, target);
+        if empty || handoff != zest_core::provider::ThreadProviderHandoff::Copy {
+            let kind = target.kind_tag();
+            if let Err(e) = chat.edit(|t| {
+                t.reassign_provider(provider, Some(kind));
+                Ok(())
+            }) {
+                self.toast(ToastKind::Error, e.to_string(), cx);
+                return false;
+            }
+            self.toast(ToastKind::Success, format!("This chat now uses {provider}."), cx);
+            return true;
+        }
+        let copy = chat.thread.lock().unwrap().fork_for_provider(provider, Some(target.kind_tag()));
+        if let Err(e) = self.project.store.save(&copy) {
+            self.toast(ToastKind::Error, e.to_string(), cx);
+            return false;
+        }
+        let from = owner.unwrap_or_default();
+        self.add(copy, window, cx);
+        self.refresh(cx);
+        self.toast(
+            ToastKind::Info,
+            format!("{from} cannot hand its history to {provider}, so the conversation continues in a copy. The original chat stays on {from}."),
+            cx,
+        );
+        false
+    }
+
     fn panel_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let chat = self.chat(cx);
         let mut body = div()
@@ -883,6 +943,7 @@ impl Workspace {
             Panel::PullRequests => body = body.child(self.pull_requests_body(cx)),
             Panel::Extras => body = body.child(self.extras_body(cx)),
             Panel::Mcp => body = body.child(self.mcp_body(cx)),
+            Panel::Providers => body = body.child(self.providers_body(cx)),
             Panel::Search => {
                 let query = self.filter.read(cx).text.to_lowercase();
                 body = body.child(self.filter.clone());
@@ -924,22 +985,24 @@ impl Workspace {
                 if busy {
                     body = body.child(crate::ui::hint("Model changes are available when this turn finishes."));
                 }
-                let owner = chat.thread.lock().unwrap().provider_id.clone();
+                let saved = !chat.thread.lock().unwrap().messages.is_empty();
                 body = body.child(crate::ui::section_title("Provider"));
+                if saved {
+                    body = body.child(crate::ui::hint("Picking another provider moves this chat to it, or continues it in a copy when a coding CLI is involved on either side."));
+                }
                 let mut providers = div().flex().flex_wrap().gap_1();
                 for id in self
                     .project
                     .config
                     .providers
                     .keys()
-                    .filter(|id| owner.as_ref().is_none_or(|o| o == *id))
                 {
                     let id = id.clone();
                     let label = mark(&id, id == selected.provider);
                     providers = providers.child(button(
                         SharedString::from(format!("provider-{id}")),
                         label,
-                        cx.listener(move |ws, _, _, cx| ws.select_model(&id, None, None, cx)),
+                        cx.listener(move |ws, _, w, cx| ws.select_model(&id, None, None, w, cx)),
                     ));
                 }
                 body = body.child(providers);
@@ -979,8 +1042,8 @@ impl Workspace {
                         models = models.child(button(
                             SharedString::from(format!("model-{model}")),
                             mark(&model, current == model),
-                            cx.listener(move |ws, _, _, cx| {
-                                ws.select_model(&provider, Some(model.clone()), None, cx)
+                            cx.listener(move |ws, _, w, cx| {
+                                ws.select_model(&provider, Some(model.clone()), None, w, cx)
                             }),
                         ));
                     }
@@ -993,11 +1056,12 @@ impl Workspace {
                             efforts = efforts.child(button(
                                 SharedString::from(format!("effort-{e}")),
                                 mark(e, selected.effort.as_deref() == Some(e)),
-                                cx.listener(move |ws, _, _, cx| {
+                                cx.listener(move |ws, _, w, cx| {
                                     ws.select_model(
                                         &p,
                                         Some(model.clone()),
                                         Some(effort.clone()),
+                                        w,
                                         cx,
                                     )
                                 }),
@@ -1008,7 +1072,7 @@ impl Workspace {
                 } else if self.project.demo {
                     body = body.child(crate::ui::hint("Offline demo provider"));
                 } else {
-                    body = body.child(crate::ui::hint("Configure a provider in zest.toml to start a turn."));
+                    body = body.child(crate::ui::hint("Add a provider in Customize > Providers to start a turn."));
                 }
                 let mode = chat.policy.lock().unwrap().mode();
                 let mut modes = div().flex().flex_wrap();
@@ -1243,11 +1307,16 @@ impl Workspace {
     }
 
     fn start_login(&mut self, cx: &mut Context<Self>) {
+        let id = self.chat(cx).options.lock().unwrap().provider.clone();
+        self.start_login_for(id, cx);
+    }
+
+    /// Runs the vendor sign-in for one configured provider and polls it until it ends.
+    pub(super) fn start_login_for(&mut self, id: String, cx: &mut Context<Self>) {
         use zest_core::{ProviderConfig, auth};
         if self.login.is_some() {
             return;
         }
-        let id = self.chat(cx).options.lock().unwrap().provider.clone();
         let result = match self.project.config.providers.get(&id) {
             Some(ProviderConfig::CodexOAuth { credential, .. }) => auth::start_codex_oauth_login(
                 credential
@@ -1281,7 +1350,10 @@ impl Workspace {
                     };
                     match login.poll_status() {
                         Ok(auth::LoginPoll::Running) => return true,
-                        Ok(auth::LoginPoll::Succeeded) => ws.toast(ToastKind::Success, "Signed in.", cx),
+                        Ok(auth::LoginPoll::Succeeded) => {
+                            ws.toast(ToastKind::Success, "Signed in.", cx);
+                            ws.load_providers(cx);
+                        }
                         Ok(auth::LoginPoll::Failed(detail)) => ws.toast(ToastKind::Error, detail, cx),
                         Err(e) => ws.toast(ToastKind::Error, e.to_string(), cx),
                     }

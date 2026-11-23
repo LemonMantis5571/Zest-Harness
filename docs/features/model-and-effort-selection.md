@@ -29,11 +29,11 @@ Catalogues come from the provider drivers in
 - Customize > Models (`Panel::Settings`) shows, in order: Provider, Model,
   Reasoning effort and Tool permissions. Each choice is a button; the current
   one is marked.
-- Provider buttons list every `[providers.*]` entry in the active config. Once a
-  chat has a saved provider (`Thread.provider_id`), only that provider is
-  listed; picking another provider for an existing chat says "Start a new chat
-  to choose a different provider." The desktop app does not switch a chat to
-  another provider.
+- Provider buttons list every `[providers.*]` entry in the active config. Picking
+  another provider for a chat with messages switches it, or continues it in a
+  copy when a vendor CLI owns either side (see
+  [providers-and-sign-in](providers-and-sign-in.md)); a hint above the buttons
+  says so.
 - Models come from `zest_core::descriptor_from_config` for the selected
   provider, so availability is decided in Rust. The current model is the
   remembered one, else the descriptor's `default_model`. Alias resolution

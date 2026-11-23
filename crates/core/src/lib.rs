@@ -40,6 +40,7 @@ pub mod process_job;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
+pub mod provider_setup;
 pub mod prune;
 pub mod pull_request;
 pub mod quota;
