@@ -1,17 +1,20 @@
 ---
 title: Providers and sign-in
-summary: Configure providers in zest.toml, sign in to a coding CLI or ChatGPT from Customize > Models, and see which provider a chat uses.
+summary: Add providers (a coding CLI, ChatGPT sign-in, or an API key) and sign in from Customize > Providers, choose the one new chats use, and move a chat to another provider.
 paths:
   - crates/core/src/auth.rs
   - crates/core/src/credentials.rs
   - crates/core/src/codex_oauth.rs
   - crates/core/src/provider/codex_oauth.rs
+  - crates/core/src/provider_setup.rs
+  - crates/desktop/src/workspace/providers.rs
   - crates/desktop/src/workspace.rs
   - crates/desktop/src/native.rs
 verify:
   - cargo test -p zest-core --lib auth::tests
   - cargo test -p zest-core --lib credentials::tests
   - cargo test -p zest-core --lib codex_oauth
+  - cargo test -p zest-core --lib provider_setup
   - npm run gpui:test
 ---
 
@@ -24,19 +27,33 @@ connected provider actually serves turns is in
 
 ## Behavior
 
-- The desktop app has no provider picker on launch. A project window opens
-  straight into chat. A chat uses its saved provider (`Thread.provider_id`);
-  a new chat uses the config's default target, else the first configured
-  provider. The offline demo uses the built-in `demo` provider.
-- Providers come only from `[providers.*]` in the active config (see
-  [settings-and-appearance](settings-and-appearance.md)). With none
-  configured, Customize > Models says "Configure a provider in zest.toml to
-  start a turn." and a turn fails with "Choose a configured provider. '<id>'
-  is unavailable."
+- Customize > Providers lists the configured providers (the one new chats use
+  first, marked "New chats"), then the standard providers not added yet: Claude
+  Code, Codex CLI, ChatGPT, Cursor, Anthropic API and an OpenAI-compatible API.
+  Each row has a status (Ready, Needs sign-in, Needs a key, Unverified, Not
+  added) and a line with the signed-in account, what is missing, or "Already
+  signed in. Add it to use it." when the vendor CLI is signed in but the project
+  has no entry.
+- A project window whose config has no provider opens on Customize > Providers
+  with "Add a provider to start chatting." **Add** writes the entry to the
+  project's `zest.toml` when it has one, otherwise to the user's (the page says
+  which): CLI kinds and ChatGPT in one click with Zest's defaults (Claude Code
+  in `auto` permission mode, Cursor in `agent` mode, no model allow-lists), API
+  kinds through a form (API key, and for an OpenAI-compatible endpoint its URL
+  and model). The first provider added becomes the one new chats use.
+- **Use for new chats** sets `[default] provider`, dropping a default model and
+  effort chosen for another provider. A chat uses its saved provider
+  (`Thread.provider_id`); a new chat uses that default, else the first
+  configured provider. The offline demo uses the built-in `demo` provider.
+- With no provider configured, Customize > Models says "Add a provider in
+  Customize > Providers to start a turn." and a turn fails with "Choose a
+  configured provider. '<id>' is unavailable."
 - The desktop app does not read or write the remembered `last-provider`, and
   it does not check sign-in state (`AuthStatus`) before a turn; a missing
   sign-in surfaces as the provider's turn error.
-- Customize > Models shows a **Sign in** button for the selected provider when
+- Customize > Providers shows **Sign in** on a `claude_code`, `codex_cli` or
+  `codex_oauth` row that is not signed in, and the page refreshes when the
+  sign-in ends. Customize > Models shows a **Sign in** button for the selected provider when
   it is a `codex_oauth`, `codex_cli` or `claude_code` entry. It runs the vendor
   login (`claude auth login`, `codex login`) in its own console window, or an
   in-process ChatGPT PKCE sign-in on `localhost:1455` stored under the entry's
@@ -47,20 +64,23 @@ connected provider actually serves turns is in
   cancelled."). The status is polled every 500 ms until it reports "Signed
   in." or the failure detail. Closing the window also kills a running login.
   Only one sign-in runs per window.
-- The desktop app does not send a verification turn after sign-in and does not
-  add a `codex_oauth` entry to `zest.toml`; configure the entry first.
-- The desktop app has no API key form. Add API providers to `zest.toml` by hand
-  and store the key in the OS credential manager under the entry's
-  `credential` account, or set the entry's `api_key_env` variable. API keys are
-  never written to `zest.toml`.
+- The desktop app does not send a verification turn after sign-in.
+- API keys go to the OS credential manager under the entry's `credential`
+  account (the provider id for entries added here), never into `zest.toml`.
+  **Save key** / **Replace key** on an API row stores a new one; an entry that
+  reads `api_key_env` instead is told to set that variable.
 - A worktree chat runs in its isolated checkout but reads provider
   configuration from the original project. This applies to Claude Code, Codex
   CLI, and API providers alike; a missing original project is an error.
   `zest_core::worktree_registry::config_root` resolves that project when the
   desktop opens a project window.
-- An existing chat stays on its provider. Picking another provider for it in
-  Customize > Models says "Start a new chat to choose a different provider."
-  The desktop app has no in-chat provider switch.
+- Picking another provider for an existing chat in Customize > Models moves the
+  chat (`zest_core::provider::thread_provider_handoff`): when both providers use
+  Zest's own agent loop (API keys, ChatGPT), or the chat has no messages yet, the
+  chat keeps its id and history and switches ("This chat now uses <id>."). When
+  a vendor CLI owns either side the history cannot be handed over, so the
+  conversation continues in a copy on the new provider, which opens; the
+  original chat stays on its provider.
 
 ## How it works
 
