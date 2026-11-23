@@ -116,6 +116,7 @@ enum ComposerPopover {
     Model(Option<Point<Pixels>>),
     Mode(Point<Pixels>),
     Context(Point<Pixels>),
+    ChatMenu(Point<Pixels>),
 }
 
 pub struct Workspace {
@@ -605,8 +606,11 @@ impl Workspace {
     }
 
     fn open(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if id != self.active && self.chats[&self.active].read(cx).side.open {
-            self.chats[&self.active].update(cx, |r, cx| r.close_side(cx));
+        if id != self.active
+            && let Some(prev) = self.chats.get(&self.active).cloned()
+            && prev.read(cx).side.open
+        {
+            prev.update(cx, |r, cx| r.close_side(cx));
         }
         if let Some(chat) = self.chats.get(id).cloned() {
             self.select_chat(id);
@@ -671,6 +675,9 @@ impl Workspace {
             match self.history.first().map(|row| row.id.clone()) {
                 Some(next) => self.open(&next, window, cx),
                 None => self.new_chat(window, cx),
+            }
+            if !self.chats.contains_key(&self.active) {
+                self.new_chat(window, cx);
             }
         }
         let name = title.unwrap_or_else(|| "the chat".into());
@@ -895,7 +902,7 @@ impl Workspace {
             Panel::Worktrees => self.load_worktrees(cx),
             Panel::PullRequests => {
                 self.filter.update(cx, |field, cx| {
-                    field.placeholder = "Filter pull requests";
+                    field.placeholder = "Search title, project, branch, or number";
                     field.text.clear();
                     field.sel = 0..0;
                     field.marked = None;
@@ -1108,82 +1115,246 @@ impl Workspace {
             }
             Panel::Rename => body = body.child(self.filter.clone()),
             Panel::Settings => {
+                use crate::theme::{self, Icon, alpha};
                 let selected = chat.options.lock().unwrap().clone();
                 let busy = self.chats[&self.active].read(cx).turn_active;
-                if busy {
-                    body = body.child(crate::ui::hint("Model changes are available when this turn finishes."));
-                }
                 let saved = !chat.thread.lock().unwrap().messages.is_empty();
-                body = body.child(crate::ui::section_title("Provider"));
-                if saved {
-                    body = body.child(crate::ui::hint("Picking another provider moves this chat to it, or continues it in a copy when a coding CLI is involved on either side."));
+                let mut page = div().flex().flex_col().gap_6();
+                if busy {
+                    page = page.child(
+                        div()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(alpha(theme::border(), 0.7))
+                            .bg(alpha(theme::card(), 0.6))
+                            .px_3()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(rgb(theme::muted_foreground()))
+                            .child("Model changes are available once the current turn finishes."),
+                    );
                 }
-                let mut providers = div().flex().flex_wrap().gap_1();
-                for id in self
-                    .project
-                    .config
-                    .providers
-                    .keys()
-                {
-                    let id = id.clone();
-                    let label = mark(&id, id == selected.provider);
-                    providers = providers.child(button(
-                        SharedString::from(format!("provider-{id}")),
-                        label,
-                        cx.listener(move |ws, _, w, cx| ws.select_model(&id, None, None, w, cx)),
-                    ));
-                }
-                body = body.child(providers);
-                if let Some(cfg) = self.project.config.providers.get(&selected.provider) {
-                    if self.login.is_some() {
-                        body = body.child(button(
-                            "cancel-login",
-                            "Cancel sign-in",
-                            cx.listener(|ws, _, _, cx| {
-                                if let Some(mut login) = ws.login.take() {
-                                    let _ = login.kill();
-                                }
-                                ws.toast(ToastKind::Info, "Sign-in cancelled.", cx);
-                                cx.notify();
-                            }),
-                        ));
-                    } else if matches!(
+
+                let provider_hint = if saved {
+                    "Picking another provider moves this chat to it, or continues it in a copy when a coding CLI is involved on either side."
+                } else {
+                    "Choose which provider powers this chat."
+                };
+                let mut provider_cards = div().flex().flex_col().gap_2();
+                for (id, cfg) in &self.project.config.providers {
+                    let is_current = *id == selected.provider;
+                    let desc = zest_core::descriptor_from_config(id, cfg);
+                    let display_label = provider_display_name(id, cfg);
+                    let owns_loop = cfg.owns_agent_loop();
+                    let model_count = desc.models.len().max(1);
+                    let detail = format!(
+                        "{} · {} {}",
+                        id,
+                        model_count,
+                        if model_count == 1 { "model" } else { "models" }
+                    );
+                    let can_login = matches!(
                         cfg,
                         zest_core::ProviderConfig::CodexOAuth { .. }
                             | zest_core::ProviderConfig::CodexCli { .. }
                             | zest_core::ProviderConfig::ClaudeCode { .. }
-                    ) {
-                        body = body.child(button(
-                            "login",
-                            "Sign in",
-                            cx.listener(|ws, _, _, cx| ws.start_login(cx)),
-                        ));
+                    );
+                    let pick_id = id.clone();
+                    let login_id = id.clone();
+                    let mut row = div()
+                        .id(SharedString::from(format!("provider-{id}")))
+                        .role(Role::RadioButton)
+                        .aria_label(SharedString::from(format!("Provider {display_label}")))
+                        .aria_toggled(if is_current {
+                            accesskit::Toggled::True
+                        } else {
+                            accesskit::Toggled::False
+                        })
+                        .tab_index(0)
+                        .cursor_pointer()
+                        .px_3()
+                        .py(px(10.))
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(if is_current {
+                            alpha(theme::primary(), 0.85)
+                        } else {
+                            alpha(theme::border(), 0.8)
+                        })
+                        .bg(if is_current {
+                            alpha(theme::primary(), 0.10)
+                        } else {
+                            alpha(theme::card(), 0.75)
+                        })
+                        .hover(|s| {
+                            if is_current {
+                                s.bg(alpha(theme::primary(), 0.14))
+                            } else {
+                                s.bg(rgb(theme::card())).border_color(rgb(theme::border()))
+                            }
+                        })
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size(px(28.))
+                                .flex_none()
+                                .rounded(px(7.))
+                                .bg(rgb(theme::secondary()))
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(theme::provider_icon(id, None, 15.)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(13.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(theme::foreground()))
+                                                .child(display_label),
+                                        )
+                                        .when(owns_loop, |d| {
+                                            d.child(ui::pill(None, "CLI"))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme::muted_foreground()))
+                                        .child(detail),
+                                ),
+                        )
+                        .on_click(cx.listener(move |ws, _, w, cx| {
+                            ws.select_model(&pick_id, None, None, w, cx);
+                        }));
+
+                    if is_current && can_login {
+                        if self.login.is_some() {
+                            row = row.child(
+                                div()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .child(ui::button(
+                                        "cancel-login",
+                                        ui::Variant::Outline,
+                                        Some(Icon::LoaderCircle),
+                                        "Cancel sign-in",
+                                        cx.listener(|ws, _, _, cx| {
+                                            if let Some(mut login) = ws.login.take() {
+                                                let _ = login.kill();
+                                            }
+                                            ws.toast(ToastKind::Info, "Sign-in cancelled.", cx);
+                                            cx.notify();
+                                        }),
+                                    )),
+                            );
+                        } else {
+                            row = row.child(
+                                div()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .child(ui::button(
+                                        "login",
+                                        ui::Variant::Outline,
+                                        None,
+                                        "Sign in",
+                                        cx.listener(move |ws, _, _, cx| {
+                                            ws.start_login_for(login_id.clone(), cx);
+                                        }),
+                                    )),
+                            );
+                        }
                     }
+                    if is_current {
+                        row = row.child(ui::check_badge());
+                    }
+                    provider_cards = provider_cards.child(row);
+                }
+
+                if self.project.config.providers.is_empty() {
+                    page = page.child(if self.project.demo {
+                        ui::empty_state(
+                            Icon::Layers,
+                            "Offline demo provider",
+                            "Open a project window to choose between connected providers and models.",
+                        )
+                    } else {
+                        ui::empty_state(
+                            Icon::Sparkles,
+                            "No providers connected yet",
+                            "Add a provider in Customize > Providers to choose models and start chatting.",
+                        )
+                    });
+                } else {
+                    page = page.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(ui::section_heading("Provider", provider_hint))
+                            .child(provider_cards),
+                    );
+                }
+
+                if let Some(cfg) = self.project.config.providers.get(&selected.provider) {
                     let descriptor = zest_core::descriptor_from_config(&selected.provider, cfg);
                     let current = selected
                         .model
                         .as_deref()
                         .unwrap_or(&descriptor.default_model);
-                    let mut models = div().flex().flex_wrap().gap_1();
+                    let mut models = div().flex().flex_wrap().gap_2();
                     for spec in &descriptor.models {
                         let (provider, model) = (selected.provider.clone(), spec.id.clone());
-                        models = models.child(button(
+                        models = models.child(ui::select_chip(
                             SharedString::from(format!("model-{model}")),
-                            mark(&model, current == model),
+                            model.clone(),
+                            current == model,
                             cx.listener(move |ws, _, w, cx| {
                                 ws.select_model(&provider, Some(model.clone()), None, w, cx)
                             }),
                         ));
                     }
-                    body = body.child(crate::ui::section_title("Model")).child(models);
-                    if let Some(spec) = descriptor.models.iter().find(|m| m.id == current) {
-                        let mut efforts = div().flex().flex_wrap();
+                    page = page.child(
+                        div()
+                            .border_t_1()
+                            .border_color(alpha(theme::border(), 0.6))
+                            .pt_5()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(ui::section_heading(
+                                "Model",
+                                "Choose which model answers turns on this provider.",
+                            ))
+                            .child(models),
+                    );
+
+                    if let Some(spec) = descriptor.models.iter().find(|m| m.id == current)
+                        && !spec.efforts.is_empty()
+                    {
+                        let mut efforts = div().flex().flex_wrap().gap_2();
                         for e in &spec.efforts {
                             let (p, model, effort) =
                                 (selected.provider.clone(), spec.id.clone(), e.clone());
-                            efforts = efforts.child(button(
+                            efforts = efforts.child(ui::select_chip(
                                 SharedString::from(format!("effort-{e}")),
-                                mark(e, selected.effort.as_deref() == Some(e)),
+                                e.clone(),
+                                selected.effort.as_deref() == Some(e),
                                 cx.listener(move |ws, _, w, cx| {
                                     ws.select_model(
                                         &p,
@@ -1195,31 +1366,130 @@ impl Workspace {
                                 }),
                             ));
                         }
-                        body = body.child(crate::ui::section_title("Reasoning effort")).child(efforts);
+                        page = page.child(
+                            div()
+                                .border_t_1()
+                                .border_color(alpha(theme::border(), 0.6))
+                                .pt_5()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(ui::section_heading(
+                                    "Reasoning effort",
+                                    "Higher effort spends more time thinking before answering.",
+                                ))
+                                .child(efforts),
+                        );
                     }
-                } else if self.project.demo {
-                    body = body.child(crate::ui::hint("Offline demo provider"));
-                } else {
-                    body = body.child(crate::ui::hint("Add a provider in Customize > Providers to start a turn."));
                 }
+
                 let mode = chat.policy.lock().unwrap().mode();
-                let mut modes = div().flex().flex_wrap();
-                for m in [
-                    ApprovalMode::Manual,
-                    ApprovalMode::Plan,
-                    ApprovalMode::AcceptEdits,
-                    ApprovalMode::Auto,
-                ] {
-                    modes = modes.child(button(
-                        m.as_str(),
-                        mark(m.as_str(), mode == m),
-                        cx.listener(move |ws, _, _, cx| {
-                            ws.chat(cx).policy.lock().unwrap().set_mode(m);
-                            cx.notify();
-                        }),
-                    ));
+                let mode_specs: &[(ApprovalMode, &str, &str)] = &[
+                    (
+                        ApprovalMode::Manual,
+                        "Ask",
+                        "Ask before writing files or running commands.",
+                    ),
+                    (
+                        ApprovalMode::Plan,
+                        "Plan",
+                        "Read-only planning without editing files.",
+                    ),
+                    (
+                        ApprovalMode::AcceptEdits,
+                        "Accept edits",
+                        "Auto-approve file edits; ask before running commands.",
+                    ),
+                    (
+                        ApprovalMode::Auto,
+                        "Auto",
+                        "Approve routine workspace actions automatically.",
+                    ),
+                ];
+                let mut modes = div().flex().flex_wrap().gap_2();
+                for &(m, title, desc) in mode_specs {
+                    let active = mode == m;
+                    modes = modes.child(
+                        div()
+                            .id(m.as_str())
+                            .role(Role::RadioButton)
+                            .aria_label(SharedString::from(title))
+                            .aria_toggled(if active {
+                                accesskit::Toggled::True
+                            } else {
+                                accesskit::Toggled::False
+                            })
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .w(px(262.))
+                            .p_3()
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(if active {
+                                alpha(theme::primary(), 0.85)
+                            } else {
+                                alpha(theme::border(), 0.75)
+                            })
+                            .bg(if active {
+                                alpha(theme::primary(), 0.10)
+                            } else {
+                                alpha(theme::card(), 0.75)
+                            })
+                            .hover(|s| {
+                                if active {
+                                    s.bg(alpha(theme::primary(), 0.14))
+                                } else {
+                                    s.bg(rgb(theme::card())).border_color(rgb(theme::border()))
+                                }
+                            })
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(theme::foreground()))
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .line_height(px(16.))
+                                            .text_color(rgb(theme::muted_foreground()))
+                                            .child(desc),
+                                    ),
+                            )
+                            .when(active, |d| d.child(ui::check_badge()))
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                ws.chat(cx).policy.lock().unwrap().set_mode(m);
+                                cx.notify();
+                            })),
+                    );
                 }
-                body = body.child(crate::ui::section_title("Tool permissions")).child(modes);
+                page = page.child(
+                    div()
+                        .border_t_1()
+                        .border_color(alpha(theme::border(), 0.6))
+                        .pt_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(ui::section_heading(
+                            "Tool permissions",
+                            "Control when Zest asks for confirmation before editing files or running commands.",
+                        ))
+                        .child(modes),
+                );
+                body = body.child(page);
             }
             Panel::Files => {
                 if !self.directory.is_empty() || self.preview.is_some() {
@@ -1278,25 +1548,82 @@ impl Workspace {
                 }
             }
             Panel::Commands => {
+                use crate::theme::{self, Icon, alpha};
                 let commands =
                     zest_core::list_slash_commands(&self.project.skills, &self.project.mcp);
+                let mut page = div().flex().flex_col().gap_4().child(ui::section_heading(
+                    "Skills & slash commands",
+                    "Prompt shortcuts from local skills and connected MCP servers. Click any command to insert it into the composer.",
+                ));
                 if commands.is_empty() {
-                    body = body.child(crate::ui::hint("No skills or MCP commands configured."));
-                }
-                for (i, cmd) in commands.into_iter().enumerate() {
-                    let name = cmd.name;
-                    body = body.child(button(
-                        ("slash", i),
-                        format!("/{name}  ·  {}", cmd.description),
-                        cx.listener(move |ws, _, w, cx| {
-                            ws.page(Panel::Chat, w, cx);
-                            let composer = ws.chats[&ws.active].read(cx).composer.clone();
-                            composer.update(cx, |c, cx| {
-                                c.replace_text_in_range(None, &format!("/{name} "), w, cx)
-                            });
-                        }),
+                    page = page.child(ui::empty_state(
+                        Icon::Plug,
+                        "No skills or MCP commands yet",
+                        "Add a skill under .zest/skills or enable an MCP server to see slash commands here.",
                     ));
+                } else {
+                    let mut card = ui::card()
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col();
+                    for (i, cmd) in commands.into_iter().enumerate() {
+                        let name = cmd.name;
+                        let desc = cmd.description;
+                        let insert_name = name.clone();
+                        card = card.child(
+                            div()
+                                .id(("slash", i))
+                                .role(Role::Button)
+                                .aria_label(SharedString::from(format!("/{name} {desc}")))
+                                .tab_index(0)
+                                .cursor_pointer()
+                                .px_3()
+                                .py(px(10.))
+                                .when(i > 0, |d| {
+                                    d.border_t_1().border_color(alpha(theme::border(), 0.6))
+                                })
+                                .hover(|s| s.bg(alpha(theme::secondary(), 0.65)))
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .px_2()
+                                        .py(px(2.))
+                                        .rounded(px(6.))
+                                        .bg(rgb(theme::secondary()))
+                                        .border_1()
+                                        .border_color(alpha(theme::border(), 0.8))
+                                        .font_family(MONO)
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(theme::foreground()))
+                                        .child(format!("/{name}")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(theme::muted_foreground()))
+                                        .child(desc),
+                                )
+                                .child(theme::icon(Icon::ChevronRight, 14.))
+                                .on_click(cx.listener(move |ws, _, w, cx| {
+                                    ws.page(Panel::Chat, w, cx);
+                                    let composer = ws.chats[&ws.active].read(cx).composer.clone();
+                                    composer.update(cx, |c, cx| {
+                                        c.replace_text_in_range(None, &format!("/{insert_name} "), w, cx)
+                                    });
+                                })),
+                        );
+                    }
+                    page = page.child(card);
                 }
+                body = body.child(page);
             }
             Panel::Delegation => body = body.child(self.board_body(cx)),
             Panel::Checkpoints => {
@@ -1326,14 +1653,241 @@ impl Workspace {
                     body = body.child(self.checkpoint_row(cp, busy, cx));
                 }
             }
-            _ => {
-                if self.panel == Panel::Usage && !self.project.demo {
-                    body = body.child(button(
-                        "quota",
-                        "Check provider quota",
-                        cx.listener(|ws, _, _, cx| ws.check_quota(cx)),
+            Panel::Usage => {
+                use crate::theme::{self, Icon, alpha};
+                let snap = self.project.ledger.lock().unwrap().snapshot();
+                let checking_quota = self.report == "Checking provider quota…";
+                let total_reqs: u64 = snap.providers.iter().map(|p| p.measured.requests).sum();
+                let total_in: u64 = snap.providers.iter().map(|p| p.measured.input_tokens).sum();
+                let total_out: u64 = snap.providers.iter().map(|p| p.measured.output_tokens).sum();
+                let max_tokens: u64 = snap
+                    .providers
+                    .iter()
+                    .map(|p| p.measured.input_tokens + p.measured.output_tokens)
+                    .max()
+                    .unwrap_or(0);
+
+                let metric_tile = |label: &'static str, value: String, hint: &'static str| {
+                    ui::card()
+                        .rounded(px(10.))
+                        .flex_1()
+                        .min_w(px(160.))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(theme::muted_foreground()))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(22.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::foreground()))
+                                .child(value),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::muted_foreground()))
+                                .child(hint),
+                        )
+                };
+
+                let mut page = div().flex().flex_col().gap_5().child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(ui::section_heading(
+                            "Usage & quotas",
+                            "Local token counts recorded by Zest on this computer. Not a billing statement.",
+                        ))
+                        .when(!self.project.demo, |d| {
+                            d.child(ui::button(
+                                "quota",
+                                ui::Variant::Outline,
+                                Some(if checking_quota {
+                                    Icon::LoaderCircle
+                                } else {
+                                    Icon::RefreshCw
+                                }),
+                                if checking_quota {
+                                    "Checking quota…"
+                                } else {
+                                    "Check provider quota"
+                                },
+                                cx.listener(|ws, _, _, cx| ws.check_quota(cx)),
+                            ))
+                        }),
+                );
+
+                page = page.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(metric_tile("REQUESTS", total_reqs.to_string(), "Measured turns"))
+                        .child(metric_tile("INPUT TOKENS", format_tokens(total_in), "Prompt + context"))
+                        .child(metric_tile("OUTPUT TOKENS", format_tokens(total_out), "Generated replies")),
+                );
+
+                if snap.providers.is_empty() {
+                    page = page.child(ui::empty_state(
+                        Icon::Gauge,
+                        "Nothing recorded yet",
+                        "Send a turn in any chat and Zest will track token counts and provider shares here.",
                     ));
+                } else {
+                    let mut providers_card = ui::card()
+                        .rounded(px(10.))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::foreground()))
+                                .child("By provider"),
+                        );
+                    for p in &snap.providers {
+                        let tokens = p.measured.input_tokens + p.measured.output_tokens;
+                        let frac = if max_tokens > 0 {
+                            (tokens as f32 / max_tokens as f32).clamp(0.04, 1.0)
+                        } else {
+                            0.04
+                        };
+                        providers_card = providers_card.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(theme::provider_icon(&p.provider_id, None, 14.))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(13.))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(rgb(theme::foreground()))
+                                                        .child(p.provider_id.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(theme::foreground()))
+                                                .child(format!("{} tokens", format_tokens(tokens))),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(4.))
+                                        .w_full()
+                                        .rounded_full()
+                                        .bg(alpha(theme::border(), 0.5))
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .w(relative(frac))
+                                                .rounded_full()
+                                                .bg(rgb(theme::primary())),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme::muted_foreground()))
+                                        .child(format!(
+                                            "{} requests · {} in · {} out",
+                                            p.measured.requests,
+                                            format_tokens(p.measured.input_tokens),
+                                            format_tokens(p.measured.output_tokens)
+                                        )),
+                                ),
+                        );
+                    }
+                    page = page.child(providers_card);
                 }
+
+                if checking_quota {
+                    page = page.child(ui::loading_row("quota-loading", "Checking provider quota…"));
+                } else if !self.report.is_empty() && self.report != snap
+                    .providers
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}\n{} requests  ·  {} input tokens  ·  {} output tokens",
+                            p.provider_id,
+                            p.measured.requests,
+                            p.measured.input_tokens,
+                            p.measured.output_tokens
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+                {
+                    page = page.child(
+                        ui::card()
+                            .rounded(px(10.))
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Live provider quota"),
+                                    )
+                                    .child(ui::icon_button(
+                                        "copy-report",
+                                        Icon::Copy,
+                                        "Copy quota report",
+                                        cx.listener(|ws, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                ws.report.clone(),
+                                            ));
+                                        }),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .font_family(MONO)
+                                    .text_size(px(12.))
+                                    .line_height(px(19.))
+                                    .text_color(rgb(theme::secondary_foreground()))
+                                    .child(self.report.clone()),
+                            ),
+                    );
+                }
+
+                body = body.child(page);
+            }
+            _ => {
                 if !self.report.is_empty() {
                     body = body.child(
                         div()
@@ -1441,11 +1995,6 @@ impl Workspace {
         })
         .detach();
         cx.notify();
-    }
-
-    fn start_login(&mut self, cx: &mut Context<Self>) {
-        let id = self.chat(cx).options.lock().unwrap().provider.clone();
-        self.start_login_for(id, cx);
     }
 
     /// Runs the vendor sign-in for one configured provider and polls it until it ends.
@@ -1579,6 +2128,17 @@ fn chat_title(row: &ThreadSummary) -> String {
     row.title.clone().unwrap_or_else(|| "Untitled chat".into())
 }
 
+pub(super) fn provider_display_name(id: &str, cfg: &zest_core::ProviderConfig) -> String {
+    match cfg {
+        zest_core::ProviderConfig::ClaudeCode { .. } => "Claude Code".into(),
+        zest_core::ProviderConfig::CodexCli { .. } => "Codex CLI".into(),
+        zest_core::ProviderConfig::CodexOAuth { .. } => "ChatGPT".into(),
+        zest_core::ProviderConfig::CursorAcp { .. } => "Cursor".into(),
+        zest_core::ProviderConfig::Anthropic { .. } => "Anthropic".into(),
+        zest_core::ProviderConfig::OpenaiCompatible { .. } => id.into(),
+    }
+}
+
 #[cfg(test)]
 mod history_tests {
     use super::{HashMap, Thread, merge_history};
@@ -1663,6 +2223,12 @@ impl Workspace {
                 .snap_to_window_with_margin(px(12.))
                 .child(self.render_context_popover(cx))
                 .into_any_element(),
+            ComposerPopover::ChatMenu(anchor) => anchored()
+                .anchor(Anchor::TopRight)
+                .position(point(anchor.x + px(14.), anchor.y + px(18.)))
+                .snap_to_window_with_margin(px(12.))
+                .child(self.render_chat_menu_popover(cx))
+                .into_any_element(),
         };
 
         Some(
@@ -1674,12 +2240,165 @@ impl Workspace {
                     MouseButton::Left,
                     cx.listener(|ws, _, _, cx| {
                         ws.popover = None;
+                        ws.delete_confirm = None;
                         cx.notify();
                     }),
                 )
                 .child(positioned)
                 .into_any_element(),
         )
+    }
+
+    fn render_chat_menu_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::theme::{self, Icon, alpha};
+        let chat = self.chat(cx);
+        let pinned = chat.thread.lock().unwrap().pinned;
+        let confirming_delete = self.delete_confirm.as_deref() == Some(self.active.as_str());
+        let active_id = self.active.clone();
+
+        let item = |id: &'static str,
+                    glyph: Icon,
+                    label: &'static str,
+                    destructive: bool,
+                    click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>| {
+            let color = if destructive {
+                theme::destructive()
+            } else {
+                theme::foreground()
+            };
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .tab_index(0)
+                .cursor_pointer()
+                .h(px(30.))
+                .px(px(10.))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_size(px(12.5))
+                .text_color(rgb(color))
+                .hover(move |s| {
+                    s.bg(if destructive {
+                        alpha(theme::destructive(), 0.14)
+                    } else {
+                        rgb(theme::secondary()).into()
+                    })
+                })
+                .child(theme::icon(glyph, 14.).text_color(rgb(if destructive {
+                    theme::destructive()
+                } else {
+                    theme::muted_foreground()
+                })))
+                .child(label)
+                .on_click(move |ev, w, cx| click(ev, w, cx))
+        };
+
+        let mut panel = div()
+            .id("chat-menu-popover")
+            .w(px(200.))
+            .rounded(px(10.))
+            .bg(rgb(theme::popover()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .shadow_lg()
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(item(
+                "pin",
+                if pinned { Icon::PinOff } else { Icon::Pin },
+                if pinned { "Unpin chat" } else { "Pin chat" },
+                false,
+                Box::new(cx.listener(|ws, _, _, cx| {
+                    ws.popover = None;
+                    if let Err(e) = ws.chat(cx).edit(|t| Ok(t.set_pinned(!t.pinned))) {
+                        ws.toast(ToastKind::Error, e.to_string(), cx);
+                    }
+                    ws.refresh(cx);
+                })),
+            ))
+            .child(item(
+                "rename",
+                Icon::Pencil,
+                "Rename chat",
+                false,
+                Box::new(cx.listener(|ws, _, w, cx| {
+                    ws.popover = None;
+                    ws.page(Panel::Rename, w, cx);
+                })),
+            ))
+            .child(item(
+                "fork",
+                Icon::GitFork,
+                "Fork chat",
+                false,
+                Box::new(cx.listener(|ws, _, w, cx| {
+                    ws.popover = None;
+                    ws.fork(None, w, cx);
+                })),
+            ))
+            .child(div().my_1().h(px(1.)).bg(alpha(theme::border(), 0.6)));
+
+        if confirming_delete {
+            panel = panel.child(
+                div()
+                    .p_1()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_1()
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme::muted_foreground()))
+                            .child("Delete this chat and its saved history?"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(ui::button(
+                                "delete-chat-yes",
+                                ui::Variant::Destructive,
+                                Some(Icon::Trash2),
+                                "Delete",
+                                cx.listener(move |ws, _, w, cx| {
+                                    ws.popover = None;
+                                    ws.delete_chat(&active_id, w, cx);
+                                }),
+                            ))
+                            .child(ui::button(
+                                "delete-chat-no",
+                                ui::Variant::Ghost,
+                                None,
+                                "Cancel",
+                                cx.listener(|ws, _, _, cx| {
+                                    ws.delete_confirm = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
+            );
+        } else {
+            panel = panel.child(item(
+                "delete-chat",
+                Icon::Trash2,
+                "Delete chat",
+                true,
+                Box::new(cx.listener(|ws, _, _, cx| {
+                    ws.delete_confirm = Some(ws.active.clone());
+                    cx.notify();
+                })),
+            ));
+        }
+
+        panel.into_any_element()
     }
 
     fn render_mode_popover(&self, cx: &mut Context<Self>) -> AnyElement {

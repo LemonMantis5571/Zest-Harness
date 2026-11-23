@@ -209,6 +209,143 @@ pub fn section_title(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
+/// Section title + muted description matching pre-GPUI `SectionHeading`.
+pub fn section_heading(title: impl Into<SharedString>, hint: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::foreground()))
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .line_height(px(17.))
+                .text_color(rgb(theme::muted_foreground()))
+                .child(hint.into()),
+        )
+}
+
+/// Bordered chip button for model, effort, filter, or option selection.
+pub fn select_chip(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .role(Role::RadioButton)
+        .aria_label(label.clone())
+        .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
+        .tab_index(0)
+        .cursor_pointer()
+        .h(px(30.))
+        .px(px(11.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(if selected {
+            alpha(theme::primary(), 0.8)
+        } else {
+            alpha(theme::border(), 0.85)
+        })
+        .bg(if selected {
+            alpha(theme::primary(), 0.14)
+        } else {
+            alpha(theme::card(), 0.75)
+        })
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(if selected {
+            theme::foreground()
+        } else {
+            theme::secondary_foreground()
+        }))
+        .hover(|s| {
+            if selected {
+                s.bg(alpha(theme::primary(), 0.2))
+            } else {
+                s.bg(rgb(theme::secondary())).text_color(rgb(theme::foreground()))
+            }
+        })
+        .focus_visible(|s| s.border_color(rgb(theme::primary())))
+        .when(selected, |d| {
+            d.child(icon(Icon::Check, 12.).text_color(rgb(theme::primary())))
+        })
+        .child(label)
+        .on_click(click)
+}
+
+/// Centered empty-state card with icon badge, heading, and guidance copy.
+pub fn empty_state(
+    glyph: Icon,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Div {
+    div()
+        .min_h(px(220.))
+        .rounded(px(12.))
+        .border_1()
+        .border_color(alpha(theme::border(), 0.65))
+        .bg(alpha(theme::card(), 0.45))
+        .px_6()
+        .py(px(40.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .child(
+            div()
+                .mb_2()
+                .p_3()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(alpha(theme::border(), 0.65))
+                .bg(alpha(theme::secondary(), 0.6))
+                .child(icon(glyph, 20.).text_color(rgb(theme::muted_foreground()))),
+        )
+        .child(
+            div()
+                .text_size(px(14.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(theme::foreground()))
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .max_w(px(360.))
+                .text_center()
+                .text_size(px(12.5))
+                .line_height(px(19.))
+                .text_color(rgb(theme::muted_foreground()))
+                .child(detail.into()),
+        )
+}
+
+/// Circular primary checkmark badge used on selected radio/theme/font/provider cards.
+pub fn check_badge() -> Div {
+    div()
+        .size(px(16.))
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(theme::primary()))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(Icon::Check, 10.).text_color(rgb(theme::ON_PRIMARY)))
+}
+
 /// Muted helper or status line under a section.
 pub fn hint(text: impl Into<SharedString>) -> Div {
     div()

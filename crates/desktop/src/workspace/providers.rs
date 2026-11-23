@@ -108,30 +108,68 @@ impl Workspace {
 
     pub(super) fn providers_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = &self.providers_page;
-        let mut body = div().flex().flex_col().gap_3();
+        let mut body = div().flex().flex_col().gap_5();
         if self.project.demo {
-            return body.child(ui::hint("The offline demo uses its built-in provider. Providers are set up in project windows.")).into_any_element();
+            return body
+                .child(ui::empty_state(
+                    Icon::Sparkles,
+                    "Offline demo provider active",
+                    "Open a project window to connect Claude Code, Codex CLI, ChatGPT, Cursor, or API-key providers.",
+                ))
+                .into_any_element();
         }
-        body = body.child(ui::hint(format!(
-            "Editing {}. API keys are kept in the system credential manager, never in zest.toml.",
-            zest_core::mcp_admin::config_scope(&self.project.config_root)
-        )));
-        if self.project.config.providers.is_empty() {
-            body = body.child(
-                ui::card()
-                    .p_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(theme::icon(Icon::Sparkles, 14.))
-                    .child("Add a provider to start chatting. If you already use Claude Code, Codex or Cursor, add it and Zest uses that sign-in."),
-            );
-        }
+        let scope = zest_core::mcp_admin::config_scope(&self.project.config_root);
+        body = body.child(ui::section_heading(
+            "Connected providers",
+            format!("Editing {scope}. API keys stay in the system credential manager, never in zest.toml."),
+        ));
         if let Some(form) = &page.form {
             body = body.child(self.key_form(form, cx));
         }
-        for (index, row) in page.rows.iter().enumerate() {
-            body = body.child(self.provider_row(index, row, cx));
+        let configured: Vec<(usize, &ProviderRow)> = page
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.state != ProviderState::NotAdded)
+            .collect();
+        let offers: Vec<(usize, &ProviderRow)> = page
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.state == ProviderState::NotAdded)
+            .collect();
+        if configured.is_empty() {
+            body = body.child(ui::empty_state(
+                Icon::Sparkles,
+                "No providers connected yet",
+                "Add a provider below to start chatting. If you already use Claude Code, Codex, or Cursor, Zest reuses that sign-in.",
+            ));
+        } else {
+            let mut list = div().flex().flex_col().gap_2();
+            for (index, row) in configured {
+                list = list.child(self.provider_row(index, row, cx));
+            }
+            body = body.child(list);
+        }
+        if !offers.is_empty() {
+            let mut add_list = div().flex().flex_col().gap_2();
+            for (index, row) in offers {
+                add_list = add_list.child(self.provider_row(index, row, cx));
+            }
+            body = body.child(
+                div()
+                    .border_t_1()
+                    .border_color(theme::alpha(theme::border(), 0.6))
+                    .pt_5()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(ui::section_heading(
+                        "Add a provider",
+                        "Connect another local CLI or API-key provider to switch between models in any chat.",
+                    ))
+                    .child(add_list),
+            );
         }
         body.into_any_element()
     }

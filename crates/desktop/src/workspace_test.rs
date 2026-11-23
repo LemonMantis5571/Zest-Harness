@@ -498,3 +498,48 @@ fn attention_route_follows_window_and_chat_visibility() {
     assert_eq!(chat_alert_route(false, true), AlertRoute::System);
     assert_eq!(chat_alert_route(false, false), AlertRoute::System);
 }
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn deleting_active_chat_opens_next_without_panicking() {
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_state = Project::open(project_dir.path().to_owned(), true).unwrap();
+    let mut first = Thread::new();
+    first.set_title("First chat").unwrap();
+    first.updated_at = 100;
+    let first_id = first.id.clone();
+    project_state.store.save(&first).unwrap();
+
+    let mut second = Thread::new();
+    second.set_title("Second chat").unwrap();
+    second.updated_at = 200;
+    let second_id = second.id.clone();
+    project_state.store.save(&second).unwrap();
+
+    let mut app = gpui::TestAppContext::single();
+    app.update(composer::bind_keys);
+    let window = app.open_window(size(px(1000.), px(700.)), |w, cx| {
+        Workspace::new(project_state, w, cx)
+    });
+    app.run_until_parked();
+
+    window
+        .update(&mut app, |ws, w, cx| {
+            ws.open(&second_id, w, cx);
+            assert_eq!(ws.active, second_id);
+            ws.delete_chat(&second_id, w, cx);
+            assert_eq!(ws.active, first_id);
+            assert!(ws.chats.contains_key(&ws.active));
+            assert!(!ws.chats.contains_key(&second_id));
+            assert!(!ws.history.iter().any(|row| row.id == second_id));
+        })
+        .unwrap();
+
+    app.update(|cx| {
+        for window in cx.windows() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    });
+    app.run_until_parked();
+    app.quit();
+}

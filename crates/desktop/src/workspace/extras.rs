@@ -171,119 +171,284 @@ impl Workspace {
     }
 
     pub(super) fn extras_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut body = div().flex().flex_col().gap_2();
+        use crate::theme::{self, Icon, alpha};
+        use crate::ui::{self, Variant};
+
+        let mut body = div().flex().flex_col().gap_4();
         if self.project.demo {
-            return body.child("Local add-ons are available in project windows.");
-        }
-        body = body
-            .child(button(
-                "refresh-extras",
-                "Refresh add-ons",
-                cx.listener(|ws, _, _, cx| ws.load_extras(cx)),
-            ))
-            .child(button(
-                "open-plugins",
-                "Open add-ons folder",
-                cx.listener(|ws, _, _, cx| match plugins::ensure_plugin_folder() {
-                    Ok(path) => cx.open_with_system(&path),
-                    Err(e) => {
-                        ws.toast(ToastKind::Error, e, cx);
-                        cx.notify();
-                    }
-                }),
+            return body.child(ui::empty_state(
+                Icon::Puzzle,
+                "Add-ons unavailable in offline demo",
+                "Open a project window to turn on optional local integrations like Now Playing or Wallpaper.",
             ));
-        if self.extras.busy {
-            body = body.child(crate::ui::loading_row("addons-loading", "Loading add-ons…"));
-        } else if self.extras.rows.is_empty() {
-            body = body.child(crate::ui::hint("No add-ons installed."));
         }
+        body = body.child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_3()
+                .child(ui::section_heading(
+                    "Extras",
+                    "Optional local integrations. They stay on this PC, and each one is off until you turn it on.",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .child(ui::button(
+                            "open-plugins",
+                            Variant::Secondary,
+                            Some(Icon::FolderOpen),
+                            "Open folder",
+                            cx.listener(|ws, _, _, cx| match plugins::ensure_plugin_folder() {
+                                Ok(path) => cx.open_with_system(&path),
+                                Err(e) => {
+                                    ws.toast(ToastKind::Error, e, cx);
+                                    cx.notify();
+                                }
+                            }),
+                        ))
+                        .child(ui::button(
+                            "refresh-extras",
+                            Variant::Outline,
+                            Some(if self.extras.busy { Icon::LoaderCircle } else { Icon::RefreshCw }),
+                            if self.extras.busy { "Refreshing…" } else { "Refresh" },
+                            cx.listener(|ws, _, _, cx| ws.load_extras(cx)),
+                        )),
+                ),
+        );
+        if self.extras.busy && self.extras.rows.is_empty() {
+            return body.child(ui::loading_row("addons-loading", "Loading add-ons…"));
+        }
+        if self.extras.rows.is_empty() {
+            return body.child(ui::empty_state(
+                Icon::Puzzle,
+                "No add-ons installed",
+                "Open the add-ons folder to place local Zest plugins, then click Refresh.",
+            ));
+        }
+
+        let mut list = div().flex().flex_col().gap_3();
         for (i, row) in self.extras.rows.iter().enumerate() {
-            body = body.child(row.name.clone()).child(row.description.clone());
-            if !row.available {
-                body = body.child(row.detail.clone());
-                continue;
-            }
             let id = row.id.clone();
             let enable = !row.enabled;
-            body = body.child(button(
-                ("plugin-toggle", i),
-                if enable { "Turn on" } else { "Turn off" },
-                cx.listener(move |ws, _, _, cx| {
-                    ws.apply_extra(Action::Enable(id.clone(), enable), cx);
-                }),
-            ));
-        }
-        if let Some(media) = &self.extras.media {
-            body = body
-                .child(
-                    [
-                        media.title.as_deref(),
-                        media.artist.as_deref(),
-                        Some(media.status.as_str()),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · "),
+            let action = if !row.available {
+                ui::pill(None, "Not ready").into_any_element()
+            } else {
+                ui::button(
+                    ("plugin-toggle", i),
+                    if row.enabled { Variant::Outline } else { Variant::Primary },
+                    None,
+                    if enable { "Turn on" } else { "Turn off" },
+                    cx.listener(move |ws, _, _, cx| {
+                        ws.apply_extra(Action::Enable(id.clone(), enable), cx);
+                    }),
                 )
-                .child(media.detail.clone());
-            let mut controls = div().flex().gap_1().flex_wrap();
-            for (action, label, supported) in [
-                ("previous", "Previous", media.can_previous),
-                ("toggle", "Play / pause", media.can_toggle),
-                ("next", "Next", media.can_next),
-            ] {
-                if supported != Some(false) {
-                    controls = controls.child(button(
-                        action,
-                        label,
-                        cx.listener(move |ws, _, _, cx| ws.apply_extra(Action::Play(action), cx)),
-                    ));
-                }
-            }
-            if let Some(volume) = media.volume_percent {
-                for (label, step) in [("Quieter", -10.), ("Louder", 10.)] {
-                    controls = controls.child(button(
-                        label,
-                        label,
-                        cx.listener(move |ws, _, _, cx| {
-                            ws.apply_extra(Action::Volume(volume + step), cx)
-                        }),
-                    ));
-                }
-                controls = controls.child(format!("Volume {:.0}%", volume));
-            }
-            body = body.child(controls);
-        }
-        if let Some(wall) = &self.extras.wallpaper {
-            body = body
+                .into_any_element()
+            };
+
+            let mut card = ui::card()
+                .rounded(px(10.))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_3()
                 .child(
-                    wall.source_name
-                        .clone()
-                        .unwrap_or_else(|| wall.detail.clone()),
-                )
-                .child(button(
-                    "choose-wallpaper",
-                    "Choose image",
-                    cx.listener(|ws, _, _, cx| ws.choose_wallpaper(cx)),
-                ));
-            if self.extras.image.is_some() {
-                let mut looks = div().flex().flex_wrap().gap_1();
-                for &look in LOOKS {
-                    looks = looks.child(button(
-                        look,
-                        mark(look, wall.filter == look),
-                        cx.listener(move |ws, _, _, cx| ws.apply_extra(Action::Look(look), cx)),
-                    ));
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_size(px(13.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(theme::foreground()))
+                                                .child(row.name.clone()),
+                                        )
+                                        .when(row.enabled, |d| d.child(ui::pill(None, "On"))),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .line_height(px(17.))
+                                        .text_color(rgb(theme::muted_foreground()))
+                                        .child(row.description.clone()),
+                                )
+                                .when(row.detail != "Ready" && !row.detail.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .mt(px(2.))
+                                            .text_size(px(11.))
+                                            .text_color(rgb(theme::muted_foreground()))
+                                            .child(row.detail.clone()),
+                                    )
+                                }),
+                        )
+                        .child(action),
+                );
+
+            if row.id == "now-playing" && row.enabled
+                && let Some(media) = &self.extras.media
+            {
+                let summary = [
+                    media.title.as_deref(),
+                    media.artist.as_deref(),
+                    Some(media.status.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                let mut controls = div().flex().flex_wrap().items_center().gap_2();
+                for (action_name, label, supported) in [
+                    ("previous", "Previous", media.can_previous),
+                    ("toggle", "Play / pause", media.can_toggle),
+                    ("next", "Next", media.can_next),
+                ] {
+                    if supported != Some(false) {
+                        controls = controls.child(ui::button(
+                            action_name,
+                            Variant::Outline,
+                            None,
+                            label,
+                            cx.listener(move |ws, _, _, cx| ws.apply_extra(Action::Play(action_name), cx)),
+                        ));
+                    }
                 }
-                body = body.child(looks).child(button(
-                    "clear-wallpaper",
-                    "Clear wallpaper",
-                    cx.listener(|ws, _, _, cx| ws.apply_extra(Action::Clear, cx)),
-                ));
+                if let Some(volume) = media.volume_percent {
+                    for (label, step) in [("Quieter", -10.), ("Louder", 10.)] {
+                        controls = controls.child(ui::button(
+                            label,
+                            Variant::Ghost,
+                            None,
+                            label,
+                            cx.listener(move |ws, _, _, cx| {
+                                ws.apply_extra(Action::Volume(volume + step), cx)
+                            }),
+                        ));
+                    }
+                    controls = controls.child(ui::pill(None, format!("Volume {:.0}%", volume)));
+                }
+                card = card.child(
+                    div()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(alpha(theme::border(), 0.7))
+                        .bg(alpha(theme::background(), 0.5))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(theme::icon(Icon::Music, 14.).text_color(rgb(theme::primary())))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(if summary.is_empty() { media.detail.clone() } else { summary }),
+                                ),
+                        )
+                        .when(!media.detail.is_empty(), |d| d.child(ui::hint(media.detail.clone())))
+                        .child(controls),
+                );
             }
+
+            if row.id == "wallpaper" && row.enabled
+                && let Some(wall) = &self.extras.wallpaper
+            {
+                let mut wall_box = div()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(alpha(theme::border(), 0.7))
+                    .bg(alpha(theme::background(), 0.5))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::muted_foreground()))
+                                    .child(
+                                        wall.source_name
+                                            .clone()
+                                            .unwrap_or_else(|| wall.detail.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(ui::button(
+                                        "choose-wallpaper",
+                                        Variant::Outline,
+                                        Some(Icon::FolderOpen),
+                                        "Choose image",
+                                        cx.listener(|ws, _, _, cx| ws.choose_wallpaper(cx)),
+                                    ))
+                                    .when(self.extras.image.is_some(), |d| {
+                                        d.child(ui::button(
+                                            "clear-wallpaper",
+                                            Variant::Ghost,
+                                            Some(Icon::Trash2),
+                                            "Clear",
+                                            cx.listener(|ws, _, _, cx| ws.apply_extra(Action::Clear, cx)),
+                                        ))
+                                    }),
+                            ),
+                    );
+                if self.extras.image.is_some() {
+                    let mut looks = div().flex().flex_wrap().gap_2();
+                    for &look in LOOKS {
+                        looks = looks.child(ui::select_chip(
+                            look,
+                            look,
+                            wall.filter == look,
+                            cx.listener(move |ws, _, _, cx| ws.apply_extra(Action::Look(look), cx)),
+                        ));
+                    }
+                    wall_box = wall_box.child(looks);
+                }
+                card = card.child(wall_box);
+            }
+
+            list = list.child(card);
         }
-        body
+
+        body.child(list)
     }
 }
 
