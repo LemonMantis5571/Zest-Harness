@@ -1,6 +1,6 @@
 ---
 title: Workbench panel
-summary: A project page with Changes, Files, Jobs, Checkpoints, Delegation, and Worktrees tabs, including checkpoint forks and a read-only file browser.
+summary: A project page with Changes, Files, Jobs, Checkpoints, Delegation, and Worktrees tabs, including checkpoint forks and rewind and a read-only file browser.
 paths:
   - crates/desktop/src/workspace.rs
   - crates/desktop/src/workspace/chrome.rs
@@ -38,8 +38,9 @@ verify:
   refused before canonicalizing, and the canonical path must stay under the root.
 - Jobs lists the active chat's background jobs as "<kind> · <status> ·
   <label>", or "No background jobs for this chat.", with a Copy button.
-- Checkpoints lists the active chat's checkpoints newest first, each a "Fork
-  from <label> · <preview>" button that opens the fork as a new chat. **Compact
+- Checkpoints lists the active chat's checkpoints newest first, each with
+  **Fork** (opens a new chat from that point) and **Rewind** (restores this chat
+  to that point after a confirmation; see [threads-and-history](threads-and-history.md)). **Compact
   context** appears when the chat is idle and has agent history; it starts a
   compaction and returns to the chat. See
   [threads-and-history](threads-and-history.md).
@@ -49,7 +50,7 @@ verify:
   [worktree-chats](worktree-chats.md).
 - The desktop app does not have the old Activity tab (provider state, subagent
   and tool task list, the `git diff --check` workspace check), the Outline tab,
-  checkpoint rewind, or jumping from a delegation job in the sidebar to its card.
+  or jumping from a delegation job in the sidebar to its card.
 
 ## How it works
 1. `chrome.rs` defines the tabs in `WORKBENCH` and draws them in `page_frame`.

@@ -266,6 +266,7 @@ impl Root {
         cx.subscribe(&side_input, |this, _, ev: &ComposerEvent, cx| match ev {
             ComposerEvent::Send { text, .. } => this.ask_side(text, cx),
             ComposerEvent::Stop => this.side.cancel_current(),
+            ComposerEvent::Navigate(_) => {}
         }).detach();
         cx.subscribe(&decision_input, |this, _, ev: &ComposerEvent, cx| {
             if let ComposerEvent::Send { text, .. } = ev {
@@ -283,6 +284,7 @@ impl Root {
                 }
             }
             ComposerEvent::Stop => this.stop(cx),
+            ComposerEvent::Navigate(_) => {}
         })
         .detach();
 
