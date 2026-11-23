@@ -17,6 +17,8 @@ mod toasts;
 mod palette;
 mod mcp;
 mod providers;
+mod background;
+mod advisor;
 use toasts::ToastKind;
 #[path = "workspace_test.rs"]
 mod workspace_test;
@@ -43,6 +45,7 @@ enum Panel {
     Search,
     Settings,
     Providers,
+    Advisor,
     Commands,
     Mcp,
     Files,
@@ -133,9 +136,12 @@ pub struct Workspace {
     delete_confirm: Option<String>,
     /// Chats whose turn finished or failed while they were not on screen, until opened.
     unread: std::collections::HashSet<String>,
+    /// Delegation card statuses at the last check, for alerting on changes; `None` before the first.
+    delegation_seen: Option<HashMap<String, zest_coordinator::DelegationStatus>>,
     palette: Option<palette::Palette>,
     mcp_page: mcp::McpPage,
     providers_page: providers::ProvidersPage,
+    advisor_draft: advisor::AdvisorDraft,
     report: String,
     report_epoch: usize,
     login: Option<zest_core::auth::LoginProcess>,
@@ -163,6 +169,7 @@ const PAGES: &[(Panel, &str)] = &[
     (Panel::Search, "Find chats"),
     (Panel::Providers, "Providers"),
     (Panel::Settings, "Model & permissions"),
+    (Panel::Advisor, "Advisor"),
     (Panel::Commands, "Skills & MCP"),
     (Panel::Mcp, "MCP servers"),
     (Panel::Files, "Files"),
@@ -256,9 +263,11 @@ impl Workspace {
             rewind_confirm: None,
             delete_confirm: None,
             unread: Default::default(),
+            delegation_seen: None,
             palette: None,
             mcp_page: mcp::McpPage::default(),
             providers_page: providers::ProvidersPage::default(),
+            advisor_draft: advisor::AdvisorDraft::default(),
             report: String::new(),
             report_epoch: 0,
             login: None,
@@ -281,6 +290,8 @@ impl Workspace {
         ws.new_chat(window, cx);
         ws.load_history(cx);
         ws.load_free_chats(cx);
+        ws.watch_jobs(cx);
+        ws.check_delegations(cx);
         // Nothing can answer a chat yet: open on the page that fixes that.
         if !ws.project.demo && ws.project.config.providers.is_empty() {
             ws.panel = Panel::Providers;
@@ -828,6 +839,7 @@ impl Workspace {
             Panel::Extras => self.load_extras(cx),
             Panel::Mcp => self.load_mcp(cx),
             Panel::Providers => self.load_providers(cx),
+            Panel::Advisor => self.load_advisor(cx),
             Panel::Delegation => self.load_board(true, cx),
             Panel::Jobs => {
                 let thread = &self.active;
@@ -989,6 +1001,7 @@ impl Workspace {
             Panel::Extras => body = body.child(self.extras_body(cx)),
             Panel::Mcp => body = body.child(self.mcp_body(cx)),
             Panel::Providers => body = body.child(self.providers_body(cx)),
+            Panel::Advisor => body = body.child(self.advisor_body(cx)),
             Panel::Search => {
                 let query = self.filter.read(cx).text.to_lowercase();
                 body = body.child(self.filter.clone());

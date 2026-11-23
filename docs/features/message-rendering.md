@@ -15,6 +15,8 @@ verify:
   - npm run gpui -- --selftest --agent
   - npm run gpui -- --langs
   - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- native_view::tests
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- md::image_tests
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- view::image_source_tests
 ---
 
 # Message rendering
@@ -28,7 +30,8 @@ verify:
 - Assistant text renders as GitHub-flavoured Markdown: headings, paragraphs, block quotes, ordered and bullet lists (nested), task-list boxes, tables, strikethrough, rules, inline code and fenced code. Raw HTML is shown as text. User bubbles are plain text.
 - Only `http(s)` links are followed: clicking one opens the system browser. Other schemes are coloured like links but do nothing. There are no link-preview cards.
 - Fenced code shows an uppercase language chip ("TEXT" when the fence has no tag) and a "Copy code" button, and scrolls horizontally instead of wrapping. Highlighting uses syntect: the default pack, or the larger bat/two-face pack with `--features grammars`. A few fence spellings map to syntect tokens (`csharp`, `docker`, `kotlin`, `typescript`, `sh`/`shell`/`zsh`, `ps1`, `rs`, `py`); TypeScript, TSX and JSX fall back to the JavaScript grammar and PowerShell to Bash. A tag with no grammar keeps its label and renders uncoloured. Code colours follow the theme's brightness for newly rendered messages.
-- The desktop app does not render Mermaid diagrams, math, or images: a Mermaid fence is a code block and a Markdown image shows its alt text as a link.
+- Markdown images (`![alt](src)`) render inline when they are local raster files (an absolute path or a `file://` URL) or raster `data:` URLs (PNG, JPEG, GIF, WebP, BMP), up to 560 x 420 px, with the alt text as their accessible name. An http(s) image is not fetched: it shows "View image: <alt> (<host>)", which opens it in the browser. Relative paths, SVG and other schemes show `[image: <alt>]`. An image alone in its paragraph or list item replaces its alt-text line; one inside other text follows that text.
+- The desktop app does not render Mermaid diagrams or math: a Mermaid fence is a code block and math stays as its source text.
 - Text in any row can be selected by dragging, across messages and off-screen rows, and copied with Ctrl+C. Collapsed rows are left out of the copy.
 - A streaming answer shows a block cursor at its end. Each finished answer shows "Copy message" (the rendered text of its blocks, separated by blank lines, not the raw Markdown source) and "Download message" (a save dialog starting in the project folder with `zest-reply.md`; `.md` is added when the name has no extension). Neither shows while the answer streams.
 - "Zest" labels the first row of each assistant turn. The transcript is a centered 720 px column that follows the newest row until the user scrolls up.

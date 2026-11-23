@@ -51,9 +51,9 @@ verify:
   (Exec risk) only see jobs owned by the calling chat's thread id.
 - The desktop's Workbench **Jobs** tab lists the active chat's jobs (kind,
   status, label) as of when the tab opened. It cannot read a job's output or
-  stop it; the agent's job tools can. The desktop does not inject a notice
-  into the owning chat or notify the user when a job finishes; the agent sees
-  the ending only through `job_list` or `job_output`.
+  stop it; the agent's job tools can. A job that ends shows a toast (failures
+  stay until dismissed). The desktop does not inject a notice into the owning
+  chat; the agent sees the ending only through `job_list` or `job_output`.
 - `[tools.bash] enabled = false` removes `bash` but keeps the job tools.
 
 ## How it works
@@ -77,8 +77,10 @@ verify:
    Completed, Killed, Failed) and a broadcast of `JobEvent`s.
 6. Desktop: opening the Jobs tab (`Panel::Jobs` in
    `crates/desktop/src/workspace.rs`) calls `JobRegistry::list` with the active
-   chat's thread id and renders one line per snapshot. Nothing in the desktop
-   subscribes to `JobEvent`s.
+   chat's thread id and renders one line per snapshot. `Workspace::watch_jobs`
+   (`workspace/background.rs`) subscribes to `JobEvent`s and toasts each completed job
+   of this project: "Job finished: <label>", "Job failed: <label> (<detail>)" (kept
+   until dismissed) or "Job stopped: <label>".
 
 ## Verify
 Unit tests cover `classify`, argv parsing, timeouts, and job ownership.

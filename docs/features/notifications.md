@@ -4,6 +4,7 @@ summary: Zest pings only when something needs the user and they are not looking 
 paths:
   - crates/desktop/src/workspace.rs
   - crates/desktop/src/workspace/toasts.rs
+  - crates/desktop/src/workspace/background.rs
   - crates/desktop/src/main.rs
   - crates/desktop/src/native_view.rs
 tests:
@@ -26,7 +27,7 @@ verify:
 - Errors and other messages for the chat on screen go to the notice card above the composer, which stays until dismissed.
 - Workspace-level messages are toasts in the same corner, below the alerts: errors (a chat that cannot be loaded, a failed save or sign-in) stay until dismissed, confirmations ("Signed in.") leave after 3 s, and other notices and warnings after 5 s. The browser sign-in instructions stay until dismissed. A message that repeats while its toast is showing adds "×2" and restarts its timer instead of stacking a copy. At most five toasts are kept; the oldest goes first.
 - Toasts are announced to screen readers: errors and alerts with the alert role, the rest as status.
-- The desktop app does not notify about background jobs or delegation outcomes; those are visible in Workbench > Jobs and the Delegation board. It does not ask for notification permission itself; the OS decides whether a notification is shown.
+- Background work toasts too: a finished, failed or stopped job of this project, and a delegation card that becomes ready to apply, needs changes, is blocked, fails or does not apply cleanly (see [shell-commands-and-jobs](shell-commands-and-jobs.md) and [delegation](delegation.md)). These are toasts only, not system notifications. It does not ask for notification permission itself; the OS decides whether a notification is shown.
 
 ## How it works
 - `main.rs` `Root::apply` emits `workspace::ChatAttention` events: `Approval` or `Question` when an `EvKind::Card` arrives, `Failed` on `EvKind::Failure`, and `Ready` on `End` when the turn ran at least 10 s and was not stopped, cancelled or compacting.

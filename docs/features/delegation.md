@@ -176,8 +176,11 @@ Entry points:
    `artifact_page` with **Previous page**/**Next page**. Coordinator events
    reach the window through `BoardNotifier`, which only bumps a watch channel;
    the board reloads (without reconcile) while the Delegation tab is open. On
-   quit, the app calls `shutdown` for a project whose lock it holds. The
-   desktop does not raise notifications for delegation events, does not list
+   quit, the app calls `shutdown` for a project whose lock it holds. Every
+   notification also runs `Workspace::check_delegations` (`workspace/background.rs`),
+   which compares card statuses with the last check and toasts a card that moved to
+   ready to apply (kept until dismissed), changes requested, blocked, failed or apply
+   conflict, even with the board closed. The desktop does not list
    jobs in the sidebar, and cannot edit a card after creating it
    (`update_job`).
 2. **`delegate_feature` tool** (`FeatureDelegator`). It has Exec risk and the
