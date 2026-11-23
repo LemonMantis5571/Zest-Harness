@@ -886,6 +886,8 @@ impl Root {
         let copy_text = answer.then(|| m.doc.units.iter().map(|u| u.text.as_ref()).collect::<Vec<_>>().join("
 
 "));
+        // A sent message can be taken back into the composer while no turn runs.
+        let editable = (m.user && self.native.is_some() && !self.turn_active).then(|| self.message_at(ix)).flatten();
         let el = div()
             .w_full()
             .flex()
@@ -911,6 +913,16 @@ impl Root {
                         )
                     })
                     .child(el)
+                    .when_some(editable, |d, id| {
+                        d.child(
+                            div().flex().justify_end().opacity(0.7).child(ui::icon_button(
+                                ("edit-message", ix),
+                                theme::Icon::Pencil,
+                                "Edit message",
+                                cx.listener(move |root, _, _, cx| root.edit_message(&id, cx)),
+                            )),
+                        )
+                    })
                     .when_some(copy_text, |d, text| {
                         let saved = text.clone();
                         d.child(

@@ -129,6 +129,10 @@ pub struct Workspace {
     toasts: toasts::Toasts,
     /// The checkpoint whose Rewind is waiting for confirmation.
     rewind_confirm: Option<String>,
+    /// The chat whose Delete is waiting for confirmation.
+    delete_confirm: Option<String>,
+    /// Chats whose turn finished or failed while they were not on screen, until opened.
+    unread: std::collections::HashSet<String>,
     palette: Option<palette::Palette>,
     mcp_page: mcp::McpPage,
     providers_page: providers::ProvidersPage,
@@ -250,6 +254,8 @@ impl Workspace {
             focus: cx.focus_handle(),
             toasts: toasts::Toasts::default(),
             rewind_confirm: None,
+            delete_confirm: None,
+            unread: Default::default(),
             palette: None,
             mcp_page: mcp::McpPage::default(),
             providers_page: providers::ProvidersPage::default(),
@@ -459,6 +465,9 @@ impl Workspace {
                 if route == AlertRoute::Quiet {
                     return;
                 }
+                if matches!(event, ChatAttention::Ready | ChatAttention::Failed) {
+                    ws.unread.insert(chat_id.clone());
+                }
                 let native = chat.read(cx).native.as_ref().unwrap();
                 let title = native
                     .thread
@@ -541,6 +550,7 @@ impl Workspace {
             layout.open(&self.active, id);
         }
         self.alerts.retain(|(owner, _, _)| owner != id);
+        self.unread.remove(id);
         self.active = id.into();
     }
 
@@ -551,6 +561,41 @@ impl Workspace {
             self.add_pane(Direction::Across, window, cx);
         }
         self.panel = Panel::Chat;
+        cx.notify();
+    }
+
+    /// Deletes a chat after the user confirmed it: its file, checkpoints, spilled tool output
+    /// and search entries go (`ThreadStore::delete`), it leaves the sidebar, alerts and split
+    /// layout, and the newest remaining chat (or a new one) opens. Refused while its turn runs.
+    fn delete_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_confirm = None;
+        if self.chats.get(id).is_some_and(|chat| chat.read(cx).turn_active) {
+            self.toast(ToastKind::Info, "Stop the running turn before deleting this chat.", cx);
+            return;
+        }
+        let title = self.history.iter().find(|row| row.id == id).map(chat_title);
+        if let Err(e) = self.project.store.delete(id) {
+            self.toast(ToastKind::Error, e.to_string(), cx);
+            return;
+        }
+        if self.layout.as_ref().is_some_and(|layout| layout.ids().iter().any(|pane| pane == id)) {
+            self.close_pane(id, window, cx);
+        }
+        self.chats.remove(id);
+        self.draft_ids.retain(|draft| draft != id);
+        self.alerts.retain(|(owner, _, _)| owner != id);
+        self.unread.remove(id);
+        let mut history = (*self.history).clone();
+        history.retain(|row| row.id != id);
+        self.history = Arc::new(history);
+        if self.active == id || !self.chats.contains_key(&self.active) {
+            match self.history.first().map(|row| row.id.clone()) {
+                Some(next) => self.open(&next, window, cx),
+                None => self.new_chat(window, cx),
+            }
+        }
+        let name = title.unwrap_or_else(|| "the chat".into());
+        self.toast(ToastKind::Success, format!("Deleted {name}."), cx);
         cx.notify();
     }
 

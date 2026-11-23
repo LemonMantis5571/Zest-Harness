@@ -94,6 +94,7 @@ impl Workspace {
                                 chrome::age(row.updated_at, now),
                                 false,
                                 false,
+                                false,
                                 cx.listener(move |ws, _, _, cx| ws.open_free_chat(id.clone(), cx)),
                             )
                         })),
