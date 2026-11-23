@@ -272,7 +272,7 @@ impl Workspace {
             let enabled = row.enabled;
             actions = actions
                 .child(ui::switch(SharedString::from(format!("mcp-on-{id}")), format!("Use {id}"), enabled, cx.listener(move |ws, on: &bool, _, cx| ws.switch_mcp(switch_id.clone(), *on, cx))))
-                .child(ui::button(SharedString::from(format!("mcp-check-{id}")), Variant::Outline, Some(Icon::RefreshCw), if busy { "Checking…" } else { "Check" }, cx.listener(move |ws, _, _, cx| {
+                .child(ui::button(SharedString::from(format!("mcp-check-{id}")), Variant::Outline, Some(if busy { Icon::LoaderCircle } else { Icon::RefreshCw }), if busy { "Checking…" } else { "Check" }, cx.listener(move |ws, _, _, cx| {
                     if ws.mcp_page.busy.is_none() {
                         ws.check_mcp(check_id.clone(), cx);
                     }

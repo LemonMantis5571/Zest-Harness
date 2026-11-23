@@ -502,7 +502,31 @@ pub fn render_assistant(doc: &Rc<Doc>, msg: usize, shared: &SharedRef, live: boo
                 .text_size(px(15.))
                 .line_height(px(25.))
                 .children(render_blocks(doc, msg, shared))
-                .when(live, |d| d.child(div().w(px(6.)).h(px(16.)).bg(crate::theme::alpha(fg(), 0.7)))),
+                .when(live, |d| {
+                    d.child(
+                        div()
+                            .mt(px(4.))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(crate::theme::zest_pulse(("stream-zest-pulse", msg), 12.))
+                            .child(
+                                div()
+                                    .w(px(6.))
+                                    .h(px(16.))
+                                    .rounded(px(1.))
+                                    .bg(crate::theme::alpha(fg(), 0.7))
+                                    .with_animation(
+                                        ("stream-cursor", msg),
+                                        Animation::new(std::time::Duration::from_millis(950))
+                                            .repeat_synced()
+                                            .with_easing(pulsating_between(0.18, 0.85)),
+                                        |el, alpha| el.bg(crate::theme::alpha(fg(), alpha)),
+                                    ),
+                            ),
+                    )
+                }),
         )
         .into_any_element()
 }
@@ -518,7 +542,7 @@ pub enum ToolStatus {
 pub enum TraceKind {
     Recorded { label: String, status: String },
     Thinking { live: bool, secs: f32 },
-    Tool { name: String, id: String, status: ToolStatus, secs: f32 },
+    Tool { name: String, status: ToolStatus, secs: f32 },
 }
 
 /// One collapsible row of an agent turn (reasoning or a tool call). Its body is an ordinary `Doc`, so
@@ -529,6 +553,8 @@ pub struct Trace {
     /// One-line description shown in the header (first line of the tool result).
     pub title: String,
     pub open: bool,
+    /// Set once the user clicks the row so auto-folding a finished thinking block respects their choice.
+    pub user_toggled: bool,
 }
 
 pub fn render_trace(
@@ -539,7 +565,7 @@ pub fn render_trace(
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     use crate::theme::{self, Icon};
-    let (label, badge, badge_color, glyph) = match &tr.kind {
+    let (label, badge, badge_color, glyph, running) = match &tr.kind {
         TraceKind::Recorded { label, status } => {
             let failed = matches!(status.as_str(), "error" | "failed");
             (
@@ -547,10 +573,11 @@ pub fn render_trace(
                 status.clone(),
                 if failed { theme::destructive() } else { muted() },
                 if failed { Icon::X } else { trace_icon(label) },
+                status == "running",
             )
         }
-        TraceKind::Thinking { live: true, .. } => ("Thinking".to_string(), String::new(), muted(), Icon::Brain),
-        TraceKind::Thinking { secs, .. } => ("Thought".to_string(), format!("for {secs:.0}s"), muted(), Icon::Brain),
+        TraceKind::Thinking { live: true, .. } => ("Thinking".to_string(), String::new(), muted(), Icon::Brain, true),
+        TraceKind::Thinking { secs, .. } => ("Thought".to_string(), format!("for {:.0}s", secs.max(1.0)), muted(), Icon::Brain, false),
         TraceKind::Tool { name, status, secs, .. } => (
             name.clone(),
             match status {
@@ -565,12 +592,30 @@ pub fn render_trace(
                 ToolStatus::Error => Icon::X,
                 _ => trace_icon(name),
             },
+            *status == ToolStatus::Running,
         ),
     };
     let failed = badge_color == theme::destructive();
+    let is_thinking = matches!(tr.kind, TraceKind::Thinking { .. });
     let has_body = !doc.units.is_empty();
     let sh = shared.clone();
     let group = SharedString::from(format!("trace-{msg}"));
+    let aria = format!("{label} {}", tr.title);
+    let title_el = if running {
+        div()
+            .flex_none()
+            .child(theme::shimmer_text(("trace-shimmer", msg), label, muted(), fg(), 2000))
+            .into_any_element()
+    } else {
+        div().flex_none().child(label).into_any_element()
+    };
+    let chevron = theme::icon(Icon::ChevronRight, 16.)
+        .with_transformation(Transformation::rotate(radians(if tr.open {
+            std::f32::consts::FRAC_PI_2
+        } else {
+            0.0
+        })))
+        .group_hover(group.clone(), |s| s.text_color(rgb(fg())));
     div()
         .w_full()
         .relative()
@@ -590,7 +635,7 @@ pub fn render_trace(
             div()
                 .id(("trace", msg))
                 .group(group.clone())
-                .role(Role::Button).aria_label(format!("{label} {}", tr.title)).aria_expanded(tr.open).tab_index(0)
+                .role(Role::Button).aria_label(aria).aria_expanded(tr.open).tab_index(0)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -602,36 +647,32 @@ pub fn render_trace(
                 .child(
                     theme::icon(glyph, 16.)
                         .text_color(rgb(if failed { theme::destructive() } else { muted() }))
-                        .group_hover(group.clone(), |s| s.text_color(rgb(fg()))),
+                        .group_hover(group, |s| s.text_color(rgb(fg()))),
                 )
-                .child(div().flex_none().child(label))
+                .child(title_el)
                 .child(div().min_w_0().truncate().font_family(MONO).text_size(px(13.)).child(tr.title.clone()))
                 .child(div().flex_none().text_size(px(12.)).text_color(rgb(badge_color)).child(badge))
-                .when(has_body, |d| {
-                    d.child(
-                        theme::icon(if tr.open { Icon::ChevronDown } else { Icon::ChevronRight }, 16.)
-                            .group_hover(group, |s| s.text_color(rgb(fg()))),
-                    )
-                })
+                .when(has_body, |d| d.child(chevron))
                 .on_click(on_toggle),
         )
         .when(tr.open && has_body, |d| {
-            d.child(
-                div()
-                    .ml(px(7.))
-                    .mt_2()
-                    .mb_1()
-                    .pl_4()
-                    .pr_1()
-                    .border_l_1()
-                    .border_color(rgb(border()))
-                    .flex()
-                    .flex_col()
-                    .text_size(px(13.))
-                    .text_color(rgb(muted()))
-                    .line_height(px(21.))
-                    .children(render_blocks(doc, msg, shared)),
-            )
+            let body = div()
+                .id(("trace-body", msg))
+                .ml(px(7.))
+                .mt_2()
+                .mb_1()
+                .pl_4()
+                .pr_1()
+                .border_l_1()
+                .border_color(rgb(border()))
+                .flex()
+                .flex_col()
+                .text_size(px(13.))
+                .text_color(rgb(muted()))
+                .line_height(px(21.))
+                .when(is_thinking, |b| b.max_h(px(240.)).overflow_y_scroll())
+                .children(render_blocks(doc, msg, shared));
+            d.child(body)
         })
         .into_any_element()
 }

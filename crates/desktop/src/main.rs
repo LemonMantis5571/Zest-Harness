@@ -172,6 +172,8 @@ struct Root {
     live_text: String,
     /// Reserve the turn before sending to Tokio, including the gap before Start arrives.
     turn_active: bool,
+    turn_started_at: Option<Instant>,
+    turn_clock_task: Option<Task<()>>,
     stop_requested: bool,
     pending: VecDeque<QueuedPrompt>,
     next_prompt_id: usize,
@@ -211,7 +213,7 @@ impl Root {
                 msgs.push(match i % 6 {
                     0 => Msg::user(&seed::user_text(i), 0),
                     1 => Msg::trace(
-                        Trace { kind: TraceKind::Thinking { live: false, secs: 2. + (i % 7) as f32 }, title: String::new(), open: false },
+                        Trace { kind: TraceKind::Thinking { live: false, secs: 2. + (i % 7) as f32 }, title: String::new(), open: false, user_toggled: false },
                         Doc::plain(&seed::think_text(i)),
                     ),
                     2..=4 => {
@@ -219,9 +221,10 @@ impl Root {
                         let status = if t.is_error { ToolStatus::Error } else { ToolStatus::Ok };
                         Msg::trace(
                             Trace {
-                                kind: TraceKind::Tool { name: t.name.to_string(), id: format!("h{i}"), status, secs: t.delay_ms as f32 / 40. },
+                                kind: TraceKind::Tool { name: t.name.to_string(), status, secs: t.delay_ms as f32 / 40. },
                                 title: first_line(&t.summary),
                                 open: false,
+                                user_toggled: false,
                             },
                             tool_body(&t.summary, t.diff.as_deref()),
                         )
@@ -303,6 +306,8 @@ impl Root {
             }
             let _ = this.update(cx, |root, cx| {
                 root.turn_active = false;
+                root.turn_started_at = None;
+                root.turn_clock_task = None;
                 root.stop_requested = false;
                 cx.notify();
             });
@@ -332,6 +337,8 @@ impl Root {
             live: None,
             live_text: String::new(),
             turn_active: false,
+            turn_started_at: None,
+            turn_clock_task: None,
             stop_requested: false,
             pending: VecDeque::new(),
             next_prompt_id: 0,
@@ -383,6 +390,7 @@ impl Root {
         let prompt = self.pending.pop_front().unwrap();
         if self.editing == prompt.saved_id { self.editing = None; }
         self.turn_active = true;
+        self.turn_started_at = Some(Instant::now());
         self.native_start = native_start;
         self.push(Msg::user(&prompt.text, prompt.images));
         self.list.set_follow_mode(FollowMode::Tail);
@@ -427,6 +435,7 @@ impl Root {
                 EvKind::Start => {
                     // The answer row is pushed on the first text token, after any reasoning and tool rows.
                     self.turn_active = true;
+                    self.turn_started_at.get_or_insert_with(Instant::now);
                     self.live = None;
                     self.think = None;
                     self.tools.clear();
@@ -442,7 +451,13 @@ impl Root {
                 }
                 EvKind::Thinking(t) => {
                     if self.think.is_none() {
-                        let row = Trace { kind: TraceKind::Thinking { live: true, secs: 0. }, title: String::new(), open: false };
+                        // Match pre-GPUI ThinkingReasoning: open while streaming, auto-fold when settled.
+                        let row = Trace {
+                            kind: TraceKind::Thinking { live: true, secs: 0. },
+                            title: String::new(),
+                            open: true,
+                            user_toggled: false,
+                        };
                         let ix = self.push(Msg::trace(row, Doc::default()));
                         self.think = Some((ix, String::new(), Instant::now()));
                     }
@@ -459,9 +474,10 @@ impl Root {
                 EvKind::ToolStart { id, name } => {
                     self.finish_think();
                     let row = Trace {
-                        kind: TraceKind::Tool { name, id: id.clone(), status: ToolStatus::Running, secs: 0. },
+                        kind: TraceKind::Tool { name, status: ToolStatus::Running, secs: 0. },
                         title: String::new(),
                         open: false,
+                        user_toggled: false,
                     };
                     let ix = self.push(Msg::trace(row, Doc::default()));
                     self.tools.push((id, ix, Instant::now()));
@@ -497,6 +513,8 @@ impl Root {
                     self.refresh_git_stats(cx);
                     self.finish_think();
                     self.turn_active = false;
+                    self.turn_started_at = None;
+                    self.turn_clock_task = None;
                     self.turns_done += 1;
                     if let Some(ix) = self.live.take() {
                         self.reparse(ix);
@@ -533,7 +551,8 @@ impl Root {
         }
     }
 
-    /// Closes the running reasoning row: final text and duration, header relabelled "Thought".
+    /// Closes the running reasoning row: final text and duration, header relabelled "Thought",
+    /// and auto-folds unless the user explicitly toggled it.
     fn finish_think(&mut self) {
         if let Some((ix, buf, started)) = self.think.take() {
             let secs = started.elapsed().as_secs_f32();
@@ -541,6 +560,9 @@ impl Root {
             m.doc = Rc::new(Doc::plain(&buf));
             if let Some(tr) = m.trace.as_mut() {
                 tr.kind = TraceKind::Thinking { live: false, secs };
+                if !tr.user_toggled {
+                    tr.open = false;
+                }
             }
             self.list.remeasure_items(ix..ix + 1);
         }
@@ -549,9 +571,61 @@ impl Root {
     fn toggle_trace(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(tr) = self.msgs.get_mut(ix).and_then(|m| m.trace.as_mut()) {
             tr.open = !tr.open;
+            tr.user_toggled = true;
             self.list.remeasure_items(ix..ix + 1);
             cx.notify();
         }
+    }
+
+    /// Ticks once per second while a native turn is running so `WorkingIndicator`
+    /// keeps its elapsed clock live, and drops immediately when the turn ends.
+    fn sync_turn_clock(&mut self, cx: &mut Context<Self>) {
+        if !(self.turn_active && self.native.is_some()) {
+            self.turn_clock_task = None;
+            return;
+        }
+        self.turn_started_at.get_or_insert_with(Instant::now);
+        if self.turn_clock_task.is_some() {
+            return;
+        }
+        self.turn_clock_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let keep_going = this
+                    .update(cx, |r, cx| {
+                        if !r.turn_active {
+                            r.turn_clock_task = None;
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Short description of what the running turn is doing right now, for `WorkingIndicator`.
+    fn current_working_action(&self) -> Option<String> {
+        if self.stop_requested {
+            return None;
+        }
+        if let Some((_, ix, _)) = self.tools.last()
+            && let Some(Trace { kind: TraceKind::Tool { name, .. }, .. }) =
+                self.msgs.get(*ix).and_then(|m| m.trace.as_ref())
+        {
+            return Some(name.replace('_', " "));
+        }
+        if self.think.is_some() {
+            return Some("Thinking".to_string());
+        }
+        if self.compacting {
+            return Some("Compacting context".to_string());
+        }
+        None
     }
 
     fn reparse(&mut self, ix: usize) {
@@ -881,12 +955,14 @@ impl Root {
             })).into_any_element()
         };
         // Lay the row out as a centered column, "Zest" above each
-        // assistant turn, and copy under a finished answer.
+        // assistant turn, and copy/download/retry/fork under a finished answer.
         let first_of_turn = !m.user && (ix == 0 || self.msgs.get(ix - 1).is_some_and(|p| p.user));
         let answer = !m.user && m.trace.is_none() && self.live != Some(ix);
-        let copy_text = answer.then(|| m.doc.units.iter().map(|u| u.text.as_ref()).collect::<Vec<_>>().join("
-
-"));
+        let is_last_answer = answer && ix + 1 == self.msgs.len();
+        let copy_text = answer.then(|| m.doc.units.iter().map(|u| u.text.as_ref()).collect::<Vec<_>>().join("\n\n"));
+        let user_copy_text = m.user.then(|| m.doc.units.iter().map(|u| u.text.as_ref()).collect::<Vec<_>>().join("\n\n"));
+        let can_retry = is_last_answer && self.native.is_some() && !self.turn_active;
+        let can_fork = answer && self.native.is_some() && !self.turn_active;
         // A sent message can be taken back into the composer while no turn runs.
         let editable = (m.user && self.native.is_some() && !self.turn_active).then(|| self.message_at(ix)).flatten();
         let el = div()
@@ -914,14 +990,31 @@ impl Root {
                         )
                     })
                     .child(el)
-                    .when_some(editable, |d, id| {
+                    .when(user_copy_text.is_some() || editable.is_some(), |d| {
                         d.child(
-                            div().flex().justify_end().opacity(0.7).child(ui::icon_button(
-                                ("edit-message", ix),
-                                theme::Icon::Pencil,
-                                "Edit message",
-                                cx.listener(move |root, _, _, cx| root.edit_message(&id, cx)),
-                            )),
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(2.))
+                                .opacity(0.7)
+                                .when_some(user_copy_text, |row, text| {
+                                    row.child(ui::icon_button(
+                                        ("copy-user-message", ix),
+                                        theme::Icon::Copy,
+                                        "Copy message",
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                                        },
+                                    ))
+                                })
+                                .when_some(editable, |row, id| {
+                                    row.child(ui::icon_button(
+                                        ("edit-message", ix),
+                                        theme::Icon::Pencil,
+                                        "Edit message",
+                                        cx.listener(move |root, _, _, cx| root.edit_message(&id, cx)),
+                                    ))
+                                }),
                         )
                     })
                     .when_some(copy_text, |d, text| {
@@ -939,7 +1032,23 @@ impl Root {
                                     theme::Icon::Download,
                                     "Download message",
                                     cx.listener(move |root, _, _, cx| root.save_message(saved.clone(), cx)),
-                                )),
+                                ))
+                                .when(can_retry, |row| {
+                                    row.child(ui::icon_button(
+                                        ("retry-message", ix),
+                                        theme::Icon::RotateCcw,
+                                        "Retry response",
+                                        cx.listener(move |root, _, _, cx| root.retry_turn(ix, cx)),
+                                    ))
+                                })
+                                .when(can_fork, |row| {
+                                    row.child(ui::icon_button(
+                                        ("fork-message", ix),
+                                        theme::Icon::GitFork,
+                                        "Fork conversation",
+                                        cx.listener(|_, _, _, cx| cx.emit(native_view::ForkFromChat)),
+                                    ))
+                                }),
                         )
                     }),
             )
@@ -966,7 +1075,12 @@ impl Render for Root {
             s.rows.clear();
         }
         let following = self.list.is_following_tail();
+        self.sync_turn_clock(cx);
         let busy = self.turn_active;
+        let working_elapsed = busy
+            .then(|| self.turn_started_at.map(|t| theme::elapsed_label(t.elapsed().as_secs())))
+            .flatten();
+        let working_action = busy.then(|| self.current_working_action()).flatten();
         let n = self.msgs.len();
         let list = self.list.clone();
         div()
@@ -1044,21 +1158,54 @@ impl Render for Root {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .when(self.native.is_some() && busy, |d| d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_1()
-                                .text_size(px(12.))
-                                .text_color(rgb(theme::muted_foreground()))
-                                .child(theme::icon(theme::Icon::LoaderCircle, 14.).text_color(rgb(theme::primary())))
-                                .child(if self.stop_requested { "Stopping…" } else { "Working…" }),
-                        ))
+                        .when(self.native.is_some() && busy, |d| {
+                            let label = if self.stop_requested { "Stopping" } else { "Working" };
+                            d.child(
+                                div()
+                                    .flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_1()
+                                    .min_h(px(24.))
+                                    .text_size(px(12.))
+                                    .child(theme::working_dots("turn-working-dots"))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(theme::shimmer_text(
+                                                "turn-working-shimmer",
+                                                label,
+                                                theme::muted_foreground(),
+                                                theme::foreground(),
+                                                1400,
+                                            )),
+                                    )
+                                    .when_some(working_elapsed.clone(), |d, secs| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(rgb(theme::muted_foreground()))
+                                                .child(secs),
+                                        )
+                                    })
+                                    .when_some(working_action.clone(), |d, act| {
+                                        d.child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(rgb(theme::muted_foreground()))
+                                                .child(act),
+                                        )
+                                    }),
+                            )
+                        })
                         .when(!self.pending.is_empty(), |d| d.child(self.render_queue(cx)))
                         .when(self.native.is_some(), |d| d.child(self.native_controls(cx)))
                         .when(self.side.open, |d| d.child(self.render_side(cx)))
                         .children(self.branch_strip(cx))
+                        .children(self.slash_popup(cx))
                         .child(
                             div()
                                 .rounded(px(14.4))
@@ -1075,7 +1222,7 @@ impl Render for Root {
                                 .child(self.composer.clone())
                                 .when(self.native.is_some(), |d| d.child(self.composer_toolbar(cx))),
                         )
-                        .when(self.native.is_some(), |d| d.child(self.status_row())),
+                        .when(self.native.is_some(), |d| d.child(self.status_row(cx))),
                 ),
             )
     }

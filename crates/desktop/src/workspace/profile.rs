@@ -296,7 +296,7 @@ impl Workspace {
                     ),
             );
         let body = match &self.profile.data {
-            None => ui::hint("Loading activity…").into_any_element(),
+            None => ui::loading_row("profile-loading", "Loading activity…").into_any_element(),
             Some(Err(_)) => ui::hint("Could not load profile activity. Try again.").into_any_element(),
             Some(Ok(data)) => self.profile_stats(data, cx),
         };

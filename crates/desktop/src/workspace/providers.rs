@@ -168,7 +168,7 @@ impl Workspace {
                 actions = actions.child(ui::button(
                     SharedString::from(format!("provider-sign-in-{index}")),
                     Variant::Primary,
-                    None,
+                    busy.then_some(Icon::LoaderCircle),
                     if busy { "Signing in…" } else { "Sign in" },
                     cx.listener(move |ws, _, _, cx| ws.start_login_for(login.clone(), cx)),
                 ));
@@ -205,6 +205,19 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(
+                        div()
+                            .size(px(26.))
+                            .rounded(px(7.))
+                            .bg(rgb(theme::secondary()))
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .child(theme::provider_icon(&row.id, row.choice, 14.)),
+                    )
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(ui::pill(None, status))
                     .when(row.is_default, |d| d.child(ui::pill(Some(Icon::CircleCheck), "New chats")))

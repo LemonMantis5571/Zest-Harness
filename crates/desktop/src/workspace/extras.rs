@@ -193,7 +193,7 @@ impl Workspace {
                 }),
             ));
         if self.extras.busy {
-            body = body.child(crate::ui::hint("Loading add-ons…"));
+            body = body.child(crate::ui::loading_row("addons-loading", "Loading add-ons…"));
         } else if self.extras.rows.is_empty() {
             body = body.child(crate::ui::hint("No add-ons installed."));
         }

@@ -29,7 +29,7 @@ pub(super) const WORKBENCH: &[(Panel, &str, Icon)] = &[
     (Panel::Worktrees, "Worktrees", Icon::FolderGit2),
 ];
 
-/// Relative age as the sidebar prints it: "now", "45s", "6m", "8h", "2d".
+/// Relative age as the sidebar prints it: "now", "45s", "6m", "8h", "2d", "4mo".
 pub(super) fn age(then: u64, now: u64) -> String {
     let secs = now.saturating_sub(then);
     match secs {
@@ -37,7 +37,8 @@ pub(super) fn age(then: u64, now: u64) -> String {
         5..60 => format!("{secs}s"),
         60..3600 => format!("{}m", secs / 60),
         3600..86400 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / 86400),
+        86400..2_592_000 => format!("{}d", secs / 86400),
+        _ => format!("{}mo", secs / 2_592_000),
     }
 }
 
@@ -48,7 +49,8 @@ pub(super) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// One chat in the sidebar list.
+/// One chat in the sidebar list — clean typography, rounded pill when selected,
+/// glowing primary dot for unread, and subtle right-aligned age.
 pub(super) fn chat_row(
     id: SharedString,
     glyph: Icon,
@@ -60,8 +62,18 @@ pub(super) fn chat_row(
     click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let label = if unread { format!("{title}, unread") } else { title.clone() };
+    let show_icon = theme::compact_sidebar()
+        || matches!(
+            glyph,
+            Icon::Pin
+                | Icon::GitPullRequest
+                | Icon::Columns2
+                | Icon::CircleAlert
+                | Icon::LoaderCircle
+        );
+    let spin_id = SharedString::from(format!("chat-spin-{id}"));
     div()
-        .h(px(30.))
+        .h(px(32.))
         .py(px(1.))
         .child(
             div()
@@ -70,44 +82,71 @@ pub(super) fn chat_row(
                 .aria_label(SharedString::from(label))
                 .tab_index(0)
                 .cursor_pointer()
-                .relative()
-                .h(px(28.))
-                .pl(px(10.))
-                .pr_1()
+                .h(px(30.))
+                .px(px(10.))
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .rounded(px(6.))
+                .gap(px(8.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if selected {
+                    rgb(theme::border()).into()
+                } else {
+                    transparent_black()
+                })
                 .text_size(px(13.))
                 .text_color(rgb(theme::foreground()))
-                .when(selected, |d| {
-                    d.bg(rgb(theme::selected_row())).child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(4.))
-                            .bottom(px(4.))
-                            .w(px(2.))
-                            .rounded_full()
-                            .bg(rgb(theme::primary())),
-                    )
-                })
-                .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::secondary()))))
+                .when(selected, |d| d.bg(rgb(theme::secondary())))
+                .when(!selected, |d| d.hover(|s| s.bg(alpha(theme::secondary(), 0.7))))
                 .focus_visible(|s| s.bg(rgb(theme::accent())))
-                .child(
-                    icon(glyph, 16.)
-                        .text_color(if busy { rgb(theme::primary()) } else { rgb(theme::muted_foreground()) }),
-                )
-                .child(div().flex_1().min_w_0().truncate().when(unread, |d| d.font_weight(FontWeight::SEMIBOLD)).child(title))
-                .when(unread, |d| d.child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(theme::primary()))))
+                .when(show_icon, |d| {
+                    if glyph == Icon::LoaderCircle {
+                        d.child(theme::spinner(spin_id.clone(), 14.))
+                    } else {
+                        d.child(
+                            icon(glyph, 14.).text_color(if busy {
+                                rgb(theme::primary())
+                            } else {
+                                rgb(theme::muted_foreground())
+                            }),
+                        )
+                    }
+                })
                 .child(
                     div()
-                        .flex_none()
-                        .pr_1()
-                        .text_size(px(10.))
-                        .text_color(rgb(theme::muted_foreground()))
-                        .child(age),
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .when(selected || unread, |d| d.font_weight(FontWeight::MEDIUM))
+                        .child(title),
                 )
+                .when(unread, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .size(px(16.))
+                            .rounded_full()
+                            .bg(alpha(theme::primary(), 0.22))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(rgb(theme::primary())),
+                            ),
+                    )
+                })
+                .when(!unread && !age.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::faint()))
+                            .child(age),
+                    )
+                })
                 .on_click(click),
         )
         .into_any_element()
@@ -128,6 +167,154 @@ fn kbd(key: &'static str) -> Div {
 }
 
 impl Workspace {
+    pub(super) fn load_other_projects(&mut self, cx: &mut Context<Self>) {
+        if self.project.demo {
+            return;
+        }
+        let registry = self.project.registry_dir.clone();
+        let current = self.project.path.clone();
+        let task = cx.background_spawn(async move {
+            let mut out = Vec::new();
+            for path in launcher::load_recent_projects(&registry) {
+                if path == current {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| zest_core::display_path(&path));
+                let mut rows: Vec<ThreadSummary> = if path.join(".zest").is_dir() {
+                    zest_core::ThreadStore::open(&path)
+                        .and_then(|s| s.list())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|r| r.message_count > 0)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                rows.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated_at.cmp(&a.updated_at)));
+                rows.truncate(4);
+                out.push((path, name, rows));
+            }
+            out
+        });
+        cx.spawn(async move |this, cx| {
+            let groups = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.other_projects = groups;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_other_project_chat(
+        &mut self,
+        path: PathBuf,
+        thread_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let registry = self.project.registry_dir.clone();
+        let current_window = window.window_handle();
+        cx.defer(move |cx| {
+            let Ok(project) = Project::open(path.clone(), false) else {
+                return;
+            };
+            launcher::record_recent_project(&registry, &project.path);
+            let _ = current_window.update(cx, |_, w, cx| {
+                let ws = w.replace_root(cx, |w, cx| Workspace::new(project, w, cx));
+                if let Some(tid) = thread_id {
+                    ws.update(cx, |ws, cx| ws.open(&tid, w, cx));
+                }
+            });
+        });
+    }
+
+    fn other_projects_section(&self, now: u64, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.other_projects.is_empty() || theme::compact_sidebar() {
+            return Vec::new();
+        }
+        let mut items = Vec::with_capacity(self.other_projects.len());
+        for (p_idx, (path, name, chats)) in self.other_projects.iter().enumerate() {
+            let open_path = path.clone();
+            let new_chat_path = path.clone();
+            let mut group = div().flex_none().flex().flex_col().gap(px(2.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("other-proj-{p_idx}")))
+                            .role(Role::Button)
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px(px(6.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(alpha(theme::secondary(), 0.7)))
+                            .on_click(cx.listener(move |ws, _, w, cx| {
+                                ws.open_other_project_chat(open_path.clone(), None, w, cx);
+                            }))
+                            .child(icon(Icon::Folder, 14.).text_color(rgb(theme::muted_foreground())))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(theme::muted_foreground()))
+                                    .child(name.clone()),
+                            ),
+                    )
+                    .child(ui::icon_button_xs(
+                        SharedString::from(format!("other-proj-new-chat-{p_idx}")),
+                        Icon::Plus,
+                        SharedString::from(format!("New chat in {name}")),
+                        cx.listener(move |ws, _, w, cx| {
+                            ws.open_other_project_chat(new_chat_path.clone(), None, w, cx);
+                        }),
+                    )),
+            );
+            if !chats.is_empty() {
+                let mut rows = div().pl(px(18.)).flex().flex_col();
+                for (c_idx, row) in chats.iter().enumerate() {
+                    let chat_path = path.clone();
+                    let tid = row.id.clone();
+                    rows = rows.child(chat_row(
+                        SharedString::from(format!("other-chat-{p_idx}-{c_idx}")),
+                        if row.pinned {
+                            Icon::Pin
+                        } else {
+                            Icon::MessageSquare
+                        },
+                        chat_title(row),
+                        age(row.updated_at, now),
+                        false,
+                        false,
+                        false,
+                        cx.listener(move |ws, _, w, cx| {
+                            ws.open_other_project_chat(chat_path.clone(), Some(tid.clone()), w, cx);
+                        }),
+                    ));
+                }
+                group = group.child(rows);
+            }
+            items.push(group.into_any_element());
+        }
+        items
+    }
+
     fn location(&self) -> (Panel, String) {
         (self.panel, self.active.clone())
     }
@@ -189,9 +376,11 @@ impl Workspace {
         }
 
         let now = now_secs();
+        let history_count = self.draft_ids.len() + self.history.len();
+        let history_height = (history_count as f32 * 32.).min(420.);
         let history = uniform_list(
             "history",
-            self.draft_ids.len() + self.history.len(),
+            history_count,
             cx.processor(move |ws, range: std::ops::Range<usize>, _, cx| {
                 range
                     .filter_map(|index| {
@@ -243,16 +432,19 @@ impl Workspace {
                     .collect::<Vec<_>>()
             }),
         )
-        .flex_1()
-        .min_h_0();
+        .h(px(history_height))
+        .flex_none();
 
-        let project_name = self
-            .project
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let project_name = if self.is_free_chats_window() {
+            "Quick chats".to_string()
+        } else {
+            self.project
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        };
         let top = div()
             .h(px(40.))
             .flex_none()
@@ -288,58 +480,68 @@ impl Workspace {
             .child(ui::nav_item("nav-prs", Icon::GitPullRequest, "Pull requests", self.panel == Panel::PullRequests, cx.listener(|ws, _, w, cx| ws.page(Panel::PullRequests, w, cx))))
             .child(ui::nav_item("nav-customize", Icon::SlidersHorizontal, "Customize", in_customize, cx.listener(|ws, _, w, cx| ws.page(Panel::Settings, w, cx))));
         let projects_header = div()
-            .px_1()
+            .px(px(6.))
             .flex()
             .items_center()
             .justify_between()
             .child(
-                ui::section_label(Icon::Folder, "Projects").child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(rgb(crate::theme::faint()))
-                        .child("1"),
-                ),
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::muted_foreground()))
+                    .child("Projects"),
             )
             .child(
                 div()
                     .flex()
                     .gap(px(2.))
                     .child(ui::icon_button_xs("find-chat", Icon::Search, "Find chats", cx.listener(|ws, _, w, cx| ws.page(Panel::Search, w, cx))))
-                    .child(ui::icon_button_xs("project", Icon::Plus, "Open project folder", cx.listener(|ws, _, _, cx| ws.pick_project(cx)))),
+                    .child(ui::icon_button_xs("project", Icon::FolderOpen, "Open project folder", cx.listener(|ws, _, w, cx| ws.pick_project(w, cx)))),
             );
         let project_row = div()
-            .id("project-row")
-            .role(Role::Button)
-            .aria_label(SharedString::from(format!("Project {project_name}")))
-            .aria_expanded(self.project_open)
-            .tab_index(0)
-            .cursor_pointer()
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(6.))
-            .px(px(6.))
-            .py_1()
-            .rounded(px(6.))
-            .hover(|s| s.bg(rgb(theme::secondary())))
-            .child(
-                icon(if self.project_open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.)
-                    .text_color(rgb(theme::muted_foreground())),
-            )
-            .child(icon(Icon::FolderOpen, 14.).text_color(rgb(theme::primary())))
+            .gap(px(2.))
             .child(
                 div()
+                    .id("project-row")
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("Project {project_name}")))
+                    .aria_expanded(self.project_open)
+                    .tab_index(0)
+                    .cursor_pointer()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(project_name),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px(px(6.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .hover(|s| s.bg(alpha(theme::secondary(), 0.7)))
+                    .child(icon(Icon::Folder, 14.).text_color(rgb(theme::muted_foreground())))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(theme::muted_foreground()))
+                            .child(project_name),
+                    )
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.project_open = !ws.project_open;
+                        cx.notify();
+                    })),
             )
-            .on_click(cx.listener(|ws, _, _, cx| {
-                ws.project_open = !ws.project_open;
-                cx.notify();
-            }));
+            .child(ui::icon_button_xs(
+                "project-new-chat",
+                Icon::Plus,
+                "New chat in this project",
+                cx.listener(|ws, _, w, cx| ws.new_chat(w, cx)),
+            ));
         // Compact list: the project name is the only heading tier, with New chat always visible.
         let compact_heading = div()
             .px(px(6.))
@@ -372,6 +574,23 @@ impl Workspace {
                 cx.listener(move |ws, _, w, cx| ws.reopen_group(index, w, cx)),
             )
         }));
+        let current_group = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .when(!theme::compact_sidebar(), |d| d.child(project_row))
+            .when(theme::compact_sidebar(), |d| d.child(compact_heading))
+            .when(self.project_open || theme::compact_sidebar(), |d| {
+                d.child(
+                    div()
+                        .when(!theme::compact_sidebar(), |d| d.pl(px(18.)))
+                        .flex()
+                        .flex_col()
+                        .child(splits)
+                        .when(history_count > 0, |d| d.child(history)),
+                )
+            });
         let body = div()
             .flex_1()
             .min_h_0()
@@ -391,27 +610,17 @@ impl Workspace {
                     .child(projects_header)
                     .child(
                         div()
+                            .id("projects-tree")
                             .flex_1()
                             .min_h_0()
+                            .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
-                            .when(!theme::compact_sidebar(), |d| d.child(project_row))
-                            .when(theme::compact_sidebar(), |d| d.child(compact_heading))
-                            .when(self.project_open || theme::compact_sidebar(), |d| {
-                                d.child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .when(!theme::compact_sidebar(), |d| d.pl_3())
-                                        .flex()
-                                        .flex_col()
-                                        .child(splits)
-                                        .child(history),
-                                )
-                            }),
-                    )
-                    .children(self.recent_section(cx)),
+                            .gap_3()
+                            .child(current_group)
+                            .children(self.other_projects_section(now, cx))
+                            .children(self.recent_section(cx)),
+                    ),
             );
         let provider = self.chat(cx).options.lock().unwrap().provider.clone();
         let footer = div()
@@ -559,7 +768,7 @@ impl Workspace {
                 cx.listener(|ws, _, w, cx| ws.split(w, cx)),
             ))
             .child(ui::icon_button("workbench", Icon::PanelRight, "Workbench", cx.listener(|ws, _, w, cx| ws.page(Panel::Changes, w, cx))))
-            .child(ui::icon_button("open-folder", Icon::FolderOpen, "Open project folder", cx.listener(|ws, _, _, cx| ws.pick_project(cx))));
+            .child(ui::icon_button("open-folder", Icon::FolderOpen, "Open project folder", cx.listener(|ws, _, w, cx| ws.pick_project(w, cx))));
         div()
             .flex_none()
             .px_4()

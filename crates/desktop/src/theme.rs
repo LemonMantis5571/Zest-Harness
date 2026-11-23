@@ -325,10 +325,237 @@ pub fn icon(icon: Icon, size: f32) -> Svg {
         .text_color(rgb(muted_foreground()))
 }
 
+/// Smoothly rotates an SVG icon while mounted; stops automatically when unmounted and
+/// respects `App::reduce_motion`.
+pub fn spin_icon(
+    id: impl Into<ElementId>,
+    glyph: Icon,
+    size: f32,
+    color: u32,
+) -> AnimationElement<Svg> {
+    icon(glyph, size)
+        .text_color(rgb(color))
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(850)).repeat_synced(),
+            |svg, delta| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
+}
+
+/// A smoothly spinning `LoaderCircle` in the active theme's primary color.
+pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Svg> {
+    spinner_colored(id, size, primary())
+}
+
+/// A smoothly spinning `LoaderCircle` in a chosen theme color token.
+pub fn spinner_colored(
+    id: impl Into<ElementId>,
+    size: f32,
+    color: u32,
+) -> AnimationElement<Svg> {
+    spin_icon(id, Icon::LoaderCircle, size, color)
+}
+
+/// The bundled Zest mark used on onboarding/auth screens (`BrandMark`).
+pub fn zest_mark(size: f32) -> Img {
+    img("brand/zest-mark.png").size(px(size)).flex_none()
+}
+
+/// Compact pulsing Zest mark rendered beside the streaming cursor (`ZestPulse`).
+pub fn zest_pulse(id: impl Into<ElementId>, size: f32) -> AnimationElement<Div> {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(zest_mark(size))
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(1600))
+                .repeat_synced()
+                .with_easing(pulsating_between(0.4, 1.0)),
+            |d, alpha| d.opacity(alpha),
+        )
+}
+
+/// Three staggered bouncing dots matching the pre-GPUI `WorkingDots` indicator.
+pub fn working_dots(id: impl Into<ElementId>) -> AnimationElement<Div> {
+    let dot_color = alpha(foreground(), 0.7);
+    div()
+        .flex_none()
+        .h(px(12.))
+        .pb(px(1.))
+        .flex()
+        .flex_row()
+        .items_end()
+        .gap(px(2.))
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(900)).repeat_synced(),
+            move |d, delta| {
+                // Offsets start all three dots level at `delta = 0` (also the reduced-motion pose)
+                // and sweep a smooth left-to-right bounce wave across the loop.
+                const OFFSETS: [f32; 3] = [0.0, -0.18, -0.36];
+                const WINDOW: f32 = 0.55;
+                let mut row = d;
+                for offset in OFFSETS {
+                    let phase = (delta + offset).rem_euclid(1.0);
+                    let lift = if phase < WINDOW {
+                        (phase / WINDOW * std::f32::consts::PI).sin() * 4.0
+                    } else {
+                        0.0
+                    };
+                    row = row.child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(dot_color)
+                            .mb(px(lift)),
+                    );
+                }
+                row
+            },
+        )
+}
+
+/// Computes per-character highlight runs for a left-to-right text shimmer sweep.
+pub fn shimmer_highlights(
+    text: &str,
+    delta: f32,
+    base: u32,
+    highlight: u32,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    let char_bounds: Vec<(usize, usize)> = text
+        .char_indices()
+        .map(|(start, ch)| (start, start + ch.len_utf8()))
+        .collect();
+    let count = char_bounds.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let spread = (count as f32 * 0.35).clamp(2.5, 6.0);
+    let center = -spread + delta.clamp(0.0, 1.0) * (count as f32 + spread * 2.0);
+    char_bounds
+        .into_iter()
+        .enumerate()
+        .map(|(i, (start, end))| {
+            let dist = ((i as f32) - center).abs() / spread;
+            let weight = if dist < 1.0 {
+                0.5 * (1.0 + (dist * std::f32::consts::PI).cos())
+            } else {
+                0.0
+            };
+            let color = mix(highlight, base, weight);
+            (
+                start..end,
+                HighlightStyle {
+                    color: Some(rgb(color).into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+}
+
+/// Sweeps a bright theme-colored shimmer highlight left-to-right across `text`
+/// (matching pre-GPUI `.shimmer-text` and `TraceLine status="running"`).
+pub fn shimmer_text(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    base: u32,
+    highlight: u32,
+    duration_ms: u64,
+) -> AnimationElement<Div> {
+    let text = text.into();
+    div()
+        .min_w_0()
+        .text_color(rgb(base))
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(duration_ms)).repeat_synced(),
+            move |d, delta| {
+                let runs = shimmer_highlights(text.as_ref(), delta, base, highlight);
+                d.child(StyledText::new(text.clone()).with_highlights(runs))
+            },
+        )
+}
+
+/// Compact elapsed turn duration matching pre-GPUI `elapsedLabel`: `8s`, `6m 51s`, `1h 04m`.
+pub fn elapsed_label(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Resolves the official monochrome brand SVG path for a provider id / choice.
+pub fn provider_mark_path(
+    id: &str,
+    choice: Option<zest_core::provider_setup::ProviderChoice>,
+) -> Option<&'static str> {
+    use zest_core::provider_setup::ProviderChoice;
+    let id = id.trim().to_ascii_lowercase();
+    if id == "codex" || id.starts_with("codex-") || id.starts_with("openai") {
+        return Some("brand/codex.svg");
+    }
+    if id == "claude" || id.starts_with("claude-") || id.starts_with("anthropic") {
+        return Some("brand/claude.svg");
+    }
+    if id.starts_with("deepseek") {
+        return Some("brand/deepseek.svg");
+    }
+    if id.starts_with("gemini") || id == "antigravity" {
+        return Some("brand/gemini.svg");
+    }
+    if id == "cursor" || id.starts_with("cursor-") {
+        return Some("brand/cursor.svg");
+    }
+    match choice {
+        Some(ProviderChoice::ClaudeCode | ProviderChoice::Anthropic) => Some("brand/claude.svg"),
+        Some(ProviderChoice::CodexCli | ProviderChoice::ChatGpt) => Some("brand/codex.svg"),
+        Some(ProviderChoice::Cursor) => Some("brand/cursor.svg"),
+        _ => None,
+    }
+}
+
+/// Renders the original provider brand icon (or a server icon for generic endpoints)
+/// using the active theme's foreground color.
+pub fn provider_icon(
+    id: &str,
+    choice: Option<zest_core::provider_setup::ProviderChoice>,
+    size: f32,
+) -> Svg {
+    let path = provider_mark_path(id, choice).unwrap_or_else(|| Icon::Server.path());
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(rgb(foreground()))
+}
+
+static BRAND_FILES: &[(&str, &[u8])] = &[
+    ("brand/zest-mark.png", include_bytes!("../icons/zest-mark.png")),
+    ("brand/codex.svg", include_bytes!("../assets/brand/codex.svg")),
+    ("brand/claude.svg", include_bytes!("../assets/brand/claude.svg")),
+    ("brand/deepseek.svg", include_bytes!("../assets/brand/deepseek.svg")),
+    ("brand/gemini.svg", include_bytes!("../assets/brand/gemini.svg")),
+    ("brand/cursor.svg", include_bytes!("../assets/brand/cursor.svg")),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some((_, bytes)) = BRAND_FILES.iter().find(|(name, _)| *name == path) {
+            return Ok(Some(Cow::Borrowed(*bytes)));
+        }
         Ok(crate::icons_generated::FILES
             .iter()
             .find(|(name, _)| *name == path)
@@ -338,6 +565,7 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(crate::icons_generated::FILES
             .iter()
+            .chain(BRAND_FILES.iter())
             .filter(|(name, _)| name.starts_with(path))
             .map(|(name, _)| SharedString::from(*name))
             .collect())
@@ -397,5 +625,54 @@ mod tests {
             assert!(bytes.starts_with(b"<svg"));
         }
         assert_eq!(Assets.list("icons/").unwrap().len(), crate::icons_generated::FILES.len());
+    }
+
+    #[::core::prelude::v1::test]
+    fn brand_assets_and_provider_marks_resolve() {
+        let logo = Assets.load("brand/zest-mark.png").unwrap().expect("zest mark bundled");
+        assert!(logo.starts_with(b"\x89PNG"));
+        for (id, expected) in [
+            ("codex", "brand/codex.svg"),
+            ("codex-chatgpt", "brand/codex.svg"),
+            ("openai", "brand/codex.svg"),
+            ("claude", "brand/claude.svg"),
+            ("anthropic", "brand/claude.svg"),
+            ("deepseek-chat", "brand/deepseek.svg"),
+            ("gemini", "brand/gemini.svg"),
+            ("cursor", "brand/cursor.svg"),
+        ] {
+            let path = super::provider_mark_path(id, None).expect("known brand mark");
+            assert_eq!(path, expected);
+            let svg_bytes = Assets.load(path).unwrap().expect("brand svg bundled");
+            assert!(svg_bytes.starts_with(b"<svg"));
+        }
+        assert_eq!(super::provider_mark_path("local-ollama", None), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn shimmer_highlights_sweep_across_utf8_characters() {
+        let text = "Thinking…";
+        let base = 0x808080;
+        let highlight = 0xffffff;
+        let start_runs = super::shimmer_highlights(text, 0.0, base, highlight);
+        assert_eq!(start_runs.len(), text.chars().count());
+        assert_eq!(start_runs.first().unwrap().0.start, 0);
+        assert_eq!(start_runs.last().unwrap().0.end, text.len());
+
+        // Mid-sweep brightens middle glyphs above the base tone.
+        let mid_runs = super::shimmer_highlights(text, 0.5, base, highlight);
+        let mid_color = mid_runs[4].1.color.expect("mid glyph colored");
+        let edge_color = start_runs[4].1.color.expect("edge glyph colored");
+        assert!(mid_color.l > edge_color.l, "shimmer peak should brighten glyph at sweep center");
+    }
+
+    #[::core::prelude::v1::test]
+    fn elapsed_label_formats_seconds_minutes_and_hours() {
+        assert_eq!(super::elapsed_label(0), "0s");
+        assert_eq!(super::elapsed_label(8), "8s");
+        assert_eq!(super::elapsed_label(59), "59s");
+        assert_eq!(super::elapsed_label(60), "1m 00s");
+        assert_eq!(super::elapsed_label(411), "6m 51s");
+        assert_eq!(super::elapsed_label(3840), "1h 04m");
     }
 }

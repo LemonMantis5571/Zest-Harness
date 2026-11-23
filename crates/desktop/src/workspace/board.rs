@@ -373,7 +373,7 @@ impl Workspace {
             body = body.child(crate::ui::hint("Another coordinator owns this project. Cards are read-only."));
         }
         if b.busy {
-            body = body.child(crate::ui::hint("Updating delegation…"));
+            body = body.child(crate::ui::loading_row("board-loading", "Updating delegation…"));
         }
         if !b.message.is_empty() {
             body = body.child(b.message.clone());

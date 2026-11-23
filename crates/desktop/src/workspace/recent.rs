@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::theme::{self, Icon};
-use crate::ui;
 
 /// Recent lists at most this many, newest first.
 const MAX_RECENT: usize = 30;
@@ -28,7 +27,7 @@ pub(super) fn list_free_chats(root: &std::path::Path) -> Vec<ThreadSummary> {
 
 impl Workspace {
     /// Whether this window is itself the free-chats window, whose own history already lists them.
-    fn is_free_chats_window(&self) -> bool {
+    pub(super) fn is_free_chats_window(&self) -> bool {
         free_chats_root()
             .and_then(|root| std::fs::canonicalize(root).ok())
             .is_some_and(|root| root == self.project.path)
@@ -50,16 +49,16 @@ impl Workspace {
         .detach();
     }
 
-    fn open_free_chat(&mut self, id: String, cx: &mut Context<Self>) {
+    fn open_free_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = free_chats_root() else { return };
+        let current_window = window.window_handle();
         cx.defer(move |cx| {
-            let opened = std::fs::create_dir_all(&root)
-                .map_err(|e| e.to_string())
-                .and_then(|_| Project::open(root, false).map_err(|e| e.to_string()))
-                .and_then(|project| open_project_window(project, false, cx));
-            if let Ok(window) = opened {
-                let _ = window.update(cx, |ws, window, cx| ws.open(&id, window, cx));
-            }
+            let Ok(()) = std::fs::create_dir_all(&root) else { return };
+            let Ok(project) = Project::open(root, false) else { return };
+            let _ = current_window.update(cx, |_, w, cx| {
+                let ws = w.replace_root(cx, |w, cx| Workspace::new(project, w, cx));
+                ws.update(cx, |ws, cx| ws.open(&id, w, cx));
+            });
         });
     }
 
@@ -69,20 +68,32 @@ impl Workspace {
             return None;
         }
         let now = chrome::now_secs();
-        let label = if theme::compact_sidebar() { "No project" } else { "Recent" };
+        let label = if theme::compact_sidebar() { "No project" } else { "Quick chats" };
         Some(
             div()
                 .flex_none()
-                .mt_3()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(div().px_2().pb_1().child(ui::section_label(Icon::Clock, label)))
                 .child(
                     div()
-                        .id("recent-chats")
-                        .max_h(px(200.))
-                        .overflow_y_scroll()
+                        .px(px(6.))
+                        .py(px(4.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(theme::icon(Icon::Clock, 14.).text_color(rgb(theme::muted_foreground())))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(theme::muted_foreground()))
+                                .child(label),
+                        ),
+                )
+                .child(
+                    div()
+                        .when(!theme::compact_sidebar(), |d| d.pl(px(18.)))
                         .flex()
                         .flex_col()
                         .children(self.free_chats.iter().map(|row| {
@@ -95,7 +106,7 @@ impl Workspace {
                                 false,
                                 false,
                                 false,
-                                cx.listener(move |ws, _, _, cx| ws.open_free_chat(id.clone(), cx)),
+                                cx.listener(move |ws, _, w, cx| ws.open_free_chat(id.clone(), w, cx)),
                             )
                         })),
                 )

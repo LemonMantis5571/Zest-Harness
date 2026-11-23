@@ -90,19 +90,6 @@ fn sized_icon_button(
         .on_click(click)
 }
 
-/// Uppercase section heading such as "PROJECTS".
-pub fn section_label(glyph: Icon, label: &'static str) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .text_size(px(10.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme::muted_foreground()))
-        .child(icon(glyph, 14.))
-        .child(label.to_uppercase())
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Primary,
@@ -112,7 +99,7 @@ pub enum Variant {
     Destructive,
 }
 
-/// Text button with an optional leading icon.
+/// Text button with an optional leading icon. Passing `Icon::LoaderCircle` animates it automatically.
 pub fn button(
     id: impl Into<ElementId>,
     variant: Variant,
@@ -120,9 +107,10 @@ pub fn button(
     label: impl Into<SharedString>,
     click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let id = id.into();
     let label = label.into();
     let base = div()
-        .id(id)
+        .id(id.clone())
         .role(Role::Button)
         .aria_label(label.clone())
         .tab_index(0)
@@ -169,7 +157,15 @@ pub fn button(
                 Variant::Outline => theme::foreground(),
                 Variant::Secondary | Variant::Ghost => theme::secondary_foreground(),
             };
-            d.child(icon(g, 14.).text_color(rgb(color)))
+            if g == Icon::LoaderCircle {
+                d.child(theme::spinner_colored(
+                    SharedString::from(format!("btn-spin-{id:?}")),
+                    14.,
+                    color,
+                ))
+            } else {
+                d.child(icon(g, 14.).text_color(rgb(color)))
+            }
         })
         .child(label)
         .on_click(click)
@@ -218,6 +214,18 @@ pub fn hint(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(12.))
         .text_color(rgb(theme::muted_foreground()))
+        .child(text.into())
+}
+
+/// Muted status line with a spinning loader icon.
+pub fn loading_row(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(12.))
+        .text_color(rgb(theme::muted_foreground()))
+        .child(theme::spinner(id, 13.))
         .child(text.into())
 }
 

@@ -8,6 +8,7 @@ paths:
   - crates/core/src/provider/codex_oauth.rs
   - crates/core/src/provider_setup.rs
   - crates/desktop/src/workspace/providers.rs
+  - crates/desktop/src/workspace/launcher.rs
   - crates/desktop/src/workspace.rs
   - crates/desktop/src/native.rs
 verify:
