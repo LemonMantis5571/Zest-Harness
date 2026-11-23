@@ -365,10 +365,107 @@ pub fn render_blocks(doc: &Rc<Doc>, msg: usize, shared: &SharedRef) -> Vec<AnyEl
                 }))
                 .into_any_element(),
             Block::Rule => div().h(px(1.)).my_4().bg(rgb(border())).into_any_element(),
+            Block::Image { src, alt, indent } => image_el(src, alt, msg, out.len())
+                .map(|el| div().pl(px(if *indent > 0 { list_text_offset(*indent) } else { 0. })).child(el).into_any_element())
+                .unwrap_or_else(|| div().text_color(rgb(muted())).child(format!("[image: {alt}]")).into_any_element()),
         };
         out.push(div().mt(px(gap)).child(el).into_any_element());
     }
     out
+}
+
+/// Where a Markdown image comes from, after deciding whether to show it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImageSrc {
+    /// A local raster file (an absolute path or a `file://` URL).
+    Local(std::path::PathBuf),
+    /// A raster `data:` URL, decoded.
+    Data(std::sync::Arc<Image>),
+    /// An http(s) image. The transcript never fetches it; it shows a link to open it instead.
+    Remote(String),
+}
+
+fn raster_format(ext: &str) -> Option<ImageFormat> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "bmp" => ImageFormat::Bmp,
+        _ => return None,
+    })
+}
+
+thread_local! {
+    /// Decoded `data:` images by URL, so a message is not decoded again on every frame.
+    static DATA_IMAGES: RefCell<HashMap<String, Option<std::sync::Arc<Image>>>> = RefCell::new(HashMap::new());
+}
+
+/// Decides how to show an image: local raster files and raster `data:` URLs inline, http(s)
+/// as a link, anything else (relative paths, other schemes, SVG) not at all.
+pub fn image_source(src: &str) -> Option<ImageSrc> {
+    use base64::Engine as _;
+    let src = src.trim();
+    if let Some(rest) = src.strip_prefix("data:image/") {
+        let (meta, payload) = rest.split_once(',')?;
+        let (ext, encoding) = meta.split_once(';').unwrap_or((meta, ""));
+        let format = raster_format(ext)?;
+        if encoding != "base64" {
+            return None;
+        }
+        return DATA_IMAGES.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(src.to_string())
+                .or_insert_with(|| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(payload.trim())
+                        .ok()
+                        .map(|bytes| std::sync::Arc::new(Image::from_bytes(format, bytes)))
+                })
+                .clone()
+                .map(ImageSrc::Data)
+        });
+    }
+    if src.starts_with("http://") || src.starts_with("https://") {
+        return Some(ImageSrc::Remote(src.to_string()));
+    }
+    let path = match url::Url::parse(src) {
+        Ok(url) if url.scheme() == "file" => url.to_file_path().ok()?,
+        _ => std::path::PathBuf::from(src),
+    };
+    let raster = path.extension().and_then(|e| e.to_str()).and_then(raster_format).is_some();
+    (path.is_absolute() && raster).then_some(ImageSrc::Local(path))
+}
+
+fn image_el(src: &str, alt: &str, msg: usize, index: usize) -> Option<AnyElement> {
+    let id = SharedString::from(format!("image-{msg}-{index}"));
+    let label = if alt.trim().is_empty() { "Image".to_string() } else { alt.trim().to_string() };
+    let shown = |source: ImageSource| {
+        div()
+            .id(id.clone())
+            .role(accesskit::Role::Image)
+            .aria_label(SharedString::from(label.clone()))
+            .max_w(px(560.))
+            .child(img(source).max_w_full().max_h(px(420.)).object_fit(ObjectFit::Contain).rounded(px(8.)))
+            .into_any_element()
+    };
+    Some(match image_source(src)? {
+        ImageSrc::Local(path) => shown(path.into()),
+        ImageSrc::Data(image) => shown(ImageSource::Image(image)),
+        ImageSrc::Remote(url) => {
+            let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            div()
+                .id(id)
+                .role(accesskit::Role::Link)
+                .aria_label(SharedString::from(format!("Open image {label} from {host}")))
+                .cursor_pointer()
+                .text_color(rgb(crate::theme::link()))
+                .child(format!("View image: {label} ({host})"))
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .into_any_element()
+        }
+    })
 }
 
 pub fn render_user(doc: &Rc<Doc>, msg: usize, shared: &SharedRef, attachments: usize) -> AnyElement {
@@ -556,5 +653,27 @@ fn trace_icon(name: &str) -> crate::theme::Icon {
         _ if name.starts_with("mcp") => Icon::Zap,
         _ if name.starts_with("browser") => Icon::Globe,
         _ => Icon::Wrench,
+    }
+}
+
+#[cfg(test)]
+mod image_source_tests {
+    use super::{image_source, ImageSrc};
+
+    #[::core::prelude::v1::test]
+    fn local_raster_files_and_data_urls_show_and_the_rest_do_not() {
+        let local = if cfg!(windows) { r"C:\out\chart.png" } else { "/out/chart.png" };
+        assert!(matches!(image_source(local), Some(ImageSrc::Local(_))));
+        let file_url = if cfg!(windows) { "file:///C:/out/chart.jpg" } else { "file:///out/chart.jpg" };
+        assert!(matches!(image_source(file_url), Some(ImageSrc::Local(_))));
+        // A 1x1 transparent PNG.
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        assert!(matches!(image_source(png), Some(ImageSrc::Data(_))));
+        assert_eq!(image_source("https://x.test/a.png"), Some(ImageSrc::Remote("https://x.test/a.png".into())));
+        assert_eq!(image_source("relative/chart.png"), None, "relative paths have no base");
+        assert_eq!(image_source(if cfg!(windows) { r"C:\notes.txt" } else { "/notes.txt" }), None);
+        assert_eq!(image_source("data:image/svg+xml;base64,PHN2Zz4="), None, "SVG is not a raster format");
+        assert_eq!(image_source("data:image/png,raw"), None, "only base64 data URLs");
+        assert_eq!(image_source("javascript:alert(1)"), None);
     }
 }
