@@ -1,12 +1,16 @@
 ---
 title: MCP servers
-summary: Users configure outbound MCP servers (local command or Streamable HTTP URL) in zest.toml whose tools the parent chat can call, always behind the approval card.
+summary: Users add, check, switch and remove outbound MCP servers (local command or Streamable HTTP URL) in Customize > MCP servers or zest.toml, and the parent chat calls their tools behind the approval card.
 paths:
   - crates/core/src/mcp.rs
   - crates/core/src/mcp/http.rs
+  - crates/core/src/mcp_admin.rs
+  - crates/desktop/src/workspace/mcp.rs
   - crates/desktop/src/interaction.rs
 verify:
   - cargo test -p zest-core --lib -- mcp::
+  - cargo test -p zest-core --lib -- mcp_admin::
+  - cargo test --locked --release --manifest-path crates/desktop/Cargo.toml -- workspace::mcp::
 ---
 
 # MCP servers
@@ -17,10 +21,22 @@ See docs/MCP.md for the user-facing guide.
 - `[mcp.<id>]` in `zest.toml` is either `command` + `args` (+ `env_vars`) or `url`
   (+ `headers`, `header_credentials`), never both; `timeout_secs` 1-600 bounds one
   call. `enabled = false` keeps the entry but loads nothing.
-- The desktop app has no MCP settings page: servers are added, changed, enabled
-  and removed by editing `zest.toml`, and the config is read when a project
-  window opens. Customize > Skills & MCP only lists enabled servers as slash
-  commands.
+- Customize > MCP servers edits the project's `zest.toml` when it has one, otherwise
+  the user's (the page says which). Each server shows its name, a status pill (Off,
+  Not checked, Ready), the command line or URL, and a detail line ("3 tools · checked
+  2h ago", or the last failed check's error), with an on/off switch, **Check**,
+  **Edit** and **Remove** (which asks first).
+- **Add server** opens a form: name, Command or HTTP URL, command and arguments (one
+  line, quotes keep a path with spaces together), or URL and Access token (sent as the
+  `Authorization` header), environment variables to pass (names only) and timeout.
+  **Add GitHub** fills in GitHub's hosted server; paste a personal access token.
+  Editing keeps the name and any header-to-variable mappings the file already has;
+  a blank Access token keeps the saved one. **Save and check** writes the whole entry.
+- Saving, or switching a server on, also checks it: Zest starts it, lists its tools
+  and caches them, which is what lets chats use them. A check that fails does not undo
+  the save; the server shows "Not checked" and **Check** reports the error as a toast.
+- Changes reach new chats; open chats keep the servers they started with.
+  Customize > Skills & MCP lists enabled servers as slash commands.
 - Tools are registered as `mcp__<server>__<tool>` (sanitized, truncated to 64
   chars) with the server's description suffixed "(via the <id> MCP server)".
   At most 12 servers and 48 tools per server.
@@ -37,18 +53,16 @@ See docs/MCP.md for the user-facing guide.
 - Tools come from the cached catalogue (`~/.zest/mcp-catalog.json`), never by
   handshaking at chat start. An enabled server with no cached tools contributes
   nothing, and each turn in the desktop app shows a notice naming it.
-- The desktop app does not refresh the catalogue (there is no Check server
-  button and nothing calls `probe_server` on save), so a newly added server has
-  no tools in the desktop app until its catalogue entry exists.
 - A local server process starts on first tool call and lives for the session;
   a URL server is called per request.
 - Secrets stay out of `zest.toml`: `env_vars` and `headers` hold environment
   variable **names**; `header_credentials` maps a header to an OS credential
   manager account whose value is read at call time (entries written by an
-  earlier desktop form use `mcp-header:<blake3>` accounts). Credential-looking
+  Customize > MCP servers use `mcp-header:<blake3>` accounts, from the config path, server and header name). Credential-looking
   variables are scrubbed from a local server's environment unless listed in
-  `env_vars`. The desktop app has no Access token field, so it cannot store or
-  delete these secrets.
+  `env_vars`. Saving a typed token replaces an environment mapping for the same header;
+  tokens the entry no longer uses, and all of a removed server's, are deleted from
+  the credential manager.
 - An enabled server id is also a `/id` slash command (see
   skills-and-slash-commands).
 
@@ -60,12 +74,19 @@ See docs/MCP.md for the user-facing guide.
    as a notice in the chat.
 2. `probe_server` (mcp.rs, exported as `zest_core::probe_mcp_server`) starts a
    server, lists tools, and drops it; results go into `McpCatalog`.
-3. `McpTool::prepare` builds the preview (`server · tool`, a summary, argument
+3. Settings: `mcp_admin.rs` holds the provider-independent part of the page.
+   `list` builds rows with `status`; `save` cleans the form, moves typed header
+   values into the credential manager (`header_credential_account`), validates,
+   writes with `config_edit::upsert_mcp_server` (refusing a 13th server), deletes
+   unused credentials and refreshes the catalogue; `set_enabled`, `remove` and
+   `check` do the rest. The desktop page (`workspace/mcp.rs`) runs them on the
+   Tokio executor, then reloads the rows and `Project::reload_config`.
+4. `McpTool::prepare` builds the preview (`server · tool`, a summary, argument
    JSON as the diff). The desktop's `Interactions::decide` (`interaction.rs`)
    turns it into the approval card and returns `AllowOnce` or `Deny`.
-4. `run` -> `McpServer::call_tool` -> `request` connects on first use: stdio
+5. `run` -> `McpServer::call_tool` -> `request` connects on first use: stdio
    child (`kill_on_drop`, `scrub_environment`) or `http::connect`.
-5. Protocol: `server/discover` is probed first; a 2026-era server stays on
+6. Protocol: `server/discover` is probed first; a 2026-era server stays on
    per-request `_meta` (`MODERN_PROTOCOL_VERSION`), a 2025 server gets the
    `initialize` handshake. HTTP sends `MCP-Protocol-Version`, `Mcp-Method`,
    `Mcp-Name`, and `Mcp-Param-*` headers from `x-mcp-header` schema annotations;
@@ -73,7 +94,11 @@ See docs/MCP.md for the user-facing guide.
 
 ## Verify
 `mcp::tests` spawns small Node fixture servers; `mcp::http::tests` covers the
-HTTP transport and headers.
+HTTP transport and headers. `mcp_admin::tests` cover argument splitting, status
+text, credential account ids, and saving, switching and removing entries in a
+temporary project config (with servers that are off or missing, so no check runs).
+By hand: Customize > MCP servers > Add server, a command such as
+`npx -y @modelcontextprotocol/server-everything`, then **Save and check**.
 
 ## Pitfalls
 - Two remote tool names that differ only in stripped characters collapse to one
@@ -81,7 +106,5 @@ HTTP transport and headers.
 - HTTP tools whose schemas have invalid or duplicate `x-mcp-header` annotations
   are dropped from the tool list.
 - A stale catalogue entry fails at call time with the server's error.
-- The missing-tools warning from `runtime.rs` still says "Check it in Customize
-  → MCPs", a page the desktop app does not have.
 - One connection per server, behind a mutex: concurrent calls to the same server
   serialize.
