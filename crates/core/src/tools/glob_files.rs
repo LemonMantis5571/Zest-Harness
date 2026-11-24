@@ -8,7 +8,7 @@ use super::project::ProjectRoot;
 use super::walk::walk_files;
 use super::Tool;
 
-const MAX_MATCHES: usize = 200;
+const MAX_MATCHES: usize = 500;
 
 /// Find files by glob pattern, confined to a project root.
 pub struct GlobFiles {

@@ -59,13 +59,21 @@ fn is_prose_only_path(path: Option<&str>) -> bool {
     let Some(path) = path else {
         return false;
     };
-    let lower = path.trim().to_ascii_lowercase();
-    matches!(
-        std::path::Path::new(&lower)
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("md" | "markdown" | "txt" | "rst" | "adoc")
-    )
+    let parts: Vec<&str> = path
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    !parts.is_empty()
+        && parts.into_iter().all(|part| {
+            let lower = part.to_ascii_lowercase();
+            matches!(
+                std::path::Path::new(&lower)
+                    .extension()
+                    .and_then(|ext| ext.to_str()),
+                Some("md" | "markdown" | "txt" | "rst" | "adoc")
+            )
+        })
 }
 
 fn assistant_text_from_blocks(blocks: &[serde_json::Value]) -> String {
@@ -2001,12 +2009,19 @@ impl Agent {
                     }
                 }
             }
+            let touched: Vec<String> = prepared
+                .touched_paths()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
             let outcome = self
                 .run_gated_call(&calls[index], prepared, on_event, cancel)
                 .await;
             if !outcome.is_error {
-                if let Some(path) = outcome.path.as_ref().filter(|path| !path.is_empty()) {
-                    dirty_paths.insert(path.clone());
+                for path in touched {
+                    if !path.is_empty() {
+                        dirty_paths.insert(path);
+                    }
                 }
             }
             slots[index] = Some(outcome);
@@ -2286,7 +2301,10 @@ struct ToolCallOutcome {
 }
 
 fn should_reprepare(prepared: &PreparedToolCall, dirty_paths: &HashSet<String>) -> bool {
-    !prepared.preview.path.is_empty() && dirty_paths.contains(&prepared.preview.path)
+    prepared
+        .touched_paths()
+        .into_iter()
+        .any(|path| !path.is_empty() && dirty_paths.contains(path))
 }
 
 impl ToolCallOutcome {

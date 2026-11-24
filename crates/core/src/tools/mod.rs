@@ -1,3 +1,4 @@
+pub mod apply_patch;
 pub mod approval;
 pub mod bash;
 pub mod browser;
@@ -37,6 +38,7 @@ use crate::anthropic::types::{Message, ToolDef};
 use crate::jobs::JobRegistry;
 use crate::skills::SkillSet;
 
+use self::apply_patch::ApplyPatch;
 use self::approval::ToolRisk;
 use self::bash::Bash;
 use self::edit_file::EditFile;
@@ -281,11 +283,12 @@ pub fn register_todo_tool(registry: &mut ToolRegistry, store: self::todo::TodoSt
     registry.register(Arc::new(self::todo::TodoWrite::new(store)));
 }
 
-/// Register project-scoped write tools (`write_file`, `edit_file`). Requires an
-/// [`Approver`] on the agent — without one, gated calls are denied.
+/// Register project-scoped write tools (`write_file`, `edit_file`,
+/// `apply_patch`). Requires an [`Approver`] on the agent — without one, gated
+/// calls are denied.
 ///
-/// `edit_file` goes last so adding it shifts the cached prompt prefix exactly
-/// once rather than displacing every tool after it.
+/// New write tools append at the end so adding one shifts the cached prompt
+/// prefix once rather than displacing every tool before it.
 pub fn register_write_tools(
     registry: &mut ToolRegistry,
     root: impl AsRef<Path>,
@@ -293,6 +296,7 @@ pub fn register_write_tools(
     let root = root.as_ref();
     registry.register(Arc::new(WriteFile::new(root)?));
     registry.register(Arc::new(EditFile::new(root)?));
+    registry.register(Arc::new(ApplyPatch::new(root)?));
     Ok(())
 }
 
@@ -375,6 +379,7 @@ mod characterization {
                 "web_search",
                 "write_file",
                 "edit_file",
+                "apply_patch",
             ]
         );
     }
@@ -651,6 +656,50 @@ mod characterization {
         assert!(
             !dir.join(".zest").exists(),
             "a second cleartext copy must never be written"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_bash_output_spills_its_full_log_instead_of_losing_the_middle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let store = self::spill::SpillStore::open(dir, "t-bash").unwrap();
+        let mut reg = ToolRegistry::new();
+        register_read_tools(&mut reg, dir).unwrap();
+        register_exec_tools(&mut reg, dir, self::bash::BashSettings::default()).unwrap();
+        let reg = reg.with_spill(Arc::new(self::spill::SpillPolicy::new(store, 32 * 1024)));
+
+        // Emit ~50 KiB with a distinctive line in the middle so a 30 KiB
+        // internal clip would have dropped it before SpillPolicy ran.
+        let command = if cfg!(windows) {
+            "(for /L %i in (1,1,400) do @echo pad_head_line_012345678901234567890123456789) & echo MIDDLE_MARKER_SURVIVED & (for /L %i in (1,1,400) do @echo pad_tail_line_012345678901234567890123456789)"
+        } else {
+            "for i in $(seq 1 400); do echo pad_head_line_012345678901234567890123456789; done; echo MIDDLE_MARKER_SURVIVED; for i in $(seq 1 400); do echo pad_tail_line_012345678901234567890123456789; done"
+        };
+
+        let out = reg
+            .run("bash", serde_json::json!({ "command": command }))
+            .await
+            .unwrap();
+        assert!(out.body.len() <= 32 * 1024, "{}", out.body.len());
+        let locator = out
+            .body
+            .split("Full result stored at: ")
+            .nth(1)
+            .and_then(|rest| rest.split(". Use").next())
+            .expect("oversized bash output must spill to a locator");
+
+        let searched = reg
+            .run(
+                "grep",
+                serde_json::json!({ "pattern": "MIDDLE_MARKER_SURVIVED", "path": locator }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            searched.body.contains("MIDDLE_MARKER_SURVIVED"),
+            "middle of bash log must survive in spilled file: {}",
+            searched.body
         );
     }
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde_json::{json, Value};
 
 use super::approval::{ApprovalPreview, ToolRisk};
@@ -13,6 +13,7 @@ use super::sensitive::is_sensitive_path;
 use super::Tool;
 
 const MAX_MATCHES: usize = 100;
+const MAX_CONTEXT_LINES: usize = 10;
 /// Per-file search reach. `read_file` can page to any line, so this is set far
 /// above its page size, and a file cut at this reach is named in the output
 /// rather than being silently half-searched.
@@ -40,8 +41,13 @@ impl Grep {
         if pattern.is_empty() {
             return Err("pattern must not be empty".to_string());
         }
+        let case_insensitive = parse_case_insensitive(&input)?;
+        let _ = parse_context_lines(&input)?;
         // Validate regex before approval so bad patterns fail fast.
-        let _ = Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+        let _ = RegexBuilder::new(pattern)
+            .case_insensitive(case_insensitive)
+            .build()
+            .map_err(|e| format!("invalid regex: {e}"))?;
 
         let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
         let start = self.root.resolve(path)?;
@@ -76,7 +82,12 @@ impl Grep {
         if pattern.is_empty() {
             return Err("pattern must not be empty".to_string());
         }
-        let re = Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+        let case_insensitive = parse_case_insensitive(&input)?;
+        let context_lines = parse_context_lines(&input)?;
+        let re = RegexBuilder::new(pattern)
+            .case_insensitive(case_insensitive)
+            .build()
+            .map_err(|e| format!("invalid regex: {e}"))?;
 
         let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
         let start = self.root.resolve(path)?;
@@ -95,19 +106,45 @@ impl Grep {
         };
 
         let root = self.root.clone();
-        let (matches, cut_files) = tokio::task::spawn_blocking(move || {
+        let (rows, match_count, cut_files) = tokio::task::spawn_blocking(move || {
             search(
                 &root,
                 &start,
                 &re,
                 file_filter.as_ref(),
                 allow_sensitive_file,
+                context_lines,
             )
         })
         .await
         .map_err(|e| format!("grep task failed: {e}"))??;
 
-        format_results(matches, &cut_files)
+        format_results(rows, match_count, &cut_files)
+    }
+}
+
+fn parse_case_insensitive(input: &Value) -> Result<bool, String> {
+    match input.get("case_insensitive") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(format!("`case_insensitive` must be a boolean, got {other}")),
+    }
+}
+
+fn parse_context_lines(input: &Value) -> Result<usize, String> {
+    match input.get("context_lines") {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                format!("`context_lines` must be an integer between 0 and {MAX_CONTEXT_LINES}")
+            })?;
+            if n > MAX_CONTEXT_LINES as u64 {
+                return Err(format!(
+                    "`context_lines` must be at most {MAX_CONTEXT_LINES}"
+                ));
+            }
+            Ok(n as usize)
+        }
     }
 }
 
@@ -120,7 +157,9 @@ impl Tool for Grep {
     fn description(&self) -> &str {
         "Search file contents under the project root with a regular expression. \
          Optional `path` scopes to a file or directory; optional `glob` filters \
-         by filename pattern (e.g. `*.rs`). Results are capped; each file is \
+         by filename pattern (e.g. `*.rs`); optional `case_insensitive` ignores \
+         ASCII/Unicode case; optional `context_lines` (0..=10) includes surrounding \
+         lines around each match. Results are capped; each file is \
          searched up to 8 MiB and the output names any file cut there. Long \
          matching lines are clipped around the match. Respects \
          `.gitignore` and skips `.git`, `.zest`, `target`, and `node_modules`. \
@@ -144,6 +183,16 @@ impl Tool for Grep {
                 "glob": {
                     "type": "string",
                     "description": "Optional filename glob filter, e.g. *.rs or **/*.toml"
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Match case-insensitively. Defaults to false."
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_CONTEXT_LINES,
+                    "description": "Surrounding context lines before and after each match (0..=10). Defaults to 0."
                 }
             },
             "required": ["pattern"],
@@ -172,10 +221,18 @@ fn build_glob_filter(pattern: &str) -> Result<GlobSet, String> {
         .map_err(|e| format!("invalid glob filter: {e}"))
 }
 
-struct MatchLine {
-    path: String,
-    line_no: usize,
-    line: String,
+enum ResultRow {
+    Match {
+        path: String,
+        line_no: usize,
+        line: String,
+    },
+    Context {
+        path: String,
+        line_no: usize,
+        line: String,
+    },
+    Separator,
 }
 
 /// Search while walking — do not collect every file first.
@@ -185,31 +242,35 @@ fn search(
     re: &Regex,
     file_filter: Option<&GlobSet>,
     allow_sensitive_file: bool,
-) -> Result<(Vec<MatchLine>, Vec<String>), String> {
+    context_lines: usize,
+) -> Result<(Vec<ResultRow>, usize, Vec<String>), String> {
     let meta = std::fs::metadata(start).map_err(|e| format!("stat failed: {e}"))?;
 
-    let mut matches = Vec::new();
+    let mut rows = Vec::new();
+    let mut match_count = 0usize;
     let mut cut_files = Vec::new();
     let mut output_bytes = 0usize;
 
     if meta.is_file() {
         let Ok(resolved) = root.confine(start) else {
-            return Ok((matches, cut_files));
+            return Ok((rows, match_count, cut_files));
         };
         let rel = root.relativize(&resolved);
         if is_sensitive_path(&rel) && !allow_sensitive_file {
-            return Ok((matches, cut_files));
+            return Ok((rows, match_count, cut_files));
         }
         search_file(
             root,
             &resolved,
             re,
             file_filter,
-            &mut matches,
+            context_lines,
+            &mut rows,
+            &mut match_count,
             &mut cut_files,
             &mut output_bytes,
         );
-        return Ok((matches, cut_files));
+        return Ok((rows, match_count, cut_files));
     }
 
     if !meta.is_dir() {
@@ -221,7 +282,7 @@ fn search(
     super::walk::configure_walk_builder(&mut builder, root.as_path());
 
     for entry in builder.build().flatten() {
-        if matches.len() >= MAX_MATCHES || output_bytes >= MAX_OUTPUT_BYTES {
+        if match_count >= MAX_MATCHES || output_bytes >= MAX_OUTPUT_BYTES {
             break;
         }
         if !super::walk::dir_entry_is_file(&entry) {
@@ -242,25 +303,30 @@ fn search(
             &resolved,
             re,
             file_filter,
-            &mut matches,
+            context_lines,
+            &mut rows,
+            &mut match_count,
             &mut cut_files,
             &mut output_bytes,
         );
     }
 
-    Ok((matches, cut_files))
+    Ok((rows, match_count, cut_files))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_file(
     root: &ProjectRoot,
     file: &Path,
     re: &Regex,
     file_filter: Option<&GlobSet>,
-    matches: &mut Vec<MatchLine>,
+    context_lines: usize,
+    rows: &mut Vec<ResultRow>,
+    match_count: &mut usize,
     cut_files: &mut Vec<String>,
     output_bytes: &mut usize,
 ) {
-    if matches.len() >= MAX_MATCHES || *output_bytes >= MAX_OUTPUT_BYTES {
+    if *match_count >= MAX_MATCHES || *output_bytes >= MAX_OUTPUT_BYTES {
         return;
     }
 
@@ -296,22 +362,98 @@ fn search_file(
     }
     let text = String::from_utf8_lossy(&bytes);
 
-    for (idx, line) in text.lines().enumerate() {
-        if matches.len() >= MAX_MATCHES || *output_bytes >= MAX_OUTPUT_BYTES {
+    if context_lines == 0 {
+        for (idx, line) in text.lines().enumerate() {
+            if *match_count >= MAX_MATCHES || *output_bytes >= MAX_OUTPUT_BYTES {
+                break;
+            }
+            if let Some(found) = re.find(line) {
+                let line_no = idx + 1;
+                let clipped = clip_around(line, found.start(), MAX_LINE_CHARS);
+                *output_bytes = output_bytes
+                    .saturating_add(rel.len())
+                    .saturating_add(clipped.len())
+                    .saturating_add(16);
+                *match_count += 1;
+                rows.push(ResultRow::Match {
+                    path: rel.clone(),
+                    line_no,
+                    line: clipped,
+                });
+            }
+        }
+        return;
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if *match_count + hits.len() >= MAX_MATCHES {
             break;
         }
         if let Some(found) = re.find(line) {
-            let line_no = idx + 1;
-            let clipped = clip_around(line, found.start(), MAX_LINE_CHARS);
-            *output_bytes = output_bytes
-                .saturating_add(rel.len())
-                .saturating_add(clipped.len())
-                .saturating_add(16);
-            matches.push(MatchLine {
-                path: rel.clone(),
-                line_no,
-                line: clipped,
-            });
+            hits.push((idx, found.start()));
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for &(idx, _) in &hits {
+        let start = idx.saturating_sub(context_lines);
+        let end = (idx + context_lines).min(lines.len().saturating_sub(1));
+        if let Some(last) = windows.last_mut() {
+            if start <= last.1 + 1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        windows.push((start, end));
+    }
+
+    let mut hit_cursor = 0usize;
+    for (win_start, win_end) in windows {
+        if *output_bytes >= MAX_OUTPUT_BYTES {
+            break;
+        }
+        if !rows.is_empty() && !matches!(rows.last(), Some(ResultRow::Separator)) {
+            rows.push(ResultRow::Separator);
+            *output_bytes = output_bytes.saturating_add(3);
+        }
+        for (line_idx, &line) in lines.iter().enumerate().take(win_end + 1).skip(win_start) {
+            if *output_bytes >= MAX_OUTPUT_BYTES {
+                break;
+            }
+            while hit_cursor < hits.len() && hits[hit_cursor].0 < line_idx {
+                hit_cursor += 1;
+            }
+            if hit_cursor < hits.len() && hits[hit_cursor].0 == line_idx {
+                let match_start = hits[hit_cursor].1;
+                hit_cursor += 1;
+                let clipped = clip_around(line, match_start, MAX_LINE_CHARS);
+                *output_bytes = output_bytes
+                    .saturating_add(rel.len())
+                    .saturating_add(clipped.len())
+                    .saturating_add(16);
+                *match_count += 1;
+                rows.push(ResultRow::Match {
+                    path: rel.clone(),
+                    line_no: line_idx + 1,
+                    line: clipped,
+                });
+            } else {
+                let clipped = clip_chars(line, MAX_LINE_CHARS);
+                *output_bytes = output_bytes
+                    .saturating_add(rel.len())
+                    .saturating_add(clipped.len())
+                    .saturating_add(16);
+                rows.push(ResultRow::Context {
+                    path: rel.clone(),
+                    line_no: line_idx + 1,
+                    line: clipped,
+                });
+            }
         }
     }
 }
@@ -345,14 +487,30 @@ fn clip_around(line: &str, match_start: usize, max_chars: usize) -> String {
     format!("…{}", clip_chars(&line[byte..], max_chars))
 }
 
-fn format_results(matches: Vec<MatchLine>, cut_files: &[String]) -> Result<String, String> {
+fn format_results(
+    rows: Vec<ResultRow>,
+    match_count: usize,
+    cut_files: &[String],
+) -> Result<String, String> {
     let mut out = String::new();
-    if matches.is_empty() {
+    if match_count == 0 {
         out.push_str("(no matches)");
     }
-    let truncated = matches.len() >= MAX_MATCHES;
-    for m in &matches {
-        out.push_str(&format!("{}:{}:{}\n", m.path, m.line_no, m.line));
+    let truncated = match_count >= MAX_MATCHES;
+    for row in &rows {
+        match row {
+            ResultRow::Match {
+                path,
+                line_no,
+                line,
+            } => out.push_str(&format!("{path}:{line_no}:{line}\n")),
+            ResultRow::Context {
+                path,
+                line_no,
+                line,
+            } => out.push_str(&format!("{path}:{line_no}-{line}\n")),
+            ResultRow::Separator => out.push_str("--\n"),
+        }
     }
     if truncated {
         out.push_str(&format!("\n[truncated at {MAX_MATCHES} matches]"));
@@ -564,5 +722,51 @@ mod tests {
         let tool = Grep::new(&dir).unwrap();
         let out = tool.run(json!({ "pattern": "needle" })).await.unwrap().body;
         assert!(out.contains("hit.txt"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn supports_case_insensitive_and_context_lines() {
+        let dir = scratch("case-context");
+        std::fs::write(
+            dir.join("notes.txt"),
+            "line one\nImportantHeader\nline three\nline four\nline five\nanother IMPORTANTHEADER\nline seven\n",
+        )
+        .unwrap();
+        let tool = Grep::new(&dir).unwrap();
+
+        let case_sensitive = tool
+            .run(json!({ "pattern": "importantheader", "path": "notes.txt" }))
+            .await
+            .unwrap()
+            .body;
+        assert_eq!(case_sensitive, "(no matches)");
+
+        let with_context = tool
+            .run(json!({
+                "pattern": "importantheader",
+                "path": "notes.txt",
+                "case_insensitive": true,
+                "context_lines": 1
+            }))
+            .await
+            .unwrap()
+            .body;
+        assert!(
+            with_context.contains("notes.txt:1-line one\n"),
+            "{with_context}"
+        );
+        assert!(
+            with_context.contains("notes.txt:2:ImportantHeader\n"),
+            "{with_context}"
+        );
+        assert!(
+            with_context.contains("notes.txt:3-line three\n"),
+            "{with_context}"
+        );
+        assert!(with_context.contains("\n--\n"), "{with_context}");
+        assert!(
+            with_context.contains("notes.txt:6:another IMPORTANTHEADER\n"),
+            "{with_context}"
+        );
     }
 }

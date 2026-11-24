@@ -21,7 +21,8 @@ verify:
 # Shell commands and background jobs
 
 ## Behavior
-- `bash` requires `command` and `cwd` (`.` for the project, or an absolute path).
+- `bash` requires `command`; `cwd` defaults to `.` (the active project) and
+  accepts a relative subdirectory or an absolute path for another project.
   A relative `cwd` that escapes the project is refused. An absolute `cwd` outside
   the project is allowed but always needs approval and is shown on the card.
 - Risk is always `Exec`. `classify` marks a command `AutoRun` (auto-eligible)
@@ -39,8 +40,11 @@ verify:
 - Auto-run commands are spawned from an argv vector with no shell; approved
   commands run through `cmd /C` (Windows) or `sh -c`.
 - Output: stdout+stderr combined, first line `cwd: ...`, then `$ cmd`, `exit N`.
-  At most 30 KiB is kept, middle clipped with a stated byte count. A non-zero
-  exit is a normal result, not a tool error.
+  `bash` keeps up to 256 KiB before middle-clipping (512 KiB per pipe while
+  draining), so outputs exceeding `[tools] max_result_bytes` (default 32 KiB)
+  spill their full log to `.zest/spill/<thread-id>/` and return a bounded
+  preview plus locator instead of losing the middle. A non-zero exit is a
+  normal result, not a tool error.
 - Timeout defaults to 120 s (`[tools.bash] timeout_ms`), capped at 600 s. On
   timeout the whole process tree is killed and the tool errors.
 - Provider credentials are scrubbed from the child environment

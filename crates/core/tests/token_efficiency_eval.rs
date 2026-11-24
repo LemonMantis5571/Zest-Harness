@@ -860,10 +860,15 @@ struct FixtureApprover {
 #[async_trait]
 impl Approver for FixtureApprover {
     async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
-        if matches!(request.tool_name.as_str(), "write_file" | "edit_file")
-            && self
-                .allowed_paths
-                .contains(&request.preview.path.replace('\\', "/"))
+        if matches!(
+            request.tool_name.as_str(),
+            "write_file" | "edit_file" | "apply_patch"
+        ) && request
+            .preview
+            .path
+            .split(',')
+            .map(|p| p.trim().replace('\\', "/"))
+            .all(|p| !p.is_empty() && self.allowed_paths.contains(&p))
         {
             return ApprovalDecision::AllowOnce;
         }
