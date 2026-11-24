@@ -10,6 +10,7 @@ paths:
   - crates/core/src/tools/write_file.rs
   - crates/core/src/tools/edit_file.rs
   - crates/core/src/tools/edit_match.rs
+  - crates/core/src/tools/apply_patch.rs
   - crates/core/src/tools/glob_files.rs
   - crates/core/src/tools/grep.rs
   - crates/core/src/tools/list_dir.rs
@@ -24,6 +25,7 @@ verify:
   - cargo test -p zest-core --lib -- tools::write_file
   - cargo test -p zest-core --lib -- tools::edit_file
   - cargo test -p zest-core --lib -- tools::edit_match
+  - cargo test -p zest-core --lib -- tools::apply_patch
   - cargo test -p zest-core --lib -- tools::grep
   - cargo test -p zest-core --lib -- tools::spill
   - npm run gpui:test
@@ -53,9 +55,17 @@ verify:
   `.gitignore`, never read ignore files above the root, do not follow symlinks,
   and always skip `.git`, `.zest`, `target`, `node_modules`.
 - Caps are announced, never silent: `read_file` 256 KiB and 2000 lines by default
-  (footer says which lines were shown and the next `offset`); `glob` 200 matches;
-  `grep` 100 matches, 64 KiB output, 256 KiB per file, 400 chars per line, binary
-  files skipped; `list_dir` 500 entries; write/edit bodies 1 MiB.
+  (footer says which lines were shown and the next `offset`); `glob` 500 matches;
+  `grep` 100 matches (plus optional `case_insensitive` and `context_lines` 0..=10),
+  64 KiB output, 8 MiB per file, 400 chars per line, binary files skipped;
+  `list_dir` 500 entries; write/edit/patch bodies 1 MiB per file.
+- `apply_patch` applies structured multi-hunk or multi-file `*** Begin Patch` ...
+  `*** End Patch` blocks (`*** Add File:`, `*** Update File:` with optional
+  `*** Move to:`, and `*** Delete File:`) atomically inside the project root.
+  Every touched path resolves via `resolve_for_write` and records a BLAKE3
+  pre-image at prepare time; all pre-images are verified before any file is
+  written or unlinked, and touching any sensitive path escalates the entire
+  patch to `ToolRisk::Sensitive`.
 - `edit_file` only changes an existing UTF-8 file; `old_string` must be non-empty
   and match exactly once unless `replace_all` is true. Matching ignores CRLF versus
   LF, because `read_file` hides carriage returns. The replacement is written in the
@@ -92,9 +102,10 @@ verify:
 ## How it works
 1. `RuntimeBuilder::build` (crates/core/src/runtime.rs) registers
    `register_read_tools` (read_file, list_dir, glob, grep, web_search),
-   `register_write_tools` (write_file, edit_file; skipped for the delegation
-   reviewer role), and `read_skill` into `worker_tools`, which delegated workers
-   clone. Nothing here is registered when a CLI provider owns the agent loop.
+   `register_write_tools` (write_file, edit_file, apply_patch; skipped for the
+   delegation reviewer role), and `read_skill` into `worker_tools`, which
+   delegated workers clone. Nothing here is registered when a CLI provider owns
+   the agent loop.
 2. `Agent::execute_tool_calls` (crates/core/src/agent.rs) calls
    `ToolRegistry::prepare` for each call to get a `PreparedToolCall` (risk,
    `ApprovalPreview`, `PreparedKind::Plain` or `WriteFile`). Read-risk calls run

@@ -62,6 +62,20 @@ pub struct PreparedToolCall {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PreparedPatchOp {
+    pub absolute_path: PathBuf,
+    pub relative_path: String,
+    pub preimage: PreImage,
+    pub action: PatchCommitAction,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PatchCommitAction {
+    Write { content: String },
+    Delete,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum PreparedKind {
     /// Ordinary tool: execute with this input after optional approval.
     Plain { input: Value },
@@ -74,6 +88,8 @@ pub(crate) enum PreparedKind {
         content: String,
         preimage: PreImage,
     },
+    /// Multi-file / multi-hunk patch bound to per-path pre-images.
+    Patch { ops: Vec<PreparedPatchOp> },
 }
 
 impl PreparedToolCall {
@@ -164,10 +180,43 @@ impl PreparedToolCall {
         )
     }
 
+    pub(crate) fn patch(ops: Vec<PreparedPatchOp>, preview: ApprovalPreview) -> Self {
+        let risk = if ops
+            .iter()
+            .any(|op| super::sensitive::write_risk(&op.relative_path) == ToolRisk::Sensitive)
+        {
+            ToolRisk::Sensitive
+        } else {
+            ToolRisk::Write
+        };
+        Self {
+            tool_name: "apply_patch".into(),
+            risk,
+            preview,
+            metadata: None,
+            auto_eligible: false,
+            kind: PreparedKind::Patch { ops },
+        }
+    }
+
+    pub fn touched_paths(&self) -> Vec<&str> {
+        match &self.kind {
+            PreparedKind::Plain { .. } => {
+                if self.preview.path.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![self.preview.path.as_str()]
+                }
+            }
+            PreparedKind::WriteFile { relative_path, .. } => vec![relative_path.as_str()],
+            PreparedKind::Patch { ops } => ops.iter().map(|op| op.relative_path.as_str()).collect(),
+        }
+    }
+
     pub fn plain_input(&self) -> Option<&Value> {
         match &self.kind {
             PreparedKind::Plain { input } => Some(input),
-            PreparedKind::WriteFile { .. } => None,
+            PreparedKind::WriteFile { .. } | PreparedKind::Patch { .. } => None,
         }
     }
 }

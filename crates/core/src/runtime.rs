@@ -897,6 +897,7 @@ mod tests {
             "web_search",
             "write_file",
             "edit_file",
+            "apply_patch",
             "read_skill",
             "todo_write",
         ];

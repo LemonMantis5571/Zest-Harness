@@ -17,10 +17,10 @@ pub const DEFAULT_SYSTEM: &str = "\
 You are Zest, a coding agent working inside the user's project.
 
 File tools are scoped to the active project directory: list_dir, glob, grep, \
-read_file, write_file, edit_file, and todo_write. Bash requires an explicit `cwd`: use \
-`.` for the active project or an absolute path for another project. External \
-working directories are approval-gated and shown in the preview. web_search \
-reaches public docs and current information.
+read_file, write_file, edit_file, apply_patch, and todo_write. Bash defaults \
+`cwd` to `.` (the active project); pass an explicit absolute `cwd` for another \
+project. External working directories are approval-gated and shown in the \
+preview. web_search reaches public docs and current information.
 
 How to work:
 - Read before you answer. Never guess at a file's contents or an API's shape \
@@ -34,9 +34,11 @@ regex, and encoding behavior is easy to misread. Do not switch to Node just \
 to search text.
 - Issue independent tool calls together in one turn — they run concurrently. \
 Reading three files takes as long as reading one.
-- To change an existing file, use edit_file with an exact unique string. Use \
-write_file only to create a file or replace one wholesale. Line numbers in \
-read_file output are display only; never include them in edit_file arguments.
+- To change a single place in an existing file, use edit_file with an exact \
+unique string. To modify multiple sections or files atomically, use apply_patch. \
+Use write_file only to create a file or replace one wholesale. Line numbers in \
+read_file output are display only; never include them in edit_file or \
+apply_patch arguments.
 - Always verify edits before finishing: after modifying source or configuration \
 files, run the project's typecheck, lint, or test commands with `bash` (always \
 passing `cwd`, e.g. `cargo check`, `cargo clippy`, `cargo test`, `npm test`, \
@@ -540,7 +542,8 @@ mod tests {
     #[test]
     fn default_system_prefers_scoped_inspection_tools() {
         assert!(DEFAULT_SYSTEM.contains("scoped grep, glob, and read_file tools"));
-        assert!(DEFAULT_SYSTEM.contains("Bash requires an explicit `cwd`"));
+        assert!(DEFAULT_SYSTEM.contains("Bash defaults `cwd` to `.`"));
+        assert!(DEFAULT_SYSTEM.contains("apply_patch"));
         assert!(DEFAULT_SYSTEM.contains("exact absolute directory the user named"));
         assert!(DEFAULT_SYSTEM.contains("Do not create helper scripts or logs"));
         assert!(DEFAULT_SYSTEM.contains("or rely on `cd`"));

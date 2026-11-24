@@ -33,17 +33,18 @@ use super::prepared::PreparedToolCall;
 use super::Tool;
 use crate::jobs::JobRegistry;
 
-/// Combined stdout+stderr kept from a command. Build logs are enormous and the
-/// interesting part is at both ends, so the middle is what gets dropped.
-const MAX_OUTPUT_BYTES: usize = 30 * 1024;
+/// Combined stdout+stderr kept inline by `bash` before dispatch-level
+/// [`super::spill::SpillPolicy`] stores oversized output to `.zest/spill/`.
+/// Set well above `[tools] max_result_bytes` (default 32 KiB) so large test
+/// and build logs spill their full body to a retrievable file instead of
+/// silently losing their middle inside `bash`.
+const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 /// Ceiling on what one stream may cost in memory, however much it writes.
 ///
-/// The output is clipped to both ends anyway, so reading all of a runaway
-/// command into a `Vec` first buys nothing and risks everything: `yes`, a build
-/// loop, or a binary accidentally written to stdout will produce gigabytes, and
-/// the only reason it was survivable before is that nothing had tried it yet.
-/// Generous enough that the clip below still has more than it needs.
+/// Reading all of a runaway command into a `Vec` first risks gigabytes on `yes`
+/// or a build loop; bounding each pipe keeps memory predictable while leaving
+/// enough room for `MAX_OUTPUT_BYTES` and `SpillPolicy`.
 const MAX_STREAM_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_BACKGROUND_TIMEOUT_MS: u64 = 30_000;
@@ -438,16 +439,19 @@ impl Bash {
             return Err("`command` must not be empty".into());
         }
 
-        let raw_cwd = input
-            .get("cwd")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                "missing required field `cwd`; use `.` for the active project or an absolute path for another project".to_string()
-            })?
-            .trim();
-        if raw_cwd.is_empty() {
-            return Err("`cwd` must not be empty; use `.` for the active project".into());
-        }
+        let raw_cwd = match input.get("cwd") {
+            None | Some(Value::Null) => ".",
+            Some(Value::String(s)) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Err(
+                        "`cwd` must not be empty; omit it or use `.` for the active project".into(),
+                    );
+                }
+                trimmed
+            }
+            Some(_) => return Err("`cwd` must be a string".into()),
+        };
         let raw_cwd_path = Path::new(raw_cwd);
         let cwd_candidate = if raw_cwd_path.is_absolute() {
             raw_cwd_path.to_path_buf()
@@ -527,24 +531,26 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &str {
-        "Run a command in an explicit working directory and return its combined output. \
+        "Run a command in a working directory and return its combined output. \
          Use this to verify your work — build, lint, run tests, inspect git \
-         state — rather than assuming a change compiles. Read-only commands \
-         (cargo fmt --check, git status/diff/log, toolchain version checks, and \
-         fixed-host browse-x GET requests) \
-         run immediately; commands that compile or execute repository code \
-         still ask the user first, showing the \
-         exact command. Every call must set `cwd`: use `.` for the active project \
-         or an absolute path for another project. External directories are shown \
-         in the approval preview and are never auto-run. For a long-running local \
-         dev server, set `background` to \
-         true and provide a loopback `ready_url`; the tool returns once the \
-         endpoint accepts connections and keeps the process scoped to this \
-         session. Do not run a dev server in the foreground. Output is truncated \
-         in the middle if very long. Not for \
-         reading or editing files — use read_file and edit_file, which are far \
-         cheaper. For source inspection, use grep/read_file; in particular avoid \
-         Windows `findstr` and `Select-String`."
+         state — rather than assuming a change compiles. Shell-free inspection \
+         and verification commands (`cargo check`, `cargo clippy`, `cargo test`, \
+         `cargo fmt --check`, `npm test`, `npm run lint|test|check|typecheck`, \
+         `npx tsc --noEmit`, `pytest`, `go test|vet`, `git status|diff|log`, \
+         toolchain version checks, and fixed-host browse-x GET requests) run \
+         immediately in Auto mode; arbitrary execution or shell operators ask \
+         the user first, showing the exact command. `cwd` defaults to `.` (the \
+         active project); pass a relative subdirectory or an absolute path for \
+         another project. External directories are shown in the approval preview \
+         and are never auto-run. For a long-running local dev server, set \
+         `background` to true and provide a loopback `ready_url`; the tool \
+         returns once the endpoint accepts connections and keeps the process \
+         scoped to this session. Do not run a dev server in the foreground. \
+         Oversized output is spilled to `.zest/spill/` when available or \
+         clipped in the middle. Not for reading or editing files — use \
+         read_file, edit_file, and apply_patch, which are far cheaper. For \
+         source inspection, use grep/read_file; in particular avoid Windows \
+         `findstr` and `Select-String`."
     }
 
     /// The declared risk is the ceiling. [`Self::prepare`] downgrades a command
@@ -564,7 +570,7 @@ impl Tool for Bash {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Required working directory. Use `.` for the active project or an absolute path for another project."
+                    "description": "Working directory. Defaults to `.` (the active project); pass a relative subdirectory or an absolute path for another project."
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -580,7 +586,7 @@ impl Tool for Bash {
                     "description": "Loopback HTTP URL to probe before returning from a background process, e.g. http://localhost:1420"
                 }
             },
-            "required": ["command", "cwd"],
+            "required": ["command"],
             "additionalProperties": false
         })
     }
@@ -1164,14 +1170,23 @@ mod tests {
     }
 
     #[test]
-    fn cwd_is_required_and_relative_paths_cannot_escape() {
-        let dir = scratch("cwd-required");
+    fn omitted_cwd_defaults_to_project_root_and_relative_paths_cannot_escape() {
+        let dir = scratch("cwd-default");
         let tool = Bash::new(&dir).unwrap();
 
-        let missing = tool
-            .parse(&json!({ "command": "npm run dev" }))
+        let defaulted = tool.parse(&json!({ "command": "cargo check" })).unwrap();
+        assert_eq!(defaulted.cwd, std::fs::canonicalize(&dir).unwrap());
+        assert!(!defaulted.external_cwd);
+
+        let null_cwd = tool
+            .parse(&json!({ "command": "cargo check", "cwd": null }))
+            .unwrap();
+        assert_eq!(null_cwd.cwd, std::fs::canonicalize(&dir).unwrap());
+
+        let empty = tool
+            .parse(&json!({ "command": "npm run dev", "cwd": "   " }))
             .unwrap_err();
-        assert!(missing.contains("cwd"), "{missing}");
+        assert!(empty.contains("cwd"), "{empty}");
 
         let escaping = tool
             .parse(&json!({ "command": "npm run dev", "cwd": ".." }))
@@ -1179,7 +1194,7 @@ mod tests {
         assert!(escaping.contains("escapes"), "{escaping}");
 
         let required = tool.input_schema()["required"].clone();
-        assert_eq!(required, json!(["command", "cwd"]));
+        assert_eq!(required, json!(["command"]));
     }
 
     #[test]
