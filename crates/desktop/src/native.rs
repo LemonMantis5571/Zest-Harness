@@ -118,6 +118,10 @@ impl Project {
             .or_else(|| self.config.providers.keys().next().cloned())
             .unwrap_or_default()
     }
+
+    pub fn list_commands(&self) -> Vec<zest_core::commands::SlashCommand> {
+        zest_core::commands::list_slash_commands(&self.skills, &self.mcp)
+    }
 }
 
 struct BoardNotifier(tokio::sync::watch::Sender<()>);
@@ -141,6 +145,7 @@ pub struct Chat {
     pub thread: Arc<Mutex<Thread>>,
     pub options: Arc<Mutex<Selection>>,
     pub policy: Arc<Mutex<ApprovalPolicy>>,
+    pub context_meter: Arc<Mutex<Option<crate::context_meter::ContextUsageView>>>,
 }
 
 fn error(message: impl ToString) -> HarnessError {
@@ -178,7 +183,24 @@ impl Chat {
             browser: Arc::default(),
             options: Arc::new(Mutex::new(options)),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Manual))),
+            context_meter: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn current_context_usage(&self) -> Option<crate::context_meter::ContextUsageView> {
+        if let Ok(guard) = self.context_meter.lock()
+            && let Some(meter) = guard.as_ref()
+        {
+            return Some(meter.clone());
+        }
+        let (tx, _) = futures::channel::mpsc::unbounded();
+        let (agent, _, _) = self.agent(&tx).ok()?;
+        let checkpoints = self.thread.lock().ok().map_or(0, |t| t.checkpoints.len());
+        let meter = crate::context_meter::estimate_context(&agent, checkpoints);
+        if let Ok(mut guard) = self.context_meter.lock() {
+            *guard = Some(meter.clone());
+        }
+        Some(meter)
     }
 
     // Commit the projection only after the atomic file replacement succeeds.
@@ -563,6 +585,9 @@ impl Chat {
                 Ok(()) => meter = crate::context_meter::estimate_context(&agent, checkpoints + 1),
                 Err(e) => emit(events, EvKind::Notice(format!("Compaction: {e}"))),
             }
+        }
+        if let Ok(mut guard) = self.context_meter.lock() {
+            *guard = Some(meter.clone());
         }
         let source = if meter.source == "estimate" {
             "estimated"

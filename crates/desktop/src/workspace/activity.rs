@@ -128,6 +128,7 @@ impl Workspace {
 
     pub(super) fn activity_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let root = self.chats[&self.active].read(cx);
+        let active_work = root.compacting || root.turn_active;
         let state = if root.compacting {
             "Compacting"
         } else if root.turn_active {
@@ -145,6 +146,7 @@ impl Workspace {
                 .items_center()
                 .gap_2()
                 .child(div().flex_1().min_w_0().truncate().child(if session.is_empty() { "No turn yet".to_string() } else { session }))
+                .when(active_work, |d| d.child(theme::spinner("activity-state-spinner", 13.)))
                 .child(ui::pill(None, state)),
         );
         body = body.child(ui::section_title(format!("Tool calls ({})", tools.len())));
@@ -173,10 +175,17 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _, w, cx| ws.jump_to_message(message.clone(), w, cx))),
             );
         }
+        let checking = self.workspace_check.as_deref() == Some("Checking…");
         body = body
             .child(ui::section_title("Workspace check"))
             .child(ui::hint("Looks for whitespace problems (trailing spaces, conflict markers) in uncommitted changes with git diff --check."))
-            .child(ui::button("workspace-check", Variant::Outline, Some(Icon::RefreshCw), "Run check", cx.listener(|ws, _, _, cx| ws.run_workspace_check(cx))));
+            .child(ui::button(
+                "workspace-check",
+                Variant::Outline,
+                Some(if checking { Icon::LoaderCircle } else { Icon::RefreshCw }),
+                if checking { "Checking…" } else { "Run check" },
+                cx.listener(|ws, _, _, cx| ws.run_workspace_check(cx)),
+            ));
         if let Some(result) = &self.workspace_check {
             body = body.child(ui::card().p_3().font_family(theme::MONO).text_size(px(12.)).child(result.clone()));
         }

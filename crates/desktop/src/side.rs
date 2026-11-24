@@ -175,7 +175,11 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(crate::theme::icon(crate::theme::Icon::MessageSquare, 14.))
+                    .child(if self.side.busy {
+                        crate::theme::spinner("side-busy-spinner", 14.).into_any_element()
+                    } else {
+                        crate::theme::icon(crate::theme::Icon::MessageSquare, 14.).into_any_element()
+                    })
                     .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Side conversation"))
                     .when(self.side.busy, |d| {
                         d.child(button(

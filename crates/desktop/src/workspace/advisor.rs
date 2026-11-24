@@ -4,6 +4,7 @@
 //! `config_edit::set_advisor` validates the selection before it writes.
 
 use super::*;
+use crate::theme::Icon;
 use crate::ui::{self, Variant};
 use zest_core::config_edit::{self, AdvisorInput};
 
@@ -87,53 +88,154 @@ impl Workspace {
     pub(super) fn advisor_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let draft = &self.advisor_draft;
         let config = &self.project.config;
-        let mut body = div().flex().flex_col().gap_3();
+        let mut body = div().flex().flex_col().gap_5();
         if self.project.demo {
-            return body.child(ui::hint("The offline demo has no advisor. Set one up in a project window.")).into_any_element();
+            return body
+                .child(ui::empty_state(
+                    Icon::Users,
+                    "Advisor unavailable in offline demo",
+                    "Open a project window to configure a second-opinion advisor model.",
+                ))
+                .into_any_element();
         }
         let saved = config.advisor.as_ref();
-        body = body.child(ui::hint(match saved {
-            Some(advisor) => format!(
-                "On: {} · {}. The agent can ask it for a second opinion; each request may consult it up to {} time{}.",
-                advisor.provider,
-                advisor.model.as_deref().unwrap_or("default model"),
-                advisor.max_uses,
-                if advisor.max_uses == 1 { "" } else { "s" }
-            ),
-            None => "Off. An advisor is a stronger model the agent can consult before finishing or after failures.".to_string(),
-        }));
+        body = body
+            .child(ui::section_heading(
+                "Advisor",
+                "A stronger model your chat can consult for a second opinion before finishing or after failures.",
+            ))
+            .child(
+                div()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(theme::alpha(theme::border(), 0.7))
+                    .bg(theme::alpha(theme::card(), 0.55))
+                    .px_3()
+                    .py(px(10.))
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(rgb(theme::muted_foreground()))
+                    .child(match saved {
+                        Some(advisor) => format!(
+                            "Active: {} · {}. Each request may consult it up to {} time{}.",
+                            advisor.provider,
+                            advisor.model.as_deref().unwrap_or("default model"),
+                            advisor.max_uses,
+                            if advisor.max_uses == 1 { "" } else { "s" }
+                        ),
+                        None => "Off. Choose a provider and model below, then save to turn it on.".to_string(),
+                    }),
+            );
         let providers = advisor_providers(config);
         if providers.is_empty() {
             return body
-                .child(ui::hint("The advisor needs a provider on Zest's own loop: an API key or ChatGPT sign-in. Add one in Customize > Providers."))
+                .child(ui::empty_state(
+                    Icon::Sparkles,
+                    "No eligible advisor providers yet",
+                    "The advisor needs a provider on Zest's own loop: an API key or ChatGPT sign-in. Add one in Customize > Providers.",
+                ))
                 .into_any_element();
         }
-        let mut row = div().flex().flex_wrap().gap_1();
+        let mut provider_list = div().flex().flex_col().gap_2();
         for id in providers {
             let selected = draft.provider.as_deref() == Some(id.as_str());
             let pick = id.clone();
-            row = row.child(ui::button(
-                SharedString::from(format!("advisor-provider-{id}")),
-                if selected { Variant::Secondary } else { Variant::Ghost },
-                None,
-                if selected { format!("{id}, current") } else { id.clone() },
-                cx.listener(move |ws, _, _, cx| {
-                    ws.advisor_draft.provider = Some(pick.clone());
-                    ws.advisor_draft.model = None;
-                    cx.notify();
-                }),
-            ));
+            let title = config
+                .providers
+                .get(&id)
+                .map(|cfg| provider_display_name(&id, cfg))
+                .unwrap_or_else(|| id.clone());
+            let detail = config
+                .providers
+                .get(&id)
+                .map(|cfg| {
+                    let d = zest_core::descriptor_from_config(&id, cfg);
+                    format!("{} · {} models", id, d.models.len().max(1))
+                })
+                .unwrap_or_else(|| id.clone());
+            provider_list = provider_list.child(
+                div()
+                    .id(SharedString::from(format!("advisor-provider-{id}")))
+                    .role(Role::RadioButton)
+                    .aria_label(SharedString::from(if selected {
+                        format!("{title}, current")
+                    } else {
+                        title.clone()
+                    }))
+                    .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .px_3()
+                    .py(px(9.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(if selected {
+                        theme::alpha(theme::primary(), 0.8)
+                    } else {
+                        theme::alpha(theme::border(), 0.8)
+                    })
+                    .bg(if selected {
+                        theme::alpha(theme::primary(), 0.12)
+                    } else {
+                        theme::alpha(theme::card(), 0.7)
+                    })
+                    .hover(|s| {
+                        if selected {
+                            s.bg(theme::alpha(theme::primary(), 0.16))
+                        } else {
+                            s.bg(rgb(theme::card())).border_color(rgb(theme::border()))
+                        }
+                    })
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(28.))
+                            .flex_none()
+                            .rounded(px(7.))
+                            .bg(rgb(theme::secondary()))
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(theme::provider_icon(&id, None, 14.)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(title))
+                            .child(div().truncate().text_size(px(11.)).text_color(rgb(theme::muted_foreground())).child(detail)),
+                    )
+                    .when(selected, |d| d.child(ui::check_badge()))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.advisor_draft.provider = Some(pick.clone());
+                        ws.advisor_draft.model = None;
+                        cx.notify();
+                    })),
+            );
         }
-        body = body.child(ui::section_title("Provider")).child(row);
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::muted_foreground())).child("Provider"))
+                .child(provider_list),
+        );
         if let Some(provider) = draft.provider.as_deref().and_then(|id| config.providers.get(id).map(|cfg| (id, cfg))) {
             let descriptor = zest_core::descriptor_from_config(provider.0, provider.1);
-            let mut models = div().flex().flex_wrap().gap_1();
+            let mut models = div().flex().flex_wrap().gap_2();
             let default_selected = draft.model.is_none();
-            models = models.child(ui::button(
+            models = models.child(ui::select_chip(
                 "advisor-model-default",
-                if default_selected { Variant::Secondary } else { Variant::Ghost },
-                None,
                 format!("Default ({})", descriptor.default_model),
+                default_selected,
                 cx.listener(|ws, _, _, cx| {
                     ws.advisor_draft.model = None;
                     cx.notify();
@@ -142,27 +244,32 @@ impl Workspace {
             for spec in descriptor.models.iter().take(12) {
                 let selected = draft.model.as_deref() == Some(spec.id.as_str());
                 let pick = spec.id.clone();
-                models = models.child(ui::button(
+                models = models.child(ui::select_chip(
                     SharedString::from(format!("advisor-model-{}", spec.id)),
-                    if selected { Variant::Secondary } else { Variant::Ghost },
-                    None,
                     spec.id.clone(),
+                    selected,
                     cx.listener(move |ws, _, _, cx| {
                         ws.advisor_draft.model = Some(pick.clone());
                         cx.notify();
                     }),
                 ));
             }
-            body = body.child(ui::section_title("Model")).child(models);
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::muted_foreground())).child("Model"))
+                    .child(models),
+            );
         }
-        let mut uses = div().flex().gap_1();
+        let mut uses = div().flex().flex_wrap().gap_2();
         for n in USES {
             let selected = draft.max_uses == n;
-            uses = uses.child(ui::button(
+            uses = uses.child(ui::select_chip(
                 SharedString::from(format!("advisor-uses-{n}")),
-                if selected { Variant::Secondary } else { Variant::Ghost },
-                None,
                 n.to_string(),
+                selected,
                 cx.listener(move |ws, _, _, cx| {
                     ws.advisor_draft.max_uses = n;
                     cx.notify();
@@ -170,12 +277,18 @@ impl Workspace {
             ));
         }
         body = body
-            .child(ui::section_title("Consultations per request"))
-            .child(uses)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::muted_foreground())).child("Consultations per request"))
+                    .child(uses),
+            )
             .child(ui::switch_row(
                 "advisor-auto",
-                "Consult on its own",
-                "Before a turn that changed files finishes, and after two failed tool calls in a row, when that needs no new approval.",
+                "Review automatically",
+                "Zest also asks the advisor itself: before a turn that changed files ends, and after two failed tool calls in a row.",
                 draft.auto_review,
                 cx.listener(|ws, on: &bool, _, cx| {
                     ws.advisor_draft.auto_review = *on;
@@ -184,11 +297,13 @@ impl Workspace {
             ))
             .child(
                 div()
+                    .pt_1()
                     .flex()
+                    .items_center()
                     .gap_2()
                     .child(ui::button("advisor-save", Variant::Primary, None, "Save advisor", cx.listener(|ws, _, _, cx| ws.save_advisor(false, cx))))
                     .when(saved.is_some(), |d| {
-                        d.child(ui::button("advisor-off", Variant::Ghost, None, "Turn off", cx.listener(|ws, _, _, cx| ws.save_advisor(true, cx))))
+                        d.child(ui::button("advisor-off", Variant::Outline, None, "Turn off", cx.listener(|ws, _, _, cx| ws.save_advisor(true, cx))))
                     }),
             );
         body.into_any_element()

@@ -37,21 +37,6 @@ pub struct ContextUsageView {
     pub should_auto_compact: bool,
 }
 
-/// What one compaction did, alongside the resulting occupancy.
-///
-/// Separate from [`ContextUsageView`] rather than extra fields on it: the
-/// `context_usage` command serves that type on every refresh, where these would
-/// always be zero.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactionResultView {
-    pub usage: ContextUsageView,
-    /// True when shortening long tool results was enough and no model call was
-    /// made — the conversation was kept rather than replaced by a summary.
-    pub pruned_only: bool,
-    pub results_pruned: usize,
-}
-
 /// Prefer the provider's count of the whole prompt; fall back to char/4.
 ///
 /// `input_tokens` alone excludes everything the cache served. Since the 1h

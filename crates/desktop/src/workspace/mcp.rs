@@ -218,31 +218,68 @@ impl Workspace {
 
     pub(super) fn mcp_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = &self.mcp_page;
-        let mut body = div().flex().flex_col().gap_3();
+        let mut body = div().flex().flex_col().gap_4();
         if self.project.demo {
-            return body.child(ui::hint("MCP servers are configured in project windows.")).into_any_element();
-        }
-        body = body.child(ui::hint(format!(
-            "Editing {}. Saving or turning on a server checks it, which is what loads its tools; new chats get them, open chats keep the servers they started with.",
-            page.scope
-        )));
-        if let Some(form) = &page.form {
-            return body.child(self.mcp_form(form, cx)).into_any_element();
+            return body
+                .child(ui::empty_state(
+                    Icon::Server,
+                    "MCP servers unavailable in offline demo",
+                    "Open a project window to connect local or HTTP MCP servers.",
+                ))
+                .into_any_element();
         }
         body = body.child(
             div()
                 .flex()
-                .gap_2()
-                .child(ui::button("mcp-add", Variant::Primary, Some(Icon::Plus), "Add server", cx.listener(|ws, _, w, cx| ws.open_mcp_form(None, false, w, cx))))
-                .when(!page.rows.iter().any(|r| r.id.eq_ignore_ascii_case("github")), |d| {
-                    d.child(ui::button("mcp-github", Variant::Outline, None, "Add GitHub", cx.listener(|ws, _, w, cx| ws.open_mcp_form(None, true, w, cx))))
-                }),
+                .items_start()
+                .justify_between()
+                .gap_3()
+                .child(ui::section_heading(
+                    "MCP connections",
+                    format!(
+                        "Connections your chats can use (editing {}). Type /name in chat to point a turn at one. Each tool call still asks for your approval.",
+                        page.scope
+                    ),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .when(!page.rows.iter().any(|r| r.id.eq_ignore_ascii_case("github")), |d| {
+                            d.child(ui::button(
+                                "mcp-github",
+                                Variant::Outline,
+                                Some(Icon::GitPullRequest),
+                                "Add GitHub",
+                                cx.listener(|ws, _, w, cx| ws.open_mcp_form(None, true, w, cx)),
+                            ))
+                        })
+                        .child(ui::button(
+                            "mcp-add",
+                            Variant::Primary,
+                            Some(Icon::Plus),
+                            "Add server",
+                            cx.listener(|ws, _, w, cx| ws.open_mcp_form(None, false, w, cx)),
+                        )),
+                ),
         );
-        if page.rows.is_empty() {
-            body = body.child(ui::hint("No MCP servers yet."));
+        if let Some(form) = &page.form {
+            return body.child(self.mcp_form(form, cx)).into_any_element();
         }
-        for row in &page.rows {
-            body = body.child(self.mcp_row(row, cx));
+        if page.rows.is_empty() {
+            body = body.child(ui::empty_state(
+                Icon::Server,
+                "No MCP servers configured yet",
+                "Add a local stdio server or connect GitHub to expose external tools to your API-provider chats.",
+            ));
+        } else {
+            let mut list = div().flex().flex_col().gap_2();
+            for row in &page.rows {
+                list = list.child(self.mcp_row(row, cx));
+            }
+            body = body.child(list);
         }
         body.into_any_element()
     }
@@ -272,7 +309,7 @@ impl Workspace {
             let enabled = row.enabled;
             actions = actions
                 .child(ui::switch(SharedString::from(format!("mcp-on-{id}")), format!("Use {id}"), enabled, cx.listener(move |ws, on: &bool, _, cx| ws.switch_mcp(switch_id.clone(), *on, cx))))
-                .child(ui::button(SharedString::from(format!("mcp-check-{id}")), Variant::Outline, Some(Icon::RefreshCw), if busy { "Checking…" } else { "Check" }, cx.listener(move |ws, _, _, cx| {
+                .child(ui::button(SharedString::from(format!("mcp-check-{id}")), Variant::Outline, Some(if busy { Icon::LoaderCircle } else { Icon::RefreshCw }), if busy { "Checking…" } else { "Check" }, cx.listener(move |ws, _, _, cx| {
                     if ws.mcp_page.busy.is_none() {
                         ws.check_mcp(check_id.clone(), cx);
                     }

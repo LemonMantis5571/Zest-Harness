@@ -19,7 +19,6 @@ const MAX_TEXT_READ_BYTES: usize = MAX_ATTACHMENT_CHARS * 4;
 
 /// Per-image ceiling.
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_IMAGE_BASE64_CHARS: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 /// Ceiling across everything attached to one message.
 ///
@@ -559,23 +558,6 @@ pub fn build_user_content(text: &str, attachments: &[AttachmentInput]) -> Vec<Va
     }
 
     blocks
-}
-
-pub fn has_images(attachments: &[AttachmentInput]) -> bool {
-    attachments.iter().any(|a| {
-        a.kind.as_deref() == Some("image")
-            && a.status == "done"
-            && a.data_base64.as_ref().is_some_and(|d| !d.is_empty())
-    })
-}
-
-pub fn has_usable_attachment(attachments: &[AttachmentInput]) -> bool {
-    attachments.iter().any(|a| {
-        a.status == "done"
-            && (a.content.as_ref().is_some_and(|c| !c.trim().is_empty())
-                || (a.kind.as_deref() == Some("image")
-                    && a.data_base64.as_ref().is_some_and(|d| !d.is_empty())))
-    })
 }
 
 #[cfg(test)]

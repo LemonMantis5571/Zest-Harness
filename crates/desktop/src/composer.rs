@@ -7,9 +7,11 @@ use gpui::prelude::*;
 use gpui::*;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 const MESSAGE_HINT: &str = "Ask about this project — / for commands, paste or attach files";
+const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 actions!(
     zest_spike,
@@ -73,6 +75,9 @@ pub struct Composer {
     layout: Option<TextLayout>,
     bounds: Option<Bounds<Pixels>>,
     dragging: bool,
+    caret_blink_on: bool,
+    caret_blink_epoch: u64,
+    caret_blink_task: Option<Task<()>>,
     pub images: Vec<Arc<Image>>,
     /// Trace of what the platform asked of the input handler, for the IME report.
     pub trace: Vec<String>,
@@ -95,9 +100,62 @@ impl Composer {
             layout: None,
             bounds: None,
             dragging: false,
+            caret_blink_on: true,
+            caret_blink_epoch: 0,
+            caret_blink_task: None,
             images: vec![],
             trace: vec![],
         }
+    }
+
+    /// Keeps the caret solid right after typing or cursor movement and restarts
+    /// the blink cycle on the next render.
+    fn reset_caret_blink(&mut self) {
+        self.caret_blink_on = true;
+        self.caret_blink_epoch = self.caret_blink_epoch.wrapping_add(1);
+        self.caret_blink_task = None;
+    }
+
+    /// Runs the 530 ms blink timer only while the caret is active and visible;
+    /// drops the task immediately on blur, selection, window deactivation, or reduced motion.
+    fn sync_caret_blink(&mut self, active: bool, window: &Window, cx: &mut Context<Self>) {
+        if !active {
+            if self.caret_blink_task.is_some() || !self.caret_blink_on {
+                self.caret_blink_task = None;
+                self.caret_blink_on = true;
+                self.caret_blink_epoch = self.caret_blink_epoch.wrapping_add(1);
+            }
+            return;
+        }
+        if self.caret_blink_task.is_some() {
+            return;
+        }
+        let epoch = self.caret_blink_epoch;
+        self.caret_blink_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CARET_BLINK_INTERVAL).await;
+                let keep_going = this
+                    .update_in(cx, |c, window, cx| {
+                        let still_active = c.caret_blink_epoch == epoch
+                            && c.focus.is_focused(window)
+                            && window.is_window_active()
+                            && c.sel.is_empty()
+                            && !cx.reduce_motion();
+                        if !still_active {
+                            c.caret_blink_on = true;
+                            c.caret_blink_task = None;
+                            return false;
+                        }
+                        c.caret_blink_on = !c.caret_blink_on;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
     }
 
     /// (visual lines, laid-out height in px) from the last paint.
@@ -121,6 +179,7 @@ impl Composer {
     fn move_to(&mut self, i: usize, window: &Window, cx: &mut Context<Self>) {
         self.sel = i..i;
         self.reversed = false;
+        self.reset_caret_blink();
         window.notify_text_selection_changed(&self.focus);
         cx.notify();
     }
@@ -131,6 +190,7 @@ impl Composer {
             self.reversed = !self.reversed;
             self.sel = self.sel.end..self.sel.start;
         }
+        self.reset_caret_blink();
         window.notify_text_selection_changed(&self.focus);
         cx.notify();
     }
@@ -191,6 +251,7 @@ impl Composer {
         cx.emit(ComposerEvent::Send { text, images });
         self.text.clear();
         self.sel = 0..0;
+        self.reset_caret_blink();
         window.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -376,6 +437,7 @@ impl EntityInputHandler for Composer {
         ime_log("unmark_text".into());
         self.trace.push("unmark".into());
         self.marked = None;
+        self.reset_caret_blink();
         w.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -395,6 +457,7 @@ impl EntityInputHandler for Composer {
         self.sel = end..end;
         self.reversed = false;
         self.marked = None;
+        self.reset_caret_blink();
         w.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -422,6 +485,7 @@ impl EntityInputHandler for Composer {
             .map(|s| self.range_from_u16(&(start16 + s.start.min(len16)..start16 + s.end.min(len16))))
             .unwrap_or(r.start + new.len()..r.start + new.len());
         self.reversed = false;
+        self.reset_caret_blink();
         w.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -593,7 +657,7 @@ impl Element for ComposerText {
             let c = self.input.read(cx);
             (c.cursor(), c.sel.is_empty())
         };
-        if focus.is_focused(w) && collapsed && self.caret_blink_on {
+        if focus.is_focused(w) && w.is_window_active() && collapsed && self.caret_blink_on {
             let origin = layout.position_for_index(cursor).unwrap_or(bounds.origin);
             let lh = layout.line_height();
             w.paint_quad(fill(Bounds::new(origin, size(px(1.5), lh)), rgb(fg())));
@@ -658,6 +722,9 @@ impl Render for Composer {
         let styled = StyledText::new(if empty { SharedString::from(" ") } else { SharedString::from(self.text.clone()) })
             .with_highlights(runs);
         let focused = self.focus.is_focused(window);
+        let caret_active = focused && window.is_window_active() && self.sel.is_empty() && !cx.reduce_motion();
+        self.sync_caret_blink(caret_active, window, cx);
+        let caret_blink_on = self.caret_blink_on;
         let chat = self.is_chat();
         let lh = px(21.);
         let this = cx.entity();
@@ -754,7 +821,7 @@ impl Render for Composer {
                             });
                         }
                     })
-                    .child(ComposerText { input: this, inner: styled, caret_blink_on: true })
+                    .child(ComposerText { input: this, inner: styled, caret_blink_on })
                     .when(empty, |d| {
                         d.child(
                             div()
@@ -811,5 +878,48 @@ mod tests {
         assert_eq!(runs.iter().map(|r| r.lengths.len()).collect::<Vec<_>>(), vec![RUN_CHARS, 3]);
         assert!(runs[1].continues_line);
         assert_eq!(a11y_position(&runs, RUN_CHARS + 1), (1, 1));
+    }
+
+    #[::core::prelude::v1::test]
+    fn caret_blinks_while_focused_and_stops_on_blur() {
+        use super::{CARET_BLINK_INTERVAL, Composer};
+        use gpui::{AppContext, EntityInputHandler, TestAppContext, px, size};
+
+        let mut app = TestAppContext::single();
+        let window = app.open_window(size(px(400.), px(200.)), |_, cx| Composer::new(cx));
+        let composer = window.root(&mut app).unwrap();
+
+        // Activate window, focus composer, and render once so the blink timer starts.
+        app.update_window(window.into(), |_, w, cx| {
+            w.activate_window();
+            let focus = composer.read(cx).focus.clone();
+            w.focus(&focus, cx);
+        })
+        .unwrap();
+        app.run_until_parked();
+
+        assert!(composer.read_with(&app, |c, _| c.caret_blink_on && c.caret_blink_task.is_some()));
+
+        // After one interval, caret blinks off.
+        app.executor().advance_clock(CARET_BLINK_INTERVAL);
+        app.run_until_parked();
+        assert!(!composer.read_with(&app, |c, _| c.caret_blink_on));
+
+        // Typing immediately resets the caret solid so it stays visible while editing.
+        app.update_window(window.into(), |_, w, cx| {
+            composer.update(cx, |c, cx| c.replace_text_in_range(None, "a", w, cx));
+        })
+        .unwrap();
+        app.run_until_parked();
+        assert!(composer.read_with(&app, |c, _| c.caret_blink_on && c.caret_blink_task.is_some()));
+
+        // Blurring stops the timer task so unfocused inputs consume zero idle CPU.
+        app.update_window(window.into(), |_, w, cx| {
+            w.blur(cx);
+        })
+        .unwrap();
+        app.executor().advance_clock(CARET_BLINK_INTERVAL);
+        app.run_until_parked();
+        assert!(composer.read_with(&app, |c, _| c.caret_blink_on && c.caret_blink_task.is_none()));
     }
 }

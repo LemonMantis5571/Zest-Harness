@@ -192,7 +192,7 @@ impl Workspace {
         match target {
             Target::Act(act) => match act {
                 Act::NewChat => self.new_chat(window, cx),
-                Act::OpenFolder => self.pick_project(cx),
+                Act::OpenFolder => self.pick_project(window, cx),
                 Act::Split => self.split(window, cx),
                 Act::Zoom => self.zoom_active(cx),
                 Act::Minimize => self.minimize_active(window, cx),

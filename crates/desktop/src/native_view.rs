@@ -50,8 +50,18 @@ mod tests {
     }
 }
 impl EventEmitter<ChatChanged> for Root {}
-pub struct ChooseModel;
+pub struct ChooseModel(pub Option<Point<Pixels>>);
 impl EventEmitter<ChooseModel> for Root {}
+pub struct ChooseMode(pub Point<Pixels>);
+impl EventEmitter<ChooseMode> for Root {}
+pub struct ShowContext(pub Point<Pixels>);
+impl EventEmitter<ShowContext> for Root {}
+pub struct ComposerOpenFolder;
+impl EventEmitter<ComposerOpenFolder> for Root {}
+pub struct ComposerOpenPr;
+impl EventEmitter<ComposerOpenPr> for Root {}
+pub struct ForkFromChat;
+impl EventEmitter<ForkFromChat> for Root {}
 
 pub fn button(
     id: impl Into<ElementId>,
@@ -114,6 +124,7 @@ fn recorded(label: &str, status: &str, title: String, body: Doc) -> Msg {
             },
             title,
             open: false,
+            user_toggled: false,
         },
         body,
     )
@@ -233,6 +244,46 @@ impl Root {
             }
             Err(e) => self.note = e.to_string(),
         }
+        cx.notify();
+    }
+
+    /// Re-runs the user turn that produced the assistant reply at `answer_ix`.
+    pub fn retry_turn(&mut self, answer_ix: usize, cx: &mut Context<Self>) {
+        if self.turn_active {
+            return;
+        }
+        let Some(user_ix) = (0..answer_ix).rev().find(|&i| self.msgs.get(i).is_some_and(|m| m.user)) else {
+            return;
+        };
+        let Some(user_id) = self.message_at(user_ix) else {
+            return;
+        };
+        let Some(chat) = self.native.clone() else {
+            return;
+        };
+        match chat.edit_message(&user_id) {
+            Ok(text) => {
+                self.native_start = None;
+                self.restore_native();
+                cx.emit(ChatChanged);
+                self.submit_native(&text, &[], cx);
+            }
+            Err(e) => {
+                self.note = e.to_string();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Triggers manual context compaction when idle.
+    pub fn trigger_compact(&mut self, cx: &mut Context<Self>) {
+        if self.turn_active || self.native.is_none() {
+            return;
+        }
+        self.turn_active = true;
+        self.stop_requested = false;
+        self.note = "Compacting context…".into();
+        let _ = self.cmd_tx.send(Cmd::Compact);
         cx.notify();
     }
 
@@ -377,7 +428,7 @@ impl Root {
                 c.images = images.to_vec();
                 cx.notify();
             });
-            cx.emit(ChooseModel);
+            cx.emit(ChooseModel(None));
             return;
         }
         if let Some(question) = zest_core::commands::btw_question(text) {
@@ -718,27 +769,41 @@ impl Root {
             );
         }
         let model = session_parts(&self.session_label).0;
+        let (provider_id, effort) = self
+            .native
+            .as_ref()
+            .map(|c| {
+                let opts = c.options.lock().unwrap();
+                (opts.provider.clone(), opts.effort.clone())
+            })
+            .unwrap_or_default();
+        let model_label = match effort.as_deref().filter(|e| !e.is_empty()) {
+            Some(effort) => format!("{model} · {effort}"),
+            None => model,
+        };
         left = left.child(
             div()
                 .id("choose-model")
                 .role(Role::Button)
-                .aria_label(SharedString::from(format!("Model: {model}")))
+                .aria_label(SharedString::from(format!("Model: {model_label}")))
                 .tab_index(0)
                 .cursor_pointer()
                 .min_h(px(28.))
-                .px(px(6.))
+                .px(px(8.))
                 .flex()
                 .items_center()
-                .gap_1()
+                .gap(px(6.))
                 .rounded(px(6.))
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(crate::theme::model_text()))
-                .hover(|s| s.bg(alpha(theme::secondary(), 0.5)))
-                .child(theme::icon(Icon::Sparkles, 14.).text_color(rgb(theme::secondary_foreground())))
-                .child(div().max_w(px(220.)).truncate().child(model))
+                .hover(|s| s.bg(alpha(theme::secondary(), 0.7)))
+                .child(theme::provider_icon(&provider_id, None, 14.))
+                .child(div().max_w(px(220.)).truncate().child(model_label))
                 .child(theme::icon(Icon::ChevronDown, 12.).opacity(0.6))
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(ChooseModel))),
+                .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                    cx.emit(ChooseModel(Some(event.position())))
+                })),
         );
         let send = div()
             .id(if busy { "stop-turn" } else { "send" })
@@ -775,38 +840,209 @@ impl Root {
             .child(send)
     }
 
-    /// The muted line under the composer card: project, branch, model and approval mode.
-    pub fn status_row(&self) -> impl IntoElement {
-        use crate::theme::{self, Icon};
+    /// Slash command autocomplete popup shown above the composer when typing `/...`.
+    pub fn slash_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::theme::{self, alpha};
+        let chat = self.native.as_ref()?;
+        let text = self.composer.read(cx).text.trim_start();
+        let after_slash = text.strip_prefix('/')?;
+        // Only show while typing the command token (before the first space/newline).
+        if after_slash.contains(char::is_whitespace) || after_slash.starts_with('/') {
+            return None;
+        }
+        let query = after_slash.to_ascii_lowercase();
+        let matches: Vec<_> = chat
+            .project
+            .list_commands()
+            .into_iter()
+            .filter(|cmd| {
+                query.is_empty()
+                    || cmd.name.to_ascii_lowercase().contains(&query)
+                    || cmd.description.to_ascii_lowercase().contains(&query)
+            })
+            .take(8)
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+        let mut list = div()
+            .id("slash-command-menu")
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(theme::popover()))
+            .shadow_lg()
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+        for (i, cmd) in matches.into_iter().enumerate() {
+            let name = cmd.name.clone();
+            let kind_label = match cmd.kind {
+                zest_core::commands::SlashKind::Builtin => "built-in",
+                zest_core::commands::SlashKind::Skill => "skill",
+                zest_core::commands::SlashKind::Mcp => "mcp",
+            };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("slash-cmd-{i}")))
+                    .role(Role::Button)
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .hover(|s| s.bg(alpha(theme::secondary(), 0.8)))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .on_click(cx.listener(move |root, _, window, cx| {
+                        if name.eq_ignore_ascii_case("model") {
+                            root.composer.update(cx, |c, cx| {
+                                c.text.clear();
+                                c.sel = 0..0;
+                                cx.notify();
+                            });
+                            cx.emit(ChooseModel(None));
+                            return;
+                        }
+                        if name.eq_ignore_ascii_case("compact") {
+                            root.composer.update(cx, |c, cx| {
+                                c.text.clear();
+                                c.sel = 0..0;
+                                cx.notify();
+                            });
+                            root.trigger_compact(cx);
+                            return;
+                        }
+                        let filled = format!("/{name} ");
+                        let len = filled.len();
+                        root.composer.update(cx, |c, cx| {
+                            c.text = filled;
+                            c.sel = len..len;
+                            cx.notify();
+                        });
+                        window.focus(&root.composer.read(cx).focus.clone(), cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(theme::foreground()))
+                            .child(format!("/{}", cmd.name)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme::muted_foreground()))
+                            .child(cmd.description),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.))
+                            .text_color(rgb(theme::faint()))
+                            .child(kind_label),
+                    ),
+            );
+        }
+        Some(list.into_any_element())
+    }
+
+    /// The interactive status line under the composer card: project, branch, PR,
+    /// model, approval mode dropdown, and context usage popover.
+    pub fn status_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::theme::{self, Icon, alpha};
         let mut left = div().flex().items_center().gap_2().min_w_0();
         let mut right = div().flex().items_center().gap_1();
         if let Some(chat) = &self.native {
-            let name = chat.project.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = chat
+                .project
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             left = left.child(
-                div().flex().items_center().gap_1().child(theme::icon(Icon::FolderOpen, 12.).opacity(0.7)).child(name),
+                div()
+                    .id("status-folder")
+                    .role(Role::Button)
+                    .aria_label("Open project folder")
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .min_h(px(24.))
+                    .px(px(6.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .hover(|s| s.bg(alpha(theme::secondary(), 0.8)).text_color(rgb(theme::foreground())))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerOpenFolder)))
+                    .child(theme::icon(Icon::FolderOpen, 12.).opacity(0.75))
+                    .child(name),
             );
             let thread = chat.thread.lock().unwrap();
-            let branch = thread.git_context.as_ref().and_then(|g| g.branch.clone()).or_else(|| self.checkout_branch.clone());
+            let branch = thread
+                .git_context
+                .as_ref()
+                .and_then(|g| g.branch.clone())
+                .or_else(|| self.checkout_branch.clone());
             if let Some(branch) = branch {
-                left = left.child(div().flex().items_center().gap_1().child(theme::icon(Icon::GitBranch, 12.)).child(branch));
+                left = left.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(theme::icon(Icon::GitBranch, 12.))
+                        .child(branch),
+                );
             }
             if let Some(git) = &thread.git_context {
                 if let Some(pr) = &git.pull_request {
                     left = left.child(
-                        div().flex().items_center().gap_1().child(theme::icon(Icon::GitPullRequest, 12.)).child(format!("#{}", pr.number)),
+                        div()
+                            .id("status-pr")
+                            .role(Role::Button)
+                            .aria_label("Open pull request")
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .min_h(px(24.))
+                            .px(px(6.))
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .hover(|s| {
+                                s.bg(alpha(theme::secondary(), 0.8))
+                                    .text_color(rgb(theme::foreground()))
+                            })
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerOpenPr)))
+                            .child(theme::icon(Icon::GitPullRequest, 12.))
+                            .child(format!("#{}", pr.number)),
                     );
                 }
             }
             drop(thread);
             let mode = chat.policy.lock().unwrap().mode();
             let (label, color) = match mode {
-                zest_core::ApprovalMode::Manual => ("Ask".to_string(), theme::muted_foreground()),
-                zest_core::ApprovalMode::AcceptEdits => ("Edits".to_string(), theme::muted_foreground()),
-                zest_core::ApprovalMode::Plan => ("Plan".to_string(), theme::link()),
-                other => (format!("{other:?}"), theme::muted_foreground()),
+                zest_core::ApprovalMode::Manual => ("Ask", theme::muted_foreground()),
+                zest_core::ApprovalMode::AcceptEdits => ("Accept edits", theme::muted_foreground()),
+                zest_core::ApprovalMode::Plan => ("Plan", theme::link()),
+                zest_core::ApprovalMode::Auto => ("Auto", theme::muted_foreground()),
+                zest_core::ApprovalMode::Bypass => ("Bypass", theme::destructive()),
             };
             right = right.child(
                 div()
+                    .id("approval-mode")
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("Approval mode: {label}")))
+                    .tab_index(0)
+                    .cursor_pointer()
                     .min_h(px(24.))
                     .px(px(6.))
                     .flex()
@@ -814,6 +1050,10 @@ impl Root {
                     .gap_1()
                     .rounded(px(6.))
                     .text_color(rgb(color))
+                    .hover(|s| s.bg(alpha(theme::secondary(), 0.8)))
+                    .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                        cx.emit(ChooseMode(event.position()));
+                    }))
                     .child(theme::icon(Icon::Shield, 12.).text_color(rgb(color)))
                     .child(label),
             );
@@ -825,11 +1065,24 @@ impl Root {
         if let Some((percent, remaining)) = context {
             right = right.child(
                 div()
+                    .id("context-usage")
+                    .role(Role::Button)
+                    .aria_label("Context usage")
+                    .tab_index(0)
+                    .cursor_pointer()
                     .min_h(px(24.))
                     .px(px(6.))
+                    .rounded(px(6.))
                     .flex()
                     .items_center()
                     .gap_1()
+                    .hover(|s| {
+                        s.bg(alpha(theme::secondary(), 0.8))
+                            .text_color(rgb(theme::foreground()))
+                    })
+                    .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                        cx.emit(ShowContext(event.position()));
+                    }))
                     .child(theme::icon(Icon::CircleDot, 12.).text_color(rgb(theme::primary())))
                     .child(format!("{percent} · {remaining} left")),
             );
