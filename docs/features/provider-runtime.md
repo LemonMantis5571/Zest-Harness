@@ -99,6 +99,17 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
 - `Completion.served_model` records what the endpoint says it ran; `None` means
   "did not say", not agreement. Rate-limit headers become `RateLimitSnapshot`
   (throughput headroom, never plan quota).
+- Vision & multimodal history: Claude (`claude-*`, `opus`/`sonnet`/`haiku`/`fable`),
+  GPT-5/GPT-6/GPT-4o, and Gemini models report `supports_vision = true` so
+  `browser` and `html_preview` tool screenshots reach the model. User-attached
+  base64 images (`png`, `jpeg`, `gif`, `webp`) map cleanly across Anthropic,
+  Rig/ChatGPT Codex (`rig_convert::user_content`), and OpenAI-compatible
+  (`image_url` data URLs).
+- OpenAI-compatible reasoning & token limits: `reasoning_content`, `reasoning`,
+  and `analysis` stream deltas emit live `StreamEvent::Thinking` chunks;
+  `reasoning_content` is echoed back on assistant `tool_calls` turns (for
+  DeepSeek Reasoner / Kimi K2 Thinking multi-step tool loops); and `o1`/`o3`/`o4`/
+  `gpt-5`/`gpt-6` models send `max_completion_tokens` instead of `max_tokens`.
 - ChatGPT Codex (`codex_oauth` kind) runs in Zest's loop; its session is refreshed
   and re-stored before each turn and Rig only ever receives an access token.
 - `resume_support` is consulted by chat restart reconciliation only after the

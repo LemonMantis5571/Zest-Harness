@@ -90,8 +90,8 @@ struct CodexLaunchPolicy {
     turn_sandbox: &'static str,
 }
 
-fn launch_policy(has_host: bool, allow_tool_use: bool) -> CodexLaunchPolicy {
-    if has_host {
+fn launch_policy(has_host: bool, allow_tool_use: bool, bypass_mode: bool) -> CodexLaunchPolicy {
+    if has_host && !(allow_tool_use && bypass_mode) {
         CodexLaunchPolicy {
             approval_policy: "on-request",
             thread_sandbox: THREAD_SANDBOX_READ_ONLY,
@@ -115,6 +115,19 @@ fn launch_policy(has_host: bool, allow_tool_use: bool) -> CodexLaunchPolicy {
     }
 }
 
+fn is_dead_connection_error(err: &HarnessError) -> bool {
+    match err {
+        HarnessError::PrematureEof => true,
+        HarnessError::Other(msg) => msg.starts_with("provider stdin "),
+        _ => false,
+    }
+}
+
+struct CodexConnection {
+    process: JsonlProcess,
+    request_id: u64,
+}
+
 pub struct CodexAppServerProvider {
     id: String,
     root: PathBuf,
@@ -127,6 +140,7 @@ pub struct CodexAppServerProvider {
     allow_mcp: bool,
     timeout_secs: u64,
     auth: AuthStatus,
+    connection: tokio::sync::Mutex<Option<CodexConnection>>,
 }
 
 impl CodexAppServerProvider {
@@ -176,6 +190,7 @@ impl CodexAppServerProvider {
             allow_mcp,
             timeout_secs,
             auth: detect_codex_cli(),
+            connection: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -261,14 +276,14 @@ impl CodexAppServerProvider {
         JsonlProcess::spawn_command(command, &self.command).await
     }
 
-    async fn run_turn(
+    async fn spawn_initialized(
         &self,
         req: &TurnRequest,
+        state: &mut StreamState,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
-    ) -> Result<Completion> {
+    ) -> Result<(JsonlProcess, u64)> {
         let mut process = self.spawn().await?;
         let mut request_id = 1_u64;
-        let mut state = StreamState::default();
         rpc_request(
             &mut process,
             &mut request_id,
@@ -280,13 +295,50 @@ impl CodexAppServerProvider {
             self.timeout(),
             req.cancel.as_ref(),
             req.interaction.clone(),
-            &mut state,
+            state,
             on_event,
         )
         .await?;
         process.send(&json!({"method":"initialized"})).await?;
+        Ok((process, request_id))
+    }
 
-        let policy = launch_policy(req.interaction.is_some(), req.allow_tool_use);
+    async fn run_turn(
+        &self,
+        req: &TurnRequest,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> Result<Completion> {
+        let mut state = StreamState::default();
+        let warm = {
+            let mut guard = tokio::select! {
+                guard = self.connection.lock() => guard,
+                _ = crate::cancel::wait_cancel(req.cancel.as_ref()) => return Err(HarnessError::Cancelled),
+            };
+            guard
+                .take()
+                .and_then(|mut conn| conn.process.is_running().then_some(conn))
+        };
+        let (mut process, mut request_id, mut reused_process) = match warm {
+            Some(conn) => (conn.process, conn.request_id, true),
+            None => {
+                let (process, request_id) =
+                    self.spawn_initialized(req, &mut state, on_event).await?;
+                (process, request_id, false)
+            }
+        };
+
+        let bypass_mode = req
+            .interaction
+            .as_ref()
+            .and_then(|host| host.approval_policy())
+            .and_then(|policy| {
+                policy
+                    .lock()
+                    .ok()
+                    .map(|guard| guard.mode() == crate::tools::approval::ApprovalMode::Bypass)
+            })
+            .unwrap_or(false);
+        let policy = launch_policy(req.interaction.is_some(), req.allow_tool_use, bypass_mode);
         let thread_params = thread_start_params(
             &self.root,
             &req.model,
@@ -305,15 +357,17 @@ impl CodexAppServerProvider {
                     req.provider_session,
                     Some(ProviderSessionRef::CodexAppServerFork { .. })
                 );
-                let response = rpc_request(
+                let method = if forking {
+                    "thread/fork"
+                } else {
+                    "thread/resume"
+                };
+                let params = add_thread_id(thread_params.clone(), thread_id, forking);
+                let mut response = rpc_request(
                     &mut process,
                     &mut request_id,
-                    if forking {
-                        "thread/fork"
-                    } else {
-                        "thread/resume"
-                    },
-                    add_thread_id(thread_params.clone(), thread_id, forking),
+                    method,
+                    params.clone(),
                     self.timeout(),
                     req.cancel.as_ref(),
                     req.interaction.clone(),
@@ -321,6 +375,26 @@ impl CodexAppServerProvider {
                     on_event,
                 )
                 .await;
+                if reused_process && response.as_ref().is_err_and(is_dead_connection_error) {
+                    let _ = process.kill().await;
+                    let (fresh, fresh_id) =
+                        self.spawn_initialized(req, &mut state, on_event).await?;
+                    process = fresh;
+                    request_id = fresh_id;
+                    reused_process = false;
+                    response = rpc_request(
+                        &mut process,
+                        &mut request_id,
+                        method,
+                        params,
+                        self.timeout(),
+                        req.cancel.as_ref(),
+                        req.interaction.clone(),
+                        &mut state,
+                        on_event,
+                    )
+                    .await;
+                }
                 match response {
                     Ok(value) => match parse_thread_id(&value) {
                         Some(child_id) if !forking || child_id != *thread_id => {
@@ -345,18 +419,37 @@ impl CodexAppServerProvider {
             _ => String::new(),
         };
         let thread_id = if requested_thread.is_empty() {
-            let response = rpc_request(
+            let mut response = rpc_request(
                 &mut process,
                 &mut request_id,
                 "thread/start",
-                thread_params,
+                thread_params.clone(),
                 self.timeout(),
                 req.cancel.as_ref(),
                 req.interaction.clone(),
                 &mut state,
                 on_event,
             )
-            .await?;
+            .await;
+            if reused_process && response.as_ref().is_err_and(is_dead_connection_error) {
+                let _ = process.kill().await;
+                let (fresh, fresh_id) = self.spawn_initialized(req, &mut state, on_event).await?;
+                process = fresh;
+                request_id = fresh_id;
+                response = rpc_request(
+                    &mut process,
+                    &mut request_id,
+                    "thread/start",
+                    thread_params,
+                    self.timeout(),
+                    req.cancel.as_ref(),
+                    req.interaction.clone(),
+                    &mut state,
+                    on_event,
+                )
+                .await;
+            }
+            let response = response?;
             parse_thread_id(&response).ok_or_else(|| HarnessError::Stream {
                 kind: "codex_protocol".into(),
                 message: "thread/start returned no thread id".into(),
@@ -453,7 +546,20 @@ impl CodexAppServerProvider {
             provider_session: Some(ProviderSessionRef::CodexAppServer { thread_id }),
         };
         let _ = turn_id;
-        let _ = process.kill().await;
+        if process.is_running() {
+            let mut slot = self.connection.lock().await;
+            if slot.is_none() {
+                *slot = Some(CodexConnection {
+                    process,
+                    request_id,
+                });
+            } else {
+                drop(slot);
+                let _ = process.kill().await;
+            }
+        } else {
+            let _ = process.kill().await;
+        }
         Ok(completion)
     }
 }
@@ -1397,19 +1503,25 @@ mod tests {
     #[test]
     fn a_hosted_turn_asks_before_workspace_writes() {
         // `on-request` + `workspace-write` is Codex Auto: in-repo edits never
-        // raise a file-change card. A host has to force the read-only pair.
-        let policy = launch_policy(true, true);
+        // raise a file-change card. A host has to force the read-only pair
+        // unless the user explicitly chose Bypass mode.
+        let policy = launch_policy(true, true, false);
         assert_eq!(policy.approval_policy, "on-request");
         assert_eq!(policy.thread_sandbox, "read-only");
         assert_eq!(policy.turn_sandbox, "readOnly");
         let turn = turn_sandbox_policy(policy.turn_sandbox, std::path::Path::new("C:/workspace"));
         assert_eq!(turn["type"], "readOnly");
         assert!(turn.get("writableRoots").is_none());
+
+        let bypass = launch_policy(true, true, true);
+        assert_eq!(bypass.approval_policy, "never");
+        assert_eq!(bypass.thread_sandbox, "workspace-write");
+        assert_eq!(bypass.turn_sandbox, "workspaceWrite");
     }
 
     #[test]
     fn an_unhosted_turn_keeps_the_unattended_write_sandbox() {
-        let policy = launch_policy(false, true);
+        let policy = launch_policy(false, true, false);
         assert_eq!(policy.approval_policy, "never");
         assert_eq!(policy.thread_sandbox, "workspace-write");
         assert_eq!(policy.turn_sandbox, "workspaceWrite");
@@ -1420,7 +1532,7 @@ mod tests {
 
     #[test]
     fn a_side_turn_is_ephemeral_and_read_only_without_a_host() {
-        let policy = launch_policy(false, false);
+        let policy = launch_policy(false, false, true);
         assert_eq!(policy.approval_policy, "never");
         assert_eq!(policy.thread_sandbox, THREAD_SANDBOX_READ_ONLY);
         assert_eq!(policy.turn_sandbox, TURN_SANDBOX_READ_ONLY);
