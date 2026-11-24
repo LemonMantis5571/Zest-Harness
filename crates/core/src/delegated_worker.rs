@@ -651,11 +651,14 @@ mod tests {
     fn skip_reason_names_the_config_change_that_lets_a_check_run() {
         let mut config = Config::default();
         assert_eq!(acceptance_check_skip_reason(&config, "git status"), None);
-        let reason = acceptance_check_skip_reason(&config, "cargo test --workspace").unwrap();
+        assert_eq!(
+            acceptance_check_skip_reason(&config, "cargo test --workspace"),
+            None
+        );
+        let reason = acceptance_check_skip_reason(&config, "npm run deploy").unwrap();
         assert!(
-            reason.contains(
-                r#"add ["cargo", "test", "--workspace"] to extra_allowlist under [tools.bash]"#
-            ),
+            reason
+                .contains(r#"add ["npm", "run", "deploy"] to extra_allowlist under [tools.bash]"#),
             "{reason}"
         );
         assert!(
@@ -663,9 +666,9 @@ mod tests {
                 .unwrap()
                 .contains("without a shell")
         );
-        config.tools.bash.extra_allowlist = vec![vec!["cargo".into(), "test".into()]];
+        config.tools.bash.extra_allowlist = vec![vec!["npm".into(), "run".into(), "deploy".into()]];
         assert_eq!(
-            acceptance_check_skip_reason(&config, "cargo test --workspace"),
+            acceptance_check_skip_reason(&config, "npm run deploy"),
             None
         );
         config.tools.bash.denylist = vec!["--workspace".into()];

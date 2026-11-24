@@ -3494,14 +3494,14 @@ mod tests {
         write_fixture_project(root);
         let coordinator = Arc::new(DelegationCoordinator::new());
         let mut request = create_request("Unrunnable check");
-        request.acceptance_checks = vec!["cargo test".into()];
+        request.acceptance_checks = vec!["npm run deploy".into()];
         let created = coordinator.create_job(root, request).unwrap();
         let blocked = coordinator.approve(root, &created.job_id, None).unwrap();
         assert_eq!(blocked.status, DelegationStatus::Blocked);
         let error = blocked.error.as_deref().unwrap();
-        assert!(error.contains("`cargo test` cannot run"), "{error}");
+        assert!(error.contains("`npm run deploy` cannot run"), "{error}");
         assert!(
-            error.contains(r#"add ["cargo", "test"] to extra_allowlist under [tools.bash]"#),
+            error.contains(r#"add ["npm", "run", "deploy"] to extra_allowlist under [tools.bash]"#),
             "{error}"
         );
         assert!(blocked.attempts.is_empty(), "no worker may start");

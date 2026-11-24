@@ -1011,6 +1011,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Sets the active chat's permission mode. `persist_default` also saves it
+    /// as the project's default for chats opened later.
+    fn set_approval_mode(&mut self, mode: ApprovalMode, persist_default: bool, cx: &mut Context<Self>) {
+        let chat = self.chat(cx);
+        chat.policy.lock().unwrap().set_mode(mode);
+        if persist_default && !self.project.demo {
+            let provider = chat.options.lock().unwrap().provider.clone();
+            let mut prefs = zest_core::ProjectSessionState::load(&self.project.path, &provider);
+            prefs.set_approval_mode(mode);
+            if let Err(e) = prefs.save(&self.project.path) {
+                self.toast(ToastKind::Error, e.to_string(), cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// Moves the active chat to another provider. When both use Zest's own agent loop, or the
     /// chat has no messages yet, the chat keeps its id and history (returns `true`). When a
     /// vendor CLI owns either side the history cannot be handed over, so the conversation
@@ -1403,7 +1419,12 @@ impl Workspace {
                     (
                         ApprovalMode::Auto,
                         "Auto",
-                        "Approve routine workspace actions automatically.",
+                        "Approve edits and verification checks automatically.",
+                    ),
+                    (
+                        ApprovalMode::Bypass,
+                        "Bypass",
+                        "Skip approval prompts for this project.",
                     ),
                 ];
                 let mut modes = div().flex().flex_wrap().gap_2();
@@ -1470,8 +1491,7 @@ impl Workspace {
                             )
                             .when(active, |d| d.child(ui::check_badge()))
                             .on_click(cx.listener(move |ws, _, _, cx| {
-                                ws.chat(cx).policy.lock().unwrap().set_mode(m);
-                                cx.notify();
+                                ws.set_approval_mode(m, true, cx);
                             })),
                     );
                 }

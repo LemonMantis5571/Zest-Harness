@@ -7,9 +7,10 @@
 //!
 //! ## Why the allowlist is written the way it is
 //!
-//! Repository builds and tests execute code from the active checkout, so they
-//! stay behind the approval card even in Auto mode. Only inspection commands
-//! and toolchain metadata checks run unattended.
+//! Inspection and verification commands (typechecks, linters, unit tests) run
+//! unattended in Auto mode so the agent can verify its edits before finishing;
+//! arbitrary builds, package installs, deploys, and scripts stay behind the
+//! approval card.
 //!
 //! The dangerous part of any allowlist is not the list — it is the shell.
 //! `cargo check && rm -rf /` starts with an allowlisted token. So a command is
@@ -61,13 +62,16 @@ const SHELL_METACHARACTERS: &[char] = &[
 
 const BROWSE_X_HOST: &str = "x.pcstyle.dev";
 
-/// Commands that only report. Commands that compile or execute repository code
-/// are intentionally absent: Auto mode must not turn a source change into an
-/// implicit execution grant. The fixed-host `curl` path is handled separately
-/// so a skill can read public X data without turning arbitrary networking into
-/// an unattended shell capability.
+/// Inspection and verification commands eligible to run unattended in Auto
+/// mode (and as delegation acceptance checks). Arbitrary execution (`cargo run`,
+/// `npm install`, scripts, deploys, mutations) remains gated. The fixed-host
+/// `curl` path is handled separately so a skill can read public X data without
+/// turning arbitrary networking into an unattended shell capability.
 const READ_ONLY_PREFIXES: &[&[&str]] = &[
     &["cargo", "fmt"],
+    &["cargo", "check"],
+    &["cargo", "clippy"],
+    &["cargo", "test"],
     &["cargo", "tree"],
     &["cargo", "metadata"],
     &["cargo", "--version"],
@@ -77,28 +81,45 @@ const READ_ONLY_PREFIXES: &[&[&str]] = &[
     &["git", "show"],
     &["git", "branch"],
     &["git", "rev-parse"],
+    &["npm", "test"],
     &["npm", "run", "lint"],
+    &["npm", "run", "test"],
+    &["npm", "run", "check"],
+    &["npm", "run", "typecheck"],
+    &["npx", "tsc"],
+    &["pytest"],
+    &["python", "-m", "pytest"],
+    &["go", "test"],
+    &["go", "vet"],
     &["rustc", "--version"],
     &["node", "--version"],
     &["node", "-v"],
 ];
 
-/// Tokens that turn an otherwise read-only command into a writing one.
+/// Tokens that turn an allowlisted inspection or verification command into a
+/// mutating or arbitrary-execution one.
 ///
-/// `cargo fmt` rewrites files; only `cargo fmt --check` is a report. `git diff`
-/// is safe, but git accepts `-c core.pager=...` style overrides that run
-/// programs, so any leading `-c` disqualifies.
+/// `cargo fmt` rewrites files unless `--check` is passed; `cargo clippy --fix`
+/// rewrites files; `npx tsc` emits `.js` outputs unless `--noEmit` is passed;
+/// `git` accepts `-c core.pager=...` and `--exec-path` overrides that run
+/// arbitrary programs.
 fn subverts_read_only(tokens: &[&str]) -> bool {
     let is_cargo_fmt = tokens.first() == Some(&"cargo") && tokens.get(1) == Some(&"fmt");
     if is_cargo_fmt && !tokens.contains(&"--check") {
+        return true;
+    }
+    let is_cargo_clippy = tokens.first() == Some(&"cargo") && tokens.get(1) == Some(&"clippy");
+    if is_cargo_clippy && tokens.contains(&"--fix") {
+        return true;
+    }
+    let is_npx_tsc = tokens.first() == Some(&"npx") && tokens.get(1) == Some(&"tsc");
+    if is_npx_tsc && !tokens.contains(&"--noEmit") {
         return true;
     }
     if tokens.first() == Some(&"git") && (tokens.contains(&"-c") || tokens.contains(&"--exec-path"))
     {
         return true;
     }
-    // Repository-executing commands are deliberately not auto-eligible; this
-    // helper remains for write-capable variants of the inspection prefixes.
     false
 }
 
@@ -952,9 +973,24 @@ mod tests {
     }
 
     #[test]
-    fn inspection_commands_auto_run_but_repository_execution_does_not() {
+    fn inspection_and_verification_commands_auto_run_but_arbitrary_execution_does_not() {
         for command in [
             "cargo fmt --check",
+            "cargo check",
+            "cargo check --all-targets",
+            "cargo clippy --workspace --all-targets -- -D warnings",
+            "cargo test",
+            "cargo test -p zest-core --lib",
+            "npm test",
+            "npm run test",
+            "npm run lint",
+            "npm run check",
+            "npm run typecheck",
+            "npx tsc --noEmit",
+            "pytest",
+            "python -m pytest tests/unit",
+            "go test ./...",
+            "go vet ./...",
             "git status",
             "git diff --stat HEAD",
             "git log -n 5",
@@ -964,13 +1000,13 @@ mod tests {
             assert_eq!(clear(command), Clearance::AutoRun, "{command}");
         }
         for command in [
-            "cargo check",
-            "cargo check --all-targets",
-            "cargo clippy --workspace",
-            "cargo test",
-            "npm test",
+            "cargo clippy --fix",
+            "npx tsc",
+            "cargo run",
+            "cargo build --release",
             "npm run ui:test",
             "npm run ui:build",
+            "python script.py",
         ] {
             assert_eq!(clear(command), Clearance::NeedsApproval, "{command}");
         }
@@ -1069,15 +1105,16 @@ mod tests {
 
     #[test]
     fn denylist_overrides_the_built_in_allowlist() {
-        let deny = vec!["cargo test".to_string()];
+        let deny = vec!["cargo test".to_string(), "git log".to_string()];
         assert_eq!(
             classify("cargo test --workspace", &[], &deny),
             Clearance::NeedsApproval
         );
         assert_eq!(
-            classify("cargo check", &[], &deny),
+            classify("git log -n 5", &[], &deny),
             Clearance::NeedsApproval
         );
+        assert_eq!(classify("cargo check", &[], &deny), Clearance::AutoRun);
     }
 
     #[test]

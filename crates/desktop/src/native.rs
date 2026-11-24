@@ -169,7 +169,16 @@ impl Chat {
             .config
             .default_target()
             .filter(|t| t.provider == provider);
-        let prefs = ProjectSessionState::load(&project.path, &provider).get(&provider);
+        let session_state = ProjectSessionState::load(&project.path, &provider);
+        let prefs = session_state.get(&provider);
+        // Real projects default to Auto (edits and verification checks run
+        // unattended); a saved choice wins. The offline demo stays Manual so
+        // its approval cards remain exercisable.
+        let initial_mode = if project.demo {
+            ApprovalMode::Manual
+        } else {
+            session_state.approval_mode.unwrap_or(ApprovalMode::Auto)
+        };
         let options = Selection {
             provider,
             model: prefs
@@ -182,7 +191,7 @@ impl Chat {
             thread: Arc::new(Mutex::new(thread)),
             browser: Arc::default(),
             options: Arc::new(Mutex::new(options)),
-            policy: Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Manual))),
+            policy: Arc::new(Mutex::new(ApprovalPolicy::new(initial_mode))),
             context_meter: Arc::new(Mutex::new(None)),
         }
     }
@@ -834,6 +843,26 @@ mod tests {
         };
         assert!(!provider_failure(err).to_string().contains("private transport diagnostic"));
         assert!(matches!(provider_failure(HarnessError::Cancelled), HarnessError::Cancelled));
+    }
+
+    #[test]
+    fn real_projects_default_to_auto_and_honor_saved_approval_mode_while_demo_stays_manual() {
+        let demo_dir = tempfile::tempdir().unwrap();
+        let demo_project = Project::open(demo_dir.path().into(), true).unwrap();
+        let demo_chat = Chat::new(demo_project, Thread::new());
+        assert_eq!(demo_chat.policy.lock().unwrap().mode(), ApprovalMode::Manual);
+
+        let real_dir = tempfile::tempdir().unwrap();
+        let registry_dir = tempfile::tempdir().unwrap();
+        let real_project = Project::open_with_registry(real_dir.path().into(), false, registry_dir.path().into()).unwrap();
+        let default_chat = Chat::new(real_project.clone(), Thread::new());
+        assert_eq!(default_chat.policy.lock().unwrap().mode(), ApprovalMode::Auto);
+
+        let mut state = ProjectSessionState::load(&real_project.path, "");
+        state.set_approval_mode(ApprovalMode::AcceptEdits);
+        state.save(&real_project.path).unwrap();
+        let saved_chat = Chat::new(real_project, Thread::new());
+        assert_eq!(saved_chat.policy.lock().unwrap().mode(), ApprovalMode::AcceptEdits);
     }
 }
 #[async_trait::async_trait]

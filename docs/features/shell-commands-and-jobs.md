@@ -25,11 +25,14 @@ verify:
   A relative `cwd` that escapes the project is refused. An absolute `cwd` outside
   the project is allowed but always needs approval and is shown on the card.
 - Risk is always `Exec`. `classify` marks a command `AutoRun` (auto-eligible)
-  only if it contains **no shell metacharacters** and starts with a read-only
-  prefix: `cargo fmt --check`, `cargo tree|metadata|--version`,
+  only if it contains **no shell metacharacters** and starts with an inspection
+  or verification prefix: `cargo fmt --check`, `cargo check`,
+  `cargo clippy` (no `--fix`), `cargo test`, `cargo tree|metadata|--version`,
   `git status|diff|log|show|branch|rev-parse` (no `-c` / `--exec-path`),
-  `npm run lint`, `rustc/node --version`, plus `[tools.bash] extra_allowlist`.
-  Builds and tests (`cargo check`, `cargo test`, ...) are deliberately not on it.
+  `npm test`, `npm run lint|test|check|typecheck`, `npx tsc --noEmit`,
+  `pytest`, `python -m pytest`, `go test|vet`, `rustc/node --version`, plus
+  `[tools.bash] extra_allowlist`. Arbitrary execution (`cargo run`,
+  `npm install`, scripts, deploys, mutations) remains gated.
 - `[tools.bash] denylist` substrings always force approval, even for allowlisted
   commands. The single exception to the metacharacter rule is the fixed-host
   `curl` GET to `https://x.pcstyle.dev` used by the browse-x skill.

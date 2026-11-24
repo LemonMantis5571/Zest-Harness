@@ -768,13 +768,15 @@ async fn server_request_result(
             } else {
                 ApprovalDecision::Deny
             };
-            remember(
-                &policy,
-                decision,
-                Surface::FileChange,
-                FILE_CHANGE_TOOL,
-                &path,
-            );
+            if risk != ToolRisk::Sensitive {
+                remember(
+                    &policy,
+                    decision,
+                    Surface::FileChange,
+                    FILE_CHANGE_TOOL,
+                    &path,
+                );
+            }
             json!({"decision": if allowed(decision) { "accept" } else { "decline" }})
         }
         "item/permissions/requestApproval" => {

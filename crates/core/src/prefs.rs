@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil;
+use crate::tools::approval::ApprovalMode;
 
 const STATE_FILE: &str = "session-state.json";
 const LEGACY_THREAD: &str = "last-thread-id";
@@ -32,6 +33,8 @@ pub struct ProviderSessionPrefs {
 pub struct ProjectSessionState {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderSessionPrefs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<ApprovalMode>,
 }
 
 impl ProjectSessionState {
@@ -86,6 +89,10 @@ impl ProjectSessionState {
             entry.model = None;
             entry.effort = None;
         }
+    }
+
+    pub fn set_approval_mode(&mut self, mode: ApprovalMode) {
+        self.approval_mode = Some(mode);
     }
 
     fn migrate_legacy(&mut self, root: &Path, active_provider: &str) {
@@ -247,5 +254,30 @@ mod tests {
         let loaded = ProjectSessionState::load(&root, "codex");
         assert_eq!(loaded.get("codex").model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(loaded.get("codex").effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn approval_mode_persists_at_project_level_without_touching_provider_slots() {
+        let root = scratch("approval-mode");
+        assert_eq!(
+            ProjectSessionState::load(&root, "codex").approval_mode,
+            None
+        );
+
+        let mut state = ProjectSessionState::load(&root, "codex");
+        state.set_model_effort("codex", "gpt-5.6-sol", "high");
+        state.set_approval_mode(ApprovalMode::AcceptEdits);
+        state.save(&root).unwrap();
+
+        let reloaded_claude = ProjectSessionState::load(&root, "claude");
+        assert_eq!(
+            reloaded_claude.approval_mode,
+            Some(ApprovalMode::AcceptEdits)
+        );
+        assert_eq!(reloaded_claude.get("claude").model, None);
+        assert_eq!(
+            reloaded_claude.get("codex").model.as_deref(),
+            Some("gpt-5.6-sol")
+        );
     }
 }
