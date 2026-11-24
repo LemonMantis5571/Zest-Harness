@@ -179,17 +179,59 @@ fn user_content(blocks: &[Value]) -> Result<Vec<UserContent>, ConvertError> {
                     out.push(UserContent::Text(Text::new(text)));
                 }
             }
+            "image" => out.push(UserContent::Image(user_image(block)?)),
             "tool_result" => out.push(UserContent::ToolResult(tool_result(block)?)),
             other => {
                 return Err(ConvertError::new(
                     other,
-                    "unsupported user block; images and documents need an explicit \
+                    "unsupported user block; documents need an explicit \
                      mapping before this provider can carry them",
                 ))
             }
         }
     }
     Ok(out)
+}
+
+fn user_image(block: &Value) -> Result<Image, ConvertError> {
+    let source = block
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ConvertError::new("image", "user image source must be an object"))?;
+    if source.get("type").and_then(Value::as_str) != Some("base64") {
+        return Err(ConvertError::new(
+            "image",
+            "unsupported user image source; only base64 is supported",
+        ));
+    }
+    let media_type = match source.get("media_type").and_then(Value::as_str) {
+        Some("image/png") => ImageMediaType::PNG,
+        Some("image/jpeg" | "image/jpg") => ImageMediaType::JPEG,
+        Some("image/gif") => ImageMediaType::GIF,
+        Some("image/webp") => ImageMediaType::WEBP,
+        _ => {
+            return Err(ConvertError::new(
+                "image",
+                "unsupported user image media type; expected png, jpeg, gif, or webp",
+            ))
+        }
+    };
+    let data = source
+        .get("data")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ConvertError::new("image", "base64 image data must be a non-empty string")
+        })?;
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| ConvertError::new("image", "user image data is invalid base64"))?;
+    Ok(Image {
+        data: DocumentSourceKind::Base64(data.to_string()),
+        media_type: Some(media_type),
+        detail: None,
+        additional_params: None,
+    })
 }
 
 /// A thinking block, with its signature preserved.
@@ -813,5 +855,23 @@ mod tests {
         assert_eq!(converted[0].name, "read_file");
         assert_eq!(converted[0].description, "Read a file");
         assert_eq!(converted[0].parameters["type"], "object");
+    }
+
+    #[test]
+    fn user_image_attachments_convert_to_rig_image_content() {
+        let messages = vec![user(vec![
+            json!({"type": "text", "text": "What is in this screenshot?"}),
+            screenshot(),
+        ])];
+        let (_, history) = to_rig_history(None, &messages).unwrap();
+        let RigMessage::User { content } = &history[0] else {
+            panic!("expected user message");
+        };
+        assert_eq!(content.len(), 2);
+        let UserContent::Image(img) = &content[1] else {
+            panic!("expected image block");
+        };
+        assert_eq!(img.media_type, Some(ImageMediaType::PNG));
+        assert_eq!(img.data, DocumentSourceKind::Base64(PNG.into()));
     }
 }

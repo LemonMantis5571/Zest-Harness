@@ -257,10 +257,14 @@ fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
 }
 
 pub(super) fn model_supports_vision(model_id: &str) -> bool {
-    matches!(
-        model_id.to_ascii_lowercase().as_str(),
-        "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna"
-    )
+    let lower = model_id.trim().to_ascii_lowercase();
+    let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    bare.starts_with("claude-")
+        || matches!(bare, "opus" | "sonnet" | "haiku" | "fable")
+        || bare.starts_with("gpt-5")
+        || bare.starts_with("gpt-6")
+        || bare.starts_with("gpt-4o")
+        || bare.starts_with("gemini-")
 }
 
 /// Static catalogue a provider exposes for pickers and session validation.
@@ -1321,5 +1325,20 @@ model = "deepseek-v4-flash"
             );
             assert!(validate_against(&descriptor.models, "openai", "gpt-5.4", "high").is_err());
         }
+    }
+
+    #[test]
+    fn claude_gpt5_gpt6_and_gemini_models_report_vision_support() {
+        for vision_model in [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "gpt-5.6-sol",
+            "gpt-6.1-sol",
+            "gemini-3.1-pro-high",
+        ] {
+            assert!(model_supports_vision(vision_model), "{vision_model}");
+        }
+        assert!(!model_supports_vision("deepseek-reasoner"));
     }
 }

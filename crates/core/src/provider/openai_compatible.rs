@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
 use futures_util::StreamExt;
 use rig_core::completion::message::{DocumentSourceKind, ToolResultContent};
 use serde::Serialize;
@@ -41,7 +42,20 @@ struct Request {
     tools: Vec<Value>,
     stream: bool,
     stream_options: StreamOptions,
-    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+}
+
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    bare.starts_with("o1")
+        || bare.starts_with("o3")
+        || bare.starts_with("o4")
+        || bare.starts_with("gpt-5")
+        || bare.starts_with("gpt-6")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +137,7 @@ impl Provider for OpenAiCompatibleProvider {
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
+        let use_completion_cap = uses_max_completion_tokens(&req.model);
         let wire = Request {
             model: req.model.clone(),
             messages: convert_messages(
@@ -141,7 +156,8 @@ impl Provider for OpenAiCompatibleProvider {
             stream_options: StreamOptions {
                 include_usage: true,
             },
-            max_tokens: req.max_tokens,
+            max_tokens: (!use_completion_cap).then_some(req.max_tokens),
+            max_completion_tokens: use_completion_cap.then_some(req.max_tokens),
         };
         self.client
             .stream_cancellable(&wire, on_event, req.cancel.as_ref())
@@ -377,6 +393,8 @@ where
 #[derive(Default)]
 struct OpenAiAccumulator {
     text: String,
+    reasoning: String,
+    saw_reasoning_content: bool,
     tools: BTreeMap<usize, ToolAccum>,
     stop_reason: Option<String>,
     usage: Usage,
@@ -495,10 +513,18 @@ impl OpenAiAccumulator {
                 on_event(StreamEvent::Text(text));
             }
         }
-        progressed |= ["reasoning", "reasoning_content", "analysis"]
-            .iter()
-            .filter_map(|field| delta.get(*field).and_then(Value::as_str))
-            .any(|text| !text.is_empty());
+        for field in ["reasoning_content", "reasoning", "analysis"] {
+            if let Some(piece) = delta.get(field).and_then(Value::as_str) {
+                if !piece.is_empty() {
+                    progressed = true;
+                    if field == "reasoning_content" {
+                        self.saw_reasoning_content = true;
+                    }
+                    self.reasoning.push_str(piece);
+                    on_event(StreamEvent::Thinking(piece));
+                }
+            }
+        }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -555,6 +581,13 @@ impl OpenAiAccumulator {
 
     fn finish(self, limits: Option<RateLimitSnapshot>) -> Result<Completion> {
         let mut content = Vec::new();
+        if !self.reasoning.is_empty() {
+            let mut block = json!({"type":"thinking", "thinking": self.reasoning});
+            if self.saw_reasoning_content {
+                block["reasoning_content"] = json!(true);
+            }
+            content.push(block);
+        }
         if !self.text.is_empty() {
             content.push(json!({"type":"text", "text": self.text}));
         }
@@ -635,11 +668,16 @@ fn convert_messages(system: Option<&str>, messages: &[Message]) -> Result<Vec<Va
     }
     for message in messages {
         let mut text = String::new();
+        let mut reasoning_content = String::new();
+        let mut user_images = Vec::new();
         let mut tool_calls = Vec::new();
         let mut tool_results = Vec::new();
         for block in &message.content {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => text.push_str(block.get("text").and_then(Value::as_str).unwrap_or("")),
+                Some("image") if message.role == "user" => {
+                    user_images.push(convert_user_image(block)?);
+                }
                 Some("tool_use") => tool_calls.push(json!({
                     "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
                     "type": "function",
@@ -682,7 +720,13 @@ fn convert_messages(system: Option<&str>, messages: &[Message]) -> Result<Vec<Va
                         "role":"tool", "tool_call_id":id, "content":body
                     }));
                 }
-                Some("thinking" | "redacted_thinking" | "reasoning_encrypted") => {}
+                Some("thinking") => {
+                    if block.get("reasoning_content").and_then(Value::as_bool) == Some(true) {
+                        reasoning_content
+                            .push_str(block.get("thinking").and_then(Value::as_str).unwrap_or(""));
+                    }
+                }
+                Some("redacted_thinking" | "reasoning_encrypted") => {}
                 other => {
                     return Err(HarnessError::Other(format!(
                         "unsupported OpenAI-compatible content block `{}`",
@@ -698,21 +742,84 @@ fn convert_messages(system: Option<&str>, messages: &[Message]) -> Result<Vec<Va
                         .into(),
                 ));
             }
-            if !text.is_empty() {
-                result_batch.push(json!({"role":"user", "content":text}));
+            if !text.is_empty() || !user_images.is_empty() {
+                if user_images.is_empty() {
+                    result_batch.push(json!({"role":"user", "content":text}));
+                } else {
+                    let mut parts = Vec::new();
+                    if !text.is_empty() {
+                        parts.push(json!({"type":"text", "text":text}));
+                    }
+                    parts.extend(user_images);
+                    result_batch.push(json!({"role":"user", "content":parts}));
+                }
             }
             result_batch.extend(tool_results);
             continue;
         }
         append_tool_results(&mut output, &mut result_batch, &mut screenshots);
-        let mut message_json = json!({"role": message.role, "content": if text.is_empty() { Value::Null } else { Value::String(text) }});
+        let content_value = if !user_images.is_empty() {
+            let mut parts = Vec::new();
+            if !text.is_empty() {
+                parts.push(json!({"type":"text", "text":text}));
+            }
+            parts.extend(user_images);
+            Value::Array(parts)
+        } else if text.is_empty() {
+            Value::Null
+        } else {
+            Value::String(text)
+        };
+        let mut message_json = json!({"role": message.role, "content": content_value});
         if !tool_calls.is_empty() {
+            if message.role == "assistant" && !reasoning_content.is_empty() {
+                message_json["reasoning_content"] = Value::String(reasoning_content);
+            }
             message_json["tool_calls"] = Value::Array(tool_calls);
         }
         output.push(message_json);
     }
     append_tool_results(&mut output, &mut result_batch, &mut screenshots);
     Ok(output)
+}
+
+fn convert_user_image(block: &Value) -> Result<Value> {
+    let source = block
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HarnessError::Other("OpenAI-compatible user image source must be an object".into())
+        })?;
+    if source.get("type").and_then(Value::as_str) != Some("base64") {
+        return Err(HarnessError::Other(
+            "OpenAI-compatible user image source must be base64".into(),
+        ));
+    }
+    let media_type = match source.get("media_type").and_then(Value::as_str) {
+        Some(mt @ ("image/png" | "image/jpeg" | "image/gif" | "image/webp")) => mt,
+        Some("image/jpg") => "image/jpeg",
+        _ => {
+            return Err(HarnessError::Other(
+                "OpenAI-compatible user image media_type must be png, jpeg, gif, or webp".into(),
+            ))
+        }
+    };
+    let data = source
+        .get("data")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            HarnessError::Other("OpenAI-compatible user image data must be non-empty".into())
+        })?;
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| {
+            HarnessError::Other("OpenAI-compatible user image data is invalid base64".into())
+        })?;
+    Ok(json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{media_type};base64,{data}") }
+    }))
 }
 
 fn append_tool_results(
@@ -1045,12 +1152,62 @@ mod tests {
             json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"url"}}]}),
             json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"base64", "media_type":"image/jpeg", "data":PNG}}]}),
             json!({"type":"tool_result", "tool_use_id":"a", "content":[{"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"invalid"}}]}),
-            screenshot(),
+            json!({"type":"document"}),
         ] {
             let error = convert_messages(None, &[Message::user_blocks(vec![block])]).unwrap_err();
             assert!(matches!(error, HarnessError::Other(_)));
             assert!(error.to_string().contains("OpenAI-compatible"), "{error}");
         }
+    }
+
+    #[test]
+    fn user_image_attachments_and_reasoning_content_round_trip_on_wire() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut thinking_chunks = Vec::new();
+        let mut sink = |event: StreamEvent<'_>| {
+            if let StreamEvent::Thinking(chunk) = event {
+                thinking_chunks.push(chunk.to_string());
+            }
+        };
+        accumulator
+            .push(
+                &json!({"choices":[{"delta":{"reasoning_content":"step 1; "}}]}),
+                &mut sink,
+            )
+            .unwrap();
+        accumulator
+            .push(
+                &json!({"choices":[{"delta":{"reasoning_content":"step 2","tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"a.rs\"}"}}]},"finish_reason":"tool_calls"}]}),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(thinking_chunks, vec!["step 1; ", "step 2"]);
+        let completion = accumulator.finish(None).unwrap();
+
+        let messages = vec![
+            Message::user_blocks(vec![
+                json!({"type":"text", "text":"check image"}),
+                screenshot(),
+            ]),
+            Message::assistant(completion.content),
+        ];
+        let wire = convert_messages(None, &messages).unwrap();
+        assert_eq!(
+            wire[0],
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "check image"},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PNG}")}}
+                ]
+            })
+        );
+        assert_eq!(wire[1]["reasoning_content"], "step 1; step 2");
+        assert_eq!(wire[1]["tool_calls"][0]["id"], "c1");
+
+        assert!(uses_max_completion_tokens("o3-mini"));
+        assert!(uses_max_completion_tokens("openai/gpt-5.6-sol"));
+        assert!(!uses_max_completion_tokens("deepseek-reasoner"));
     }
 
     #[test]

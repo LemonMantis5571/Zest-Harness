@@ -95,10 +95,13 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
 - Claude permission requests (`can_use_tool`) become Zest approval cards; every
   path that cannot reach a human answers deny.
 - Codex CLI (`codex_app_server`): JSON-RPC over `codex app-server --listen
-  stdio://` (`initialize`, `thread/start|resume|fork`, `turn/start`). With an
-  approval host the thread runs `on-request` + read-only sandbox so every write
-  asks; hostless maintenance turns are read-only; only hostless tool turns get
-  `workspace-write`. "Allow for session" is remembered per command / per path.
+  stdio://` (`initialize`, `thread/start|resume|fork`, `turn/start`), keeping a
+  warm app-server connection across turns and discarding/respawning on cancel or
+  transport EOF. With an approval host in non-Bypass modes the thread runs
+  `on-request` + read-only sandbox so every write asks (including `.env`);
+  Bypass mode and hostless tool turns get `never` + `workspace-write`; hostless
+  maintenance turns stay read-only. "Allow for session" is remembered per
+  command / per path.
 - In both bridges a file change to a likely secret (`.env`, keys) is `Sensitive`
   (`write_risk`), not `Write`, so Auto and Accept edits still ask, session
   grants (`AllowSession`) never cover it, and the card omits its diff
