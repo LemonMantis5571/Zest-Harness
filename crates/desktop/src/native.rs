@@ -428,18 +428,30 @@ impl Chat {
         let user = new_id("user");
         let run = new_id("turn");
         let lifecycle = ChatPersistence::open(&self.project.path)?;
-        let content = self.edit(|t| {
+        let (content, active_goal_criteria) = self.edit(|t| {
             t.ensure_provider(&provider).map_err(error)?;
             t.ensure_provider_kind(kind).map_err(error)?;
             let input = t
                 .claim_input(input_id)
                 .ok_or_else(|| error("Queued message no longer exists"))?;
             let files: Vec<_> = input.attachments.into_iter().map(to_attachment).collect();
-            let mut expanded = expand_command(&input.text, &self.project.skills, &self.project.mcp);
+            let raw_text = match parse_goal_command(&input.text) {
+                Some(GoalCommand::Set(criteria)) => criteria,
+                _ => input.text.as_str(),
+            };
+            let mut expanded = expand_command(raw_text, &self.project.skills, &self.project.mcp);
             if expanded.command.is_none()
                 && self.policy.lock().map_err(error)?.mode() == ApprovalMode::Plan
             {
-                expanded = expand_command_as(&input.text, &self.project.skills, "plan");
+                expanded = expand_command_as(raw_text, &self.project.skills, "plan");
+            }
+            let active_criteria = t
+                .active_goal
+                .as_ref()
+                .filter(|g| !g.paused)
+                .map(|g| g.criteria.clone());
+            if let Some(criteria) = &active_criteria {
+                expanded.prompt = frame_goal_prompt(criteria, &expanded.prompt);
             }
             let blocks = attachments::build_user_content(&expanded.prompt, &files);
             if blocks.is_empty() {
@@ -458,8 +470,9 @@ impl Chat {
             t.record_event(ThreadEventKind::TurnStarted {
                 turn_id: run.clone(),
             });
-            Ok(blocks)
+            Ok((blocks, active_criteria))
         })?;
+        agent = agent.with_goal(active_goal_criteria.clone());
         let recorded = match lifecycle.runs.create_or_resume_for_turn(
             &run,
             &self.thread.lock().map_err(error)?.id,
@@ -533,6 +546,7 @@ impl Chat {
             .send_blocks_cancellable(content, &mut on_event, Some(cancel))
             .await
             .map_err(provider_failure);
+        let mut goal_completed = false;
         let checkpoints = {
             let mut t = self.thread.lock().map_err(error)?;
             match &result {
@@ -540,6 +554,16 @@ impl Chat {
                     t.apply_done(&assistant);
                     t.set_agent_messages(agent.messages_for_persist());
                     t.provider_session = agent.provider_session();
+                    if active_goal_criteria.is_some() {
+                        let cli_met = t
+                            .messages
+                            .last()
+                            .is_some_and(|m| m.searchable_text().contains(GOAL_MET_MARKER));
+                        if agent.goal_satisfied() || cli_met {
+                            t.active_goal = None;
+                            goal_completed = true;
+                        }
+                    }
                 }
                 Err(e) => {
                     t.terminalize_interrupted();
@@ -549,6 +573,11 @@ impl Chat {
                     // must see it. A provider session cannot resume a broken turn, so drop it.
                     t.set_agent_messages(agent.messages_for_persist());
                     t.provider_session = None;
+                    if cancel.is_cancelled()
+                        && let Some(goal) = t.active_goal.as_mut()
+                    {
+                        goal.paused = true;
+                    }
                 }
             }
             let status = if cancel.is_cancelled() {
@@ -588,6 +617,9 @@ impl Chat {
             t.checkpoints.len()
         };
         let mut meter = crate::context_meter::estimate_context(&agent, checkpoints);
+        if goal_completed {
+            emit(events, EvKind::Notice("Goal completed.".into()));
+        }
         if result.is_ok() && meter.should_auto_compact && !cancel.is_cancelled() {
             emit(events, EvKind::Notice("Compacting context…".into()));
             match self.compact_agent(&mut agent, events, cancel).await {

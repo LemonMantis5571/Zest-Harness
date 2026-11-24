@@ -127,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut side: Option<zest_core::btw::SideConversation> = None;
+    let mut active_goal: Option<zest_core::ThreadGoal> = None;
     loop {
         print!(
             "\x1b[1m{}>\x1b[0m ",
@@ -146,6 +147,86 @@ async fn main() -> anyhow::Result<()> {
             side = None;
             println!("Returned to the main conversation.\n");
             continue;
+        }
+        if side.is_none() {
+            if let Some(goal_cmd) = zest_core::parse_goal_command(line) {
+                match goal_cmd {
+                    zest_core::GoalCommand::Status => {
+                        match &active_goal {
+                            Some(goal) if goal.paused => {
+                                println!("Active goal (paused): {}\n", goal.criteria);
+                            }
+                            Some(goal) => {
+                                println!("Active goal: {}\n", goal.criteria);
+                            }
+                            None => {
+                                println!("No active goal. Use /goal <criteria> to set one.\n");
+                            }
+                        }
+                        continue;
+                    }
+                    zest_core::GoalCommand::Clear => {
+                        active_goal = None;
+                        agent = agent.with_goal(None);
+                        println!("Cleared active goal.\n");
+                        continue;
+                    }
+                    zest_core::GoalCommand::Pause => {
+                        if let Some(goal) = active_goal.as_mut() {
+                            goal.paused = true;
+                            agent = agent.with_goal(None);
+                            println!("Paused active goal.\n");
+                        } else {
+                            println!("No active goal to pause.\n");
+                        }
+                        continue;
+                    }
+                    zest_core::GoalCommand::Resume => {
+                        let Some(goal) = active_goal.as_mut() else {
+                            println!("No active goal to resume.\n");
+                            continue;
+                        };
+                        goal.paused = false;
+                        let criteria = goal.criteria.clone();
+                        agent = agent.with_goal(Some(criteria.clone()));
+                        let mut render = Renderer::default();
+                        let mut on_event = |ev: StreamEvent<'_>| render.handle(ev);
+                        let prompt = zest_core::frame_goal_prompt(
+                            &criteria,
+                            "Continue working toward the active goal.",
+                        );
+                        if let Err(e) = agent.send(&prompt, &mut on_event).await {
+                            eprintln!("\n\x1b[31merror:\x1b[0m {e}");
+                        } else if agent.goal_satisfied() {
+                            active_goal = None;
+                            agent = agent.with_goal(None);
+                            println!("\n[Goal completed]");
+                        }
+                        println!("\n");
+                        continue;
+                    }
+                    zest_core::GoalCommand::Set(criteria) => {
+                        let criteria = criteria.to_string();
+                        active_goal = Some(zest_core::ThreadGoal {
+                            criteria: criteria.clone(),
+                            paused: false,
+                        });
+                        agent = agent.with_goal(Some(criteria.clone()));
+                        let mut render = Renderer::default();
+                        let mut on_event = |ev: StreamEvent<'_>| render.handle(ev);
+                        let prompt = zest_core::frame_goal_prompt(&criteria, &criteria);
+                        if let Err(e) = agent.send(&prompt, &mut on_event).await {
+                            eprintln!("\n\x1b[31merror:\x1b[0m {e}");
+                        } else if agent.goal_satisfied() {
+                            active_goal = None;
+                            agent = agent.with_goal(None);
+                            println!("\n[Goal completed]");
+                        }
+                        println!("\n");
+                        continue;
+                    }
+                }
+            }
         }
         let question = zest_core::commands::btw_question(line);
         if question.is_some() && side.is_none() {

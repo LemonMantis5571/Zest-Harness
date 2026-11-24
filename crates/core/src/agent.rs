@@ -31,8 +31,8 @@ use crate::provider::{
 };
 use crate::thread::{new_id, ThreadInput, ThreadInputTarget};
 use crate::tools::approval::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
-    ToolRisk,
+    ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover,
+    PolicyOutcome, ToolRisk,
 };
 use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::prepared::PreparedToolCall;
@@ -51,6 +51,71 @@ pub const REPEATED_CALL_LIMIT: u32 = 3;
 /// Rounds in a row the agent asks the model to continue a response that was
 /// empty or cut off before the turn gives up.
 const MAX_CONTINUATIONS: u32 = 3;
+
+/// Autonomous `/goal` evaluation follow-up rounds allowed inside one user turn.
+const MAX_GOAL_CONTINUATIONS: u32 = 4;
+
+fn is_prose_only_path(path: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let lower = path.trim().to_ascii_lowercase();
+    matches!(
+        std::path::Path::new(&lower)
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some("md" | "markdown" | "txt" | "rst" | "adoc")
+    )
+}
+
+fn assistant_text_from_blocks(blocks: &[serde_json::Value]) -> String {
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn pre_finish_harness_note(
+    needs_verification: bool,
+    pending_todos: &[crate::tools::todo::TodoItem],
+) -> Option<String> {
+    if !needs_verification && pending_todos.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if needs_verification {
+        parts.push(
+            "You modified code or configuration files in this turn without running a build, \
+             typecheck, or test command via `bash`. Run the relevant verification check now \
+             (or state explicitly why verification cannot run)."
+                .to_string(),
+        );
+    }
+    if !pending_todos.is_empty() {
+        let items = pending_todos
+            .iter()
+            .map(|item| format!("`{}` ({})", item.content, item.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "Unfinished items remain in `todo_write`: {items}. Complete them and update \
+             `todo_write` to `completed`, or explain why they are blocked."
+        ));
+    }
+    Some(format!("[Zest harness check: {}]", parts.join(" ")))
+}
+
+fn goal_continuation_note(criteria: &str) -> String {
+    format!(
+        "[Zest goal check: Active goal is not yet marked complete (\"{criteria}\"). \
+         Continue working and verifying with tools. Include `{}` only when every requirement \
+         is demonstrably met, or `{}` if you are blocked on user input.]",
+        crate::commands::GOAL_MET_MARKER,
+        crate::commands::GOAL_BLOCKED_MARKER
+    )
+}
 
 /// What the model is told after a response that did not finish, by stop
 /// reason; `None` is an empty response.
@@ -210,6 +275,13 @@ pub struct Agent {
     /// The same advisor registered as `consult_advisor`, kept here so Zest can
     /// also consult it on its own (`docs/plans/advisor.md`, step 2).
     advisor: Option<Arc<ConsultAdvisor>>,
+    /// Session checklist shared with the `todo_write` tool, checked before ending
+    /// a turn and preserved across context compaction.
+    todo_store: Option<crate::tools::todo::TodoStore>,
+    /// Optional `/goal` acceptance criteria for autonomous multi-round completion.
+    goal: Option<String>,
+    /// Set when the most recent turn emitted `[GOAL_MET]` under an active goal.
+    goal_satisfied: bool,
 }
 
 impl Agent {
@@ -239,7 +311,28 @@ impl Agent {
             turn_usage: None,
             sensitive_tool_ids: Vec::new(),
             advisor: None,
+            todo_store: None,
+            goal: None,
+            goal_satisfied: false,
         }
+    }
+
+    /// Share the checklist store registered on `todo_write` so Zest can guard
+    /// premature completion and preserve unfinished items across compaction.
+    pub fn with_todo_store(mut self, store: crate::tools::todo::TodoStore) -> Self {
+        self.todo_store = Some(store);
+        self
+    }
+
+    /// Configure an active `/goal` criteria string for autonomous continuation.
+    pub fn with_goal(mut self, goal: Option<String>) -> Self {
+        self.goal = goal.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
+        self
+    }
+
+    /// True when the last completed turn satisfied its active `/goal`.
+    pub fn goal_satisfied(&self) -> bool {
+        self.goal_satisfied
     }
 
     /// Let Zest consult this advisor on its own. Register the same instance as
@@ -664,7 +757,7 @@ impl Agent {
             }
         }
 
-        let summary = completion
+        let mut summary = completion
             .content
             .iter()
             .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
@@ -677,6 +770,17 @@ impl Agent {
             return Err(HarnessError::Other(
                 "provider returned an empty context checkpoint".into(),
             ));
+        }
+        if let Some(store) = &self.todo_store {
+            let items = crate::tools::todo::snapshot_todos(store);
+            if !items.is_empty() {
+                summary.push_str("\n\n## Active Checklist\n");
+                summary.push_str(&crate::tools::todo::format_todo_checklist(&items));
+            }
+        }
+        if let Some(goal) = &self.goal {
+            summary.push_str("\n\n## Active Goal\n");
+            summary.push_str(goal);
         }
         Ok(summary)
     }
@@ -1042,9 +1146,14 @@ impl Agent {
             sensitive: turn_sensitive,
             last_usage,
         } = progress;
+        self.goal_satisfied = false;
         // Zest's own advisor consultations: at most one before a turn that
         // changed files ends, and one after two failed tool calls in a row.
         let mut wrote_files = false;
+        let mut unverified_code_writes = false;
+        let mut user_denied_exec = false;
+        let mut reminded_before_finish = false;
+        let mut goal_continuations = 0u32;
         let mut failure_streak = 0u32;
         let mut reviewed_before_finish = false;
         let mut consulted_on_failures = false;
@@ -1303,6 +1412,30 @@ impl Agent {
 
             match stop {
                 Some("end_turn") | None => {
+                    if !reminded_before_finish {
+                        let mode = self
+                            .policy
+                            .lock()
+                            .map(|guard| guard.mode())
+                            .unwrap_or_default();
+                        let needs_verification = unverified_code_writes
+                            && !user_denied_exec
+                            && mode != ApprovalMode::Plan
+                            && self.tools.risk("bash").is_some();
+                        let pending_todos = self
+                            .todo_store
+                            .as_ref()
+                            .map(crate::tools::todo::unfinished_todo_items)
+                            .unwrap_or_default();
+                        if let Some(note) =
+                            pre_finish_harness_note(needs_verification, &pending_todos)
+                        {
+                            reminded_before_finish = true;
+                            staged.push(Message::user_text(note));
+                            publish_side_context(self, staged, turn_sensitive, on_side_context);
+                            continue;
+                        }
+                    }
                     if wrote_files && !reviewed_before_finish {
                         reviewed_before_finish = true;
                         let review = self
@@ -1323,6 +1456,20 @@ impl Agent {
                             staged.push(Message::user_text(crate::advisor::finish_review_note(
                                 &advice,
                             )));
+                            publish_side_context(self, staged, turn_sensitive, on_side_context);
+                            continue;
+                        }
+                    }
+                    if let Some(criteria) = self.goal.clone() {
+                        let text = assistant_text_from_blocks(&content);
+                        if text.contains(crate::commands::GOAL_MET_MARKER) {
+                            self.goal_satisfied = true;
+                        } else if !text.contains(crate::commands::GOAL_BLOCKED_MARKER)
+                            && goal_continuations < MAX_GOAL_CONTINUATIONS
+                        {
+                            goal_continuations += 1;
+                            reminded_before_finish = false;
+                            staged.push(Message::user_text(goal_continuation_note(&criteria)));
                             publish_side_context(self, staged, turn_sensitive, on_side_context);
                             continue;
                         }
@@ -1452,6 +1599,16 @@ impl Agent {
                         }
                         if outcome.risk == ToolRisk::Write && !outcome.is_error {
                             wrote_files = true;
+                            if !is_prose_only_path(outcome.path.as_deref()) {
+                                unverified_code_writes = true;
+                            }
+                        }
+                        if matches!(call.name.as_str(), "bash" | "html_preview") {
+                            if outcome.is_error && outcome.body.contains("user denied permission") {
+                                user_denied_exec = true;
+                            } else if !outcome.is_error {
+                                unverified_code_writes = false;
+                            }
                         }
                         // The advisor's own failures (a spent budget, a timeout)
                         // say nothing about the work, so they neither count nor
@@ -4709,6 +4866,156 @@ mod tests {
                 .unwrap();
             assert!(strong.requests().is_empty());
             assert_eq!(chat.requests().len(), 2);
+        }
+
+        struct FakeBash;
+        #[async_trait::async_trait]
+        impl Tool for FakeBash {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "run command"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}, "cwd": {"type": "string"}}})
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::Exec
+            }
+            fn prepare(
+                &self,
+                input: serde_json::Value,
+            ) -> std::result::Result<PreparedToolCall, String> {
+                Ok(PreparedToolCall::plain("bash", ToolRisk::Exec, input).auto_eligible(true))
+            }
+            async fn run(&self, _: serde_json::Value) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("exit 0"))
+            }
+        }
+
+        struct CodeWriter(&'static str);
+        #[async_trait::async_trait]
+        impl Tool for CodeWriter {
+            fn name(&self) -> &str {
+                "write_code"
+            }
+            fn description(&self) -> &str {
+                "write file"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::Write
+            }
+            fn prepare(
+                &self,
+                input: serde_json::Value,
+            ) -> std::result::Result<PreparedToolCall, String> {
+                Ok(PreparedToolCall::plain_with_preview(
+                    "write_code",
+                    ToolRisk::Write,
+                    input,
+                    crate::tools::approval::ApprovalPreview {
+                        path: self.0.into(),
+                        summary: format!("write {}", self.0),
+                        diff: String::new(),
+                    },
+                ))
+            }
+            async fn run(&self, _: serde_json::Value) -> std::result::Result<ToolOutcome, String> {
+                Ok(ToolOutcome::text("wrote file"))
+            }
+        }
+
+        #[tokio::test]
+        async fn unverified_code_write_triggers_one_verification_nudge_when_bash_is_registered() {
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    calls(&["write_code"]),
+                    text("Edited src/lib.rs."),
+                    calls(&["bash"]),
+                    text("Verified with cargo test."),
+                ],
+            );
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(CodeWriter("src/lib.rs")));
+            tools.register(Arc::new(FakeBash));
+            let mut agent = Agent::new(chat.clone(), tools)
+                .with_approver(Arc::new(AllowApprover))
+                .with_policy(Arc::new(Mutex::new(ApprovalPolicy::new(
+                    ApprovalMode::Auto,
+                ))));
+            agent.send("Fix bug", &mut |_| {}).await.unwrap();
+            let reqs = chat.requests();
+            assert_eq!(reqs.len(), 4);
+            assert!(last_text(&reqs[2]).contains("[Zest harness check:"));
+        }
+
+        #[tokio::test]
+        async fn prose_only_edit_does_not_trigger_verification_nudge() {
+            let chat = Replay::new(
+                "chat",
+                vec![calls(&["write_code"]), text("Updated README.md.")],
+            );
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(CodeWriter("README.md")));
+            tools.register(Arc::new(FakeBash));
+            let mut agent = Agent::new(chat.clone(), tools)
+                .with_approver(Arc::new(AllowApprover))
+                .with_policy(Arc::new(Mutex::new(ApprovalPolicy::new(
+                    ApprovalMode::Auto,
+                ))));
+            agent.send("Update docs", &mut |_| {}).await.unwrap();
+            assert_eq!(chat.requests().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn unfinished_todos_nudge_once_and_goal_loops_until_goal_met() {
+            let todo_store: crate::tools::todo::TodoStore = Arc::default();
+            {
+                let mut guard = todo_store.lock().unwrap();
+                guard.push(crate::tools::todo::TodoItem {
+                    id: "1".into(),
+                    content: "Pass unit tests".into(),
+                    status: crate::tools::todo::TodoStatus::InProgress,
+                });
+            }
+            let chat = Replay::new(
+                "chat",
+                vec![
+                    text("Step 1 done."),
+                    Completion {
+                        content: vec![serde_json::json!({
+                            "type": "tool_use",
+                            "id": "todo-1",
+                            "name": "todo_write",
+                            "input": { "todos": [{ "id": "1", "content": "Pass unit tests", "status": "completed" }] }
+                        })],
+                        stop_reason: Some("tool_use".into()),
+                        usage: Usage::default(),
+                        usage_available: false,
+                        limits: None,
+                        served_model: None,
+                        provider_session: None,
+                    },
+                    text("Almost done."),
+                    text("All unit tests pass. [GOAL_MET]"),
+                ],
+            );
+            let mut tools = ToolRegistry::new();
+            crate::tools::register_todo_tool(&mut tools, todo_store.clone());
+            let mut agent = Agent::new(chat.clone(), tools)
+                .with_todo_store(todo_store)
+                .with_goal(Some("All unit tests pass".into()));
+            agent.send("Finish task", &mut |_| {}).await.unwrap();
+            assert!(agent.goal_satisfied());
+            let reqs = chat.requests();
+            assert_eq!(reqs.len(), 4);
+            assert!(last_text(&reqs[1]).contains("Unfinished items remain in `todo_write`"));
+            assert!(last_text(&reqs[3]).contains("[Zest goal check:"));
         }
     }
 }

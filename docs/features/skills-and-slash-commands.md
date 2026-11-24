@@ -33,13 +33,14 @@ verify:
   Customize > Skills & MCP, which lists every command as `/name · description`
   ("No skills or MCP commands configured." when there are none). Clicking a row
   returns to the chat and puts `/<name> ` into the composer.
-- The list contains built-ins `btw` and `model`, skills, and enabled MCP servers
+- The list contains built-ins `btw`, `goal`, and `model`, skills, and enabled MCP servers
   whose id is a legal token. Reserved built-ins beat skills and MCP; a skill beats
   an MCP server of the same name.
 - Sending exactly `/model` opens Customize > Models (see
   [model-and-effort-selection](model-and-effort-selection.md)); `/btw <question>`
-  opens the side conversation (see [btw-side-questions](btw-side-questions.md)).
-  Neither is sent as a turn.
+  opens the side conversation (see [btw-side-questions](btw-side-questions.md));
+  `/goal` (`clear`, `pause`, `resume`, or `<criteria>`) manages the chat's
+  autonomous completion goal (see [chat-turns-and-streaming](chat-turns-and-streaming.md)).
 - On send, every recognised `/token` anywhere in the draft is removed and its
   skill body (or an MCP "use this server" instruction) is placed above the
   remaining text, separated by `---`. Unknown `/tokens` stay as typed. `//text`

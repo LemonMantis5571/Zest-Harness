@@ -81,8 +81,9 @@ pub use chat_persistence::{
 };
 pub use codex_oauth::{open_http_url, open_https_url};
 pub use commands::{
-    expand as expand_command, expand_as as expand_command_as, list_slash_commands, mcp_slashes,
-    parse_command, Expansion, McpSlash, ParsedCommand, SlashCommand, SlashKind,
+    expand as expand_command, expand_as as expand_command_as, frame_goal_prompt,
+    list_slash_commands, mcp_slashes, parse_command, parse_goal_command, Expansion, GoalCommand,
+    McpSlash, ParsedCommand, SlashCommand, SlashKind, GOAL_BLOCKED_MARKER, GOAL_MET_MARKER,
 };
 pub use config::{
     ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config, CursorMode,
@@ -167,9 +168,9 @@ pub use skills::{
 pub use thread::{
     contains_ignore_ascii_case, match_excerpt, new_id, thread_summary_from_json, PullRequestLink,
     StoredMessage, Thread, ThreadCheckpoint, ThreadCheckpointKind, ThreadEvent, ThreadEventKind,
-    ThreadGitContext, ThreadId, ThreadInput, ThreadInputAttachment, ThreadInputTarget, ThreadLoad,
-    ThreadLoadError, ThreadStore, ThreadSummary, ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION,
-    WIRE_FORMAT_ANTHROPIC_MESSAGES,
+    ThreadGitContext, ThreadGoal, ThreadId, ThreadInput, ThreadInputAttachment, ThreadInputTarget,
+    ThreadLoad, ThreadLoadError, ThreadStore, ThreadSummary, ToolPart as ThreadToolPart,
+    THREAD_FORMAT_VERSION, WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
 pub use thread_window::{MessageWindow, THREAD_OLDER_USER_TURNS, THREAD_WINDOW_USER_TURNS};
 pub use tools::approval::{
@@ -191,11 +192,16 @@ pub use tools::question::{
 };
 pub use tools::read_file::ReadFile;
 pub use tools::sensitive::is_sensitive_path;
+pub use tools::todo::{
+    format_todo_checklist, snapshot_todos, unfinished_todo_items, TodoItem, TodoStatus, TodoStore,
+    TodoWrite, TODO_WRITE_TOOL,
+};
 pub use tools::write_file::WriteFile;
 pub use tools::{
     register_browser_tool, register_exec_tools, register_exec_tools_with_jobs, register_job_tools,
-    register_question_tool, register_read_tools, register_skill_tools, register_write_tools,
-    FeatureDelegator, Tool, ToolMetadata, ToolOutcome, ToolRegistry, DELEGATE_FEATURE_TOOL,
+    register_question_tool, register_read_tools, register_skill_tools, register_todo_tool,
+    register_write_tools, FeatureDelegator, Tool, ToolMetadata, ToolOutcome, ToolRegistry,
+    DELEGATE_FEATURE_TOOL,
 };
 pub use transcripts::{CliKind, ScanResult, ScanStatus};
 pub use usage::{

@@ -22,6 +22,7 @@ pub mod read_file;
 pub mod read_skill;
 pub mod sensitive;
 pub mod spill;
+pub mod todo;
 pub mod walk;
 pub mod web_search;
 pub mod write_file;
@@ -274,6 +275,10 @@ pub fn register_skill_tools(registry: &mut ToolRegistry, skills: Arc<RwLock<Skil
 /// human interaction surface.
 pub fn register_question_tool(registry: &mut ToolRegistry) {
     question::register_question_tool(registry);
+}
+
+pub fn register_todo_tool(registry: &mut ToolRegistry, store: self::todo::TodoStore) {
+    registry.register(Arc::new(self::todo::TodoWrite::new(store)));
 }
 
 /// Register project-scoped write tools (`write_file`, `edit_file`). Requires an
