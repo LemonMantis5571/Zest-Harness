@@ -696,6 +696,14 @@ impl From<ThreadLoadError> for HarnessError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadGoal {
+    pub criteria: String,
+    #[serde(default)]
+    pub paused: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
@@ -728,6 +736,9 @@ pub struct Thread {
     /// opened in a Git workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_context: Option<ThreadGitContext>,
+    /// Optional `/goal` acceptance criteria persisted with this conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_goal: Option<ThreadGoal>,
     /// Wire format for `agent_messages` (e.g. anthropic_messages).
     #[serde(default = "default_wire_format")]
     pub wire_format: String,
@@ -776,6 +787,7 @@ impl Thread {
             provider_kind: None,
             provider_session: None,
             git_context: None,
+            active_goal: None,
             wire_format: default_wire_format(),
             messages: Vec::new(),
             checkpoints: Vec::new(),

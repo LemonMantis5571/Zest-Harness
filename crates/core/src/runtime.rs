@@ -28,8 +28,8 @@ use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::spill::{SpillPolicy, SpillStore};
 use crate::tools::{
     register_browser_tool, register_exec_tools_with_jobs, register_job_tools,
-    register_question_tool, register_read_tools, register_skill_tools, register_write_tools,
-    BrowserAdapter, FeatureDelegator, ToolRegistry,
+    register_question_tool, register_read_tools, register_skill_tools, register_todo_tool,
+    register_write_tools, BrowserAdapter, FeatureDelegator, ToolRegistry,
 };
 use crate::usage::Ledger;
 
@@ -505,6 +505,9 @@ impl RuntimeBuilder {
             SystemPrompt::new(composed).with_volatile(env_context(&root))
         };
 
+        let todo_store: Option<crate::tools::todo::TodoStore> = (!provider_owns_agent_loop
+            && self.role != RuntimeRole::DelegationReviewer)
+            .then(Arc::default);
         let mut worker_tools = ToolRegistry::new();
         if !provider_owns_agent_loop {
             register_read_tools(&mut worker_tools, &root)
@@ -514,6 +517,9 @@ impl RuntimeBuilder {
                     .map_err(|e| HarnessError::Other(format!("register write tools: {e}")))?;
             }
             register_skill_tools(&mut worker_tools, skills.clone());
+            if let Some(store) = &todo_store {
+                register_todo_tool(&mut worker_tools, store.clone());
+            }
         }
 
         // `bash` is deliberately *not* in `worker_tools`. A delegated worker
@@ -647,6 +653,9 @@ impl RuntimeBuilder {
             .with_approver(approver)
             .with_questioner(questioner)
             .with_policy(policy.clone());
+        if let Some(store) = todo_store {
+            agent = agent.with_todo_store(store);
+        }
         let usage_task_kind = match self.role {
             RuntimeRole::Parent => "turn",
             RuntimeRole::DelegationWorker => "worker",
@@ -889,13 +898,12 @@ mod tests {
             "write_file",
             "edit_file",
             "read_skill",
+            "todo_write",
         ];
         assert_eq!(first.agent.tool_names(), expected_tool_order);
         assert_eq!(first.agent.tool_names(), second.agent.tool_names());
-        assert_eq!(
-            blake3::hash(first.base_system.as_bytes()).to_hex().as_str(),
-            "1bc4094425d558a7eef2c08ee1829d11124954b3206ae78deb5c6d1dee65a111"
-        );
+        assert_eq!(first.base_system, DEFAULT_SYSTEM);
+        assert_eq!(first.base_system, second.base_system);
         assert_eq!(
             serde_json::to_value(first.agent.tools_for_model()).unwrap(),
             serde_json::to_value(second.agent.tools_for_model()).unwrap()

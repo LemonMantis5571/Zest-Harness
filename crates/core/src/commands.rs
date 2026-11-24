@@ -76,6 +76,59 @@ pub fn btw_question(input: &str) -> Option<&str> {
         .then(|| trimmed[end..].trim())
 }
 
+/// Parsed `/goal` invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalCommand<'a> {
+    Status,
+    Clear,
+    Pause,
+    Resume,
+    Set(&'a str),
+}
+
+/// Parse a leading `/goal` command (`//goal` and `/goal/path` stay literal).
+pub fn parse_goal_command(input: &str) -> Option<GoalCommand<'_>> {
+    let trimmed = input.trim_start();
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    if !trimmed[..end].eq_ignore_ascii_case("/goal") {
+        return None;
+    }
+    let rest = trimmed[end..].trim();
+    if rest.is_empty() {
+        return Some(GoalCommand::Status);
+    }
+    if rest.eq_ignore_ascii_case("clear") {
+        return Some(GoalCommand::Clear);
+    }
+    if rest.eq_ignore_ascii_case("pause") {
+        return Some(GoalCommand::Pause);
+    }
+    if rest.eq_ignore_ascii_case("resume") {
+        return Some(GoalCommand::Resume);
+    }
+    Some(GoalCommand::Set(rest))
+}
+
+/// Marker emitted by the model when the active `/goal` criteria are satisfied.
+pub const GOAL_MET_MARKER: &str = "[GOAL_MET]";
+/// Marker emitted by the model when the active `/goal` is genuinely blocked on user action.
+pub const GOAL_BLOCKED_MARKER: &str = "[GOAL_BLOCKED]";
+
+/// Frame a prompt with the active `/goal` contract so both native and CLI-owned
+/// providers follow the same completion criteria.
+pub fn frame_goal_prompt(criteria: &str, prompt: &str) -> String {
+    format!(
+        "# Active goal\n\n\
+         Criteria: {criteria}\n\n\
+         Work methodically and verify with tools until every requirement of this goal is \
+         demonstrably met. End your final response with `{GOAL_MET_MARKER}` only when all \
+         criteria are verified complete, or `{GOAL_BLOCKED_MARKER}` if you are blocked on a \
+         required user decision.\n\n\
+         ---\n\n\
+         {prompt}"
+    )
+}
+
 /// True when `id` can be typed as `/id`.
 pub fn is_command_name(id: &str) -> bool {
     !id.is_empty() && id.chars().all(is_name_char)
@@ -137,6 +190,7 @@ pub fn mcp_slashes(
 /// would steal `/model` from the picker, so reserved names win here.
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("btw", "Ask in a temporary side conversation"),
+    ("goal", "Keep working until acceptance criteria are met"),
     ("model", "Switch model or provider"),
 ];
 
@@ -672,6 +726,36 @@ mod tests {
         assert_eq!(btw_question("/btw"), Some(""));
         for literal in ["//btw", "/btw/file", "/btw-next", "explain /btw", "/btw?"] {
             assert_eq!(btw_question(literal), None, "{literal}");
+        }
+    }
+
+    #[test]
+    fn goal_is_reserved_and_parses_subcommands_cleanly() {
+        let skills = skills_with("goal", "Must not shadow builtin /goal.");
+        let listed = list_slash_commands(&skills, &[]);
+        let goals: Vec<_> = listed
+            .iter()
+            .filter(|c| c.name.eq_ignore_ascii_case("goal"))
+            .collect();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].kind, SlashKind::Builtin);
+
+        assert_eq!(parse_goal_command("/goal"), Some(GoalCommand::Status));
+        assert_eq!(
+            parse_goal_command("  /GOAL clear "),
+            Some(GoalCommand::Clear)
+        );
+        assert_eq!(parse_goal_command("/goal pause"), Some(GoalCommand::Pause));
+        assert_eq!(
+            parse_goal_command("/goal resume"),
+            Some(GoalCommand::Resume)
+        );
+        assert_eq!(
+            parse_goal_command("/goal all unit tests pass"),
+            Some(GoalCommand::Set("all unit tests pass"))
+        );
+        for literal in ["//goal", "/goal/path", "/goals", "run /goal now"] {
+            assert_eq!(parse_goal_command(literal), None, "{literal}");
         }
     }
 

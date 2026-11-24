@@ -15,6 +15,7 @@ paths:
   - crates/core/src/cancel.rs
   - crates/core/src/inbox.rs
   - crates/core/src/persist.rs
+  - crates/core/src/tools/todo.rs
 tests:
   - crates/desktop/src/selftest.rs
   - crates/core/src/agent_resilience_tests.rs
@@ -30,6 +31,7 @@ verify:
   - cargo test -p zest-core --lib -- persist::tests
   - cargo test -p zest-core --lib -- prompt::tests
   - cargo test -p zest-core --lib -- runtime::tests
+  - cargo test -p zest-core --lib -- tools::todo::tests
 ---
 
 # Chat turns and streaming
@@ -52,6 +54,8 @@ verify:
 - A served model that differs from the requested one shows "Requested X, provider served Y" in the notice card. The desktop app does not offer reconnect or provider-choice buttons on an authentication error; the message names the problem and the provider is changed in Customize.
 - A turn belongs to its chat: each open chat has its own worker, so switching chats or splits lets a turn finish in the background, and a second message to a busy chat is queued.
 - The agent uses the turn's run ID (`turn_…`) as its run identity, so provider rounds, tool activity and the run record in `ChatPersistence` can be matched.
+- Native runtimes register `todo_write` (`crates/core/src/tools/todo.rs`) so the model can maintain a structured checklist (`pending`, `in_progress`, `completed`, up to 32 items) across multi-step work. Before ending a turn (`end_turn`), `run_turn_steps` sends at most one `[Zest harness check]` reminder round if non-prose code files were modified without a subsequent `bash`/`html_preview` verification run (when `bash` is registered and the user has not denied execution) or if unfinished items remain in `todo_write`.
+- Sending `/goal <criteria>` sets an active goal on the thread (shown in the composer status row; `/goal` inspects it, `/goal pause` and `/goal resume` pause/continue it, `/goal clear` removes it, and pressing Stop pauses it). While an unpaused goal is active, Zest frames turns with the goal criteria and continues across up to 4 autonomous evaluation rounds per turn until the model emits `[GOAL_MET]` (clearing the goal) or `[GOAL_BLOCKED]`.
 - Drafts live in each open chat's composer for the session; they are not saved to disk.
 
 ## How it works

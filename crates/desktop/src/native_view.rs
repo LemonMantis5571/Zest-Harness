@@ -439,6 +439,115 @@ impl Root {
             self.ask_side(question, cx);
             return;
         }
+        if let Some(goal_cmd) = zest_core::parse_goal_command(text) {
+            match goal_cmd {
+                zest_core::GoalCommand::Status => {
+                    if let Some(chat) = &self.native {
+                        let guard = chat.thread.lock().unwrap();
+                        self.note = match &guard.active_goal {
+                            Some(g) if g.paused => format!("Active goal (paused): {}", g.criteria),
+                            Some(g) => format!("Active goal: {}", g.criteria),
+                            None => "No active goal. Send /goal <criteria> to set one.".into(),
+                        };
+                    }
+                    self.composer.update(cx, |c, cx| {
+                        c.images = images.to_vec();
+                        cx.notify();
+                    });
+                    cx.notify();
+                    return;
+                }
+                zest_core::GoalCommand::Clear => {
+                    if let Some(chat) = &self.native {
+                        let _ = chat.edit(|t| {
+                            t.active_goal = None;
+                            Ok(())
+                        });
+                    }
+                    if self.turn_active {
+                        self.stop(cx);
+                    }
+                    self.note = "Cleared active goal.".into();
+                    self.composer.update(cx, |c, cx| {
+                        c.images = images.to_vec();
+                        cx.notify();
+                    });
+                    cx.emit(ChatChanged);
+                    cx.notify();
+                    return;
+                }
+                zest_core::GoalCommand::Pause => {
+                    if let Some(chat) = &self.native {
+                        let has_goal = chat
+                            .edit(|t| {
+                                if let Some(g) = t.active_goal.as_mut() {
+                                    g.paused = true;
+                                    Ok(true)
+                                } else {
+                                    Ok(false)
+                                }
+                            })
+                            .unwrap_or(false);
+                        if has_goal {
+                            if self.turn_active {
+                                self.stop(cx);
+                            }
+                            self.note = "Paused active goal. Send /goal resume to continue.".into();
+                        } else {
+                            self.note = "No active goal to pause.".into();
+                        }
+                    }
+                    self.composer.update(cx, |c, cx| {
+                        c.images = images.to_vec();
+                        cx.notify();
+                    });
+                    cx.emit(ChatChanged);
+                    cx.notify();
+                    return;
+                }
+                zest_core::GoalCommand::Resume => {
+                    if let Some(chat) = &self.native {
+                        let resumed = chat
+                            .edit(|t| {
+                                if let Some(g) = t.active_goal.as_mut() {
+                                    g.paused = false;
+                                    Ok(true)
+                                } else {
+                                    Ok(false)
+                                }
+                            })
+                            .unwrap_or(false);
+                        if !resumed {
+                            self.note = "No active goal to resume.".into();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                    if let Err(e) =
+                        self.accept_submission("Continue working toward the active goal.", images)
+                    {
+                        self.note = e.to_string();
+                    }
+                    self.composer
+                        .update(cx, |c, _| c.has_files = !self.files.is_empty());
+                    cx.emit(ChatChanged);
+                    cx.notify();
+                    return;
+                }
+                zest_core::GoalCommand::Set(criteria) => {
+                    if let Some(chat) = &self.native {
+                        let criteria = criteria.to_string();
+                        let _ = chat.edit(|t| {
+                            t.active_goal = Some(zest_core::ThreadGoal {
+                                criteria,
+                                paused: false,
+                            });
+                            Ok(())
+                        });
+                    }
+                }
+            }
+        }
         if let Err(e) = self.accept_submission(text, images) {
             self.note = e.to_string();
             self.composer.update(cx, |c, cx| {
@@ -1034,6 +1143,26 @@ impl Root {
                             .child(format!("#{}", pr.number)),
                     );
                 }
+            }
+            if let Some(goal) = &thread.active_goal {
+                let summary = zest_core::truncate_chars(&goal.criteria, 32);
+                let label = if goal.paused {
+                    format!("Goal (paused): {summary}")
+                } else {
+                    format!("Goal: {summary}")
+                };
+                left = left.child(
+                    div()
+                        .id("status-goal")
+                        .px(px(6.))
+                        .rounded(px(6.))
+                        .text_color(rgb(if goal.paused {
+                            theme::muted_foreground()
+                        } else {
+                            theme::link()
+                        }))
+                        .child(label),
+                );
             }
             drop(thread);
             let mode = chat.policy.lock().unwrap().mode();
