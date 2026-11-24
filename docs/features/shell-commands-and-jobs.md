@@ -64,11 +64,12 @@ verify:
 - `[tools.bash] enabled = false` removes `bash` but keeps the job tools.
 
 ## How it works
-1. Registered only for the parent chat via `register_exec_tools_with_jobs`
-   (tools/mod.rs) from runtime.rs. The desktop (`Chat::agent` in
-   `crates/desktop/src/native.rs`) passes its project's `Project.jobs`
-   registry, one per opened project, with `with_job_registry`, and the chat's
-   thread id as owner with `with_job_owner`.
+1. Registered for the parent chat via `register_exec_tools_with_jobs`
+   (tools/mod.rs) from runtime.rs (and foreground-only `Bash` without job tools
+   for `RuntimeRole::DelegationWorker` under `ApprovalMode::Auto` +
+   `DenyApprover`). The desktop (`Chat::agent` in `crates/desktop/src/native.rs`)
+   passes its project's `Project.jobs` registry, one per opened project, with
+   `with_job_registry`, and the chat's thread id as owner with `with_job_owner`.
 2. `Bash::prepare` parses input, runs `classify`, and returns
    `PreparedToolCall::plain_with_preview` with the command line in
    `preview.path` (the approval target) and `auto_eligible` set.

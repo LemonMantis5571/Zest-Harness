@@ -84,8 +84,13 @@ The desktop's **Delegation** tab (under Workbench) uses the same coordinator as 
   pager (`ALLOWED_ARTIFACTS`, MCP `delegation_artifact`).
 - Workers never edit the user's checkout. Each runs in a temporary detached
   `git worktree` that holds the current dirty snapshot (tracked diff plus
-  untracked files), with sensitive files removed and `.zest/` left out. What
-  comes back is a diff.
+  untracked files), with sensitive files removed and `.zest/` left out. Native
+  workers receive read/write/patch tools plus foreground `bash` under
+  `ApprovalMode::Auto` + `DenyApprover`, so they can run allowlisted argv
+  verification checks (`cargo check`, `cargo test`, `npm test`, `pytest`, `go
+  test`) inside their isolated worktree before finishing while any unlisted
+  command, shell operator, background job, external `cwd`, or sensitive path is
+  refused. What comes back is a diff.
 - The worker's snapshot is a commit in the project's object store. The job
   records it (`worker_base`) and pins it as `refs/zest/delegations/<jobId>`
   (`pin_worker_base`) until the job is accepted or cancelled. The acceptance

@@ -93,9 +93,12 @@ verify:
    `ApprovalPolicy` and `ApprovalNeeded` event. On the desktop their command and
    file-change requests arrive as "Allow command?" and "Allow file change?"
    cards.
-6. Delegated workers run with `ApprovalMode::Bypass` and `AllowApprover`
-   (runtime.rs), which is why bash, browser, ask_user, and MCP tools are withheld
-   from them.
+6. Delegated workers run with `ApprovalMode::Auto` and `DenyApprover`
+   (runtime.rs): ordinary worktree writes and allowlisted argv verification
+   commands (`cargo check`, `cargo test`, `npm test`, `pytest`, `go test`, etc.)
+   run unattended, while unlisted shell commands, background servers, external
+   `cwd`, sensitive secret paths, browser, `ask_user`, and MCP tools are refused
+   or withheld.
 
 ## Verify
 `tools::approval` covers the mode table; `agent::tests` includes
