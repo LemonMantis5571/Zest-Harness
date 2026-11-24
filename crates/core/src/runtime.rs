@@ -21,7 +21,8 @@ use crate::provider::normalize_effort;
 use crate::provider::registry::{ProviderRegistry, Skipped};
 use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
-use crate::tools::approval::{AllowApprover, ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
+use crate::tools::approval::{ApprovalMode, ApprovalPolicy, Approver, DenyApprover};
+use crate::tools::bash::Bash;
 use crate::tools::consult_advisor::ConsultAdvisor;
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
@@ -522,10 +523,11 @@ impl RuntimeBuilder {
             }
         }
 
-        // `bash` is deliberately *not* in `worker_tools`. A delegated worker
-        // runs on a different provider to think about something; letting it
-        // also run shell commands widens the blast radius for no benefit that
-        // the parent conversation cannot already provide.
+        // Parent chats get `bash` + background job controls; isolated native
+        // workers get foreground `bash` only (under `Auto` + `DenyApprover`,
+        // so argv-spawned verification commands auto-run while arbitrary shell
+        // commands, background servers, external `cwd`, and sensitive paths are
+        // refused). Reviewers remain strictly read-only.
         let mut tools = worker_tools.clone();
         if !provider_owns_agent_loop && is_parent {
             if let Some(browser) = self.browser {
@@ -546,6 +548,15 @@ impl RuntimeBuilder {
             } else {
                 register_job_tools(&mut tools, jobs, self.job_owner.clone());
             }
+        } else if self.role == RuntimeRole::DelegationWorker
+            && !provider_owns_agent_loop
+            && self.register_exec
+            && config.tools.bash.enabled
+        {
+            let bash = Bash::new(&root)
+                .map_err(|e| HarnessError::Other(format!("register worker bash: {e}")))?
+                .with_settings(config.tools.bash.settings());
+            tools.register(Arc::new(bash));
         }
 
         // Zest-owned MCP servers, and only for a provider whose agent loop Zest
@@ -632,7 +643,7 @@ impl RuntimeBuilder {
         }
 
         let approver = if self.role == RuntimeRole::DelegationWorker {
-            Arc::new(AllowApprover) as Arc<dyn Approver>
+            Arc::new(DenyApprover) as Arc<dyn Approver>
         } else {
             self.approver
                 .unwrap_or_else(|| Arc::new(DenyApprover) as Arc<dyn Approver>)
@@ -641,7 +652,7 @@ impl RuntimeBuilder {
             .questioner
             .unwrap_or_else(|| Arc::new(DenyQuestioner) as Arc<dyn Questioner>);
         let policy = if self.role == RuntimeRole::DelegationWorker {
-            Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Bypass)))
+            Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Auto)))
         } else {
             self.policy
                 .unwrap_or_else(|| Arc::new(Mutex::new(ApprovalPolicy::default())))
@@ -1574,7 +1585,7 @@ provider = "main"
     }
 
     #[test]
-    fn delegated_worker_profile_has_read_write_skills_only() {
+    fn delegated_worker_profile_allows_safe_verification_and_denies_arbitrary_exec() {
         let dir = two_provider_dir("worker-profile");
         let session = RuntimeBuilder::new(&dir)
             .with_config(Config::find(&dir).unwrap())
@@ -1585,10 +1596,55 @@ provider = "main"
         let names = session.agent.tool_names();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"read_skill"));
-        assert!(!names.contains(&"bash"));
+        assert!(names.contains(&"todo_write"));
+        assert!(names.contains(&"bash"));
+        assert!(!names.contains(&"job_list"));
         assert!(!names.contains(&"delegate_external"));
         assert!(!names.contains(&"ask_user"));
+
+        let policy = session.policy.lock().unwrap();
+        assert_eq!(policy.mode(), ApprovalMode::Auto);
+        // Safe argv verification and ordinary writes auto-run in Auto mode.
+        assert_eq!(
+            policy.decide(
+                "bash",
+                "cargo check",
+                crate::tools::approval::ToolRisk::Exec,
+                true
+            ),
+            crate::tools::approval::PolicyOutcome::Allow
+        );
+        assert_eq!(
+            policy.decide(
+                "write_file",
+                "src/lib.rs",
+                crate::tools::approval::ToolRisk::Write,
+                false
+            ),
+            crate::tools::approval::PolicyOutcome::Allow
+        );
+        // Arbitrary shell commands and sensitive paths ask, which hits DenyApprover.
+        assert_eq!(
+            policy.decide(
+                "bash",
+                "rm -rf target",
+                crate::tools::approval::ToolRisk::Exec,
+                false
+            ),
+            crate::tools::approval::PolicyOutcome::Ask
+        );
+        assert_eq!(
+            policy.decide(
+                "write_file",
+                ".env",
+                crate::tools::approval::ToolRisk::Sensitive,
+                false
+            ),
+            crate::tools::approval::PolicyOutcome::Ask
+        );
     }
 
     #[test]

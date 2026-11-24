@@ -465,7 +465,7 @@ async fn run_in_workspace(
         .with_effort(target.effort.clone())
         .with_role(role)
         .enable_external_agents(false)
-        .register_exec_tools(false);
+        .register_exec_tools(role == RuntimeRole::DelegationWorker);
     let run_id = usage
         .correlation_id
         .as_ref()

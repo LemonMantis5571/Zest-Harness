@@ -48,7 +48,7 @@ struct Request {
     max_completion_tokens: Option<u32>,
 }
 
-fn uses_max_completion_tokens(model: &str) -> bool {
+fn prefers_completion_cap_field(model: &str) -> bool {
     let lower = model.trim().to_ascii_lowercase();
     let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
     bare.starts_with("o1")
@@ -137,7 +137,7 @@ impl Provider for OpenAiCompatibleProvider {
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
-        let use_completion_cap = uses_max_completion_tokens(&req.model);
+        let use_completion_cap = prefers_completion_cap_field(&req.model);
         let wire = Request {
             model: req.model.clone(),
             messages: convert_messages(
@@ -1205,9 +1205,9 @@ mod tests {
         assert_eq!(wire[1]["reasoning_content"], "step 1; step 2");
         assert_eq!(wire[1]["tool_calls"][0]["id"], "c1");
 
-        assert!(uses_max_completion_tokens("o3-mini"));
-        assert!(uses_max_completion_tokens("openai/gpt-5.6-sol"));
-        assert!(!uses_max_completion_tokens("deepseek-reasoner"));
+        assert!(prefers_completion_cap_field("o3-mini"));
+        assert!(prefers_completion_cap_field("openai/gpt-5.6-sol"));
+        assert!(!prefers_completion_cap_field("deepseek-reasoner"));
     }
 
     #[test]
