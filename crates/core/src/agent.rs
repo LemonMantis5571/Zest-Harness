@@ -2043,9 +2043,12 @@ impl Agent {
             match decision {
                 ApprovalDecision::AllowOnce => {}
                 ApprovalDecision::AllowSession => {
-                    // Record against the exact target that was on the card.
-                    if let Ok(mut policy) = self.policy.lock() {
-                        policy.trust(&call.name, &target);
+                    // Record against the exact target that was on the card;
+                    // sensitive secret files remain strictly per-call.
+                    if risk != ToolRisk::Sensitive {
+                        if let Ok(mut policy) = self.policy.lock() {
+                            policy.trust(&call.name, &target);
+                        }
                     }
                 }
                 ApprovalDecision::Deny => {

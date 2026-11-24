@@ -2,11 +2,14 @@
 title: Tool approvals and permission modes
 summary: Writes, commands, and other risky tool calls pass one approval gate whose behavior follows the chat's permission mode (Manual, Accept edits, Plan, Auto, Bypass).
 paths:
+  - crates/core/src/prefs.rs
   - crates/core/src/tools/approval.rs
   - crates/core/src/tools/prepared.rs
   - crates/core/src/agent.rs
   - crates/desktop/src/interaction.rs
+  - crates/desktop/src/native.rs
   - crates/desktop/src/native_view.rs
+  - crates/desktop/src/workspace.rs
 tests:
   - crates/desktop/src/workspace_test.rs
 verify:
@@ -26,20 +29,25 @@ verify:
 - Modes (`ApprovalMode`): **Manual** asks for every gated call; **Accept edits**
   applies writes, asks for the rest; **Plan** refuses every gated call with a
   message telling the model to describe the change instead; **Auto** applies
-  writes and `auto_eligible` commands (bash read-only allowlist), asks for the
+  writes and `auto_eligible` commands (bash inspection and verification allowlist), asks for the
   rest; **Bypass** never asks.
-- Each desktop chat has its own policy and starts in Manual, the same as core's
-  default. A bare `Agent` uses `DenyApprover`, so an un-wired front-end cannot
-  write. The desktop offers Manual, Plan, Accept edits and Auto under
-  Customize > Models ("Tool permissions"); it does not offer Bypass. The status
-  line under the composer shows the active chat's mode (Ask, Edits, Plan, Auto).
-- The desktop card offers **Allow once** and **Deny**. It has no "Allow for
-  session" button, so desktop chats never add session grants; the CLI and other
-  hosts can still answer `AllowSession`, which trusts that tool **and the exact
-  target shown** (file path or command line), not the whole tool. Plan mode
-  ignores grants.
-- Switching mode clears all session grants. Nothing is persisted: a new chat,
-  or any chat after restarting the app, starts in Manual.
+- Each desktop chat has its own policy. Real project chats default to **Auto**
+  (or the project's saved `approvalMode` in `.zest/session-state.json`), while
+  `--demo` chats start in **Manual** so offline approval cards remain testable; a
+  bare `Agent` uses `Manual` + `DenyApprover`, so an un-wired front-end cannot
+  write. The desktop offers Manual (Ask), Plan, Accept edits, Auto, and Bypass
+  under both Customize > Models ("Tool permissions") and the composer status-row
+  menu.
+- The desktop card offers **Allow once**, **Allow for session** (for non-secret
+  writes and commands), and **Deny**. Clicking **Allow for session** returns
+  `ApprovalDecision::AllowSession`, which trusts that tool **and the exact
+  target shown** (file path for file writes, command tool for CLI providers, or
+  exact command string for native `bash`), never a `Sensitive` secret file
+  (`.env`, keys). Plan mode ignores grants.
+- Switching mode clears all session grants. Choosing a mode in Customize >
+  Models saves `approvalMode` in `.zest/session-state.json` as the project's
+  default for newly opened chats (session grants themselves remain in-memory
+  only).
 - `html_preview` uses a fingerprint of its validated title and source as its
   target. Session approval for one document does not authorize changed HTML
   or a different title.
@@ -55,10 +63,12 @@ verify:
   questions-and-planning).
 
 ## How it works
-1. Desktop mode: the Customize > Models panel (`workspace.rs`) calls
-   `ApprovalPolicy::set_mode` on the active chat's `Chat.policy`
-   (`crates/desktop/src/native.rs`). `native_view.rs` `status_row` reads it
-   back for the status line.
+1. Desktop mode: `Chat::new` (`crates/desktop/src/native.rs`) loads
+   `ProjectSessionState.approval_mode` (defaulting to `Auto`, or `Manual` in
+   `--demo`). The Customize > Models panel (`workspace.rs` `set_approval_mode`)
+   calls `ApprovalPolicy::set_mode` on the active chat's `Chat.policy` and
+   persists `approvalMode` to `.zest/session-state.json`. `native_view.rs`
+   `status_row` reads it back for the status line.
 2. `Agent::execute_tool_calls` prepares every call, runs Read-risk calls
    concurrently, then runs gated calls strictly sequentially via
    `run_gated_call`: `policy.decide(name, preview.path, risk, auto_eligible)` ->
@@ -66,14 +76,15 @@ verify:
    continues.
 3. On Ask: `approver.prepare(id)` registers the waiter **before**
    `StreamEvent::ApprovalNeeded` is emitted (Sensitive previews lose their diff),
-   then `approver.decide` races the cancel token. AllowSession calls
-   `policy.trust(name, target)`.
+   then `approver.decide` races the cancel token. `AllowSession` calls
+   `policy.trust(name, target)` when `risk != ToolRisk::Sensitive`.
 4. Desktop: `Interactions` (`crates/desktop/src/interaction.rs`) is the chat's
    `Approver`, `Questioner` and `ProviderInteractionHost`. Each request sends an
    `EvKind::Card` holding its own oneshot reply channel to the chat view, which
    queues it in `Root.cards`. `native_view.rs` `native_controls` renders the
-   front card; `respond` pops it and sends `Response::Allow` (mapped to
-   `AllowOnce`) or `Response::Deny`. A closed event channel or a dropped card
+   front card; `respond` pops it and sends `Response::Allow` (`AllowOnce`),
+   `Response::AllowSession` (`AllowSession`, downgraded to `AllowOnce` if
+   `Sensitive`), or `Response::Deny`. A closed event channel or a dropped card
    denies, and the end of a turn clears the queue, which denies every card left.
    `ApprovalNeeded` is recorded in the saved thread with
    `apply_approval_needed`; the live transcript shows no waiting line.

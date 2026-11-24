@@ -286,10 +286,12 @@ for a CLI worker's own model; set it in that agent's `[agents.<id>]` entry.
 
 ## Pitfalls
 
-- **Acceptance checks that never pass.** Commands such as `cargo test` and
-  `npm test` are not auto-run, and a skipped required check can never pass.
-  Approval (and the start of each worker run) therefore blocks such a card
-  with `acceptance_check_skip_reason`, which names the exact
+- **Acceptance checks that never pass.** Standard verification commands
+  (`cargo check`, `cargo clippy`, `cargo test`, `npm test`, `pytest`, `go test`,
+  etc.) auto-run out of the box, whereas unlisted commands such as
+  `npm run deploy` or `cargo run` are not auto-run, and a skipped required check
+  can never pass. Approval (and the start of each worker run) therefore blocks
+  such a card with `acceptance_check_skip_reason`, which names the exact
   `extra_allowlist` entry to add under `[tools.bash]`, or explains that the
   command uses shell syntax or matches the denylist. Checks run as argv
   (`parse_auto_argv`, so quotes group arguments) with the program resolved

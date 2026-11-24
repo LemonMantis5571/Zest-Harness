@@ -508,7 +508,11 @@ impl Root {
         if let Some(card) = self.cards.front() {
             let mut box_ = ui::card().p_3().flex().flex_col().gap_2().text_size(px(13.));
             match &card.request {
-                Request::Approval { title, preview } => {
+                Request::Approval {
+                    title,
+                    preview,
+                    allow_session,
+                } => {
                     box_ = box_
                         .child(
                             div()
@@ -537,8 +541,12 @@ impl Root {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .gap_2()
                                 .child(ui::button("allow-once", Variant::Primary, Some(Icon::Check), "Allow once", cx.listener(|r, _, _, cx| r.respond(Response::Allow, cx))))
+                                .when(*allow_session, |d| {
+                                    d.child(ui::button("allow-session", Variant::Outline, None, "Allow for session", cx.listener(|r, _, _, cx| r.respond(Response::AllowSession, cx))))
+                                })
                                 .child(ui::button("deny", Variant::Ghost, Some(Icon::X), "Deny", cx.listener(|r, _, _, cx| r.respond(Response::Deny, cx)))),
                         );
                 }

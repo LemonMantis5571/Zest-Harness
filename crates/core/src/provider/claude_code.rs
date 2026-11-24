@@ -821,7 +821,7 @@ impl ControlResponder for ClaudePermissions {
             diff,
         )
         .await;
-        if decision == ApprovalDecision::AllowSession {
+        if decision == ApprovalDecision::AllowSession && risk != ToolRisk::Sensitive {
             if let Some(policy) = &policy {
                 if let Ok(mut guard) = policy.lock() {
                     remember_session_grant(&mut guard, surface, &request.tool_name, &target);

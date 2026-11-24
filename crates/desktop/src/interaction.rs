@@ -10,6 +10,7 @@ pub enum Request {
     Approval {
         title: String,
         preview: String,
+        allow_session: bool,
     },
     Question {
         prompt: String,
@@ -20,6 +21,7 @@ pub enum Request {
 
 pub enum Response {
     Allow,
+    AllowSession,
     Deny,
     Answer(Vec<String>),
 }
@@ -56,11 +58,25 @@ impl Interactions {
         receiver.await.unwrap_or(Response::Deny)
     }
 
-    async fn approve(&self, title: String, preview: String) -> bool {
-        matches!(
-            self.ask(Request::Approval { title, preview }).await,
-            Response::Allow
-        )
+    async fn decide_approval(
+        &self,
+        title: String,
+        preview: String,
+        allow_session: bool,
+    ) -> ApprovalDecision {
+        match self
+            .ask(Request::Approval {
+                title,
+                preview,
+                allow_session,
+            })
+            .await
+        {
+            Response::Allow => ApprovalDecision::AllowOnce,
+            Response::AllowSession if allow_session => ApprovalDecision::AllowSession,
+            Response::AllowSession => ApprovalDecision::AllowOnce,
+            _ => ApprovalDecision::Deny,
+        }
     }
 
     async fn question(
@@ -90,17 +106,12 @@ impl Approver for Interactions {
             "{}\n{}\n{}",
             req.preview.path, req.preview.summary, req.preview.diff
         );
-        if self
-            .approve(
-                format!("Allow {}? ({:?})", req.tool_name, req.risk),
-                preview,
-            )
-            .await
-        {
-            ApprovalDecision::AllowOnce
-        } else {
-            ApprovalDecision::Deny
-        }
+        self.decide_approval(
+            format!("Allow {}? ({:?})", req.tool_name, req.risk),
+            preview,
+            req.risk != ToolRisk::Sensitive,
+        )
+        .await
     }
 }
 
@@ -120,8 +131,8 @@ impl ProviderInteractionHost for Interactions {
         Some(self.policy.clone())
     }
 
-    async fn approve_command(&self, req: ProviderCommandRequest) -> bool {
-        self.approve(
+    async fn decide_command(&self, req: ProviderCommandRequest) -> ApprovalDecision {
+        self.decide_approval(
             "Allow command?".into(),
             format!(
                 "{}\n{}\n{}",
@@ -129,12 +140,16 @@ impl ProviderInteractionHost for Interactions {
                 req.command,
                 req.reason.unwrap_or_default()
             ),
+            true,
         )
         .await
     }
 
-    async fn approve_file_change(&self, req: ProviderFileChangeRequest) -> bool {
-        self.approve(
+    async fn decide_file_change(&self, req: ProviderFileChangeRequest) -> ApprovalDecision {
+        let allow_session = req.path.as_deref().is_some_and(|p| {
+            !p.is_empty() && tools::sensitive::write_risk(p) != ToolRisk::Sensitive
+        });
+        self.decide_approval(
             "Allow file change?".into(),
             format!(
                 "{}\n{}\n{}",
@@ -142,11 +157,92 @@ impl ProviderInteractionHost for Interactions {
                 req.reason.unwrap_or_default(),
                 req.diff.unwrap_or_default()
             ),
+            allow_session,
         )
         .await
     }
 
     async fn answer_question(&self, req: ProviderQuestionRequest) -> Option<Vec<String>> {
         self.question(req.prompt, req.choices, req.multiple).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn allow_session_grants_ordinary_requests_and_downgrades_sensitive_ones() {
+        let (events, mut rx) = futures::channel::mpsc::unbounded();
+        let host = Interactions {
+            events,
+            policy: Arc::new(Mutex::new(ApprovalPolicy::new(ApprovalMode::Manual))),
+        };
+
+        let answerer = tokio::spawn(async move {
+            while let Some(ev) = rx.next().await {
+                if let EvKind::Card(card) = ev.kind {
+                    let _ = card.reply.send(Response::AllowSession);
+                }
+            }
+        });
+
+        let write_decision = host
+            .decide(&ApprovalRequest {
+                approval_id: "a1".into(),
+                tool_name: "edit_file".into(),
+                tool_call_id: "t1".into(),
+                risk: ToolRisk::Write,
+                preview: ApprovalPreview {
+                    path: "src/lib.rs".into(),
+                    summary: "edit src/lib.rs".into(),
+                    diff: String::new(),
+                },
+            })
+            .await;
+        assert_eq!(write_decision, ApprovalDecision::AllowSession);
+
+        let sensitive_decision = host
+            .decide(&ApprovalRequest {
+                approval_id: "a2".into(),
+                tool_name: "edit_file".into(),
+                tool_call_id: "t2".into(),
+                risk: ToolRisk::Sensitive,
+                preview: ApprovalPreview {
+                    path: ".env".into(),
+                    summary: "edit .env".into(),
+                    diff: String::new(),
+                },
+            })
+            .await;
+        assert_eq!(
+            sensitive_decision,
+            ApprovalDecision::AllowOnce,
+            "sensitive secret files must never acquire a session grant"
+        );
+
+        let cmd_decision = host
+            .decide_command(ProviderCommandRequest {
+                approval_id: "c1".into(),
+                command: "cargo build".into(),
+                cwd: Some(".".into()),
+                reason: None,
+            })
+            .await;
+        assert_eq!(cmd_decision, ApprovalDecision::AllowSession);
+
+        let env_file_decision = host
+            .decide_file_change(ProviderFileChangeRequest {
+                approval_id: "f1".into(),
+                path: Some(".env".into()),
+                diff: None,
+                reason: None,
+            })
+            .await;
+        assert_eq!(env_file_decision, ApprovalDecision::AllowOnce);
+
+        drop(host);
+        let _ = answerer.await;
     }
 }

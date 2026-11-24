@@ -50,8 +50,9 @@ Catalogues come from the provider drivers in
 - In the offline demo the panel says "Offline demo provider"; with no
   configured provider it says "Configure a provider in zest.toml to start a
   turn."
-- The choice is sticky per provider per project in `.zest/session-state.json`.
-  The desktop app has no Reset to default control.
+- The choice is sticky per provider per project in `.zest/session-state.json`
+  (which also stores the project's default `approvalMode` selected under Tool
+  permissions). The desktop app has no Reset to default control.
 
 ## How it works
 
