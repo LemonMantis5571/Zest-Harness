@@ -7,13 +7,13 @@
 [providers.codex]
 kind = "codex_cli"
 command = "codex"
-model = "gpt-5.6-sol"
+model = "gpt-6.2-sol"
 allow_mcp = false
 timeout_secs = 900
 
 [default]
 provider = "codex"
-model = "gpt-5.6-sol"
+model = "gpt-6.2-sol"
 
 [tools]
 # A tool result larger than this is stored under `.zest/spill/<chat-id>/` and the
@@ -50,7 +50,7 @@ enabled = true
 #
 # [providers.anthropic]
 # kind = "anthropic"
-# model = "claude-opus-5"
+# model = "claude-opus-5-5"
 # credential = "anthropic"
 #
 # Claude Code can also be the parent provider for the whole Zest session. Run
@@ -84,14 +84,14 @@ enabled = true
 # kind = "openai_compatible"
 # base_url = "https://api.deepseek.com"
 # model = "deepseek-flash"
-# models = ["deepseek-flash", "deepseek-v4-pro"]
+# models = ["deepseek-flash", "deepseek-v4.1-flash", "deepseek-v4-pro"]
 # credential = "deepseek"
 # api_key_env = "DEEPSEEK_API_KEY"
 #
 # [providers.openai]
 # kind = "openai_compatible"
 # base_url = "https://api.openai.com/v1"
-# model = "gpt-5"
+# model = "gpt-6.1-sol"
 # credential = "openai"
 
 # Optional advisor: a stronger model the chat model can consult mid-turn with

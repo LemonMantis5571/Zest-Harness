@@ -89,11 +89,13 @@ Catalogues come from the provider drivers in
   `last-thread-id`, and only when the sticky thread belongs to the active
   provider. Reading user-level legacy files once leaked a Codex model into the
   Claude slot and made Claude unselectable.
-- Current choices include GPT-6.1 Sol and GPT-6 Astra on both Codex transports,
-  and Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 on the native API
-  and as Claude Code's only built-in ids (its bare aliases are offered only
-  when configured; see [cli-agent-providers](cli-agent-providers.md)). A saved
-  or configured default alias that is no longer offered migrates to its
+- Current choices include GPT-6.2 Sol (default), GPT-6.2 Astra, GPT-6.1 Terra,
+  GPT-6.1 Sol, GPT-6 Astra, GPT-6 Sol and GPT-6 Luna on both Codex transports,
+  and Claude
+  Opus 5.5, Fable 5.2, Sonnet 5.5, Haiku 5.5, Mythos 5.2 and Fable 5.1 on the
+  native API and as Claude Code's built-in ids (its bare aliases are offered
+  only when configured; see [cli-agent-providers](cli-agent-providers.md)). A
+  saved or configured default alias that is no longer offered migrates to its
   explicit successor; a configured alias still in the catalogue is retained.
-  The builtin Codex list no longer offers retired GPT-5.4 choices;
+  The builtin Codex list no longer offers retired GPT-5.4 or GPT-5.5 choices;
   a configured model allow-list remains authoritative.

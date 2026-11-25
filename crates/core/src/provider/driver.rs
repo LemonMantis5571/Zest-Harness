@@ -429,6 +429,7 @@ struct CodexCliDriver;
 impl CodexCliDriver {
     fn catalogue(config: &ProviderConfig) -> (String, Vec<ModelSpec>) {
         let ProviderConfig::CodexCli {
+            command,
             model,
             models,
             efforts,
@@ -437,16 +438,9 @@ impl CodexCliDriver {
         else {
             unreachable!("driver_for routes only CodexCli entries here");
         };
-        // The built-in list is the *kind's*, not the id's. Under the old
-        // `provider_id == "codex"` match a `codex_cli` entry named anything else
-        // silently lost it.
-        let catalogue = catalogue(
-            model,
-            models,
-            CODEX_KNOWN_MODELS,
-            EffortPolicy::Standard(efforts),
-        );
-        (model.clone(), catalogue)
+        let (default_model, catalogue, _) =
+            super::codex_app_server::model_catalogue(command, model, models, efforts);
+        (default_model, catalogue)
     }
 }
 

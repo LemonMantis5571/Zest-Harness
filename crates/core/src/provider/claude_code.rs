@@ -52,8 +52,10 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 /// provider accepts.
 pub(crate) const BUILTIN_MODELS: &[&str] = &[
     "claude-opus-5-5",
+    "claude-fable-5-2",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
+    "claude-mythos-5-2",
     "claude-fable-5-1",
 ];
 
@@ -924,8 +926,10 @@ mod tests {
             ids,
             [
                 "claude-opus-5-5",
+                "claude-fable-5-2",
                 "claude-sonnet-5-5",
                 "claude-haiku-5-5",
+                "claude-mythos-5-2",
                 "claude-fable-5-1",
             ]
         );

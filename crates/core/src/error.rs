@@ -84,6 +84,9 @@ impl HarnessError {
         // classifier here does. Only text explicitly tagged as user-facing qualifies;
         // see `HarnessError::provider_user_message`.
         if let Some(message) = self.provider_user_message() {
+            if let Some(clean) = extract_api_error_message(message) {
+                return clean;
+            }
             return message.to_string();
         }
         if self.is_unreachable() {
@@ -155,9 +158,10 @@ impl HarnessError {
         }
         let kind = kind.trim();
         let kind = if kind.is_empty() { "error" } else { kind };
+        let message = extract_api_error_message(trimmed).unwrap_or_else(|| trimmed.to_string());
         Self::Stream {
             kind: format!("{PROVIDER_MESSAGE_PREFIX}{kind}"),
-            message: trimmed.to_string(),
+            message,
         }
     }
 
@@ -281,8 +285,12 @@ fn looks_like_auth(text: &str) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-fn extract_api_error_message(body: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+pub(crate) fn extract_api_error_message(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok().or_else(|| {
+        let start = trimmed.find('{')?;
+        serde_json::from_str(&trimmed[start..]).ok()
+    })?;
     let message = value
         .pointer("/error/message")
         .or_else(|| value.pointer("/response/error/message"))
@@ -576,5 +584,33 @@ mod tests {
             source: Box::new(HarnessError::Other("connection refused".into())),
         };
         assert!(!refused.is_auth_problem());
+    }
+
+    #[test]
+    fn json_error_envelopes_inside_provider_messages_render_clean_text() {
+        let raw_json = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.","code":"model_not_found","subreason":"model_not_in_accessible_catalog"}}"#;
+
+        let from_stream = HarnessError::from_provider_stream("codex", raw_json);
+        assert_eq!(
+            from_stream.turn_message(),
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
+        );
+
+        let direct_stream = HarnessError::Stream {
+            kind: "provider:codex".into(),
+            message: raw_json.into(),
+        };
+        assert_eq!(
+            direct_stream.turn_message(),
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
+        );
+
+        let prefixed = format!("status 400 Bad Request: {raw_json}");
+        assert_eq!(
+            extract_api_error_message(&prefixed).as_deref(),
+            Some(
+                "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
+            )
+        );
     }
 }

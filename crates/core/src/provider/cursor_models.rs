@@ -30,8 +30,8 @@ use super::{context_window_for_model, ModelSpec, STANDARD_EFFORTS};
 /// that a week would go stale, and `cursor-agent models` costs about a second,
 /// which is far too slow to pay on every render of the provider list.
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const CACHE_FORMAT: u32 = 3;
-const CURSOR_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+const CACHE_FORMAT: u32 = 5;
+const CURSOR_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// Fallback when discovery has never succeeded.
 ///
@@ -41,11 +41,16 @@ const CURSOR_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max
 pub const BUILTIN_MODELS: &[&str] = &[
     "composer-2.5",
     "claude-opus-5-5",
+    "claude-fable-5-2",
     "claude-sonnet-5-5",
     "claude-haiku-5-5-thinking",
-    "claude-fable-5-1",
+    "claude-mythos-5-2",
     "grok-4.7",
-    "gpt-5.6-sol",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+    "gpt-6.1-sol",
+    "gemini-4-argon",
+    "gemini-3.8-flash",
     "gemini-3.1-pro",
 ];
 
@@ -111,8 +116,10 @@ pub fn fallback() -> Vec<ModelSpec> {
 /// these with the account's own effort variants.
 fn efforts_for_fallback(id: &str) -> Vec<String> {
     let efforts = match id {
-        "composer-2.5" | "gemini-3.1-pro" => &[][..],
-        "gpt-5.6-sol" => CURSOR_EFFORTS,
+        "composer-2.5" | "gemini-4-argon" | "gemini-3.8-flash" | "gemini-3.1-pro" => &[][..],
+        "gpt-6.2-sol" | "gpt-6.2-astra" | "gpt-6.1-sol" => {
+            &["low", "medium", "high", "xhigh", "max", "ultra"]
+        }
         "grok-4.7" => &["low", "medium", "high", "xhigh"],
         _ => STANDARD_EFFORTS,
     };

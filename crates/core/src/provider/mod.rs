@@ -17,6 +17,7 @@ pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod claude_stream;
 pub mod codex_app_server;
+pub mod codex_models;
 pub mod codex_oauth;
 pub mod codex_rig;
 pub mod cursor_acp;
@@ -102,10 +103,13 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
 /// [`driver::driver_for`].
 pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
     let (default_model, builtin) = match provider_id {
-        "codex" | "codex-chatgpt" => ("gpt-5.6-sol".to_string(), CODEX_KNOWN_MODELS),
+        "codex" | "codex-chatgpt" => (
+            crate::config::DEFAULT_CODEX_MODEL.to_string(),
+            CODEX_KNOWN_MODELS,
+        ),
         "anthropic" => (DEFAULT_MODEL.to_string(), ANTHROPIC_KNOWN_MODELS),
         "claude" => (DEFAULT_MODEL.to_string(), &[][..]),
-        "antigravity" => ("gemini-3.1-pro-high".to_string(), &[][..]),
+        "antigravity" => ("gemini-4-argon".to_string(), &[][..]),
         "cursor" => (
             cursor_acp::DEFAULT_CURSOR_MODEL.to_string(),
             cursor_models::BUILTIN_MODELS,
@@ -206,7 +210,7 @@ fn heuristic_context_window(model: &str) -> u64 {
     if model.contains("haiku") {
         return CLAUDE_HAIKU_WINDOW;
     }
-    if model.contains("claude") || model == "sonnet" || model == "opus" {
+    if model.contains("claude") || matches!(model, "sonnet" | "opus" | "fable" | "mythos") {
         return CLAUDE_WINDOW;
     }
     if model.contains("gemini") {
@@ -260,11 +264,15 @@ pub(super) fn model_supports_vision(model_id: &str) -> bool {
     let lower = model_id.trim().to_ascii_lowercase();
     let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
     bare.starts_with("claude-")
-        || matches!(bare, "opus" | "sonnet" | "haiku" | "fable")
+        || matches!(bare, "opus" | "sonnet" | "haiku" | "fable" | "mythos")
         || bare.starts_with("gpt-5")
         || bare.starts_with("gpt-6")
         || bare.starts_with("gpt-4o")
         || bare.starts_with("gemini-")
+        || bare == "deepseek-flash"
+        || bare.starts_with("deepseek-v4")
+        || bare.starts_with("grok-4")
+        || bare.starts_with("composer-")
 }
 
 /// Static catalogue a provider exposes for pickers and session validation.
@@ -310,7 +318,9 @@ pub fn thread_provider_handoff(
 /// Normalize UI / env effort aliases to the wire form.
 pub fn normalize_effort(effort: &str) -> String {
     match effort.trim().to_ascii_lowercase().as_str() {
-        "none" | "low" | "medium" | "high" | "xhigh" | "max" => effort.trim().to_ascii_lowercase(),
+        "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => {
+            effort.trim().to_ascii_lowercase()
+        }
         "extra" | "extra high" | "extra_high" => "xhigh".into(),
         "med" => "medium".into(),
         _ => "high".into(),
@@ -324,10 +334,12 @@ pub fn normalize_effort(effort: &str) -> String {
 /// its first request, so it is reachable only by naming it in `zest.toml`.
 pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
     DEFAULT_MODEL,
-    "claude-opus-5-5",
-    "claude-fable-5-1",
+    "claude-fable-5-2",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
+    "claude-mythos-5-2",
+    "claude-fable-5-1",
+    "claude-opus-5",
     "claude-sonnet-5",
 ];
 
@@ -335,14 +347,16 @@ pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
 ///
 /// Mirrors the desktop picker (`CODEX_MODELS` in the UI). Keep these in sync.
 pub const CODEX_KNOWN_MODELS: &[&str] = &[
-    "gpt-5.6-sol",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+    "gpt-6.1-terra",
     "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
+    "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
-    "gpt-5.5",
 ];
 
 /// Whether a provider exposes a reasoning-effort selector, and which levels.
@@ -369,16 +383,27 @@ impl EffortPolicy<'_> {
     }
 }
 
-/// Standard reasoning levels, including `none` only for models that publish it.
+/// Standard reasoning levels, including `none` or `ultra` only for models that publish them.
 pub(super) fn default_efforts_for_model(model_id: &str) -> Vec<String> {
-    let mut levels = Vec::with_capacity(STANDARD_EFFORTS.len() + 1);
-    if matches!(
-        model_id.to_ascii_lowercase().as_str(),
-        "gpt-6-sol" | "gpt-6-luna"
-    ) {
+    let lower = model_id.to_ascii_lowercase();
+    let mut levels = Vec::with_capacity(STANDARD_EFFORTS.len() + 2);
+    if matches!(lower.as_str(), "gpt-6-sol" | "gpt-6-luna") {
         levels.push("none".to_string());
     }
     levels.extend(STANDARD_EFFORTS.iter().map(|level| (*level).to_string()));
+    if matches!(
+        lower.as_str(),
+        "gpt-6.2-sol"
+            | "gpt-6.2-astra"
+            | "gpt-6-astra"
+            | "gpt-6.1-sol"
+            | "gpt-6.1-terra"
+            | "gpt-6-sol"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+    ) {
+        levels.push("ultra".to_string());
+    }
     levels
 }
 
@@ -1279,7 +1304,7 @@ model = "deepseek-v4-flash"
     #[test]
     fn the_codex_catalogue_carries_the_long_windows() {
         let cat = catalogue(
-            "gpt-5.6-sol",
+            "gpt-6.1-sol",
             &[],
             CODEX_KNOWN_MODELS,
             EffortPolicy::Standard(&[]),
@@ -1290,12 +1315,13 @@ model = "deepseek-v4-flash"
                 .map(|model| model.context_window)
                 .expect(id)
         };
+        assert_eq!(window("gpt-6.1-sol"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-6.2-astra"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-6-astra"), GPT_LONG_WINDOW);
+        assert_eq!(window("gpt-6.1-terra"), GPT_LONG_WINDOW);
         assert_eq!(window("gpt-5.6-sol"), GPT_LONG_WINDOW);
         assert_eq!(window("gpt-5.6-terra"), GPT_LONG_WINDOW);
         assert_eq!(window("gpt-5.6-luna"), GPT_LONG_WINDOW);
-        assert_eq!(window("gpt-5.5"), GPT_LONG_WINDOW);
-        assert_eq!(window("gpt-6.1-sol"), GPT_LONG_WINDOW);
-        assert_eq!(window("gpt-6-astra"), GPT_LONG_WINDOW);
     }
 
     #[test]
@@ -1305,9 +1331,19 @@ model = "deepseek-v4-flash"
                 crate::config::Config::parse(&format!("[providers.openai]\nkind = \"{kind}\"\n"))
                     .unwrap();
             let descriptor = descriptor_from_config("openai", &config.providers["openai"]);
-            for id in ["gpt-6.1-sol", "gpt-6-astra"] {
+            for id in [
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
+                "gpt-6.1-terra",
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+            ] {
                 assert_eq!(
                     validate_against(&descriptor.models, "openai", id, "high"),
+                    Ok(())
+                );
+                assert_eq!(
+                    validate_against(&descriptor.models, "openai", id, "ultra"),
                     Ok(())
                 );
                 assert!(validate_against(&descriptor.models, "openai", id, "none").is_err());
@@ -1324,6 +1360,7 @@ model = "deepseek-v4-flash"
                 Ok(())
             );
             assert!(validate_against(&descriptor.models, "openai", "gpt-5.4", "high").is_err());
+            assert!(validate_against(&descriptor.models, "openai", "gpt-5.5", "high").is_err());
         }
     }
 
@@ -1332,10 +1369,16 @@ model = "deepseek-v4-flash"
         for vision_model in [
             "claude-sonnet-5-5",
             "claude-opus-5-5",
+            "claude-fable-5-2",
             "claude-haiku-5-5",
             "gpt-5.6-sol",
             "gpt-6.1-sol",
-            "gemini-3.1-pro-high",
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "gemini-4-argon",
+            "deepseek-flash",
+            "deepseek-v4.1-flash",
+            "grok-4.7",
         ] {
             assert!(model_supports_vision(vision_model), "{vision_model}");
         }
