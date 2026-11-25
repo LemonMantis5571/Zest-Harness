@@ -8,6 +8,7 @@ paths:
   - crates/core/src/provider/claude_control.rs
   - crates/core/src/provider/claude_stream.rs
   - crates/core/src/provider/codex_app_server.rs
+  - crates/core/src/provider/codex_models.rs
   - crates/core/src/provider/cursor_acp.rs
   - crates/core/src/provider/cursor_models.rs
   - crates/core/src/provider/session.rs
@@ -22,6 +23,7 @@ verify:
   - cargo test -p zest-core --lib provider::claude_control
   - cargo test -p zest-core --lib provider::claude_stream
   - cargo test -p zest-core --lib provider::codex_app_server
+  - cargo test -p zest-core --lib provider::codex_models
   - cargo test -p zest-core --lib provider::cursor_acp
   - cargo test -p zest-core --lib provider::cursor_models
   - cargo test -p zest-core --lib provider::stream_contract
@@ -102,7 +104,11 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   `on-request` + read-only sandbox so every write asks (including `.env`);
   Bypass mode and hostless tool turns get `never` + `workspace-write`; hostless
   maintenance turns stay read-only. "Allow for session" is remembered per
-  command / per path.
+  command / per path. Accessible Codex models are discovered via `model/list`
+  (`codex_models`), cached 24 h in `<data dir>/zest/codex-models.json` and
+  invalidated whenever the CLI binary changes on disk, falling back to
+  `CODEX_KNOWN_MODELS`; upstream JSON error envelopes inside `error.message` are
+  unwrapped to their human-readable `error.message`.
 - In both bridges a file change to a likely secret (`.env`, keys) is `Sensitive`
   (`write_risk`), not `Write`, so Auto and Accept edits still ask, session
   grants (`AllowSession`) never cover it, and the card omits its diff

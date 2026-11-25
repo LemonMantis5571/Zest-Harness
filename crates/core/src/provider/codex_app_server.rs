@@ -4,7 +4,7 @@
 //! workspace, parent instructions, approvals, and a durable thread reference;
 //! it never reads or forwards Codex credentials.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -128,12 +128,79 @@ struct CodexConnection {
     request_id: u64,
 }
 
+/// Shared catalogue builder for both [`super::driver`] and [`CodexAppServerProvider`],
+/// keeping the picker and live runtime identical.
+pub(crate) fn model_catalogue(
+    command: &str,
+    configured_model: &str,
+    configured_models: &[String],
+    configured_efforts: &[String],
+) -> (String, Vec<ModelSpec>, BTreeMap<String, String>) {
+    let requested = {
+        let trimmed = configured_model.trim();
+        if trimmed.is_empty() {
+            DEFAULT_CODEX_MODEL.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    if !configured_models.is_empty() {
+        let specs = catalogue(
+            &requested,
+            configured_models,
+            CODEX_KNOWN_MODELS,
+            EffortPolicy::Standard(configured_efforts),
+        );
+        return (requested, specs, BTreeMap::new());
+    }
+
+    let discovered = super::codex_models::catalogue(command);
+    let effective_default = if requested == DEFAULT_CODEX_MODEL
+        && !discovered.models.iter().any(|model| model.id == requested)
+    {
+        discovered
+            .default_model
+            .clone()
+            .unwrap_or_else(|| requested.clone())
+    } else {
+        requested
+    };
+
+    let mut models = discovered.models;
+    if !configured_efforts.is_empty() {
+        for spec in &mut models {
+            spec.efforts = configured_efforts.to_vec();
+        }
+    }
+    if !models.iter().any(|model| model.id == effective_default) {
+        let fallback_efforts = if configured_efforts.is_empty() {
+            super::default_efforts_for_model(&effective_default)
+        } else {
+            configured_efforts.to_vec()
+        };
+        models.insert(
+            0,
+            ModelSpec {
+                context_window: super::context_window_for_model(&effective_default),
+                supports_vision: super::model_supports_vision(&effective_default),
+                id: effective_default.clone(),
+                efforts: fallback_efforts,
+                supports_tools: true,
+                resolves_to: None,
+                needs_cli: None,
+            },
+        );
+    }
+    (effective_default, models, discovered.upgrades)
+}
+
 pub struct CodexAppServerProvider {
     id: String,
     root: PathBuf,
     command: String,
     default_model: String,
     models: Arc<RwLock<Vec<ModelSpec>>>,
+    upgrades: Arc<RwLock<BTreeMap<String, String>>>,
     configured_models: Vec<String>,
     /// Per-provider effort allow-list. Empty means the standard set.
     configured_efforts: Vec<String>,
@@ -167,24 +234,16 @@ impl CodexAppServerProvider {
             ));
         }
         let id = id.into();
-        let default_model = model.into().trim().to_string();
-        let default_model = if default_model.is_empty() {
-            DEFAULT_CODEX_MODEL.to_string()
-        } else {
-            default_model
-        };
-        let catalogue = catalogue(
-            &default_model,
-            &models,
-            CODEX_KNOWN_MODELS,
-            EffortPolicy::Standard(&efforts),
-        );
+        let raw_model = model.into();
+        let (default_model, catalogue, upgrades) =
+            model_catalogue(&command, &raw_model, &models, &efforts);
         Ok(Self {
             id,
             root: root.into(),
             command,
             default_model,
             models: Arc::new(RwLock::new(catalogue)),
+            upgrades: Arc::new(RwLock::new(upgrades)),
             configured_models: models,
             configured_efforts: efforts,
             allow_mcp,
@@ -233,14 +292,19 @@ impl CodexAppServerProvider {
             &mut |_event| {},
         )
         .await?;
+        let discovered = super::codex_models::parse_model_list(&response);
         let models = parse_models(&response, &self.default_model);
         if models.is_empty() {
             return Err(HarnessError::Other(
                 "Codex model/list returned no usable models".into(),
             ));
         }
+        super::codex_models::save_cache(&self.command, &discovered);
         if let Ok(mut cached) = self.models.write() {
             *cached = models.clone();
+        }
+        if let Ok(mut upgrades) = self.upgrades.write() {
+            *upgrades = discovered.upgrades;
         }
         let _ = process.kill().await;
         Ok(models)
@@ -586,6 +650,15 @@ impl Provider for CodexAppServerProvider {
                     EffortPolicy::Standard(&self.configured_efforts),
                 )
             })
+    }
+
+    fn successor_model(&self, model: &str) -> Option<String> {
+        let upgrades = self.upgrades.read().ok()?;
+        let target = upgrades.get(model)?;
+        self.models()
+            .iter()
+            .any(|spec| spec.id == *target)
+            .then(|| target.clone())
     }
 
     fn auth_status(&self) -> AuthStatus {
@@ -1086,48 +1159,7 @@ fn parse_turn_id(value: &Value) -> Option<String> {
 }
 
 fn parse_models(value: &Value, default_model: &str) -> Vec<ModelSpec> {
-    let items = value
-        .get("data")
-        .and_then(Value::as_array)
-        .or_else(|| value.get("models").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
-    let mut models = items
-        .into_iter()
-        .filter_map(|item| {
-            let id = string_field(&item, &["id", "model"])?;
-            let efforts = match item
-                .get("supportedReasoningEfforts")
-                .and_then(Value::as_array)
-            {
-                Some(efforts) => efforts
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect(),
-                None if matches!(id.as_str(), "gpt-6-sol" | "gpt-6-luna") => {
-                    super::default_efforts_for_model(&id)
-                }
-                None => Vec::new(),
-            };
-            let supports_vision = item
-                .get("supportsVision")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| super::model_supports_vision(&id));
-            Some(ModelSpec {
-                context_window: item
-                    .get("contextWindow")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(|| super::context_window_for_model(&id)),
-                id,
-                efforts,
-                supports_tools: true,
-                supports_vision,
-                resolves_to: None,
-                needs_cli: None,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut models = super::codex_models::parse_model_list(value).models;
     if models.is_empty() {
         return models;
     }
@@ -1268,6 +1300,7 @@ fn codex_error_message(params: &Value) -> Option<String> {
         })
         .map(|message| message.trim().to_string())
         .filter(|message| !message.is_empty())
+        .map(|message| crate::error::extract_api_error_message(&message).unwrap_or(message))
 }
 
 fn codex_error_object(params: &Value) -> Option<&Value> {
@@ -1478,6 +1511,21 @@ mod tests {
         assert_eq!(
             codex_error_message(&json!({ "message": "flat reason" })).as_deref(),
             Some("flat reason")
+        );
+    }
+
+    #[test]
+    fn an_upstream_json_error_envelope_in_codex_message_renders_clean_text() {
+        let params = json!({
+            "error": {
+                "message": r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.","code":"model_not_found","subreason":"model_not_in_accessible_catalog"}}"#,
+                "codexErrorInfo": "badRequest"
+            }
+        });
+        let err = codex_failure(&params, "Codex app-server error");
+        assert_eq!(
+            err.turn_message(),
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
         );
     }
 

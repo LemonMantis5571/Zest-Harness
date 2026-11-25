@@ -30,7 +30,7 @@ use super::{context_window_for_model, ModelSpec, STANDARD_EFFORTS};
 /// that a week would go stale, and `cursor-agent models` costs about a second,
 /// which is far too slow to pay on every render of the provider list.
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const CACHE_FORMAT: u32 = 4;
+const CACHE_FORMAT: u32 = 5;
 const CURSOR_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// Fallback when discovery has never succeeded.
@@ -46,8 +46,9 @@ pub const BUILTIN_MODELS: &[&str] = &[
     "claude-haiku-5-5-thinking",
     "claude-mythos-5-2",
     "grok-4.7",
-    "gpt-6.1-sol",
+    "gpt-6.2-sol",
     "gpt-6.2-astra",
+    "gpt-6.1-sol",
     "gemini-4-argon",
     "gemini-3.8-flash",
     "gemini-3.1-pro",
@@ -116,7 +117,9 @@ pub fn fallback() -> Vec<ModelSpec> {
 fn efforts_for_fallback(id: &str) -> Vec<String> {
     let efforts = match id {
         "composer-2.5" | "gemini-4-argon" | "gemini-3.8-flash" | "gemini-3.1-pro" => &[][..],
-        "gpt-6.1-sol" | "gpt-6.2-astra" => &["low", "medium", "high", "xhigh", "max", "ultra"],
+        "gpt-6.2-sol" | "gpt-6.2-astra" | "gpt-6.1-sol" => {
+            &["low", "medium", "high", "xhigh", "max", "ultra"]
+        }
         "grok-4.7" => &["low", "medium", "high", "xhigh"],
         _ => STANDARD_EFFORTS,
     };

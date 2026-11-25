@@ -62,10 +62,11 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
   commands; unavailable or untrusted metadata stays unknown. See
   [CLI agent providers](cli-agent-providers.md).
 - Efforts: `low medium high xhigh max`, plus `ultra` on Codex GPT-6.2/6.1/6/5.6
-  models (`gpt-6.2-astra`, `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
-  `gpt-6-sol`, `gpt-5.6-sol`, `gpt-5.6-terra`), and `none` only for `gpt-6-sol`
-  / `gpt-6-luna`. GPT-6.2 Astra, GPT-6.1 Sol, GPT-6.1 Terra, and GPT-6 Astra
-  support vision and a 1,050,000-token context window, and reject `none`.
+  models (`gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-astra`, `gpt-6.1-sol`,
+  `gpt-6.1-terra`, `gpt-6-sol`, `gpt-5.6-sol`, `gpt-5.6-terra`), and `none`
+  only for `gpt-6-sol` / `gpt-6-luna`. GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Sol,
+  GPT-6.1 Terra, and GPT-6 Astra support vision and a 1,050,000-token context
+  window, and reject `none`.
   Anthropic defaults to `claude-opus-5-5` and offers `claude-opus-5-5`,
   `claude-fable-5-2`, `claude-sonnet-5-5`, `claude-haiku-5-5`,
   `claude-mythos-5-2`, `claude-fable-5-1`, `claude-opus-5`, and

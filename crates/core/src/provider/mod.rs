@@ -17,6 +17,7 @@ pub mod claude_code;
 pub(crate) mod claude_control;
 pub mod claude_stream;
 pub mod codex_app_server;
+pub mod codex_models;
 pub mod codex_oauth;
 pub mod codex_rig;
 pub mod cursor_acp;
@@ -102,7 +103,10 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
 /// [`driver::driver_for`].
 pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
     let (default_model, builtin) = match provider_id {
-        "codex" | "codex-chatgpt" => ("gpt-6.1-sol".to_string(), CODEX_KNOWN_MODELS),
+        "codex" | "codex-chatgpt" => (
+            crate::config::DEFAULT_CODEX_MODEL.to_string(),
+            CODEX_KNOWN_MODELS,
+        ),
         "anthropic" => (DEFAULT_MODEL.to_string(), ANTHROPIC_KNOWN_MODELS),
         "claude" => (DEFAULT_MODEL.to_string(), &[][..]),
         "antigravity" => ("gemini-4-argon".to_string(), &[][..]),
@@ -343,10 +347,11 @@ pub const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
 ///
 /// Mirrors the desktop picker (`CODEX_MODELS` in the UI). Keep these in sync.
 pub const CODEX_KNOWN_MODELS: &[&str] = &[
-    "gpt-6.1-sol",
+    "gpt-6.2-sol",
     "gpt-6.2-astra",
-    "gpt-6-astra",
     "gpt-6.1-terra",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
     "gpt-5.6-sol",
@@ -388,7 +393,8 @@ pub(super) fn default_efforts_for_model(model_id: &str) -> Vec<String> {
     levels.extend(STANDARD_EFFORTS.iter().map(|level| (*level).to_string()));
     if matches!(
         lower.as_str(),
-        "gpt-6.2-astra"
+        "gpt-6.2-sol"
+            | "gpt-6.2-astra"
             | "gpt-6-astra"
             | "gpt-6.1-sol"
             | "gpt-6.1-terra"
@@ -1326,10 +1332,11 @@ model = "deepseek-v4-flash"
                     .unwrap();
             let descriptor = descriptor_from_config("openai", &config.providers["openai"]);
             for id in [
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "gpt-6.2-astra",
-                "gpt-6-astra",
                 "gpt-6.1-terra",
+                "gpt-6.1-sol",
+                "gpt-6-astra",
             ] {
                 assert_eq!(
                     validate_against(&descriptor.models, "openai", id, "high"),
@@ -1366,6 +1373,7 @@ model = "deepseek-v4-flash"
             "claude-haiku-5-5",
             "gpt-5.6-sol",
             "gpt-6.1-sol",
+            "gpt-6.2-sol",
             "gpt-6.2-astra",
             "gemini-4-argon",
             "deepseek-flash",

@@ -1570,6 +1570,9 @@ pub fn prepare_external_command(command: &mut Command) {
 pub fn prepare_sync_external_command(command: &mut std::process::Command) {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
         if let Some(path) = effective_search_path() {
             command.env("PATH", path);
         }

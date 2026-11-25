@@ -7,13 +7,13 @@
 [providers.codex]
 kind = "codex_cli"
 command = "codex"
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 allow_mcp = false
 timeout_secs = 900
 
 [default]
 provider = "codex"
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 
 [tools]
 # A tool result larger than this is stored under `.zest/spill/<chat-id>/` and the

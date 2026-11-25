@@ -65,7 +65,7 @@ impl ApiPreset {
         match self {
             ApiPreset::Anthropic => "claude-opus-5-5",
             ApiPreset::DeepSeek => "deepseek-flash",
-            ApiPreset::OpenAi => "gpt-6.1-sol",
+            ApiPreset::OpenAi => "gpt-6.2-sol",
             ApiPreset::Custom => "",
         }
     }

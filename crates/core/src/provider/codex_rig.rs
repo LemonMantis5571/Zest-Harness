@@ -118,6 +118,24 @@ fn from_rig_error(error: rig_core::completion::CompletionError) -> AttemptError 
     use rig_core::completion::CompletionError;
     use rig_core::http_client::Error as HttpError;
     match error {
+        CompletionError::ProviderResponse(resp) => {
+            let retry_after = resp
+                .headers
+                .as_deref()
+                .and_then(retry::retry_after_from_headers);
+            let status = resp
+                .status
+                .map(|status| status.as_u16())
+                .or_else(|| json_error_status(&resp.body))
+                .unwrap_or(400);
+            (
+                HarnessError::Api {
+                    status,
+                    body: resp.body,
+                },
+                retry_after,
+            )
+        }
         CompletionError::HttpError(HttpError::InvalidStatusCode(status)) => (
             HarnessError::Api {
                 status: status.as_u16(),
@@ -160,6 +178,12 @@ fn from_rig_error(error: rig_core::completion::CompletionError) -> AttemptError 
     }
 }
 
+fn json_error_status(body: &str) -> Option<u16> {
+    let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let status = value.get("status").and_then(serde_json::Value::as_u64)?;
+    u16::try_from(status).ok()
+}
+
 async fn stream_once(
     session: &CodexOAuthSession,
     req: &TurnRequest,
@@ -173,6 +197,7 @@ async fn stream_once(
             access_token: session.access_token.clone(),
             account_id: Some(session.account_id.clone()),
         })
+        .originator(crate::codex_oauth::ORIGINATOR)
         .build()
         .map_err(|error| {
             (
@@ -399,5 +424,20 @@ mod tests {
             Err(HarnessError::PrematureEof)
         ));
         assert!(ensure_final_record(true).is_ok());
+    }
+
+    #[test]
+    fn a_provider_response_json_envelope_from_rig_surfaces_clean_message() {
+        let body = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.","code":"model_not_found","subreason":"model_not_in_accessible_catalog"}}"#;
+        let (error, retry_after) =
+            from_rig_error(rig_core::completion::CompletionError::ProviderResponse(
+                rig_core::ProviderResponseError::without_status(body),
+            ));
+        assert_eq!(retry_after, None);
+        assert!(matches!(error, HarnessError::Api { status: 400, .. }));
+        assert_eq!(
+            error.turn_message(),
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
+        );
     }
 }
