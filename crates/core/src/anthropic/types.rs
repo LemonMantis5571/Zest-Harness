@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 pub const API_BASE: &str = "https://api.anthropic.com";
 pub const API_VERSION: &str = "2023-06-01";
-pub const DEFAULT_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// Lets a request set `thinking.block_binding`. Sent on every request, because
 /// the field is rejected without it and every model accepts the header.
 pub const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";

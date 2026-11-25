@@ -63,16 +63,16 @@ impl ApiPreset {
 
     fn default_model(self) -> &'static str {
         match self {
-            ApiPreset::Anthropic => "claude-opus-5",
+            ApiPreset::Anthropic => "claude-opus-5-5",
             ApiPreset::DeepSeek => "deepseek-flash",
-            ApiPreset::OpenAi => "gpt-5",
+            ApiPreset::OpenAi => "gpt-6.1-sol",
             ApiPreset::Custom => "",
         }
     }
 
     fn models_summary(self) -> &'static str {
         match self {
-            ApiPreset::DeepSeek => "deepseek-flash, deepseek-v4-pro",
+            ApiPreset::DeepSeek => "deepseek-flash, deepseek-v4.1-flash, deepseek-v4-pro",
             _ => "",
         }
     }

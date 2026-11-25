@@ -101,15 +101,17 @@ pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
         "claude" => &[
             "claude-sonnet-5-5",
             "claude-opus-5-5",
+            "claude-fable-5-2",
             "claude-haiku-5-5",
+            "claude-mythos-5-2",
             "claude-fable-5-1",
         ],
         "gemini" => &[
             "auto",
-            "gemini-3-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
+            "gemini-4-argon",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash",
+            "gemini-3.1-pro-preview",
         ],
         // A worker has no effort axis, so these are Cursor's flat ids with the
         // effort suffix already on them — what `--model` takes verbatim. It is
@@ -120,11 +122,12 @@ pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
             "composer-2.5",
             "grok-4.7-high",
             "claude-opus-5-5-high",
+            "claude-fable-5-2-high",
             "claude-sonnet-5-5-high",
             "claude-haiku-5-5-thinking-medium",
-            "claude-fable-5-1-high",
-            "gpt-5.6-sol-high",
-            "gemini-3.1-pro",
+            "gpt-6.1-sol-high",
+            "gpt-6.2-astra-high",
+            "gemini-4-argon",
         ],
         _ => &[],
     }

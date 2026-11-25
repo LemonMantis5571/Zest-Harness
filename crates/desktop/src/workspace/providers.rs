@@ -65,7 +65,7 @@ impl Workspace {
             adding,
             id,
             key: field(cx, "API key"),
-            model: field(cx, if adding == Some(ProviderChoice::OpenAiCompatible) { "Model, for example gpt-5.6" } else { "Model (blank for the default)" }),
+            model: field(cx, if adding == Some(ProviderChoice::OpenAiCompatible) { "Model, for example gpt-6.1-sol" } else { "Model (blank for the default)" }),
             base_url: field(cx, "Endpoint, for example https://api.openai.com/v1"),
         };
         window.focus(&form.key.read(cx).focus.clone(), cx);

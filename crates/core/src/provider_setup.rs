@@ -376,13 +376,22 @@ pub fn add(
             if form.model.trim().is_empty() {
                 return Err("Name the model the endpoint serves.".into());
             }
+            let models = if form.base_url.contains("api.deepseek.com") {
+                vec![
+                    "deepseek-flash".into(),
+                    "deepseek-v4.1-flash".into(),
+                    "deepseek-v4-pro".into(),
+                ]
+            } else {
+                Vec::new()
+            };
             config_edit::add_openai_provider(
                 &path,
                 &OpenAiProviderInput {
                     id: id.clone(),
                     base_url: form.base_url,
                     model,
-                    models: Vec::new(),
+                    models,
                     credential: id.clone(),
                 },
             )?;

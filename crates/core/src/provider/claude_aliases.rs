@@ -21,7 +21,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("sonnet", "claude-sonnet-5-5"),
     ("opus", "claude-opus-5-5"),
     ("haiku", "claude-haiku-5-5"),
-    ("fable", "claude-fable-5-1"),
+    ("fable", "claude-fable-5-2"),
+    ("mythos", "claude-mythos-5-2"),
 ];
 
 pub fn is_alias(model: &str) -> bool {
