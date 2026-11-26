@@ -231,11 +231,11 @@ pub fn available_faces(cx: &App) -> Vec<&'static Face> {
     FACES.iter().filter(|f| f.bundled || installed.iter().any(|n| n == f.family)).collect()
 }
 
-static BLOCK_STREAMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static BLOCK_STREAMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static COMPACT_SIDEBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Customize > Chat view > "Stream complete blocks" (default on): a streaming reply shows only
-/// its complete Markdown blocks.
+/// Customize > Chat view > "Stream complete blocks" (default off): a streaming reply shows only
+/// its complete Markdown blocks instead of streaming token by token.
 pub fn block_streaming() -> bool {
     BLOCK_STREAMING.load(Ordering::Relaxed)
 }
@@ -253,12 +253,8 @@ pub fn set_compact_sidebar(on: bool) {
     COMPACT_SIDEBAR.store(on, Ordering::Relaxed);
 }
 
-fn yes() -> bool {
-    true
-}
-
 /// The saved look and chat-view choices, per machine.
-#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Appearance {
     #[serde(default)]
     pub theme: String,
@@ -267,14 +263,8 @@ pub struct Appearance {
     /// "project" (default) or "compact", as `zest.chatViewMode`.
     #[serde(default)]
     pub chat_view: String,
-    #[serde(default = "yes")]
+    #[serde(default)]
     pub block_streaming: bool,
-}
-
-impl Default for Appearance {
-    fn default() -> Self {
-        Self { theme: String::new(), font: String::new(), chat_view: String::new(), block_streaming: true }
-    }
 }
 
 fn appearance_path() -> Option<std::path::PathBuf> {
@@ -613,9 +603,9 @@ mod tests {
         assert_eq!(set_face("").id, "geist");
         let saved: Appearance = serde_json::from_str("{}").unwrap();
         assert_eq!(saved, Appearance::default());
-        assert!(saved.block_streaming, "block streaming defaults on");
+        assert!(!saved.block_streaming, "token-by-token streaming defaults on (block_streaming off)");
         let older: Appearance = serde_json::from_str(r#"{"theme":"nights","font":"inter"}"#).unwrap();
-        assert!(older.block_streaming && older.chat_view.is_empty());
+        assert!(!older.block_streaming && older.chat_view.is_empty());
     }
 
     #[::core::prelude::v1::test]
