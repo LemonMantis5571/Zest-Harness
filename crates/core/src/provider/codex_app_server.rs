@@ -694,6 +694,8 @@ struct StreamState {
     /// Paths/diffs from `item/started` fileChange items, keyed by item id.
     /// The later `requestApproval` often names only `itemId`.
     pending_file_changes: HashMap<String, (String, String)>,
+    /// Human-readable titles for active Codex tool items, keyed by item id.
+    activity_titles: HashMap<String, String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -761,16 +763,47 @@ async fn handle_message(
                 on_event(StreamEvent::Thinking(&delta));
             }
         }
-        "item/started" | "item/updated" | "item/completed" => {
+        "item/started" => {
             remember_file_change_item(state, &params);
+            if let Some((id, title)) = describe_started_item(&params) {
+                state.activity_titles.insert(id.clone(), title.clone());
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: &title,
+                    status: "running",
+                });
+            }
+        }
+        "item/updated" => {
+            remember_file_change_item(state, &params);
+        }
+        "item/completed" => {
+            remember_file_change_item(state, &params);
+            if let Some((id, title, status)) = describe_completed_item(state, &params) {
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: &title,
+                    status,
+                });
+            }
         }
         "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" => {
             let id = string_field(&params, &["itemId"]).unwrap_or_else(|| "codex".into());
-            on_event(StreamEvent::ProviderActivity {
-                id: &id,
-                title: method,
-                status: "running",
-            });
+            if !state.activity_titles.contains_key(&id) {
+                let fallback = if method == "item/fileChange/outputDelta" {
+                    "Applying file changes"
+                } else {
+                    "Running command"
+                };
+                state
+                    .activity_titles
+                    .insert(id.clone(), fallback.to_string());
+                on_event(StreamEvent::ProviderActivity {
+                    id: &id,
+                    title: fallback,
+                    status: "running",
+                });
+            }
         }
         "model/rerouted" => {
             let requested =
@@ -1081,6 +1114,79 @@ fn remember_file_change_item(state: &mut StreamState, params: &Value) {
         return;
     }
     state.pending_file_changes.insert(id, (path, diff));
+}
+
+fn describe_started_item(params: &Value) -> Option<(String, String)> {
+    let item = params.get("item").unwrap_or(params);
+    let id = string_field(item, &["id", "itemId"])
+        .or_else(|| string_field(params, &["itemId", "id"]))?;
+    let kind = string_field(item, &["type", "itemType"]).unwrap_or_default();
+    let title = if kind.eq_ignore_ascii_case("commandexecution") || kind == "command_execution" {
+        let cmd = command_line(item);
+        let first = cmd.lines().next().unwrap_or("").trim();
+        if first.is_empty() {
+            "Running command".to_string()
+        } else {
+            let summary: String = first.chars().take(92).collect();
+            format!("$ {summary}")
+        }
+    } else if kind.eq_ignore_ascii_case("filechange")
+        || kind == "file_change"
+        || item.get("changes").is_some()
+    {
+        match file_change_path(item).or_else(|| file_change_path(params)) {
+            Some(paths) => {
+                let first = paths.lines().next().unwrap_or("").trim();
+                if first.is_empty() {
+                    "Editing files".to_string()
+                } else {
+                    format!("Editing {first}")
+                }
+            }
+            None => "Editing files".to_string(),
+        }
+    } else if kind.eq_ignore_ascii_case("mcptoolcall") || kind == "mcp_tool_call" {
+        match string_field(item, &["tool", "name"]) {
+            Some(tool) => format!("MCP {tool}"),
+            None => "Running MCP tool".to_string(),
+        }
+    } else if kind.eq_ignore_ascii_case("websearch") || kind == "web_search" {
+        match string_field(item, &["query"]) {
+            Some(query) => {
+                let summary: String = query.chars().take(72).collect();
+                format!("Searching web: {summary}")
+            }
+            None => "Searching web".to_string(),
+        }
+    } else {
+        return None;
+    };
+    Some((id, title))
+}
+
+fn describe_completed_item(
+    state: &StreamState,
+    params: &Value,
+) -> Option<(String, String, &'static str)> {
+    let item = params.get("item").unwrap_or(params);
+    let id = string_field(item, &["id", "itemId"])
+        .or_else(|| string_field(params, &["itemId", "id"]))?;
+    let title = state
+        .activity_titles
+        .get(&id)
+        .cloned()
+        .or_else(|| describe_started_item(params).map(|(_, t)| t))?;
+    let item_status = string_field(item, &["status"]).unwrap_or_default();
+    let exit_failed = item
+        .get("exitCode")
+        .or_else(|| item.get("exit_code"))
+        .and_then(Value::as_i64)
+        .is_some_and(|code| code != 0);
+    let failed = matches!(
+        item_status.as_str(),
+        "failed" | "error" | "declined" | "rejected"
+    ) || exit_failed;
+    Some((id, title, if failed { "failed" } else { "done" }))
 }
 
 fn file_change_path(value: &Value) -> Option<String> {
@@ -1526,6 +1632,48 @@ mod tests {
         assert_eq!(
             err.turn_message(),
             "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
+        );
+    }
+
+    #[test]
+    fn started_and_completed_items_produce_human_readable_activity_rows() {
+        let mut state = StreamState::default();
+        let started = json!({
+            "item": {
+                "id": "cmd_1",
+                "type": "commandExecution",
+                "command": ["rg", "-n", "App", "src"]
+            }
+        });
+        let (id, title) = describe_started_item(&started).expect("command item");
+        assert_eq!(id, "cmd_1");
+        assert_eq!(title, "$ rg -n App src");
+        state.activity_titles.insert(id, title);
+
+        let completed_ok = json!({
+            "item": {
+                "id": "cmd_1",
+                "type": "commandExecution",
+                "status": "completed",
+                "exitCode": 0
+            }
+        });
+        assert_eq!(
+            describe_completed_item(&state, &completed_ok),
+            Some(("cmd_1".into(), "$ rg -n App src".into(), "done"))
+        );
+
+        let completed_fail = json!({
+            "item": {
+                "id": "cmd_1",
+                "type": "commandExecution",
+                "status": "completed",
+                "exitCode": 1
+            }
+        });
+        assert_eq!(
+            describe_completed_item(&state, &completed_fail),
+            Some(("cmd_1".into(), "$ rg -n App src".into(), "failed"))
         );
     }
 

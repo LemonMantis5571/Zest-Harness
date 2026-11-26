@@ -108,7 +108,10 @@ sign-in are in [providers-and-sign-in](providers-and-sign-in.md).
   (`codex_models`), cached 24 h in `<data dir>/zest/codex-models.json` and
   invalidated whenever the CLI binary changes on disk, falling back to
   `CODEX_KNOWN_MODELS`; upstream JSON error envelopes inside `error.message` are
-  unwrapped to their human-readable `error.message`.
+  unwrapped to their human-readable `error.message`. Live tool items
+  (`commandExecution`, `fileChange`, `mcpToolCall`, `webSearch`) open a
+  human-readable `ProviderActivity` row on `item/started` and settle to `done` /
+  `failed` on `item/completed`.
 - In both bridges a file change to a likely secret (`.env`, keys) is `Sensitive`
   (`write_risk`), not `Write`, so Auto and Accept edits still ask, session
   grants (`AllowSession`) never cover it, and the card omits its diff
