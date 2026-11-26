@@ -109,15 +109,17 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
   GPT-5/GPT-6/GPT-4o, and Gemini models report `supports_vision = true` so
   `browser` and `html_preview` tool screenshots reach the model. User-attached
   base64 images (`png`, `jpeg`, `gif`, `webp`) map cleanly across Anthropic,
-  Rig/ChatGPT Codex (`rig_convert::user_content`), and OpenAI-compatible
+  ChatGPT Codex (Responses `input_image`), and OpenAI-compatible
   (`image_url` data URLs).
 - OpenAI-compatible reasoning & token limits: `reasoning_content`, `reasoning`,
   and `analysis` stream deltas emit live `StreamEvent::Thinking` chunks;
   `reasoning_content` is echoed back on assistant `tool_calls` turns (for
   DeepSeek Reasoner / Kimi K2 Thinking multi-step tool loops); and `o1`/`o3`/`o4`/
   `gpt-5`/`gpt-6` models send `max_completion_tokens` instead of `max_tokens`.
-- ChatGPT Codex (`codex_oauth` kind) runs in Zest's loop; its session is refreshed
-  and re-stored before each turn and Rig only ever receives an access token.
+- ChatGPT Codex (`codex_oauth` kind) runs in Zest's loop. It refreshes the session
+  before each turn and streams text and reasoning summaries from the Responses endpoint.
+  Tool rounds carry the encrypted reasoning item, function item ID and call ID into
+  the next request. Results are linked by call ID in the order the model issued the calls.
 - `resume_support` is consulted by chat restart reconciliation only after the
   provider builds successfully. Recovery records why an old run cannot attach;
   existing adapters remain unsupported and never replay a stale cursor.
@@ -141,10 +143,9 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
    `include_usage`, splits cached prompt tokens out of `prompt_tokens`, and reads
    `x-ratelimit-*` headers.
 5. `CodexOAuthProvider::stream_turn` → `codex_oauth::refresh_and_store` →
-   `codex_rig::stream_turn`, which converts history with `rig_convert`
-   (`to_rig_history`, `to_rig_tools`, `from_rig_content`) and uses
-   `rig_core::providers::chatgpt`. The hand-rolled Responses code in
-   `provider/codex_oauth.rs` is kept only so its tests guard the wire shape.
+   `stream_responses_with_retry` in `provider/codex_oauth.rs`. The accumulator
+   joins argument deltas by item ID and publishes tool starts after the terminal
+   response. A dropped connection can preserve partial text for continuation.
 6. `provider::probe` sends a one-token turn; used by the desktop's
    `verify_provider`.
 
@@ -162,9 +163,8 @@ storage are in [providers-and-sign-in](providers-and-sign-in.md).
 
 ## Pitfalls
 
-- `rig_convert` must set both Rig call ids from the provider's id; a synthetic
-  id on the wire makes the API reject the `tool_result`. It errors rather than
-  dropping an unrepresentable block.
+- Responses argument deltas can identify a function by its item ID (`fc_…`).
+  Its result must echo the function's `call_id`.
 - `CODEX_KNOWN_MODELS` mirrors `CODEX_LABELS` in `ui/src/lib/models.ts`; keep
   them in sync.
 - `supports_prompt_cache` defaults to false. Sending `cache_control` to a non-

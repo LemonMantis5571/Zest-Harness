@@ -1733,7 +1733,7 @@ impl Agent {
                     .get("text")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|text| !text.trim().is_empty()),
-                Some("thinking" | "redacted_thinking") | None => false,
+                Some("thinking" | "redacted_thinking" | "reasoning_encrypted") | None => false,
                 Some(_) => true,
             },
         )
@@ -2782,6 +2782,9 @@ mod tests {
     #[test]
     fn empty_provider_responses_are_not_assistant_output() {
         assert!(!Agent::has_assistant_output(&[]));
+        assert!(!Agent::has_assistant_output(&[json!({
+            "type": "reasoning_encrypted", "id": "rs_1", "data": "opaque"
+        })]));
         assert!(!Agent::has_assistant_output(&[json!({
             "type": "text",
             "text": "  "

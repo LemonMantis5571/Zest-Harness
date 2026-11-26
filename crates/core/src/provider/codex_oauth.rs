@@ -3,7 +3,6 @@
 //! Talks to the unpublished Codex Responses backend. Identify as Zest; do not
 //! impersonate the official CLI.
 
-use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -13,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::{
     catalogue, Completion, EffortPolicy, ModelSpec, Provider, StreamEvent, SystemPrompt,
-    TurnRequest, CODEX_KNOWN_MODELS,
+    TurnRequest, CODEX_KNOWN_MODELS, STREAM_INTERRUPTED,
 };
 use crate::anthropic::sse::SseParser;
 use crate::anthropic::types::{Message, ToolDef, Usage};
@@ -21,26 +20,16 @@ use crate::auth::AuthStatus;
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::codex_oauth::{refresh_and_store, CodexOAuthSession, BACKEND_URL, ORIGINATOR};
 use crate::error::{HarnessError, Result};
+use crate::retry::{self, AttemptError, RetryPolicy};
 
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
-const MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_INSTRUCTIONS: &str = "You are a helpful coding assistant.";
 
 pub struct CodexOAuthProvider {
     id: String,
     account: String,
+    client: reqwest::Client,
     session: Mutex<CodexOAuthSession>,
     default_model: String,
     models: Vec<ModelSpec>,
@@ -54,9 +43,14 @@ impl CodexOAuthProvider {
         default_model: impl Into<String>,
         models: Vec<ModelSpec>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             id: id.into(),
             account: account.into(),
+            client,
             session: Mutex::new(session),
             default_model: default_model.into(),
             models,
@@ -124,7 +118,7 @@ impl Provider for CodexOAuthProvider {
             *guard = session.clone();
         }
 
-        super::codex_rig::stream_turn(&session, req, on_event).await
+        stream_responses_with_retry(&self.client, &session, req, on_event).await
     }
 }
 
@@ -139,6 +133,7 @@ pub fn request_body(
     let mut root = json!({
         "model": model,
         "input": input,
+        "include": ["reasoning.encrypted_content"],
         "store": false,
         "stream": true,
     });
@@ -171,12 +166,41 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
     let mut input = Vec::new();
     for message in messages {
         let mut text = String::new();
+        let mut user_parts = Vec::new();
+        let mut has_user_image = false;
+        let mut reasoning_items = Vec::new();
         let mut tool_calls = Vec::new();
         let mut tool_results = Vec::new();
         for block in &message.content {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
-                    text.push_str(block.get("text").and_then(Value::as_str).unwrap_or(""))
+                    let s = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    text.push_str(s);
+                    if !s.is_empty() {
+                        user_parts.push(json!({ "type": "input_text", "text": s }));
+                    }
+                }
+                Some("image") => {
+                    if let Some(url) = image_data_url(block) {
+                        has_user_image = true;
+                        user_parts.push(json!({ "type": "input_image", "image_url": url }));
+                    }
+                }
+                Some("reasoning_encrypted") => {
+                    if let (Some(id), Some(data)) = (json_str(block, "id"), json_str(block, "data"))
+                    {
+                        let summary = block
+                            .get("summary")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        reasoning_items.push(json!({
+                            "type": "reasoning",
+                            "id": id,
+                            "summary": summary,
+                            "encrypted_content": data,
+                        }));
+                    }
                 }
                 Some("tool_use") => tool_calls.push(block),
                 Some("tool_result") => tool_results.push(block),
@@ -200,12 +224,13 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": result.get("content").and_then(Value::as_str).unwrap_or(""),
+                    "output": format_tool_result_output(result.get("content")),
                 }));
             }
             continue;
         }
-        if message.role == "assistant" && !tool_calls.is_empty() {
+        if message.role == "assistant" && (!tool_calls.is_empty() || !reasoning_items.is_empty()) {
+            input.extend(reasoning_items);
             if !text.is_empty() {
                 input.push(message_item("assistant", "output_text", &text));
             }
@@ -223,13 +248,26 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
                         }
                     })
                     .unwrap_or_else(|| "{}".into());
-                input.push(json!({
+                let mut item = json!({
                     "type": "function_call",
                     "call_id": call_id,
                     "name": call.get("name").and_then(Value::as_str).unwrap_or(""),
                     "arguments": arguments,
-                }));
+                });
+                if let Some(item_id) = json_str(call, "item_id").filter(|id| id.starts_with("fc_"))
+                {
+                    item["id"] = json!(item_id);
+                }
+                input.push(item);
             }
+            continue;
+        }
+        if message.role != "assistant" && has_user_image {
+            input.push(json!({
+                "type": "message",
+                "role": &message.role,
+                "content": user_parts,
+            }));
             continue;
         }
         let part_type = if message.role == "assistant" {
@@ -242,6 +280,57 @@ pub fn responses_input(system: Option<&SystemPrompt>, messages: &[Message]) -> (
     (instructions, Value::Array(input))
 }
 
+fn image_data_url(block: &Value) -> Option<String> {
+    let source = block.get("source")?.as_object()?;
+    if source.get("type")?.as_str()? != "base64" {
+        return None;
+    }
+    let media_type = source.get("media_type")?.as_str()?.trim();
+    let data = source.get("data")?.as_str()?.trim();
+    if media_type.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some(format!("data:{media_type};base64,{data}"))
+}
+
+fn format_tool_result_output(content: Option<&Value>) -> Value {
+    match content {
+        Some(Value::String(text)) => Value::String(text.clone()),
+        Some(Value::Array(blocks)) => {
+            let has_image = blocks
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("image"));
+            if !has_image {
+                let joined = blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Value::String(joined);
+            }
+            let mut parts = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(text) = block.get("text").and_then(Value::as_str) {
+                            parts.push(json!({ "type": "input_text", "text": text }));
+                        }
+                    }
+                    Some("image") => {
+                        if let Some(url) = image_data_url(block) {
+                            parts.push(json!({ "type": "input_image", "image_url": url }));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Value::Array(parts)
+        }
+        _ => Value::String(String::new()),
+    }
+}
+
 fn message_item(role: &str, part_type: &str, text: &str) -> Value {
     json!({
         "type": "message",
@@ -250,142 +339,151 @@ fn message_item(role: &str, part_type: &str, text: &str) -> Value {
     })
 }
 
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
-async fn stream_responses(
+struct ResponsesAttempt<'a> {
+    client: &'a reqwest::Client,
+    session: &'a CodexOAuthSession,
+    body: Value,
+    cancel: Option<&'a CancelToken>,
+}
+
+#[async_trait]
+impl retry::Attempt for ResponsesAttempt<'_> {
+    async fn run(
+        &mut self,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> std::result::Result<Completion, AttemptError> {
+        tokio::select! {
+            biased;
+            _ = wait_cancel(self.cancel) => Err((HarnessError::Cancelled, None)),
+            result = stream_responses_once(self.client, self.session, &self.body, on_event) => result,
+        }
+    }
+}
+
+async fn stream_responses_with_retry(
+    client: &reqwest::Client,
+    session: &CodexOAuthSession,
+    req: &TurnRequest,
+    on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+) -> Result<Completion> {
+    let tools: &[ToolDef] = if req.allow_tool_use { &req.tools } else { &[] };
+    let mut body = request_body(
+        &req.model,
+        req.effort.as_deref(),
+        req.system.as_ref(),
+        &req.messages,
+        tools,
+    );
+    // ChatGPT's Codex Responses backend requires a non-empty `instructions`
+    // field even on minimal probe turns that carry no system prompt.
+    if body.get("instructions").is_none() {
+        body["instructions"] = json!(DEFAULT_INSTRUCTIONS);
+    }
+    let mut attempt = ResponsesAttempt {
+        client,
+        session,
+        body,
+        cancel: req.cancel.as_ref(),
+    };
+    retry::run_with_retry(
+        &RetryPolicy::default(),
+        &mut attempt,
+        on_event,
+        req.cancel.as_ref(),
+    )
+    .await
+}
+
+async fn stream_responses_once(
+    client: &reqwest::Client,
     session: &CodexOAuthSession,
     body: &Value,
     on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
-    cancel: Option<&CancelToken>,
-) -> Result<Completion> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()?;
-    let mut attempt = 0;
-    let response = loop {
-        attempt += 1;
-        match send_once(&client, session, body, cancel).await {
-            Ok(response) => break response,
-            Err((error, _)) if attempt < MAX_ATTEMPTS && error.is_transient() => {
-                tokio::select! {
-                    biased;
-                    _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
-                    _ = tokio::time::sleep(Duration::from_secs(1 << attempt.min(4).saturating_sub(1))) => {}
-                }
-            }
-            Err((error, _)) => {
-                return Err(if attempt > 1 {
-                    HarnessError::Exhausted {
-                        attempts: attempt,
-                        source: Box::new(error),
-                    }
-                } else {
-                    error
-                })
-            }
-        }
-    };
-
+) -> std::result::Result<Completion, AttemptError> {
+    let response = tokio::time::timeout(STREAM_IDLE_TIMEOUT, send_once(client, session, body))
+        .await
+        .map_err(|_| (HarnessError::StreamIdleTimeout, None))??;
     let mut parser = SseParser::default();
     let mut body_stream = response.bytes_stream();
     let mut accumulator = ResponsesAccumulator::default();
-    loop {
+    let mut idle_deadline = tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT;
+    let failure = 'read: loop {
         tokio::select! {
             biased;
-            _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
+            _ = tokio::time::sleep_until(idle_deadline) => break Some(HarnessError::StreamIdleTimeout),
             chunk = body_stream.next() => match chunk {
                 Some(Ok(bytes)) => {
                     for payload in parser.feed(&bytes) {
-                        if payload == "[DONE]" {
-                            accumulator.done = true;
-                            break;
+                        let trimmed = payload.trim();
+                        if trimmed.is_empty() {
+                            continue;
                         }
-                        let event: Value = serde_json::from_str(&payload)?;
-                        accumulator.push(&event, on_event)?;
+                        if trimmed == "[DONE]" {
+                            break 'read None;
+                        }
+                        let event: Value = serde_json::from_str(trimmed).map_err(|err| (HarnessError::Json(err), None))?;
+                        if let Err(error) = accumulator.push(&event, on_event) {
+                            break 'read Some(error);
+                        }
+                        idle_deadline = tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT;
+                        if accumulator.done { break 'read None; }
                     }
-                    if accumulator.done { break; }
                 }
-                Some(Err(error)) => return Err(error.into()),
-                None => break,
+                Some(Err(error)) => break Some(HarnessError::Http(error)),
+                None => break None,
             },
-            _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                return Err(HarnessError::StreamIdleTimeout);
-            }
         }
-    }
-    if !accumulator.done && accumulator.text.is_empty() && accumulator.tools.is_empty() {
-        return Err(HarnessError::PrematureEof);
-    }
-    Ok(accumulator.finish())
+    };
+    accumulator
+        .finish_stream(failure, on_event)
+        .map_err(|err| (err, None))
 }
 
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 async fn send_once(
     client: &reqwest::Client,
     session: &CodexOAuthSession,
     body: &Value,
-    cancel: Option<&CancelToken>,
-) -> std::result::Result<reqwest::Response, (HarnessError, Option<Duration>)> {
-    let response = tokio::select! {
-        biased;
-        _ = wait_cancel(cancel) => return Err((HarnessError::Cancelled, None)),
-        response = client
-            .post(format!("{BACKEND_URL}/responses"))
-            .header("authorization", format!("Bearer {}", session.access_token))
-            .header("ChatGPT-Account-ID", &session.account_id)
-            .header("originator", ORIGINATOR)
-            .header("accept", "text/event-stream")
-            .header("content-type", "application/json")
-            .json(body)
-            .send() => match response {
-                Ok(response) => response,
-                Err(error) => return Err((HarnessError::Http(error), None)),
-            },
-    };
+) -> std::result::Result<reqwest::Response, AttemptError> {
+    let response = client
+        .post(format!("{BACKEND_URL}/responses"))
+        .header("authorization", format!("Bearer {}", session.access_token))
+        .header("ChatGPT-Account-ID", &session.account_id)
+        .header("originator", ORIGINATOR)
+        .header("accept", "text/event-stream")
+        .header("content-type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| (HarnessError::Http(error), None))?;
     if response.status().is_success() {
         return Ok(response);
     }
     let status = response.status().as_u16();
+    let retry_after = retry::retry_after_from_headers(response.headers());
     let body = response.text().await.unwrap_or_default();
-    Err((HarnessError::Api { status, body }, None))
+    Err((HarnessError::Api { status, body }, retry_after))
 }
 
 #[derive(Default)]
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 struct ResponsesAccumulator {
     text: String,
-    tools: BTreeMap<String, ToolAccum>,
+    reasoning_items: Vec<Value>,
+    tools: Vec<ToolAccum>,
     usage: Usage,
     usage_available: bool,
     served_model: Option<String>,
+    incomplete_max_tokens: bool,
     done: bool,
 }
 
 #[derive(Default)]
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 struct ToolAccum {
     id: String,
     item_id: String,
     name: String,
     arguments: String,
-    emitted: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 impl ResponsesAccumulator {
     fn push(
         &mut self,
@@ -405,12 +503,15 @@ impl ResponsesAccumulator {
                 .map(str::to_string);
         }
         match kind {
-            "response.output_text.delta" | "response.reasoning_text.delta" => {
+            "error" => return Err(chatgpt_stream_error(event)),
+            "response.output_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(Value::as_str) {
                     if kind == "response.output_text.delta" {
                         self.text.push_str(delta);
                         on_event(StreamEvent::Text(delta));
-                    } else {
+                    } else if !delta.is_empty() {
                         on_event(StreamEvent::Thinking(delta));
                     }
                 }
@@ -429,8 +530,17 @@ impl ResponsesAccumulator {
                     }
                 }
             }
-            "response.failed" | "response.incomplete" => {
-                if let Some(error) = event.pointer("/response/error") {
+            "response.function_call_arguments.done" => {
+                if let Some(arguments) = json_str(event, "arguments") {
+                    if let Some(tool) =
+                        self.tool_mut(json_str(event, "call_id"), json_str(event, "item_id"))
+                    {
+                        tool.arguments = arguments.to_string();
+                    }
+                }
+            }
+            "response.failed" | "response.incomplete" | "response.completed" | "response.done" => {
+                if let Some(error) = event.pointer("/response/error").filter(|v| !v.is_null()) {
                     return Err(chatgpt_stream_error(error));
                 }
                 if kind == "response.failed" {
@@ -439,9 +549,34 @@ impl ResponsesAccumulator {
                         "ChatGPT stopped the reply before it finished.",
                     ));
                 }
-                self.done = true;
-            }
-            "response.completed" | "response.done" => {
+                let incomplete = kind == "response.incomplete"
+                    || event.pointer("/response/status").and_then(Value::as_str)
+                        == Some("incomplete");
+                if incomplete {
+                    if event
+                        .pointer("/response/incomplete_details/reason")
+                        .and_then(Value::as_str)
+                        != Some("max_output_tokens")
+                    {
+                        return Err(HarnessError::StoppedEarly(
+                            "ChatGPT marked the response incomplete".into(),
+                        ));
+                    }
+                    self.incomplete_max_tokens = true;
+                    // Only dispatch calls the terminal response confirms finished.
+                    self.tools.clear();
+                }
+                if let Some(items) = event.pointer("/response/output").and_then(Value::as_array) {
+                    for item in items {
+                        if incomplete
+                            && item["type"] == "function_call"
+                            && item["status"] != "completed"
+                        {
+                            continue;
+                        }
+                        self.ingest_item(item, on_event);
+                    }
+                }
                 if let Some(usage) = event
                     .pointer("/response/usage")
                     .or_else(|| event.get("usage"))
@@ -476,30 +611,44 @@ impl ResponsesAccumulator {
                     }
                 }
                 let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
-                if !arguments.is_empty() && tool.arguments.is_empty() {
-                    tool.arguments.push_str(arguments);
+                if !arguments.is_empty() {
+                    tool.arguments = arguments.to_string();
                 }
-                // Wait for ChatGPT's call_id so the UI row and the next request
-                // agree. An item id is only a join key.
-                if !tool.emitted && call_id.is_some() && !tool.name.is_empty() {
-                    on_event(StreamEvent::ToolCallStart {
-                        name: &tool.name,
-                        id: &tool.id,
-                    });
-                    tool.emitted = true;
+            }
+            Some("reasoning") => {
+                if let (Some(id), Some(encrypted)) =
+                    (json_str(item, "id"), json_str(item, "encrypted_content"))
+                {
+                    if !self
+                        .reasoning_items
+                        .iter()
+                        .any(|existing| json_str(existing, "id") == Some(id))
+                    {
+                        let summary = item
+                            .get("summary")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        self.reasoning_items.push(json!({
+                            "type": "reasoning_encrypted",
+                            "id": id,
+                            "summary": summary,
+                            "data": encrypted,
+                        }));
+                    }
                 }
             }
             Some("message") => {
-                if let Some(text) = item
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .and_then(|parts| parts.first())
-                    .and_then(|part| part.get("text"))
-                    .and_then(Value::as_str)
-                {
+                if let Some(parts) = item.get("content").and_then(Value::as_array) {
                     if self.text.is_empty() {
-                        self.text.push_str(text);
-                        on_event(StreamEvent::Text(text));
+                        for part in parts {
+                            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                if !text.is_empty() {
+                                    self.text.push_str(text);
+                                    on_event(StreamEvent::Text(text));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -548,25 +697,21 @@ impl ResponsesAccumulator {
         if call_id.is_none() && item_id.is_none() {
             return None;
         }
-        if let (Some(call), Some(item)) = (call_id, item_id) {
-            if call != item {
-                if let Some(orphan) = self.tools.remove(item) {
-                    merge_tool(self.tools.entry(call.to_string()).or_default(), orphan);
-                }
+        let by_call = call_id.and_then(|id| self.tools.iter().position(|tool| tool.id == id));
+        let by_item = item_id.and_then(|id| self.tools.iter().position(|tool| tool.item_id == id));
+        let index = match (by_call, by_item) {
+            (Some(a), Some(b)) if a != b => {
+                let orphan = self.tools.remove(a.max(b));
+                merge_tool(&mut self.tools[a.min(b)], orphan);
+                a.min(b)
             }
-        }
-        let key = match (call_id, item_id) {
-            (Some(call), _) => call.to_string(),
-            (None, Some(item)) => self
-                .tools
-                .iter()
-                .find_map(|(key, tool)| {
-                    (tool.item_id == item || tool.id == item || key == item).then(|| key.clone())
-                })
-                .unwrap_or_else(|| item.to_string()),
-            (None, None) => return None,
+            (Some(index), _) | (_, Some(index)) => index,
+            (None, None) => {
+                self.tools.push(ToolAccum::default());
+                self.tools.len() - 1
+            }
         };
-        let tool = self.tools.entry(key).or_default();
+        let tool = &mut self.tools[index];
         if let Some(call) = call_id {
             tool.id = call.to_string();
         } else if tool.id.is_empty() {
@@ -580,29 +725,70 @@ impl ResponsesAccumulator {
         Some(tool)
     }
 
+    fn finish_stream(
+        mut self,
+        failure: Option<HarnessError>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> Result<Completion> {
+        if let Some(error) = failure.or_else(|| (!self.done).then_some(HarnessError::PrematureEof))
+        {
+            if !error.is_retryable_stream_failure() || self.text.trim().is_empty() {
+                return Err(error);
+            }
+            self.tools.clear();
+            self.reasoning_items.clear();
+            let mut partial = self.finish();
+            partial.stop_reason = Some(STREAM_INTERRUPTED.into());
+            return Ok(partial);
+        }
+        let completion = self.finish();
+        // Publish only committed calls. Retrying a dropped stream must not
+        // leave a running row for a tool the agent will never execute.
+        for call in &completion.content {
+            if call["type"] == "tool_use" {
+                if let (Some(name), Some(id)) = (json_str(call, "name"), json_str(call, "id")) {
+                    on_event(StreamEvent::ToolCallStart { name, id });
+                }
+            }
+        }
+        Ok(completion)
+    }
+
     fn finish(self) -> Completion {
-        let mut content = Vec::new();
+        let mut content = self.reasoning_items;
         if !self.text.is_empty() {
             content.push(json!({"type":"text", "text": self.text}));
         }
         let tools: Vec<ToolAccum> = self
             .tools
-            .into_values()
+            .into_iter()
             .filter(|tool| !tool.id.is_empty() && !tool.name.is_empty())
             .collect();
-        let stop_reason = if tools.is_empty() {
-            Some("end_turn".into())
-        } else {
+        let stop_reason = if self.incomplete_max_tokens {
+            Some("max_tokens".into())
+        } else if !tools.is_empty() {
             Some("tool_use".into())
+        } else {
+            Some("end_turn".into())
         };
         for tool in tools {
-            let input = serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}));
-            content.push(json!({
+            let trimmed = tool.arguments.trim();
+            let input = if trimmed.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(trimmed)
+                    .unwrap_or_else(|_| Value::String(tool.arguments.clone()))
+            };
+            let mut block = json!({
                 "type": "tool_use",
                 "id": tool.id,
                 "name": tool.name,
                 "input": input
-            }));
+            });
+            if tool.item_id.starts_with("fc_") {
+                block["item_id"] = json!(tool.item_id);
+            }
+            content.push(block);
         }
         Completion {
             content,
@@ -624,10 +810,6 @@ fn json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 fn merge_tool(dest: &mut ToolAccum, src: ToolAccum) {
     if dest.id.is_empty() {
         dest.id = src.id;
@@ -641,15 +823,10 @@ fn merge_tool(dest: &mut ToolAccum, src: ToolAccum) {
     if src.arguments.len() > dest.arguments.len() {
         dest.arguments = src.arguments;
     }
-    dest.emitted |= src.emitted;
 }
 
 /// ChatGPT's own stream text, tagged so the desktop can show it. A missing
 /// message stays untagged: that fallback is ours, not theirs.
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 fn chatgpt_stream_error(error: &Value) -> HarnessError {
     if let Some(message) = error
         .as_str()
@@ -680,10 +857,6 @@ fn chatgpt_stream_error(error: &Value) -> HarnessError {
 
 /// Saturate rather than wrap. A provider that reports a nonsense token count
 /// should show as an implausibly large one, not as a small one.
-#[allow(
-    dead_code,
-    reason = "legacy hand-rolled Responses path; removed in the Rig migration's cleanup phase, kept meanwhile so its tests keep guarding the wire shape"
-)]
 fn bounded_u32(value: u64) -> u32 {
     value.min(u64::from(u32::MAX)) as u32
 }
@@ -927,7 +1100,7 @@ mod tests {
     fn four_lookups_do_not_leave_an_empty_call_id_on_the_next_request() {
         let mut events = Vec::new();
         for (item, call) in [
-            ("fc_1", "call_1"),
+            ("fc_1", "call_z"),
             ("fc_2", "call_2"),
             ("fc_3", "call_3"),
             ("fc_4", "call_4"),
@@ -976,7 +1149,10 @@ mod tests {
         let input = input.as_array().expect("array");
         assert_eq!(input.len(), 9, "user + 4 calls + 4 outputs");
         assert_eq!(input[5]["type"], "function_call_output");
-        assert_eq!(input[5]["call_id"], "call_1");
+        assert_eq!(
+            input[5]["call_id"], "call_z",
+            "preserve the order emitted by the model"
+        );
         assert!(input.iter().all(|item| {
             item.get("call_id")
                 .and_then(Value::as_str)
@@ -1008,5 +1184,172 @@ mod tests {
         assert_eq!(input.len(), 3, "user + the real call + its output");
         assert_eq!(input[1]["call_id"], "call_ok");
         assert_eq!(input[2]["call_id"], "call_ok");
+    }
+
+    #[test]
+    fn encrypted_reasoning_and_fc_item_ids_round_trip_across_tool_rounds() {
+        let mut thinking_deltas = String::new();
+        let mut started_tools = Vec::new();
+        let mut accumulator = ResponsesAccumulator::default();
+        for event in [
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "delta": "Inspecting workspace...",
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_abc",
+                    "summary": [{"type": "summary_text", "text": "Inspecting workspace..."}],
+                    "encrypted_content": "enc_payload_123"
+                }
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_99",
+                    "call_id": "call_99",
+                    "name": "read_file",
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_99",
+                "delta": "{\"path\":\"README.md\"}"
+            }),
+            json!({
+                "type": "response.completed",
+                "response": { "status": "completed", "model": "gpt-6-luna" }
+            }),
+        ] {
+            accumulator
+                .push(&event, &mut |ev| {
+                    if let StreamEvent::Thinking(s) = ev {
+                        thinking_deltas.push_str(s);
+                    }
+                })
+                .expect("valid stream event");
+        }
+        let completion = accumulator
+            .finish_stream(None, &mut |ev| {
+                if let StreamEvent::ToolCallStart { name, id } = ev {
+                    started_tools.push((name.to_string(), id.to_string()));
+                }
+            })
+            .unwrap();
+        assert_eq!(thinking_deltas, "Inspecting workspace...");
+        assert_eq!(
+            started_tools,
+            vec![("read_file".to_string(), "call_99".to_string())]
+        );
+
+        assert_eq!(completion.stop_reason.as_deref(), Some("tool_use"));
+
+        let messages = vec![
+            msg(
+                "user",
+                vec![
+                    json!({"type": "text", "text": "check screenshot"}),
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "iVBORw0KGgo="
+                        }
+                    }),
+                ],
+            ),
+            Message::assistant(completion.content),
+            msg(
+                "user",
+                vec![json!({
+                    "type": "tool_result",
+                    "tool_use_id": "call_99",
+                    "content": "# Zest"
+                })],
+            ),
+        ];
+
+        let (_, input) = responses_input(None, &messages);
+        let input = input.as_array().expect("array");
+        assert_eq!(input[0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            input[0]["content"][1]["image_url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_abc");
+        assert_eq!(input[1]["encrypted_content"], "enc_payload_123");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["id"], "fc_99");
+        assert_eq!(input[2]["call_id"], "call_99");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_99");
+    }
+
+    #[test]
+    fn a_dropped_stream_never_dispatches_a_partial_tool() {
+        fn reject_tool_start(event: StreamEvent<'_>) {
+            assert!(!matches!(event, StreamEvent::ToolCallStart { .. }));
+        }
+        for text in ["", "Checking the project"] {
+            let mut accumulator = ResponsesAccumulator::default();
+            accumulator
+                .push(
+                    &json!({"type":"response.output_text.delta", "delta":text}),
+                    &mut reject_tool_start,
+                )
+                .unwrap();
+            let tool = json!({"type":"response.output_item.added","item":{
+                "type":"function_call","id":"fc_1","call_id":"call_z","name":"read_file","arguments":""
+            }});
+            accumulator.push(&tool, &mut reject_tool_start).unwrap();
+            let result = accumulator.finish_stream(None, &mut reject_tool_start);
+            if text.is_empty() {
+                assert!(matches!(result, Err(HarnessError::PrematureEof)));
+            } else {
+                let partial = result.unwrap();
+                assert_eq!(partial.stop_reason.as_deref(), Some(STREAM_INTERRUPTED));
+                assert_eq!(partial.content, vec![json!({"type":"text","text":text})]);
+            }
+        }
+    }
+
+    #[test]
+    fn token_limit_only_dispatches_calls_confirmed_complete() {
+        let partial = json!({"type":"function_call","id":"fc_1","call_id":"call_a",
+            "name":"read_file","arguments":"","status":"incomplete"});
+        let done = json!({"type":"function_call","id":"fc_2","call_id":"call_b",
+            "name":"list_dir","arguments":"{}","status":"completed"});
+        let result = complete(&[
+            json!({"type":"response.output_item.added","item":partial}),
+            json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},
+                "output":[partial,done]}}),
+        ]);
+        assert_eq!(result.stop_reason.as_deref(), Some("max_tokens"));
+        let calls = tool_uses_of(&result);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_b");
+    }
+
+    #[test]
+    fn malformed_tool_arguments_survive_as_string_for_repair() {
+        let completion = complete(&[json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_bad",
+                "call_id": "call_bad",
+                "name": "read_file",
+                "arguments": "{\"path\":\"unclosed"
+            }
+        })]);
+        let tools = tool_uses_of(&completion);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["input"], json!("{\"path\":\"unclosed"));
     }
 }
