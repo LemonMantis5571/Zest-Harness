@@ -141,6 +141,9 @@ pub struct Selection {
 #[derive(Clone)]
 pub struct Chat {
     browser: Arc<crate::web_content::Browser>,
+    /// Acquire before the thread lock for any transcript write. Streaming
+    /// checkpoints can then release the thread lock during disk I/O.
+    transcript_writer: Arc<Mutex<()>>,
     pub project: Project,
     pub thread: Arc<Mutex<Thread>>,
     pub options: Arc<Mutex<Selection>>,
@@ -190,6 +193,7 @@ impl Chat {
             project,
             thread: Arc::new(Mutex::new(thread)),
             browser: Arc::default(),
+            transcript_writer: Arc::default(),
             options: Arc::new(Mutex::new(options)),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(initial_mode))),
             context_meter: Arc::new(Mutex::new(None)),
@@ -214,6 +218,7 @@ impl Chat {
 
     // Commit the projection only after the atomic file replacement succeeds.
     pub fn edit<T>(&self, change: impl FnOnce(&mut Thread) -> Result<T>) -> Result<T> {
+        let _writer = self.transcript_writer.lock().map_err(error)?;
         let mut live = self.thread.lock().map_err(error)?;
         let mut next = live.clone();
         let value = change(&mut next)?;
@@ -222,10 +227,17 @@ impl Chat {
         Ok(value)
     }
 
+    fn save_stream_checkpoint(&self) -> Result<()> {
+        let _writer = self.transcript_writer.lock().map_err(error)?;
+        let snapshot = self.thread.lock().map_err(error)?.clone();
+        self.project.store.save(&snapshot)
+    }
+
     /// Restores the conversation to a checkpoint in place: later messages and checkpoints are
     /// discarded and the provider session is dropped. Files the agent changed are not touched.
     /// Returns the checkpoint's label.
     pub fn rewind(&self, checkpoint_id: &str) -> Result<String> {
+        let _writer = self.transcript_writer.lock().map_err(error)?;
         let mut live = self.thread.lock().map_err(error)?;
         let label = live
             .checkpoints
@@ -241,6 +253,7 @@ impl Chat {
     /// before it (the message and everything after it are discarded, like a rewind), and the
     /// message's text is returned for the composer. Files the agent changed are not touched.
     pub fn edit_message(&self, message_id: &str) -> Result<String> {
+        let _writer = self.transcript_writer.lock().map_err(error)?;
         let mut live = self.thread.lock().map_err(error)?;
         let text = live
             .messages
@@ -499,7 +512,8 @@ impl Chat {
             )),
         );
         let mut last_save = Instant::now();
-        let mut write_failed = false;
+        let mut checkpoint: Option<tokio::task::JoinHandle<()>> = None;
+        let checkpoint_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut has_text = false;
         let mut round_break = false;
         let mut on_event = |event: StreamEvent<'_>| {
@@ -516,38 +530,52 @@ impl Chat {
                 }
                 return;
             }
-            let mut t = self.thread.lock().expect("thread");
-            match &event {
-                StreamEvent::ToolCallStart { .. } if has_text => round_break = true,
-                StreamEvent::Text(s) if !s.trim().is_empty() => {
-                    if round_break && !s.starts_with('\n') {
-                        t.apply_text_delta(&assistant, "\n\n");
-                        emit(events, EvKind::Text("\n\n".into()));
+            {
+                let mut t = self.thread.lock().expect("thread");
+                match &event {
+                    StreamEvent::ToolCallStart { .. } if has_text => round_break = true,
+                    StreamEvent::Text(s) if !s.trim().is_empty() => {
+                        if round_break && !s.starts_with('\n') {
+                            t.apply_text_delta(&assistant, "\n\n");
+                            emit(events, EvKind::Text("\n\n".into()));
+                        }
+                        has_text = true;
+                        round_break = false;
                     }
-                    has_text = true;
-                    round_break = false;
+                    _ => {}
                 }
-                _ => {}
-            }
-            if let Some(ui) = apply(&mut t, &assistant, event) {
-                emit(events, ui);
-            }
-            if last_save.elapsed() >= Duration::from_millis(250) {
-                if let Err(e) = self.project.store.save(&t) {
-                    if !write_failed {
-                        emit(events, EvKind::Notice(e.to_string()));
-                    }
-                    write_failed = true;
+                if let Some(ui) = apply(&mut t, &assistant, event) {
+                    emit(events, ui);
                 }
+            }
+            if last_save.elapsed() >= Duration::from_millis(250)
+                && checkpoint.as_ref().is_none_or(|task| task.is_finished())
+            {
                 last_save = Instant::now();
+                let chat = self.clone();
+                let events = events.clone();
+                let failed = checkpoint_failed.clone();
+                checkpoint = Some(tokio::task::spawn_blocking(move || {
+                    if let Err(e) = chat.save_stream_checkpoint()
+                        && !failed.swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        emit(&events, EvKind::Notice(e.to_string()));
+                    }
+                }));
             }
         };
         let result = agent
             .send_blocks_cancellable(content, &mut on_event, Some(cancel))
             .await
             .map_err(provider_failure);
+        if let Some(task) = checkpoint
+            && let Err(e) = task.await
+        {
+            emit(events, EvKind::Notice(format!("Transcript checkpoint failed: {e}")));
+        }
         let mut goal_completed = false;
         let checkpoints = {
+            let _writer = self.transcript_writer.lock().map_err(error)?;
             let mut t = self.thread.lock().map_err(error)?;
             match &result {
                 Ok(()) => {
@@ -754,6 +782,24 @@ struct Demo;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_stream_checkpoint_keeps_a_followup_queued_during_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path().into(), true).unwrap();
+        let chat = Chat::new(project, Thread::new());
+        let id = chat.thread.lock().unwrap().id.clone();
+        let (resume, delayed) = std::sync::mpsc::channel();
+        let writer = chat.clone();
+        let checkpoint = std::thread::spawn(move || {
+            delayed.recv().unwrap();
+            writer.save_stream_checkpoint()
+        });
+        let input = chat.enqueue("Keep this queued", vec![]).unwrap();
+        resume.send(()).unwrap();
+        checkpoint.join().unwrap().unwrap();
+        assert_eq!(chat.project.store.load(&id).unwrap().pending_inputs[0].id, input.id);
+    }
 
     #[test]
     fn unavailable_provider_leaves_the_input_queued_for_retry() {

@@ -1,9 +1,8 @@
 //! The ChatGPT Codex turn, served through Rig.
 //!
-//! Replaces the hand-rolled Responses client in [`super::codex_oauth`]: the
-//! request shape, the SSE parse, and the event reassembly all move to
-//! `rig_core::providers::chatgpt`, which targets the same
-//! `chatgpt.com/backend-api/codex` endpoint.
+//! This adapter uses `rig_core::providers::chatgpt`. The registered ChatGPT
+//! provider uses [`super::codex_oauth`] to retain Responses item IDs and
+//! encrypted reasoning across tool rounds.
 //!
 //! # Zest keeps the credentials
 //!

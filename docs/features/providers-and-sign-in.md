@@ -105,8 +105,8 @@ connected provider actually serves turns is in
    read back through a fresh entry; macOS uses an owner-only
    `<data dir>/zest/credentials.json` instead of Keychain.
 5. ChatGPT turns: `CodexOAuthProvider` (`provider/codex_oauth.rs`) refreshes the
-   session via `codex_oauth::refresh_and_store` before each turn, then streams
-   through `provider/codex_rig.rs`.
+   session via `codex_oauth::refresh_and_store` before each turn, then reads
+   the event stream from the Responses endpoint.
 
 ## Verify
 
